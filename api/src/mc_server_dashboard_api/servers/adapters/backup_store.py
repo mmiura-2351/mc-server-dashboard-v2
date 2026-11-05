@@ -10,7 +10,9 @@ archive ref) and the storage errors so no storage type crosses back into the
 servers layer: ``NotFoundError`` -> :class:`BackupNotFoundError`,
 ``IntegrityCheckError`` -> :class:`BackupCorruptError`,
 ``StorageUnavailableError`` -> :class:`BackupStorageUnavailableError` (#2270),
-and ``ArchiveUnreadableError`` -> :class:`BackupUnreadableError` (#2371).
+and ``ArchiveUnreadableError`` -> :class:`BackupUnreadableError` (#2371), as is
+``ArchiveTooLargeError`` (#3237): an archive past the decompressed-size cap can
+never be restored either, override or not.
 
 The ``StorageUnavailableError`` translation covers every method that reaches the
 store, so one outage yields one storage type at the seam and one status at the edge
@@ -49,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
     ArchiveUnreadableError,
     IntegrityCheckError,
     NotFoundError,
@@ -143,10 +146,12 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupCorruptError(
                 storage_ref, corrupt_count=len(exc.report.corrupt)
             ) from exc
-        except ArchiveUnreadableError as exc:
+        except (ArchiveUnreadableError, ArchiveTooLargeError) as exc:
             # The archive's bytes could not be read back while extracting it (issue
-            # #3230): truncated, or damaged gzip / tar framing. The same verdict the
-            # sweep's probe reaches, so it crosses the seam as the same error.
+            # #3230): truncated, or damaged gzip / tar framing — or they hold
+            # nothing a restore can stage, an unsafe member or a bomb past the
+            # decompressed-size cap (issue #3237). The same verdict the sweep's
+            # probe reaches, so it crosses the seam as the same error.
             raise BackupUnreadableError(storage_ref) from exc
         except StorageUnavailableError as exc:
             # The object store surfaced a transport/backend failure during the restore
@@ -169,12 +174,14 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             )
         except NotFoundError as exc:
             raise BackupNotFoundError(storage_ref) from exc
-        except ArchiveUnreadableError as exc:
+        except (ArchiveUnreadableError, ArchiveTooLargeError) as exc:
             # The object backend's readability probe could not stream the stored
             # archive back in full (issue #2371) — a verdict about the archive's
             # BYTES, which has no ``WorkingSetReport`` to report a corrupt count
             # from. Translate to its own servers error so the sweep can quarantine
-            # it and say why, without a storage type crossing the seam.
+            # it and say why, without a storage type crossing the seam. An archive
+            # past the decompressed-size cap is the same verdict (issue #3237): no
+            # restore can extract it, so the sweep records it and moves on.
             raise BackupUnreadableError(storage_ref) from exc
         except StorageUnavailableError as exc:
             # The probe reads every archive byte, so a backend outage lands here

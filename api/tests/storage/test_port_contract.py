@@ -1067,6 +1067,20 @@ async def test_restore_rejects_decompression_bomb(backend: str, tmp_path: Path) 
         await harness.storage.restore_backup(community, server, key)
 
 
+async def test_check_backup_health_rejects_decompression_bomb(
+    backend: str, tmp_path: Path
+) -> None:
+    """The sweep's probe refuses a bomb the way restore does, on BOTH backends
+    (issue #3237): an archive no restore can extract is never reported sound."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=1024)
+    community, server = new_scope()
+    key = await harness.storage.put_backup(community, server, stream_of(bomb_targz()))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
 async def test_restore_corrupt_backup_without_force_is_refused(
     harness: StorageHarness,
 ) -> None:
@@ -1331,9 +1345,10 @@ async def test_fs_restore_through_the_reserved_name_creates_no_reserved_entry(
 async def test_object_restore_through_the_reserved_name_creates_no_reserved_entry(
     raw: str, is_dir: bool, lands: str, tmp_path: Path
 ) -> None:
-    """The object backend refuses a ``..`` FILE member as traversal before
-    anything is staged, and stages no directory member at all (a prefix store
-    has none), so neither shape can leave a reserved root entry behind."""
+    """The object backend refuses a ``..`` FILE member as an unrestorable
+    archive before anything is staged, and stages no directory member at all (a
+    prefix store has none), so neither shape can leave a reserved root entry
+    behind."""
 
     import io
     import tarfile
@@ -1355,7 +1370,7 @@ async def test_object_restore_through_the_reserved_name_creates_no_reserved_entr
     key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
 
     if not is_dir:
-        with pytest.raises(PathTraversalError):
+        with pytest.raises(ArchiveUnreadableError):
             await harness.storage.restore_backup(community, server, key)
         return
     await harness.storage.restore_backup(community, server, key)
@@ -1375,7 +1390,7 @@ async def test_object_restore_refuses_an_aliased_reserved_member(
         key = await harness.storage.put_backup(
             community, server, stream_of(_aliased_reserved_targz(alias))
         )
-        with pytest.raises(PathTraversalError):
+        with pytest.raises(ArchiveUnreadableError):
             await harness.storage.restore_backup(community, server, key)
 
 
@@ -1456,6 +1471,30 @@ async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
 
     with pytest.raises(ArchiveUnreadableError):
         await harness.storage.restore_backup(community, server, key, force=force)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+@pytest.mark.parametrize("force", [False, True])
+async def test_archive_with_an_escaping_member_is_unreadable(
+    harness: StorageHarness, force: bool
+) -> None:
+    """An archive holding a ``../`` member is ``ArchiveUnreadableError`` on BOTH
+    backends (issue #3237), for the restore — ``force`` or not, the live snapshot
+    untouched — and for the sweep's probe, so the two reach one verdict."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(malicious_tar_with_escape()))
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key, force=force)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == live

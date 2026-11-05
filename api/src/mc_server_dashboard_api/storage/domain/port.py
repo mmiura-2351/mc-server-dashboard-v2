@@ -559,9 +559,11 @@ class BackupStore(abc.ABC):
         :class:`~.errors.NotFoundError` for an unknown key, and
         :class:`~.errors.ArchiveUnreadableError` — ``force`` or not, ``current``
         untouched — when the archive's bytes do not read back as a ``tar.gz``
-        (truncated, or damaged gzip / tar framing; issue #3230), and on the fs
-        backend when the archive holds a member the extraction refuses (a link or
-        an unsafe path; issue #3371).
+        (truncated, or damaged gzip / tar framing; issue #3230), and when the
+        archive holds a member the extraction refuses: an unsafe path on both
+        backends (issue #3237), and on the fs backend a link (issue #3371). An
+        archive inflating past the decompressed-size cap raises
+        :class:`~.errors.ArchiveTooLargeError`, ``force`` or not.
         """
 
     @abc.abstractmethod
@@ -586,12 +588,16 @@ class BackupStore(abc.ABC):
           raises :class:`~.errors.ArchiveUnreadableError` (issue #3230).
         - The **object** adapter streams the stored object end to end and proves the
           store can still *produce* the archive (issue #2371) — the precondition
-          restore depends on, which a ``HEAD`` alone never tested. It does not
-          extract, so its report is always empty; an archive the store cannot
-          reproduce raises :class:`~.errors.ArchiveUnreadableError`, and a backend
-          outage during the read raises
-          :class:`~.errors.ObjectStoreUnavailableError` (no verdict about the
-          archive).
+          restore depends on, which a ``HEAD`` alone never tested — then walks its
+          members as restore does, without staging them (issue #3237). It does not
+          region-fsck, so its report is always empty; an archive the store cannot
+          reproduce, or holding a member restore refuses, raises
+          :class:`~.errors.ArchiveUnreadableError`, and a backend outage during the
+          read raises :class:`~.errors.ObjectStoreUnavailableError` (no verdict
+          about the archive).
+
+        On both backends an archive inflating past the decompressed-size cap
+        raises :class:`~.errors.ArchiveTooLargeError`, as restore does.
         """
 
     @abc.abstractmethod

@@ -46,17 +46,19 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import hashlib
 import io
 import json
 import logging
+import os
 import tarfile
 import tempfile
 import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -68,6 +70,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     FailureSeam,
     PublishPhase,
 )
+from mc_server_dashboard_api.storage.adapters.fs import _translating_io_faults
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     ArchiveUnreadableError,
@@ -1547,40 +1550,65 @@ class ObjectStorage(Storage):
         # returned ``WorkingSetReport`` is therefore always empty here — a sound
         # archive is "healthy" and an unproducible one raises ArchiveUnreadableError,
         # which is a verdict about the bytes, not about the world inside them.
+        #
+        # Bytes the store can produce can still hold nothing a restore can stage
+        # (issue #3237): a member escaping the prefix, or members inflating past
+        # the decompressed-size cap. So the read that proves the archive is
+        # spooled, and the spool is walked the way restore walks it, discarding
+        # the bytes — ArchiveUnreadableError / ArchiveTooLargeError, as restore.
+        # The spool is local disk, not the store: a transient fault on it is the
+        # fs errno policy's StorageUnavailableError, raised past the short-body
+        # classifier so it can never condemn the archive.
         backup_key = self._backup_key(community_id, server_id, key)
         async with self._client_factory() as client:
             declared = await client.head_object(backup_key)
             if declared is None:
                 raise NotFoundError(f"backup not found: {key.value}")
-            probe = await self._probe_archive(client, backup_key, declared)
-            if probe.ended_at is not None:
-                probe = await self._reprobe_short_body(
-                    client, backup_key, declared, probe.ended_at
-                )
-            if probe.defect is not None:
-                raise ArchiveUnreadableError(
-                    f"backup archive {key.value} could not be read back: {probe.defect}"
-                )
+            spool = await _create_spool(".fsck.", ".tar.gz")
+            try:
+                probe = await self._probe_archive(client, backup_key, declared, spool)
+                if probe.ended_at is not None:
+                    probe = await self._reprobe_short_body(
+                        client, backup_key, declared, probe.ended_at, spool
+                    )
+                if probe.defect is not None:
+                    raise ArchiveUnreadableError(
+                        f"backup archive {key.value} could not be read back: "
+                        f"{probe.defect}"
+                    )
+                with _translating_io_faults():
+                    await _drain_restorable_members(spool, self._max_restore_bytes)
+            except BaseException:
+                # The pending error, not a cleanup fault, is what the caller sees.
+                await _discard_spool(spool, raise_fault=False)
+                raise
+            await _discard_spool(spool, raise_fault=True)
         return WorkingSetReport()
 
     async def _probe_archive(
-        self, client: S3Client, backup_key: str, declared: int
+        self, client: S3Client, backup_key: str, declared: int, spool: Path
     ) -> _ArchiveProbe:
         """Stream the stored archive once, proving it can be produced (issue #2371).
 
         Reads the SAME object the download/restore path reads, checking both that
         the store delivers exactly the ``declared`` bytes its ``HEAD`` promised and
         that those bytes decompress to a well-formed gzip end. The decompressed
-        output is discarded as it is produced: nothing is staged to disk, nothing
-        is buffered whole.
+        output is discarded as it is produced, nothing is buffered whole, and the
+        bytes read are written to ``spool`` (replacing what an earlier read left
+        there) for the member walk that follows a sound read (issue #3237). A
+        local fault on the spool raises ``StorageUnavailableError`` — the base, not
+        the ``ObjectStoreUnavailableError`` caught below — so it never reaches the
+        short-body classification.
         """
 
         gzip_probe = GzipReadProbe()
         read = 0
         try:
-            async for chunk in await client.get_object(backup_key):
-                read += len(chunk)
-                gzip_probe.feed(chunk)
+            with _translating_io_faults(), open(spool, "wb") as out:
+                async for chunk in await client.get_object(backup_key):
+                    read += len(chunk)
+                    gzip_probe.feed(chunk)
+                    await asyncio.to_thread(out.write, chunk)
             if read < declared:
                 # A body that simply STOPPED early, with no transport error — some
                 # store/proxy combination can end the response cleanly. This is the
@@ -1611,7 +1639,12 @@ class ObjectStorage(Storage):
         return _ArchiveProbe()
 
     async def _reprobe_short_body(
-        self, client: S3Client, backup_key: str, declared: int, first_end: int
+        self,
+        client: S3Client,
+        backup_key: str,
+        declared: int,
+        first_end: int,
+        spool: Path,
     ) -> _ArchiveProbe:
         """Classify a body that ended short of its declared length (#2371, #2381).
 
@@ -1656,7 +1689,7 @@ class ObjectStorage(Storage):
         # Let a momentary fault clear before re-reading, so a blip has the chance to
         # come back as a complete read rather than a second short one.
         await asyncio.sleep(_REPROBE_BACKOFF_S)
-        second = await self._probe_archive(client, backup_key, declared)
+        second = await self._probe_archive(client, backup_key, declared, spool)
         if second.ended_at is None:
             return second
         # Both delivered bytes, or neither did: only a mixed pair is an outage.
@@ -2394,6 +2427,84 @@ async def _spool_stream(
     return spool
 
 
+def _make_spool(prefix: str, suffix: str) -> Path:
+    """Create an empty temp file, closing its fd before returning (issue #3237)."""
+
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    return Path(name)
+
+
+def _unlink_orphaned_spool(made: asyncio.Future[Path]) -> None:
+    """Remove a spool whose creator was cancelled before it could own it."""
+
+    if not made.cancelled() and made.exception() is None:
+        made.result().unlink(missing_ok=True)
+
+
+async def _create_spool(prefix: str, suffix: str) -> Path:
+    """Create a temp spool off the loop, reclaiming it if the caller is cancelled.
+
+    A cancel during the await does not stop the worker thread: the file it goes
+    on to create would be owned by no one. The thread closes the fd itself, and a
+    cancelled caller hands the still-running creation a callback that removes the
+    file once it exists (issue #3237).
+    """
+
+    made = asyncio.get_running_loop().run_in_executor(None, _make_spool, prefix, suffix)
+    try:
+        with _translating_io_faults():
+            return await asyncio.shield(made)
+    except asyncio.CancelledError:
+        made.add_done_callback(_unlink_orphaned_spool)
+        raise
+
+
+# Spool removals still running after their caller stopped waiting (issue #3237):
+# the strong reference keeps a cancelled health check's removal alive to the end.
+_SPOOL_DISPOSALS: set[asyncio.Future[None]] = set()
+
+
+def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
+    _SPOOL_DISPOSALS.discard(disposal)
+    if disposal.cancelled():
+        # Only the loop itself cancels the removal, at shutdown — which drops an
+        # unlink still queued for a worker. Remove the spool here instead: one
+        # blocking unlink in this rare case beats leaking an archive-sized file.
+        try:
+            os.unlink(spool)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _LOG.warning("could not remove a backup health-check spool: %s", exc)
+        return
+    if (fault := disposal.exception()) is not None:
+        _LOG.warning("could not remove a backup health-check spool: %s", fault)
+
+
+async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
+    """Remove ``spool`` off the loop, surviving cancellation (issue #3237).
+
+    The removal runs as its own shielded task, so cancelling the caller — once or
+    repeatedly, even while the removal is still queued for an executor worker —
+    stops only the wait, never the removal; a removal the loop cancels at
+    shutdown falls back to a synchronous unlink. A failed removal is logged. With
+    ``raise_fault`` it is also raised, a transient fault translated by the fs
+    errno policy; without it the caller already has an error propagating, which
+    a cleanup fault must not replace.
+    """
+
+    disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
+    _SPOOL_DISPOSALS.add(disposal)
+    disposal.add_done_callback(functools.partial(_spool_disposal_done, spool))
+    if not raise_fault:
+        with suppress(OSError):
+            await asyncio.shield(disposal)
+        return
+    with _translating_io_faults():
+        await asyncio.shield(disposal)
+
+
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
     """Spool one object's body to a local temp file (bounded disk)."""
 
@@ -2513,7 +2624,9 @@ async def _archive_file_member_streams(
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
-    member walk or from a member's chunk stream.
+    member walk or from a member's chunk stream. So does one holding a file
+    member that escapes the prefix (issue #3237): it reads, but nothing can be
+    restored from it, override or not, matching the fs extraction.
 
     With ``dropped``, a member landing at or under the reserved generation-marker
     root name — of any type — is not yielded but its name appended (issue #3433).
@@ -2532,8 +2645,9 @@ async def _archive_file_member_streams(
             if member.isfile():
                 pure = PurePosixPath(member.name)
                 if pure.is_absolute() or ".." in pure.parts:
-                    raise PathTraversalError(
-                        f"tar member escapes the server prefix: {member.name!r}"
+                    raise ArchiveUnreadableError(
+                        "archive holds a member that cannot be restored: tar "
+                        f"member escapes the server prefix: {member.name!r}"
                     )
             # Decided after the traversal check, on the name the member resolves
             # to, so an absolute or ``..`` file member is refused, not dropped.
@@ -2548,6 +2662,20 @@ async def _archive_file_member_streams(
             yield member.name, _fileobj_parts(member_file)
     finally:
         await asyncio.to_thread(tar.close)
+
+
+async def _drain_restorable_members(spool: Path, max_bytes: int) -> None:
+    """Walk the spooled ``tar.gz`` as restore does, discarding the bytes (#3237).
+
+    The same member stream and decompressed-size budget as ``restore_backup``, so
+    the health check refuses exactly what a restore would: an unsafe or unreadable
+    member (:class:`ArchiveUnreadableError`), or a bomb (:class:`ArchiveTooLargeError`).
+    """
+
+    budget = _RestoreBudget(max_bytes)
+    async for _name, parts in _archive_file_member_streams(spool, "r|gz", dropped=[]):
+        async for _chunk in budget.count(parts):
+            pass
 
 
 async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
