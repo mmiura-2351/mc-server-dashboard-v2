@@ -237,6 +237,9 @@ func run(ctx context.Context) error {
 func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.Logger) (*instancemanager.Manager, bool, error) {
 	wc := cfg.Worker
 	quiesced := true
+	// The servers whose containers the sweep removed, which the manager reports
+	// stopped once registered (issues #3486, #3514).
+	var swept []string
 
 	// containerRconHost resolves the RCON dial host for a server. It is empty
 	// (loopback) unless a container driver with a configured network is built, in
@@ -275,9 +278,11 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 			// The sweep force-removes every container labelled for this Worker,
 			// including ones still running: a graceful restart while servers are up
 			// kills those live servers. That is the deliberate M1 stateless-worker
-			// posture (no hydration yet; the API sees the resulting state on
-			// reconnect/status).
-			if _, err := cd.Sweep(ctx); err != nil {
+			// posture. The API learns the result from the first status resync after
+			// registration, which reports each removed server stopped; a failed sweep
+			// still returns the servers whose containers it did remove.
+			swept, err = cd.Sweep(ctx)
+			if err != nil {
 				// A failed sweep is logged, not fatal: leftover containers block the
 				// affected servers' restart but must not stop the Worker from serving.
 				// It does, however, leave quiescence UNPROVEN: an orphan may still be
@@ -318,6 +323,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 	return instancemanager.New(drivers, wc.ScratchDir, regionfsck.Checker{}, openControl).
 		WithLogger(logger).
 		WithWorkerID(wc.ID).
+		WithSweptServers(swept).
 		WithTunnelDialer(tunnelDialerAdapter{tunnelDialer}).
 		WithBedrockTunneler(bedrockTunnelerAdapter{bedrockTunnel}), quiesced, nil
 }

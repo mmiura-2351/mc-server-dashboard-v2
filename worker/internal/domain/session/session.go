@@ -194,7 +194,8 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	// through the handler's Events() channel, which serve() begins draining onto
 	// this fresh stream below; the handler's coalesce/pending buffer absorbs them
 	// if they are emitted before serve() starts draining, so none are lost. On a
-	// fresh process the handler holds no instances and this is a no-op.
+	// fresh process the handler holds no instances; it reports the servers whose
+	// containers its boot sweep removed, once (issues #3486, #3514).
 	if resyncer, ok := r.handler.(StatusResyncer); ok {
 		resyncer.ResyncStatus()
 	}
