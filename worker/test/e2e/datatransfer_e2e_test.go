@@ -74,9 +74,11 @@ func TestSnapshotThenHydrateRoundTrip(t *testing.T) {
 
 	// Act 1: snapshot (pack + upload + publish). A clean publish is 204. Base
 	// generation 0 (never hydrated) skips the publish-time guard (#847); the worker
-	// id is recorded as the publisher (#847 bug 3).
+	// id is recorded as the publisher (#847 bug 3). The API requires it to be a
+	// UUID, as registration does (#3542).
 	snapshotURL := scopeURL(base, community, server, "snapshot")
-	if _, err := client.Snapshot(ctx, snapshotURL, credential, src, 0, "e2e-worker"); err != nil {
+	worker := "22222222-2222-2222-2222-222222222222"
+	if _, err := client.Snapshot(ctx, snapshotURL, credential, src, 0, worker); err != nil {
 		t.Fatalf("Snapshot against real API: %v", err)
 	}
 
