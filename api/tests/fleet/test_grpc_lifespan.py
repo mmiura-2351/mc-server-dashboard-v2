@@ -16,9 +16,23 @@ from grpc import aio
 from grpc.aio._server import Server as ConcreteAioServer
 
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.fleet.adapters.drain_store import (
+    SqlAlchemyWorkerDrainStore,
+)
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mcsd.controlplane.v1.control_plane_pb2_grpc import WorkerServiceStub
 
 _CREDENTIAL = "shared-worker-secret"
+
+
+@pytest.fixture(autouse=True)
+def _no_persisted_drains(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The lifespan reads the persisted drained set before the gRPC server starts
+    # (issue #3535); these tests run with no database, so the read finds none.
+    async def _drained(self: SqlAlchemyWorkerDrainStore) -> frozenset[WorkerId]:
+        return frozenset()
+
+    monkeypatch.setattr(SqlAlchemyWorkerDrainStore, "drained", _drained)
 
 
 # Connection-level statuses that mean "the transport went away", not "the

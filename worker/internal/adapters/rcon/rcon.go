@@ -68,6 +68,9 @@ type Client struct {
 	// received counts the bytes read off conn, so Execute can tell a close
 	// before any response byte (a dropped command) from a reply cut short.
 	received int
+	// addr and password are what the client was dialed with, kept for Redial.
+	addr     string
+	password string
 }
 
 // Dial opens an RCON connection to addr and authenticates with password. It
@@ -86,12 +89,19 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 		return nil, fmt.Errorf("rcon: dial %s: %w", addr, err)
 	}
 
-	c := &Client{conn: conn, nextID: 1}
+	c := &Client{conn: conn, nextID: 1, addr: addr, password: password}
 	if err := c.withDeadline(ctx, func() error { return c.authenticate(password) }); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// Redial opens a fresh connection with the address and password c was dialed
+// with. A caller that must reconnect when the working set's storage may be stuck
+// uses it instead of reading server.properties again (issue #3511).
+func (c *Client) Redial(ctx context.Context) (execution.ServerControl, error) {
+	return Dial(ctx, c.addr, c.password)
 }
 
 // Execute sends one command line and returns the server's reply body. Vanilla

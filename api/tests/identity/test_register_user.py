@@ -89,12 +89,12 @@ class _FakeUserRepository(UserRepository):
 
     async def set_active(
         self, user_id: UserId, *, active: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         raise NotImplementedError
 
     async def set_platform_admin(
         self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         raise NotImplementedError
 
     async def delete(self, user_id: UserId) -> None:

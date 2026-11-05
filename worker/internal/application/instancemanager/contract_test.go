@@ -303,6 +303,24 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		m.snapshotAfterRunningCheck = func(string) { once.Do(func() { startRunning(t, m) }) }
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
+	case "running_snapshot_in_flight":
+		// A running server whose first snapshot is held in its pack, so that body is
+		// alive when the row's command arrives (issue #3511). Released, and waited for,
+		// when the row ends.
+		held := newStall(t)
+		m := newContractManager(t, &fakeDriver{})
+		m.transfer = &fakeTransfer{stallPack: held.wait}
+		startRunning(t, m)
+		exited := awaitSnapshotReleased(m)
+		first := goHandle(m, session.Command{CommandID: "first", ServerID: serverID, Kind: "SnapshotTrigger"})
+		awaitEnter(t, held.entered)
+		defer func() {
+			held.unblock()
+			<-first
+			awaitEnter(t, exited)
+		}()
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
 	case "driver_unavailable":
 		if row.Kind == "RestartServer" {
 			// A restart resolves its driver from the RECORDED start spec, not from the

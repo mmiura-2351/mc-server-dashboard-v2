@@ -69,6 +69,7 @@
 package regionfsck
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -240,9 +241,14 @@ type Checker struct{}
 
 var _ regioncheck.Checker = Checker{}
 
-// CheckWorkingSet runs the package-level CheckWorkingSet on root.
-func (Checker) CheckWorkingSet(root string) (regioncheck.Report, error) {
-	return CheckWorkingSet(root)
+// CheckWorkingSet runs the package-level CheckWorkingSet on root, stopping early
+// once ctx is done (issue #3511): the walk checks ctx before every entry, so a
+// check past the snapshot command's deadline returns ctx's error at its next one
+// instead of scanning the rest of the working set. A system call that does not
+// return is not bounded here; the snapshot command answers at its deadline
+// whatever the check is blocked on (instancemanager.handleSnapshot).
+func (Checker) CheckWorkingSet(ctx context.Context, root string) (regioncheck.Report, error) {
+	return checkWorkingSet(ctx, root)
 }
 
 // CheckWorkingSet walks root recursively and validates every *.mca file beneath
@@ -288,6 +294,11 @@ func (Checker) CheckWorkingSet(root string) (regioncheck.Report, error) {
 // in with an fstatat on the directory's descriptor (no path is resolved), and
 // drops an entry that vanished meanwhile without it reaching Report.Skipped.
 func CheckWorkingSet(root string) (regioncheck.Report, error) {
+	return checkWorkingSet(context.Background(), root)
+}
+
+// checkWorkingSet is CheckWorkingSet, stopping with ctx's error once ctx is done.
+func checkWorkingSet(ctx context.Context, root string) (regioncheck.Report, error) {
 	// The root is the one name resolved by path: it is the Worker's own entry in
 	// the scratch root, which the server (confined to what is beneath it) cannot
 	// replace.
@@ -300,7 +311,7 @@ func CheckWorkingSet(root string) (regioncheck.Report, error) {
 		return regioncheck.Report{}, &os.PathError{Op: "open", Path: root, Err: err}
 	}
 	var report regioncheck.Report
-	if err := walk(rootFd, root, 0, &report); err != nil {
+	if err := walk(ctx, rootFd, root, 0, &report); err != nil {
 		return regioncheck.Report{}, err
 	}
 	return report, nil
@@ -354,7 +365,7 @@ func changedSinceTheHint(err error) bool {
 // closes, in the lexical order filepath.WalkDir visited them. path is the
 // directory's path as the caller spelled root; it names findings and labels
 // errors and is never resolved. depth is the directory's level below root.
-func walk(dirFd int, path string, depth int, report *regioncheck.Report) error {
+func walk(ctx context.Context, dirFd int, path string, depth int, report *regioncheck.Report) error {
 	dir := os.NewFile(uintptr(dirFd), path)
 	defer func() { _ = dir.Close() }()
 	entries, err := dir.ReadDir(-1)
@@ -363,6 +374,9 @@ func walk(dirFd int, path string, depth int, report *regioncheck.Report) error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		name := entry.Name()
 		// The type the listing carries costs nothing and is used for one thing only:
 		// to leave alone, without a system call, the names that cannot matter — the
@@ -396,7 +410,7 @@ func walk(dirFd int, path string, depth int, report *regioncheck.Report) error {
 			if err != nil {
 				return &os.PathError{Op: "open", Path: entryPath, Err: err}
 			}
-			if err := walk(fd, entryPath, depth+1, report); err != nil {
+			if err := walk(ctx, fd, entryPath, depth+1, report); err != nil {
 				return err
 			}
 		case unix.S_IFREG:

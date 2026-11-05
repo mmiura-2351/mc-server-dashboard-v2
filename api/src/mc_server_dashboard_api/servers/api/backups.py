@@ -1012,6 +1012,10 @@ async def upload_backup(
         # #2869). exc.reason carries platform_managed_path, so the Web UI's switch
         # on ``reason`` sees the same contract here as on the files-API doors.
         raise _unprocessable(exc.reason) from exc
+    except ServerBusyError as exc:
+        # A concurrent lifecycle op held the per-server lock past the acquire
+        # budget (issue #876, #3219): a transient 409 the caller retries.
+        raise _conflict("server_busy") from exc
     except BackupStorageUnavailableError as exc:
         # The archive validated but the store could not take the write (issue
         # #2378): a transient backend fault, so 503 tells the client the upload is

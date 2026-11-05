@@ -243,6 +243,16 @@ class PrunedStoreError(StaleGenerationError):
     """
 
 
+class PublisherFencedError(StorageError):
+    """The commit's publisher fence refused the publish (issue #3544).
+
+    ``commit_snapshot`` awaits the caller's fence under the per-server lock,
+    immediately before the publish. A refusal means the publisher may no longer
+    publish (the data plane: it is no longer the assigned Worker). The staging is
+    discarded and the generation is not bumped.
+    """
+
+
 class IntegrityCheckError(StorageError):
     """A working set failed the structural ``.mca`` integrity gate (issue #739).
 

@@ -40,6 +40,7 @@ from mc_server_dashboard_api.core.adapters.database import (
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.integrity_sweep import (
     IntegritySweep,
@@ -60,6 +61,12 @@ async def run(*, server_id: ServerId | None) -> SweepSummary:
         pool_size=settings.database.pool_size,
         max_overflow=settings.database.max_overflow,
     )
+    # The lifecycle lock pins its connection for the whole hold while the sweep's
+    # unit of work and audit writer need one of their own, so the lock gets its
+    # own engine rather than a slot in the configured pool, leaving that pool
+    # whole for the sweep's work. One connection is enough: the sweep holds one
+    # lock at a time.
+    lock_engine = create_engine(settings.database.url, pool_size=1, max_overflow=0)
     try:
         session_factory = create_session_factory(engine)
         storage = _build_storage(settings)
@@ -69,9 +76,14 @@ async def run(*, server_id: ServerId | None) -> SweepSummary:
             audit=LoggingAuditRecorder(
                 SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
             ),
+            # The same per-server advisory lock the API's backup creation holds
+            # (issue #3220): keyed on the server id in PostgreSQL, so it serializes
+            # this process against the API's.
+            lifecycle_lock=PgLifecycleLock(engine=lock_engine),
         )
         return await sweep(server_id=server_id)
     finally:
+        await lock_engine.dispose()
         await engine.dispose()
 
 
@@ -118,6 +130,8 @@ def main(argv: list[str]) -> int:
         f"backups unreadable (archive bytes unproducible): "
         f"{summary.backups_unreadable}\n"
         f"backups dangling: {summary.backups_dangling}\n"
+        f"backups skipped (server busy; re-run the sweep to check them): "
+        f"{summary.backups_skipped_busy}\n"
         f"snapshots scanned: {summary.snapshots_scanned}\n"
         f"snapshots flagged: {summary.snapshots_flagged}\n"
         f"snapshots not examined (backend does not fsck snapshots at rest): "
