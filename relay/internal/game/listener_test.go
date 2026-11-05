@@ -2,6 +2,7 @@ package game
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -802,5 +803,256 @@ func TestServeReturnEndsEstablishedSession(t *testing.T) {
 		if _, err := peer.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
 			t.Errorf("%s peer read = %v, want EOF", name, err)
 		}
+	}
+}
+
+// --- pre-splice tunnel writes (issue #3287) ---
+
+// stalledTunnel delivers one side of a net.Pipe as the dial-back for token once a
+// waiter registers, and has the Worker side read exactly n bytes and then stop
+// reading without closing: a Worker whose receive buffer is full. net.Pipe is
+// unbuffered, so every relay write past those n bytes blocks. delivered is
+// closed once the waiter holds the connection.
+func stalledTunnel(t *testing.T, tokens *tunnel.TokenTable, token string, n int) (worker net.Conn, delivered <-chan struct{}) {
+	t.Helper()
+	workerSide, tunnelSide := net.Pipe()
+	t.Cleanup(func() { _ = workerSide.Close() })
+	ch := make(chan struct{})
+	go func() {
+		for !tokens.Deliver(token, tunnelSide) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		close(ch)
+	}()
+	go func() { _, _ = io.ReadFull(workerSide, make([]byte, n)) }()
+	return workerSide, ch
+}
+
+// returnsWithin runs f and fails the test unless it returns within d. On a miss
+// it closes unblock so the stuck f can exit before the test ends.
+func returnsWithin(t *testing.T, d time.Duration, unblock net.Conn, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Errorf("did not return within %v", d)
+		_ = unblock.Close()
+		<-done
+	}
+}
+
+// preSpliceLogin is a login whose pre-splice tunnel writes are, in order, the
+// "OK\n" ack, the handshake, the Login Start, and the pipelined client bytes.
+type preSpliceLogin struct {
+	hs        mc.Handshake
+	login     mc.LoginStart
+	pipelined []byte
+}
+
+func newPreSpliceLogin() preSpliceLogin {
+	return preSpliceLogin{
+		hs:        mc.Handshake{ProtocolVersion: 765, Raw: handshakePacket(765, "amber.mc.example.com", 25565, 2)},
+		login:     mc.LoginStart{Name: "Steve", Raw: loginStartPacket("Steve")},
+		pipelined: []byte("pipelined"),
+	}
+}
+
+// run calls spliceLogin with the player's pipelined bytes already buffered, as
+// the pre-route read leaves them.
+func (p preSpliceLogin) run(ctx context.Context, l *Listener, conn net.Conn) {
+	r := bufio.NewReader(bytes.NewReader(p.pipelined))
+	_, _ = r.Peek(len(p.pipelined))
+	l.spliceLogin(ctx, conn, r, p.hs, p.login, "srv", "amber", "203.0.113.1", "tok")
+}
+
+// stallPoints is how many bytes a Worker reads before it stops, for a stall
+// at each pre-splice write of the login.
+func (p preSpliceLogin) stallPoints() map[string]int {
+	return map[string]int{
+		"ack":        0,
+		"handshake":  3,
+		"loginStart": 3 + len(p.hs.Raw),
+		"pipelined":  3 + len(p.hs.Raw) + len(p.login.Raw),
+	}
+}
+
+// TestSpliceLoginNonReadingTunnelTimesOut proves each pre-splice write of the
+// login path is bounded by a write deadline: a Worker that stops reading
+// cannot pin the handler (issue #3287). The ack's own deadline is
+// tunnel.ConfirmAndAttach's and is pinned in that package.
+func TestSpliceLoginNonReadingTunnelTimesOut(t *testing.T) {
+	t.Parallel()
+	p := newPreSpliceLogin()
+	for name, n := range p.stallPoints() {
+		if name == "ack" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+			sessions := &fakeSessionRecorder{}
+			l := &Listener{tokens: tokens, sessions: sessions, logger: nopLogger()}
+			worker, _ := stalledTunnel(t, tokens, "tok", n)
+			playerSide, relaySide := net.Pipe()
+			defer func() { _ = playerSide.Close() }()
+
+			returnsWithin(t, preRouteDeadline+2*time.Second, worker, func() {
+				p.run(context.Background(), l, relaySide)
+			})
+			if sessions.started != 0 {
+				t.Errorf("sessions started=%d, want 0: a stalled tunnel must not splice", sessions.started)
+			}
+		})
+	}
+}
+
+// TestSpliceLoginNonReadingTunnelReturnsOnCancel proves a shutdown does not
+// wait out the pre-splice write deadlines: cancelling the handler's context
+// unblocks a write to a Worker that stopped reading (issue #3287).
+func TestSpliceLoginNonReadingTunnelReturnsOnCancel(t *testing.T) {
+	t.Parallel()
+	p := newPreSpliceLogin()
+	for name, n := range p.stallPoints() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+			sessions := &fakeSessionRecorder{}
+			l := &Listener{tokens: tokens, sessions: sessions, logger: nopLogger()}
+			worker, delivered := stalledTunnel(t, tokens, "tok", n)
+			playerSide, relaySide := net.Pipe()
+			defer func() { _ = playerSide.Close() }()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				<-delivered
+				time.Sleep(50 * time.Millisecond) // let the write block
+				cancel()
+			}()
+			returnsWithin(t, time.Second, worker, func() { p.run(ctx, l, relaySide) })
+			if sessions.started != 0 {
+				t.Errorf("sessions started=%d, want 0: a cancelled pre-splice must not splice", sessions.started)
+			}
+		})
+	}
+}
+
+// recordingConn records the last write deadline set on the wrapped connection.
+type recordingConn struct {
+	net.Conn
+	lastWriteDeadline atomic.Pointer[time.Time]
+}
+
+func (c *recordingConn) SetWriteDeadline(t time.Time) error {
+	c.lastWriteDeadline.Store(&t)
+	return c.Conn.SetWriteDeadline(t)
+}
+
+// TestSpliceLoginClearsTunnelWriteDeadline proves the pre-splice write deadline
+// is cleared before the splice, which installs its own (issue #3287).
+func TestSpliceLoginClearsTunnelWriteDeadline(t *testing.T) {
+	p := newPreSpliceLogin()
+	tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+	sessions := &fakeSessionRecorder{}
+	l := &Listener{tokens: tokens, sessions: sessions, logger: nopLogger()}
+
+	workerSide, tunnelSide := net.Pipe()
+	tconn := &recordingConn{Conn: tunnelSide}
+	go func() {
+		for !tokens.Deliver("tok", tconn) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+	playerSide, relaySide := net.Pipe()
+	// The Worker takes the whole pre-splice stream, then both peers hang up, so
+	// the splice ends without moving a byte (and without touching deadlines).
+	go func() {
+		_, _ = io.ReadFull(workerSide, make([]byte, p.stallPoints()["pipelined"]+len(p.pipelined)))
+		_ = workerSide.Close()
+		_ = playerSide.Close()
+	}()
+
+	returnsWithin(t, 2*time.Second, workerSide, func() { p.run(context.Background(), l, relaySide) })
+	if sessions.started != 1 {
+		t.Fatalf("sessions started=%d, want 1", sessions.started)
+	}
+	d := tconn.lastWriteDeadline.Load()
+	if d == nil {
+		t.Fatal("no write deadline was set on the tunnel connection")
+	}
+	if !d.IsZero() {
+		t.Errorf("write deadline %v left set at the splice", *d)
+	}
+}
+
+// statusStallPoints is how many bytes a Worker reads before it stops, for a
+// stall at each pre-read write of the status exchange: the "OK\n" ack, the
+// handshake, then the Status Request.
+func statusStallPoints(hs mc.Handshake) map[string]int {
+	return map[string]int{
+		"ack":           0,
+		"handshake":     3,
+		"statusRequest": 3 + len(hs.Raw),
+	}
+}
+
+func statusFetchHandshake() mc.Handshake {
+	return mc.Handshake{ProtocolVersion: 765, Raw: handshakePacket(765, "amber.mc.example.com", 25565, 1)}
+}
+
+// TestFetchStatusNonReadingTunnelTimesOut is the status path's counterpart of
+// TestSpliceLoginNonReadingTunnelTimesOut (issue #3287).
+func TestFetchStatusNonReadingTunnelTimesOut(t *testing.T) {
+	t.Parallel()
+	hs := statusFetchHandshake()
+	for name, n := range statusStallPoints(hs) {
+		if name == "ack" {
+			continue
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+			l := &Listener{tokens: tokens, logger: nopLogger()}
+			worker, _ := stalledTunnel(t, tokens, "tok", n)
+
+			returnsWithin(t, preRouteDeadline+2*time.Second, worker, func() {
+				if _, ok := l.fetchStatusThroughTunnel(context.Background(), hs, "tok"); ok {
+					t.Error("fetchStatusThroughTunnel succeeded against a stalled tunnel")
+				}
+			})
+		})
+	}
+}
+
+// TestFetchStatusNonReadingTunnelReturnsOnCancel is the status path's
+// counterpart of TestSpliceLoginNonReadingTunnelReturnsOnCancel (issue #3287).
+func TestFetchStatusNonReadingTunnelReturnsOnCancel(t *testing.T) {
+	t.Parallel()
+	hs := statusFetchHandshake()
+	for name, n := range statusStallPoints(hs) {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			tokens := tunnel.NewTokenTable(10*time.Second, time.Now)
+			l := &Listener{tokens: tokens, logger: nopLogger()}
+			worker, delivered := stalledTunnel(t, tokens, "tok", n)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				<-delivered
+				time.Sleep(50 * time.Millisecond) // let the write block
+				cancel()
+			}()
+			returnsWithin(t, time.Second, worker, func() {
+				if _, ok := l.fetchStatusThroughTunnel(ctx, hs, "tok"); ok {
+					t.Error("fetchStatusThroughTunnel succeeded after cancellation")
+				}
+			})
+		})
 	}
 }
