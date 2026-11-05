@@ -366,3 +366,65 @@ async def test_a_spool_removal_fault_keeps_the_pending_archive_error(
             await storage.check_backup_health(community, scope, key)
     finally:
         _remove_left_spools(monkeypatch, created)
+
+
+def test_a_spool_removal_cancelled_at_loop_shutdown_still_removes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``asyncio.run`` cancels the still-queued removal task itself on shutdown,
+    which drops the queued unlink: the spool is removed all the same."""
+
+    created = _spy_spools(monkeypatch)
+    worker_free = threading.Event()
+
+    async def _stalled_probe(*_args: Any, **_kwargs: Any) -> object:
+        probing.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def _free_the_worker_once_shutdown_cancels() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            # Let the runner's cancel reach the queued removal first.
+            for _ in range(100):
+                if not object_store._SPOOL_DISPOSALS:
+                    break
+                await asyncio.sleep(0)
+            worker_free.set()
+
+    async def _main() -> asyncio.Task[None]:
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        storage = ObjectStorage(fake_s3_factory(FakeS3Store()))
+        server = _server()
+        backup = await _stored_backup(storage, server)
+        monkeypatch.setattr(ObjectStorage, "_probe_archive", _stalled_probe)
+        check = asyncio.ensure_future(
+            storage.check_backup_health(
+                StorageCommunityId(server.community_id.value),
+                StorageServerId(server.id.value),
+                BackupKey(backup.storage_ref),
+            )
+        )
+        await probing.wait()
+        loop.run_in_executor(executor, worker_free.wait, 10)
+        check.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        check.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await check
+        assert object_store._SPOOL_DISPOSALS  # the removal is still queued
+        # Returned pending, so the runner's shutdown cancels it.
+        return asyncio.ensure_future(_free_the_worker_once_shutdown_cancels())
+
+    probing = asyncio.Event()
+    asyncio.run(_main())
+
+    [(_fd, name)] = created
+    try:
+        assert not os.path.exists(name)
+    finally:
+        Path(name).unlink(missing_ok=True)

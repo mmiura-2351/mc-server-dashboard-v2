@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import hashlib
 import io
 import json
@@ -2464,10 +2465,21 @@ async def _create_spool(prefix: str, suffix: str) -> Path:
 _SPOOL_DISPOSALS: set[asyncio.Future[None]] = set()
 
 
-def _spool_disposal_done(disposal: asyncio.Future[None]) -> None:
+def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
     _SPOOL_DISPOSALS.discard(disposal)
-    if not disposal.cancelled() and (exc := disposal.exception()) is not None:
-        _LOG.warning("could not remove a backup health-check spool: %s", exc)
+    if disposal.cancelled():
+        # Only the loop itself cancels the removal, at shutdown — which drops an
+        # unlink still queued for a worker. Remove the spool here instead: one
+        # blocking unlink in this rare case beats leaking an archive-sized file.
+        try:
+            os.unlink(spool)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _LOG.warning("could not remove a backup health-check spool: %s", exc)
+        return
+    if (fault := disposal.exception()) is not None:
+        _LOG.warning("could not remove a backup health-check spool: %s", fault)
 
 
 async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
@@ -2475,7 +2487,8 @@ async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
 
     The removal runs as its own shielded task, so cancelling the caller — once or
     repeatedly, even while the removal is still queued for an executor worker —
-    stops only the wait, never the removal. A failed removal is logged. With
+    stops only the wait, never the removal; a removal the loop cancels at
+    shutdown falls back to a synchronous unlink. A failed removal is logged. With
     ``raise_fault`` it is also raised, a transient fault translated by the fs
     errno policy; without it the caller already has an error propagating, which
     a cleanup fault must not replace.
@@ -2483,7 +2496,7 @@ async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
 
     disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
     _SPOOL_DISPOSALS.add(disposal)
-    disposal.add_done_callback(_spool_disposal_done)
+    disposal.add_done_callback(functools.partial(_spool_disposal_done, spool))
     if not raise_fault:
         with suppress(OSError):
             await asyncio.shield(disposal)
