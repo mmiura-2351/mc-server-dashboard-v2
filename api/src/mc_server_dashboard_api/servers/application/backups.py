@@ -96,6 +96,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupRestoreIncompleteError,
     BackupUnreadableError,
     BackupUnsettledError,
     FileTooLargeError,
@@ -389,8 +390,10 @@ class RestoreBackup:
     corrupt one included (issue #3222): a corrupt world region says nothing about
     the jars beside it. A restored plugin directory that cannot be listed raises
     :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
-    and so does a listed jar that cannot be read (issue #3269). Either failure
-    carries the corrupt count of a forced corrupt backup that published, so the
+    and so does a listed jar that cannot be read (issue #3269). Any failure after
+    the publish — the quarantine write included — surfaces as
+    :class:`BackupRestoreIncompleteError`, wrapping the step's own error and
+    carrying the corrupt count of a forced corrupt backup that published, so the
     edge audits the force-restore whatever failed after it.
     """
 
@@ -452,34 +455,54 @@ class RestoreBackup:
                 # archive; a sweep that later reads it back sound revises it.
                 await self._mark_health(backup_id, BackupHealth.UNREADABLE)
                 raise
-            if corrupt_count > 0:
-                # Forced restore of a known-corrupt backup: it published, but the
-                # backup IS corrupt, so quarantine it; the edge audits the forced
-                # corrupt restore. Quarantine BEFORE the properties re-apply, so a
-                # failure there cannot leave a known-corrupt backup unmarked.
-                await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+            # Published: the restored working set stands whatever fails from here
+            # on, so every later step's failure carries the restore's identity —
+            # above all a forced corrupt one, which the edge must still audit as
+            # the force-restore it was (issue #3269).
             try:
-                await self._reapply_platform_properties(
-                    community_id=community_id, server_id=server_id, server=server
+                await self._after_publish(
+                    community_id=community_id,
+                    server_id=server_id,
+                    server=server,
+                    backup_id=backup_id,
+                    corrupt_count=corrupt_count,
                 )
-                # Reconcile plugin rows against the restored filesystem (#1336).
-                if self.file_store is not None:
-                    await _reconcile_plugins(
-                        uow=self.uow,
-                        file_store=self.file_store,
-                        cache=self.cache,
-                        clock=self.clock,
-                        community_id=community_id,
-                        server_id=server_id,
-                        server=server,
-                    )
-            except (WorkingSetSeedFailedError, PluginReconcileIncompleteError) as exc:
-                # The corrupt backup is published whatever failed after it, so
-                # the edge must still audit the force-restore (issue #3269).
-                exc.forced_corrupt_count = corrupt_count
-                raise
+            except Exception as exc:
+                raise BackupRestoreIncompleteError(
+                    str(server_id.value), cause=exc, forced_corrupt_count=corrupt_count
+                ) from exc
             return RestoreResult(
                 forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
+            )
+
+    async def _after_publish(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        server: Server,
+        backup_id: BackupId,
+        corrupt_count: int,
+    ) -> None:
+        if corrupt_count > 0:
+            # Forced restore of a known-corrupt backup: it published, but the
+            # backup IS corrupt, so quarantine it; the edge audits the forced
+            # corrupt restore. Quarantine BEFORE the properties re-apply, so a
+            # failure there cannot leave a known-corrupt backup unmarked.
+            await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+        await self._reapply_platform_properties(
+            community_id=community_id, server_id=server_id, server=server
+        )
+        # Reconcile plugin rows against the restored filesystem (#1336).
+        if self.file_store is not None:
+            await _reconcile_plugins(
+                uow=self.uow,
+                file_store=self.file_store,
+                cache=self.cache,
+                clock=self.clock,
+                community_id=community_id,
+                server_id=server_id,
+                server=server,
             )
 
     async def _mark_health(self, backup_id: BackupId, health: BackupHealth) -> None:

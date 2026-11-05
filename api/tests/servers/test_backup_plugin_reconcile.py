@@ -37,6 +37,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
+    BackupRestoreIncompleteError,
     PluginReconcileIncompleteError,
     ServerFileNotFoundError,
     ServerFileStorageUnavailableError,
@@ -512,10 +513,11 @@ async def test_restore_keeps_plugin_rows_when_the_listing_fails() -> None:
     file_store.files["mods/present.jar"] = jar
     uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
 
-    with pytest.raises(PluginReconcileIncompleteError):
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
         await _make_restore(uow, archive, file_store=file_store)(
             community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
         )
+    assert isinstance(excinfo.value.cause, PluginReconcileIncompleteError)
 
     assert await plugins.list_for_server(server.id) == [tracked]
 
@@ -552,10 +554,11 @@ async def test_a_store_fault_reading_a_ghost_jar_reports_reconcile_incomplete() 
     file_store.files["mods/ghost.jar"] = _minimal_jar(b"ghost")
     uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
 
-    with pytest.raises(PluginReconcileIncompleteError):
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
         await _make_restore(uow, archive, file_store=file_store)(
             community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
         )
+    assert isinstance(excinfo.value.cause, PluginReconcileIncompleteError)
 
     assert uow.commits == 0
 
@@ -575,10 +578,11 @@ async def test_a_store_fault_reading_a_tracked_jar_reports_reconcile_incomplete(
     file_store.files["mods/mod.jar"] = _minimal_jar(b"changed")
     uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
 
-    with pytest.raises(PluginReconcileIncompleteError):
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
         await _make_restore(uow, archive, file_store=file_store)(
             community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
         )
+    assert isinstance(excinfo.value.cause, PluginReconcileIncompleteError)
 
     assert await plugins.list_for_server(server.id) == [tracked]
     assert uow.commits == 0
@@ -677,10 +681,11 @@ async def test_a_store_fault_listing_the_content_dir_keeps_plugin_rows(
     file_store = StorageFileStoreAdapter(storage=storage)
     break_listing()
 
-    with pytest.raises(PluginReconcileIncompleteError):
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
         await _make_restore(uow, archive, file_store=file_store)(
             community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
         )
+    assert isinstance(excinfo.value.cause, PluginReconcileIncompleteError)
 
     assert await plugins.list_for_server(server.id) == [tracked]
 
@@ -762,13 +767,14 @@ async def test_a_reconcile_failure_names_the_forced_corrupt_publish(
         archive.corrupt_count = corrupt
     uow = FakeUnitOfWork(servers=repo, backups=backups)
 
-    with pytest.raises(PluginReconcileIncompleteError) as excinfo:
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
         await _make_restore(uow, archive, file_store=_UnlistableContentDir())(
             community_id=_COMMUNITY,
             server_id=server.id,
             backup_id=backup.id,
             force=force,
         )
+    assert isinstance(excinfo.value.cause, PluginReconcileIncompleteError)
 
     assert excinfo.value.forced_corrupt_count == expected
 

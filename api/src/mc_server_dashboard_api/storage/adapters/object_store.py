@@ -84,6 +84,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PublisherFencedError,
     SnapshotHandleError,
     StaleGenerationError,
+    StorageUnavailableError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -1293,15 +1294,28 @@ class ObjectStorage(Storage):
         readers of ``old_prefix`` left are active hydrate streams, which hold a lease
         and are skipped here exactly as before (Section 4.2/4.3). A leased old prefix
         is left for the next sweep to reclaim once the reader releases.
+
+        Best-effort (issue #3269): the flip already published ``new_prefix``, so a
+        store outage here cannot undo or fail that publish. It is logged and the
+        leftovers stay for :meth:`sweep`, which reclaims every ``incoming/`` object
+        and every snapshot prefix the pointer does not name. Raising instead
+        reported a published restore as failed, losing what it had published.
         """
 
-        await _delete_prefix(client, staged_prefix)
-        if (
-            old_prefix is not None
-            and old_prefix != new_prefix
-            and not self._is_leased(old_prefix)
-        ):
-            await _delete_prefix(client, old_prefix)
+        try:
+            await _delete_prefix(client, staged_prefix)
+            if (
+                old_prefix is not None
+                and old_prefix != new_prefix
+                and not self._is_leased(old_prefix)
+            ):
+                await _delete_prefix(client, old_prefix)
+        except StorageUnavailableError:
+            _LOG.warning(
+                "post-publish cleanup of %s failed; the sweep reclaims it",
+                staged_prefix,
+                exc_info=True,
+            )
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 

@@ -56,6 +56,7 @@ from tests.storage.fake_s3 import (
     close_tracking_factory,
     fake_s3_factory,
 )
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 from tests.storage.helpers import (
     bomb_targz,
     drain,
@@ -1172,6 +1173,35 @@ async def test_backup_pack_survives_concurrent_publish_gc() -> None:
     assert backup_key in store.objects
     blob = store.objects[backup_key]
     assert read_tar(blob) == {"f": b"OLD"}
+
+
+async def test_a_post_flip_cleanup_outage_does_not_fail_the_publish() -> None:
+    """The flip is the publish; reclaiming the leftovers is the sweep's (#3269)."""
+
+    store = FakeS3Store()
+    faults = Faults()
+    storage = ObjectStorage(faulty_s3_factory(store, faults))
+    community, server = new_scope()
+    await _publish(storage, community, server, {"f": b"OLD"})
+    before = await storage.current_generation(community, server)
+
+    faults.when = lambda op, key: op == "delete_object"
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"NEW"}))
+    generation = await storage.commit_snapshot(handle)
+    faults.clear()
+
+    assert generation == before + 1
+    assert read_tar(await drain(storage.open_hydrate_source(community, server))) == {
+        "f": b"NEW"
+    }
+    await storage.sweep()
+    prefix = _server_prefix(community, server)
+    assert not [k for k in store.objects if k.startswith(prefix + "incoming/")]
+    live = json.loads(store.objects[prefix + _POINTER])["snapshot"]
+    assert all(
+        k.startswith(live) for k in store.objects if k.startswith(prefix + "snapshots/")
+    )
 
 
 # --- single-pass restore regression (issue #1945) --------------------------------

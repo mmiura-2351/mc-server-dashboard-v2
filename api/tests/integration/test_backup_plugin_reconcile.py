@@ -1,4 +1,4 @@
-"""Post-restore plugin reconcile against a real session (issue #2612).
+"""Post-restore plugin reconcile against a real session (issues #2612, #3269).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). ``tests/servers/test_backup_plugin_
@@ -16,6 +16,7 @@ transaction, so it cannot show this at all (issues #2557, #2549).
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import io
 import os
 import uuid
@@ -43,6 +44,9 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 from mc_server_dashboard_api.servers.application.backups import _reconcile_plugins
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    PluginReconcileIncompleteError,
+)
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
@@ -209,3 +213,74 @@ async def test_a_ghost_that_violates_a_constraint_does_not_poison_the_reconcile(
         "plugins/one.jar",
         "plugins/two.jar",
     ]
+
+
+class _FlakyJarRead(FakeFileStore):
+    """A file store whose read of ``fail_path`` fails while ``failing`` is set."""
+
+    def __init__(self, fail_path: str) -> None:
+        super().__init__()
+        self.fail_path = fail_path
+        self.failing = True
+
+    async def read_file(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> bytes:
+        if self.failing and rel_path == self.fail_path:
+            raise OSError(errno.EIO, "Input/output error")
+        return await super().read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+
+
+async def _rows(engine: AsyncEngine, server_id: ServerId) -> dict[str, ServerPlugin]:
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        return {p.rel_path: p for p in await uow.plugins.list_for_server(server_id)}
+
+
+async def test_a_partial_reconcile_rolls_back_and_a_retry_completes_it(
+    engine: AsyncEngine,
+) -> None:
+    # A jar read fails after the reconcile already deleted an orphan and inserted
+    # a ghost under its savepoint (issue #3269). The whole transaction must be
+    # discarded -- not just the savepoint -- so a retry starts from the rows as
+    # they were, completes the reconcile, and a further retry changes nothing.
+    server = await _seed_server(engine)
+    orphan = _plugin(server.id, "plugins/gone.jar", "gone.jar")
+    tracked = _plugin(server.id, "plugins/kept.jar", "kept.jar")
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        await uow.plugins.add(orphan)
+        await uow.plugins.add(tracked)
+        await uow.commit()
+    before = await _rows(engine, server.id)
+    # The ghost loop runs in sorted order: ``a.jar`` is ingested, then ``b.jar``
+    # cannot be read.
+    file_store = _FlakyJarRead("plugins/b.jar")
+    file_store.files["plugins/a.jar"] = _jar(b"a")
+    file_store.files["plugins/b.jar"] = _jar(b"b")
+    file_store.files["plugins/kept.jar"] = _jar(b"kept")
+
+    async def _reconcile() -> None:
+        await _reconcile_plugins(
+            uow=ServersUnitOfWork(create_session_factory(engine)),
+            file_store=file_store,
+            cache=None,
+            clock=FakeClock(_NOW),
+            community_id=server.community_id,
+            server_id=server.id,
+            server=server,
+        )
+
+    with pytest.raises(PluginReconcileIncompleteError):
+        await _reconcile()
+    assert await _rows(engine, server.id) == before
+
+    file_store.failing = False
+    await _reconcile()
+    completed = await _rows(engine, server.id)
+    assert sorted(completed) == ["plugins/a.jar", "plugins/b.jar", "plugins/kept.jar"]
+    assert completed["plugins/kept.jar"].id == tracked.id
+    assert completed["plugins/kept.jar"].checksum_sha512 is not None
+
+    await _reconcile()
+    assert await _rows(engine, server.id) == completed

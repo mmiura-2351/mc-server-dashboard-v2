@@ -933,9 +933,9 @@ export interface paths {
          *     set that IS restored — retrying the restore heals both: ``seed_failed`` when
          *     the platform-managed ``server.properties`` keys could not be re-applied
          *     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
-         *     could not be read, leaving the plugin rows unreconciled (#3221). Either is
-         *     audited ``error``, under ``backup:force_restore`` when a forced corrupt backup
-         *     was the one published (#3269).
+         *     could not be read, leaving the plugin rows unreconciled (#3221). Any failure
+         *     after the publish is audited ``error``, under ``backup:force_restore`` when a
+         *     forced corrupt backup was the one published (#3269).
          */
         post: operations["restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
         delete?: never;
