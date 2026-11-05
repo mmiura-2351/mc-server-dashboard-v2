@@ -25,7 +25,7 @@ from __future__ import annotations
 import abc
 import contextlib
 import datetime as dt
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -41,6 +41,10 @@ from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 # A byte stream: async so an adapter can read/transfer without buffering the whole
 # working set or JAR in memory (STORAGE.md Sections 3.1, 3.2).
 ByteStream = AsyncIterator[bytes]
+
+# The caller's check, run under the per-server publish lock, that the snapshot's
+# publisher may still publish (issue #3544). ``False`` refuses the commit.
+PublisherFence = Callable[[], Awaitable[bool]]
 
 
 class HydrateSource:
@@ -271,6 +275,7 @@ class WorkingSetStore(abc.ABC):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        publisher_fence: PublisherFence | None = None,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
 
@@ -316,6 +321,15 @@ class WorkingSetStore(abc.ABC):
         copy (no bump), so the Worker re-bases on its next start. ``None`` (a Worker
         that never hydrated, or an older Worker that sends no base) skips the
         re-check, matching the pre-stream guard's backward-compatible posture.
+
+        ``publisher_fence`` is awaited once under the same per-server lock,
+        immediately before the publish (issue #3544): the caller's pre-commit
+        fence ran before the commit's slow steps (the staging fsync, the object
+        copy), and the caller's view can change while they stall. ``False``
+        refuses with :class:`~.errors.PublisherFencedError`; the staging is
+        discarded and nothing is bumped, like the other refusals. The fence runs
+        while the lock is held, so it must not wait on anything that can wait on
+        this server's lock. ``None`` skips it.
 
         The content-integrity gate uses the single region rule set (issue #927): a
         non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear,
