@@ -212,7 +212,7 @@ version updates only; security updates bypass it per Section 3.
 `versioning-strategy: increase`, so version updates raise the lower bound when
 necessary instead of only widening an upper cap. The `dependabot-uv-lock`
 workflow (`.github/workflows/dependabot-uv-lock.yml`) then regenerates the lock
-with exact uv 0.13.5 through `scripts/refresh_python_lock.py`. Ordinary updates
+with exact uv 0.13.6 through `scripts/refresh_python_lock.py`. Ordinary updates
 apply the resolver cutoff in Section 3; advisory-driven security updates reuse
 the merge gate's security classification and bypass it. The helper runs updater
 code from the PR's trusted base revision against the PR manifests, and pushes
