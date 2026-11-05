@@ -340,11 +340,15 @@ startup orphan sweep removed — an exited container left by a stop the previous
 handed to the daemon at shutdown, or a server container still running after the
 previous process was killed, which the sweep stopped. Nothing else tells the API about those servers, so without the
 report their rows kept the state from before the restart (`unknown` under a stop,
-`running` under a crash) until the reconciler's slow path. Only a container the sweep
-actually removed counts, so a sweep that fails — which is non-fatal — reports only the
-servers it finished, never one whose container may still be running. A swept server the
-Worker holds again by the time of the resync (a live instance, an orphan, an in-flight
-command) is reported by that state instead. The report is made once per boot: a
+`running` under a crash) until the reconciler's slow path. A server counts only when
+**every** container listed under its id — a Forge server can leave its installer beside
+its launch container — was stopped and removed without an error, so a sweep that
+fails, which is non-fatal, reports only the servers it finished, never one whose
+container may still be running. A swept server the Worker holds again by the time of
+the resync gets no `STOPPED`: a live instance is reported at its current state and a
+failed-stop orphan as `SERVER_STATE_UNKNOWN`, as above, while an id held only as a
+reservation for an in-flight command gets **no report at all**, since the resync omits
+reserved ids (#3302). The report is made once per boot: a
 session that ends before its `RegisterAck` keeps it for the next session, and a plain
 reconnect without a reboot sends none. It is an ordinary `StatusChange` from the
 assigned Worker: under `desired=stopped` it moves the row to `stopped`, and the final

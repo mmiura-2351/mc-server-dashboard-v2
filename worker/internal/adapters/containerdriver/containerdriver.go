@@ -44,7 +44,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -859,12 +858,14 @@ const containerStateRunning = "running"
 // Removal/stop errors for individual containers are returned joined so the caller
 // can log them, but a partial sweep does not block startup.
 //
-// It also returns the server id (the server-id label) of every container it
-// removed, once per server, so the Worker can report those servers stopped after
-// it registers (issues #3486, #3514). Only a successful remove counts: a container
-// that is gone runs nothing, whatever its stop returned. One whose remove failed
-// is left out even when its stop succeeded, so a failed sweep reports only what
-// it finished and never a server that may still be running.
+// It also returns, once per server, the server id (the server-id label) of every
+// server whose containers it swept without an error, so the Worker can report
+// those servers stopped after it registers (issues #3486, #3514). A server counts
+// only when EVERY container listed under its id was stopped (if running) and
+// removed cleanly: a Forge server can leave its installer beside its launch
+// container, and removing one says nothing about the other. Any stop or remove
+// error leaves the server out, so a failed sweep reports only what it finished
+// and never a server that may still be running.
 //
 // Each daemon call runs under a deadline derived from ctx so a wedged daemon
 // cannot block worker startup indefinitely (issue #338): the startup Sweep is
@@ -883,24 +884,37 @@ func (d *Driver) Sweep(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("containerdriver: list orphans: %w", err)
 	}
 	errs := make([]error, len(containers))
-	removed := make([]bool, len(containers))
 	var wg sync.WaitGroup
 	for n, c := range containers {
-		wg.Go(func() { removed[n], errs[n] = d.sweepContainer(ctx, c) })
+		wg.Go(func() { errs[n] = d.sweepContainer(ctx, c) })
 	}
 	wg.Wait()
-	var swept []string
+	// A server is clean only if every one of its containers was swept without an
+	// error: a Forge server can leave an installer beside its launch container.
+	var ids []string
+	clean := map[string]bool{}
 	for n, c := range containers {
-		if id := c.Labels[labelServerID]; removed[n] && id != "" && !slices.Contains(swept, id) {
+		id := c.Labels[labelServerID]
+		if id == "" {
+			continue
+		}
+		if _, seen := clean[id]; !seen {
+			ids = append(ids, id)
+			clean[id] = true
+		}
+		clean[id] = clean[id] && errs[n] == nil
+	}
+	var swept []string
+	for _, id := range ids {
+		if clean[id] {
 			swept = append(swept, id)
 		}
 	}
 	return swept, errors.Join(errs...)
 }
 
-// sweepContainer stops one orphan if it is running, then removes it. removed
-// reports whether the remove succeeded, whatever the stop before it returned.
-func (d *Driver) sweepContainer(ctx context.Context, c Container) (removed bool, _ error) {
+// sweepContainer stops one orphan if it is running, then removes it.
+func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
 	var errs []error
 	if c.State == containerStateRunning {
 		// Best-effort save-on (issue #1710): a worker crash mid-snapshot may have
@@ -919,7 +933,7 @@ func (d *Driver) sweepContainer(ctx context.Context, c Container) (removed bool,
 	if err != nil {
 		errs = append(errs, fmt.Errorf("remove %s (%s): %w", c.Name, c.ID, err))
 	}
-	return err == nil, errors.Join(errs...)
+	return errors.Join(errs...)
 }
 
 // sweepStop stops a running orphan under the graceful stop's rule (issue #3445):

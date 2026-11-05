@@ -2963,9 +2963,9 @@ func TestSweepReportsOnlyTheContainersItRemoved(t *testing.T) {
 	}
 }
 
-// A running orphan whose graceful stop failed is still force-removed, and a
-// removed container runs nothing: its server is reported with the stop error.
-func TestSweepReportsAnOrphanRemovedAfterAFailedStop(t *testing.T) {
+// A running orphan whose graceful stop failed is still force-removed, but its sweep
+// did not finish cleanly, so its server is not reported.
+func TestSweepDoesNotReportAnOrphanWhoseStopFailed(t *testing.T) {
 	docker := newFakeDocker()
 	docker.listResult = []Container{{ID: "a", Name: "/mcsd-s1", State: "running", Labels: map[string]string{labelServerID: "s1"}}}
 	docker.stopErr = errors.New("stop boom")
@@ -2975,8 +2975,8 @@ func TestSweepReportsAnOrphanRemovedAfterAFailedStop(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Sweep to surface the stop failure")
 	}
-	if !slices.Equal(swept, []string{"s1"}) {
-		t.Fatalf("swept = %v, want [s1]", swept)
+	if len(swept) != 0 {
+		t.Fatalf("swept = %v, want none (s1's stop failed)", swept)
 	}
 }
 
@@ -2996,6 +2996,36 @@ func TestSweepReportsAServerOnceForItsInstallAndLaunchContainers(t *testing.T) {
 	}
 	if !slices.Equal(swept, []string{"s1"}) {
 		t.Fatalf("swept = %v, want [s1]", swept)
+	}
+}
+
+// A server is reported only when EVERY container it had was swept cleanly. A Forge
+// server can leave its exited installer beside its running launch container, both
+// under one server id: removing the installer says nothing about the launch
+// container, so a failed stop or remove of that one keeps the server out of the
+// report, where it would otherwise be reported stopped while it may still run.
+func TestSweepDoesNotReportAServerWithAContainerItFailedToSweep(t *testing.T) {
+	for name, fail := range map[string]func(*fakeDocker){
+		"launch stop fails":   func(d *fakeDocker) { d.stopErr = errors.New("stop boom") },
+		"launch remove fails": func(d *fakeDocker) { d.removeErrFor = map[string]error{"launch": errors.New("remove boom")} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.listResult = []Container{
+				{ID: "install", Name: "/mcsd-s1-install", State: "exited", Labels: map[string]string{labelServerID: "s1"}},
+				{ID: "launch", Name: "/mcsd-s1", State: "running", Labels: map[string]string{labelServerID: "s1"}},
+			}
+			fail(docker)
+			d := newTestDriver(docker, nil, nil)
+
+			swept, err := d.Sweep(context.Background())
+			if err == nil {
+				t.Fatal("expected Sweep to surface the launch container's failure")
+			}
+			if len(swept) != 0 {
+				t.Fatalf("swept = %v, want none (s1's launch container was not swept cleanly)", swept)
+			}
+		})
 	}
 }
 

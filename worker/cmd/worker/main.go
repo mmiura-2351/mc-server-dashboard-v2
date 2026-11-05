@@ -280,7 +280,7 @@ func buildInstanceManager(ctx context.Context, cfg config.Config, logger *slog.L
 			// kills those live servers. That is the deliberate M1 stateless-worker
 			// posture. The API learns the result from the first status resync after
 			// registration, which reports each removed server stopped; a failed sweep
-			// still returns the servers whose containers it did remove.
+			// still returns the servers whose containers it swept cleanly.
 			swept, err = cd.Sweep(ctx)
 			if err != nil {
 				// A failed sweep is logged, not fatal: leftover containers block the
