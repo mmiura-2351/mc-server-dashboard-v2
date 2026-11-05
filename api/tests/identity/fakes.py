@@ -171,19 +171,23 @@ class FakeUserRepository(UserRepository):
 
     async def set_active(
         self, user_id: UserId, *, active: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         stored = self.by_id.get(user_id)
-        if stored is not None:
-            self.by_id[user_id] = replace(stored, active=active, updated_at=updated_at)
+        if stored is None:
+            return False
+        self.by_id[user_id] = replace(stored, active=active, updated_at=updated_at)
+        return True
 
     async def set_platform_admin(
         self, user_id: UserId, *, is_platform_admin: bool, updated_at: dt.datetime
-    ) -> None:
+    ) -> bool:
         stored = self.by_id.get(user_id)
-        if stored is not None:
-            self.by_id[user_id] = replace(
-                stored, is_platform_admin=is_platform_admin, updated_at=updated_at
-            )
+        if stored is None:
+            return False
+        self.by_id[user_id] = replace(
+            stored, is_platform_admin=is_platform_admin, updated_at=updated_at
+        )
+        return True
 
     async def delete(self, user_id: UserId) -> None:
         self.by_id.pop(user_id, None)

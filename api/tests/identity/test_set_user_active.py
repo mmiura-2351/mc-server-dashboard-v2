@@ -12,7 +12,7 @@ import datetime as dt
 import pytest
 
 from mc_server_dashboard_api.identity.application.set_user_active import SetUserActive
-from mc_server_dashboard_api.identity.domain.entities import RefreshToken
+from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.errors import (
     LastPlatformAdminError,
     SelfTargetError,
@@ -23,7 +23,12 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     RotationChainId,
     UserId,
 )
-from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
+from tests.identity.fakes import (
+    FakeClock,
+    FakeUnitOfWork,
+    FakeUserRepository,
+    make_user,
+)
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
 
@@ -167,3 +172,28 @@ async def test_unknown_target_raises() -> None:
 
     with pytest.raises(UserNotFoundError):
         await _use_case(uow)(actor_id=admin.id, target_id=UserId.new(), active=False)
+
+
+class _DeletedAfterRead(FakeUserRepository):
+    """Deletes the row once the unlocked read returns it (#3247).
+
+    Stands in for an account deletion committed between the reactivation's read
+    and its write.
+    """
+
+    async def get_by_id(self, user_id: UserId) -> User | None:
+        user = await super().get_by_id(user_id)
+        self.by_id.pop(user_id, None)
+        return user
+
+
+async def test_reactivate_user_deleted_after_the_read_raises() -> None:
+    admin = make_user(username="admin", is_platform_admin=True)
+    target = make_user(username="bob", email="bob@example.com", active=False)
+    uow = FakeUnitOfWork(users=_DeletedAfterRead())
+    uow.users.seed(admin)
+    uow.users.seed(target)
+
+    with pytest.raises(UserNotFoundError):
+        await _use_case(uow)(actor_id=admin.id, target_id=target.id, active=True)
+    assert uow.commits == 0

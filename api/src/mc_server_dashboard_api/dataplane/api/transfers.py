@@ -57,17 +57,20 @@ from mc_server_dashboard_api.dependencies import (
     get_transfer_semaphore,
     get_worker_credential,
 )
+from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.http_body_limit import request_body_limit
-from mc_server_dashboard_api.http_problem import problem
+from mc_server_dashboard_api.http_problem import problem, validation_problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
     NotFoundError,
     PrunedStoreError,
+    PublisherFencedError,
     StaleGenerationError,
 )
-from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.storage.domain.port import PublisherFence, Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     JarKey,
@@ -352,6 +355,31 @@ async def _jar_member(
     return _tar_member_bytes(_JAR_RELPATH, data)
 
 
+def _canonical_publisher(raw: str | None) -> str | None:
+    """The ``X-Worker-Id`` in its canonical form (issue #3542).
+
+    Parsed exactly as registration parses the Worker's id, so every spelling a
+    Worker can register under compares equal to the assigned worker id (read back
+    from a uuid column). A value registration would refuse is a 422 in the shape
+    of the framework's own header validation.
+    """
+
+    if raw is None:
+        return None
+    try:
+        return WorkerId.parse(raw).value
+    except InvalidWorkerIdError:
+        raise validation_problem(
+            [
+                {
+                    "loc": ["header", _WORKER_ID_HEADER],
+                    "msg": "worker id must be a UUID",
+                    "type": "uuid_parsing",
+                }
+            ]
+        ) from None
+
+
 @router.post(
     "/communities/{community_id}/servers/{server_id}/snapshot",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -372,7 +400,7 @@ async def publish_snapshot(
     base_generation: Annotated[
         int | None, Header(alias=_BASE_GENERATION_HEADER)
     ] = None,
-    publisher: Annotated[str | None, Header(alias=_WORKER_ID_HEADER)] = None,
+    publisher_header: Annotated[str | None, Header(alias=_WORKER_ID_HEADER)] = None,
 ) -> None:
     """Stage and atomically publish the Worker's working set (snapshot, FR-DATA-4).
 
@@ -434,9 +462,11 @@ async def publish_snapshot(
     worker's base now lags). A commit-time fence re-reads the assignment AFTER the
     upload stream and refuses when the publisher is NOT the currently-assigned worker
     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
-    worker from wedging the new session. The fence is permissive when no worker is
-    assigned (``None``): the held-assignment final-snapshot window and the post-clear
-    no-replacement case must still land.
+    worker from wedging the new session. The commit runs the same fence again under
+    the per-server publish lock, immediately before the publish (issue #3544), so a
+    commit that stalls past a release and re-placement is refused there too. The
+    fence is permissive when no worker is assigned (``None``): the held-assignment
+    final-snapshot window and the post-clear no-replacement case must still land.
 
     The content-integrity gate uses the single region rule set (issue #927): a
     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
@@ -448,6 +478,7 @@ async def publish_snapshot(
     EOF, an entry past EOF, a severed prefix).
     """
 
+    publisher = _canonical_publisher(publisher_header)
     if content_length is None:
         raise problem(status.HTTP_411_LENGTH_REQUIRED, "content_length_required")
     if content_length > _MAX_SNAPSHOT_BYTES:
@@ -535,17 +566,18 @@ async def publish_snapshot(
             # the assigned worker (normal); no assignment exists (post-clear with no
             # replacement yet, or the held-assignment final-snapshot window); absent
             # publisher header (older worker, permissive).
+            #
+            # This check is the cheap early refusal. The commit's own slow steps
+            # (the fs staging fsync, the object copy) can stall past a release and
+            # re-placement, so the commit runs the same fence again under the
+            # per-server publish lock, immediately before the publish (issue #3544).
+            publisher_fence: PublisherFence | None = None
             if publisher is not None:
-                assigned = await assigned_worker(community_id, server_id)
-                if assigned is not None and assigned != publisher:
+                publisher_fence = _assignment_fence(
+                    assigned_worker, community_id, server_id, publisher
+                )
+                if not await publisher_fence():
                     await storage.abort_snapshot(handle)
-                    _logger.warning(
-                        "snapshot publish refused: publisher %s is not the assigned "
-                        "worker (%s) for server %s at commit time",
-                        publisher,
-                        assigned,
-                        server_id,
-                    )
                     raise problem(
                         status.HTTP_409_CONFLICT,
                         "publisher_not_assigned",
@@ -554,6 +586,7 @@ async def publish_snapshot(
                 handle,
                 publisher=publisher,
                 expected_base=expected_base,
+                publisher_fence=publisher_fence,
             )
             # Stamp the new authoritative generation on the response (issue #763): the
             # Worker records the header as the generation its scratch is now at (the
@@ -677,6 +710,15 @@ async def publish_snapshot(
                     "current": exc.current,
                 },
             ) from None
+        except PublisherFencedError:
+            # The publisher stopped being the assigned worker while the commit's
+            # slow steps ran (issue #3544): the fence under the publish lock refused
+            # it, and commit_snapshot already discarded the staging. The same 409
+            # as the pre-commit fence.
+            raise problem(
+                status.HTTP_409_CONFLICT,
+                "publisher_not_assigned",
+            ) from None
         except IncompleteTransferError:
             # The body cleared the length gate but staged zero files: an empty working
             # set is not a publishable snapshot (STORAGE.md Section 4.1). A worker
@@ -742,6 +784,33 @@ async def publish_snapshot(
             # staging; the authoritative copy is never touched.
             await storage.abort_snapshot(handle)
             raise
+
+
+def _assignment_fence(
+    assigned_worker: AssignedWorkerLookup,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    publisher: str,
+) -> PublisherFence:
+    """The commit-time assignment fence (issues #1703, #3544) for one publish.
+
+    Passes unless a worker other than ``publisher`` is assigned the server.
+    """
+
+    async def _fence() -> bool:
+        assigned = await assigned_worker(community_id, server_id)
+        if assigned is not None and assigned != publisher:
+            _logger.warning(
+                "snapshot publish refused: publisher %s is not the assigned "
+                "worker (%s) for server %s at commit time",
+                publisher,
+                assigned,
+                server_id,
+            )
+            return False
+        return True
+
+    return _fence
 
 
 class _CapExceeded(Exception):

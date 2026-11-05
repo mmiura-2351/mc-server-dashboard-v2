@@ -53,6 +53,11 @@ type fakeTransfer struct {
 	// error the blocked transfer observed so a test can assert it was the deadline.
 	blockUntilCtxDone bool
 	gotCtxErr         error
+	// stallPack, stallCleanup, stallUpload and stallSnapshot, when set, run at the
+	// start of PackSnapshot, of the cleanup PackSnapshot returns, of UploadSnapshot and
+	// of Snapshot, ignoring the context: a call stuck on storage the way a spool
+	// create, an unlink or an upload's open can be (issue #3511). Set before use.
+	stallPack, stallCleanup, stallUpload, stallSnapshot func()
 	// duringUpload, when set, runs inside UploadSnapshot with the working dir the
 	// preceding PackSnapshot was given — after the pack, before the caller's
 	// post-upload tail (recordGenerationIfUnchanged -> sweepDisplaced). It models a
@@ -78,6 +83,9 @@ func (f *fakeTransfer) Hydrate(ctx context.Context, _, _, workingDir string) (ui
 }
 
 func (f *fakeTransfer) PackSnapshot(_ context.Context, workingDir string) (string, func(), error) {
+	if f.stallPack != nil {
+		f.stallPack()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.packs = append(f.packs, workingDir)
@@ -87,10 +95,17 @@ func (f *fakeTransfer) PackSnapshot(_ context.Context, workingDir string) (strin
 	if f.packErr != nil {
 		return "", func() {}, f.packErr
 	}
-	return "/fake/spool.tar", func() {}, nil
+	return "/fake/spool.tar", func() {
+		if f.stallCleanup != nil {
+			f.stallCleanup()
+		}
+	}, nil
 }
 
 func (f *fakeTransfer) UploadSnapshot(ctx context.Context, _, _, _ string, baseGeneration uint64, workerID string) (uint64, error) {
+	if f.stallUpload != nil {
+		f.stallUpload()
+	}
 	f.mu.Lock()
 	if f.blockUntilCtxDone {
 		f.uploads = append(f.uploads, "upload")
@@ -131,6 +146,9 @@ func (f *fakeTransfer) UploadSnapshot(ctx context.Context, _, _, _ string, baseG
 }
 
 func (f *fakeTransfer) Snapshot(ctx context.Context, _, _, workingDir string, baseGeneration uint64, workerID string) (uint64, error) {
+	if f.stallSnapshot != nil {
+		f.stallSnapshot()
+	}
 	f.mu.Lock()
 	if f.blockUntilCtxDone {
 		f.snapshots = append(f.snapshots, workingDir)
@@ -534,10 +552,11 @@ func TestSnapshotTriggerRunningServerSaveOnRunsWhenContextCancelled(t *testing.T
 // When save-off fails the running world is NOT quiesced, so the periodic snapshot
 // is refused fail-closed (quiesce_unavailable, #907) rather than packing the live
 // world — that unquiesced pack is exactly what produced the 35/35 torn-read false
-// positives. No upload happens, and no save-on is issued (auto-save was never
-// disabled, so re-enabling it would be wrong). save-all is also NOT attempted after
-// a failed save-off: the real rcon client has already poisoned its connection, so
-// it would be a guaranteed ErrConnBroken. The next tick retries.
+// positives. No upload happens. save-all is NOT attempted after a failed save-off:
+// the real rcon client has already poisoned its connection, so it would be a
+// guaranteed ErrConnBroken. The next tick retries. A save-on IS issued: a save-off
+// written to the wire whose reply is lost may have been applied (issue #3485's
+// policy, adopted for the snapshot in issue #3511), and save-on is idempotent.
 func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *testing.T) {
 	ctrl := &fakeControl{err: errors.New("rcon: read length: EOF")}
 	tr := &fakeTransfer{}
@@ -560,8 +579,8 @@ func TestSnapshotTriggerRunningServerSaveOffFailureRefusesQuiesceUnavailable(t *
 	if containsLine(ctrl.lines, "save-all") {
 		t.Fatalf("rcon lines = %v, want no save-all attempted after save-off failed", ctrl.lines)
 	}
-	if containsLine(ctrl.lines, "save-on") {
-		t.Fatalf("rcon lines = %v, want no save-on when save-off never succeeded", ctrl.lines)
+	if !containsLine(ctrl.lines, "save-on") {
+		t.Fatalf("rcon lines = %v, want a save-on for the save-off that may have landed", ctrl.lines)
 	}
 }
 
@@ -680,11 +699,15 @@ func TestSnapshotTriggerUploadExceedingDeadlineAborts(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	m.SetTransferDeadline(20 * time.Millisecond)
 	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
+	exited := awaitSnapshotReleased(m)
 
 	res := m.Handle(context.Background(), snapshotCmd())
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
 		t.Fatalf("SnapshotTrigger over deadline = %+v, want transfer-failed", res)
 	}
+	// The command answers at its deadline (issue #3511); the transfer reports what
+	// it saw once the body has exited.
+	awaitEnter(t, exited)
 	tr.mu.Lock()
 	gotErr := tr.gotCtxErr
 	tr.mu.Unlock()
@@ -720,6 +743,7 @@ func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	seedScratch(t, m, s1) // an at-rest working set; absent is refused (#1713)
 	// No SetTransferDeadline call: the bound is 0 (unbounded).
+	exited := awaitSnapshotReleased(m)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan session.CommandResult, 1)
@@ -737,6 +761,7 @@ func TestSnapshotTriggerWithoutDeadlineRunsUnbounded(t *testing.T) {
 	if res.Success {
 		t.Fatalf("snapshot = %+v, want failure after request cancel", res)
 	}
+	awaitEnter(t, exited)
 	tr.mu.Lock()
 	gotErr := tr.gotCtxErr
 	tr.mu.Unlock()

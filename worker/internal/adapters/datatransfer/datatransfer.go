@@ -194,13 +194,23 @@ func SweepSnapshotSpools(scratchRoot string) {
 // directory; the upload reads only the spool (issue #1710). A crash before the
 // cleanup leaks the spool; SweepSnapshotSpools reclaims such leftovers at startup
 // (issue #787).
-func (c *Client) PackSnapshot(_ context.Context, srcDir string) (string, func(), error) {
+//
+// The pack stops early once ctx is done (issue #3511): every write into the spool
+// checks ctx, so a pack past the snapshot command's deadline fails at its next
+// write and removes the spool instead of reading the rest of the working set. A
+// system call that does not return is not bounded here; the snapshot command
+// answers at its deadline whatever the pack is blocked on
+// (instancemanager.handleSnapshot).
+func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
+	}
 	spool, err := os.CreateTemp(filepath.Dir(srcDir), snapshotSpoolPrefix+"*.tar")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
 	spoolPath := spool.Name()
-	if err := packTar(srcDir, spool, c.logger); err != nil {
+	if err := packTar(srcDir, ctxWriter{ctx: ctx, w: spool}, c.logger); err != nil {
 		_ = spool.Close()
 		_ = os.Remove(spoolPath)
 		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
@@ -208,6 +218,19 @@ func (c *Client) PackSnapshot(_ context.Context, srcDir string) (string, func(),
 	_ = spool.Close()
 	cleanup := func() { _ = os.Remove(spoolPath) }
 	return spoolPath, cleanup, nil
+}
+
+// ctxWriter refuses every write once ctx is done, so a pack stops at its deadline.
+type ctxWriter struct {
+	ctx context.Context
+	w   io.Writer
+}
+
+func (cw ctxWriter) Write(p []byte) (int, error) {
+	if err := cw.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return cw.w.Write(p)
 }
 
 // UploadSnapshot streams the tar spool file at spoolPath to url, declaring

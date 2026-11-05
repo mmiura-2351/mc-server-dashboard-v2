@@ -24,13 +24,16 @@ from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
     ServersAssignedServerStopper,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorkerDrain
+from mc_server_dashboard_api.fleet.application.set_worker_drain import (
+    SetWorkerDrain,
+    WorkerDrainLocks,
+)
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServersAssignedToWorker,
 )
 from tests.client_utils import enter_client
-from tests.fleet.fakes import FakeClock, make_worker
+from tests.fleet.fakes import FakeClock, FakeWorkerDrainStore, make_worker
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeUnitOfWork
@@ -62,6 +65,8 @@ def _drain_use_case(registry: InMemoryWorkerRegistry) -> SetWorkerDrain:
                 uow=FakeUnitOfWork(), clock=ServersFakeClock(_T0)
             )
         ),
+        drain_store=FakeWorkerDrainStore(),
+        locks=WorkerDrainLocks(),
     )
 
 
@@ -166,3 +171,22 @@ def test_clear_drain_unknown_worker_is_404() -> None:
     app, _ = _app(platform_admin=True, seed=False)
     client = _client(app)
     assert client.delete("/api/workers/ghost/drain").status_code == 404
+
+
+def test_drain_with_non_canonical_spelling_hits_the_registered_worker() -> None:
+    # Issue #3542: the path id is canonicalised like the registration id, so any
+    # spelling of the same UUID names the same Worker.
+    app, registry = _app(platform_admin=True, seed=False)
+    registry.register(make_worker(worker_id=_WORKER_UUID, at=_T0))
+    use_case = _drain_use_case(registry)
+    _shared_app.dependency_overrides[get_set_worker_drain] = lambda: use_case
+    client = _client(app)
+
+    assert client.put(f"/api/workers/{_WORKER_UUID.upper()}/drain").status_code == 200
+    worker = client.get("/api/workers").json()["workers"][0]
+    assert worker["status"] == "draining"
+
+    hyphenless = _WORKER_UUID.replace("-", "")
+    assert client.delete(f"/api/workers/{hyphenless}/drain").status_code == 204
+    worker = client.get("/api/workers").json()["workers"][0]
+    assert worker["status"] == "online"
