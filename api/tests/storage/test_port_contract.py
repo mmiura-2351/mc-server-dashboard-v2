@@ -10,7 +10,6 @@ covered in the per-adapter files.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import gzip
 import hashlib
 import threading
@@ -60,6 +59,8 @@ from tests.storage.helpers import (
     tar_bytes,
     tar_stream,
     unaligned_live_region_bytes,
+    wait_until_contended,
+    watch_lock_contention,
 )
 
 # --- working-set hydrate / snapshot (Section 3.1) --------------------------
@@ -118,16 +119,15 @@ async def test_settled_generation_waits_for_a_publish_past_its_fence(
 ) -> None:
     # Issue #3552: a commit whose publisher fence has passed has not bumped yet.
     # The settled read waits for it instead of answering the old generation. The
-    # commit holds at its fence until the read answers, or for 0.5 s if the read
-    # cannot answer while the commit holds the lock.
+    # commit holds at its fence until the read is waiting for the publish lock.
     community, server = new_scope()
     await harness.publish(community, server, {"f": b"v1"})
-    passed, answered = asyncio.Event(), asyncio.Event()
+    contended = watch_lock_contention(harness.storage, community, server)
+    passed, release = asyncio.Event(), asyncio.Event()
 
     async def _held_fence() -> bool:
         passed.set()
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(answered.wait(), 0.5)
+        await release.wait()
         return True
 
     handle = await harness.storage.begin_snapshot(community, server)
@@ -135,12 +135,17 @@ async def test_settled_generation_waits_for_a_publish_past_its_fence(
     commit = asyncio.create_task(
         harness.storage.commit_snapshot(handle, publisher_fence=_held_fence)
     )
-    await passed.wait()
-    settled = await harness.storage.settled_generation(community, server)
-    answered.set()
+    try:
+        await asyncio.wait_for(passed.wait(), 10)
+        settled = asyncio.create_task(
+            harness.storage.settled_generation(community, server)
+        )
+        await wait_until_contended(settled, contended)
+    finally:
+        release.set()
 
-    assert await commit == 2
-    assert settled == 2
+    assert await asyncio.wait_for(commit, 10) == 2
+    assert await asyncio.wait_for(settled, 10) == 2
 
 
 async def test_commit_records_publisher_and_reads_it_back(

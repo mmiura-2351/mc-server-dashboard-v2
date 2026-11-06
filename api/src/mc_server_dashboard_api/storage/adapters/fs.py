@@ -121,6 +121,10 @@ _SPOOL_SWEEP_MIN_AGE_S = 3600
 # world; a constant is intentional (no config knob requested).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 
+# The backoff of ``settled_generation``'s wait for the server lock (issue #3552).
+_SETTLED_POLL_INITIAL_SECONDS = 0.005
+_SETTLED_POLL_MAX_SECONDS = 0.1
+
 # The errnos an fs backup operation translates to a retryable "store unavailable"
 # outcome (issue #2555). The object backend answers a backend 5xx / transport
 # failure with ``ObjectStoreUnavailableError`` on every backup route (issues #2378,
@@ -1387,17 +1391,38 @@ class FsStorage(Storage):
     async def settled_generation(
         self, community_id: CommunityId, server_id: ServerId
     ) -> int:
-        # The server lock is a thread lock, so it is taken on a worker thread, never
-        # on the event loop: a publish holding it awaits its fence on the loop.
-        return await asyncio.to_thread(
-            self._settled_generation, community_id, server_id
-        )
+        # No thread ever blocks on the server lock here. A publish that holds it
+        # awaits its fence on the event loop, and that fence can need the default
+        # executor (a DNS lookup on a DB reconnect). A worker parked on the lock
+        # would take that capacity away from the fence (issue #3552). So each
+        # attempt only tries the lock, reads and releases on a worker thread, and
+        # the wait between attempts is a sleep on the loop.
+        delay = _SETTLED_POLL_INITIAL_SECONDS
+        while True:
+            generation = await asyncio.to_thread(
+                self._generation_if_unlocked, community_id, server_id
+            )
+            if generation is not None:
+                return generation
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _SETTLED_POLL_MAX_SECONDS)
 
-    def _settled_generation(
+    def _generation_if_unlocked(
         self, community_id: CommunityId, server_id: ServerId
-    ) -> int:
-        with self._server_lock(community_id, server_id):
+    ) -> int | None:
+        """The generation, read under the server lock, or None if the lock is held.
+
+        The lock is taken and released within this call, so a cancelled caller
+        cannot leave it held.
+        """
+
+        lock = self._server_lock(community_id, server_id)
+        if not lock.acquire(blocking=False):
+            return None
+        try:
             return self._read_generation(self._server_root(community_id, server_id))
+        finally:
+            lock.release()
 
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId

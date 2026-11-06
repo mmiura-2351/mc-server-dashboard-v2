@@ -12,14 +12,14 @@ If the start reads the generation without the publish lock, it reads that
 previous generation and skips the hydrate. A's commit then publishes the next
 generation, and B runs on the older world. The read has to wait for the publish.
 
-Each test holds A's commit just past the fence until the start has finished, or
-for ``_HOLD`` seconds if it cannot finish while the commit holds the lock.
+Each test holds A's commit just past the fence, waits until the start is
+waiting for the publish lock A holds, and only then lets A publish. A start that
+finishes without waiting for that lock fails the test.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import datetime as dt
 import io
 import tarfile
@@ -68,9 +68,9 @@ from tests.servers.fakes import (
     FakeUnitOfWork,
 )
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.storage.helpers import wait_until_contended, watch_lock_contention
 
 _NOW = dt.datetime(2026, 11, 5, 12, 0, tzinfo=dt.timezone.utc)
-_HOLD = 0.5
 _WORKER_A = WorkerId(uuid.uuid4())
 _WORKER_B = WorkerId(uuid.uuid4())
 
@@ -129,19 +129,38 @@ def _running_on_a() -> Server:
     )
 
 
+class _HeldPublish:
+    """A's late commit, held just past its fence until ``release``."""
+
+    def __init__(self, storage: Storage, server: Server) -> None:
+        self.contended = watch_lock_contention(
+            storage,
+            StorageCommunityId(server.community_id.value),
+            StorageServerId(server.id.value),
+        )
+        self.release = asyncio.Event()
+        self.commit: asyncio.Task[int] | None = None
+
+    async def publish_once_waited_for(self, start: asyncio.Task[Server]) -> int:
+        """Let A publish once ``start`` waits for the lock A holds."""
+
+        assert self.commit is not None
+        try:
+            await wait_until_contended(start, self.contended)
+        finally:
+            self.release.set()
+        return await asyncio.wait_for(self.commit, 10)
+
+
 async def _release_a_with_its_publish_past_the_fence(
     storage: Storage,
     uow: FakeUnitOfWork,
     cp: FakeControlPlane,
     server: Server,
-    finished: asyncio.Event,
-) -> asyncio.Task[int]:
-    """Stop A, fail its final snapshot, and start A's commit up to the publish.
+) -> _HeldPublish:
+    """Stop A, fail its final snapshot, and run A's commit up to the publish."""
 
-    Returns the commit, held past the fence until ``finished`` is set (or
-    ``_HOLD`` lapses).
-    """
-
+    held = _HeldPublish(storage, server)
     # B's earlier run published generation 1; B still holds that scratch.
     first = await _stage(storage, server, b"b-run")
     await storage.commit_snapshot(first, publisher=str(_WORKER_B.value))
@@ -165,11 +184,10 @@ async def _release_a_with_its_publish_past_the_fence(
     async def _held_past_fence() -> bool:
         allowed = await fence()
         passed.set()
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(finished.wait(), _HOLD)
+        await held.release.wait()
         return allowed
 
-    commit = asyncio.create_task(
+    held.commit = asyncio.create_task(
         storage.commit_snapshot(
             late,
             publisher=str(_WORKER_A.value),
@@ -177,8 +195,8 @@ async def _release_a_with_its_publish_past_the_fence(
             publisher_fence=_held_past_fence,
         )
     )
-    await passed.wait()
-    return commit
+    await asyncio.wait_for(passed.wait(), 10)
+    return held
 
 
 def _start(uow: FakeUnitOfWork, cp: FakeControlPlane, storage: Storage) -> StartServer:
@@ -213,18 +231,13 @@ async def test_start_hydrates_over_a_publish_past_its_fence(
     tmp_path: Path, make_storage: Callable[[Path], Storage]
 ) -> None:
     storage, uow, cp, server = _setup(make_storage, tmp_path)
-    finished = asyncio.Event()
-    commit = await _release_a_with_its_publish_past_the_fence(
-        storage, uow, cp, server, finished
-    )
+    held = await _release_a_with_its_publish_past_the_fence(storage, uow, cp, server)
 
-    try:
-        await _start(uow, cp, storage)(
-            community_id=server.community_id, server_id=server.id
-        )
-    finally:
-        finished.set()
-    assert await commit == 2
+    start = asyncio.create_task(
+        _start(uow, cp, storage)(community_id=server.community_id, server_id=server.id)
+    )
+    assert await held.publish_once_waited_for(start) == 2
+    await asyncio.wait_for(start, 10)
 
     # B holds generation 1 and the store is at 2, so B must hydrate first.
     assert [kind for kind, worker, _ in cp.dispatched if worker == _WORKER_B] == [
@@ -238,23 +251,20 @@ async def test_redispatch_start_hydrates_over_a_publish_past_its_fence(
     tmp_path: Path, make_storage: Callable[[Path], Storage]
 ) -> None:
     storage, uow, cp, server = _setup(make_storage, tmp_path)
-    finished = asyncio.Event()
-    commit = await _release_a_with_its_publish_past_the_fence(
-        storage, uow, cp, server, finished
-    )
+    held = await _release_a_with_its_publish_past_the_fence(storage, uow, cp, server)
     # A start committed the placement on B, then was cancelled before its launch,
     # so the reconciler's redispatch_start is what dispatches it.
     row = uow.servers.by_id[server.id]
     row.desired_state = DesiredState.RUNNING
     row.assigned_worker_id = _WORKER_B
 
-    try:
-        await _start(uow, cp, storage).redispatch_start(
+    start = asyncio.create_task(
+        _start(uow, cp, storage).redispatch_start(
             community_id=server.community_id, server_id=server.id
         )
-    finally:
-        finished.set()
-    assert await commit == 2
+    )
+    assert await held.publish_once_waited_for(start) == 2
+    await asyncio.wait_for(start, 10)
 
     assert [kind for kind, worker, _ in cp.dispatched if worker == _WORKER_B] == [
         "hydrate",
