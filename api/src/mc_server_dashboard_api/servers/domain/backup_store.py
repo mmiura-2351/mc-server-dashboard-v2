@@ -96,7 +96,9 @@ class BackupArchiveStore(abc.ABC):
         application enforces the stop precondition; Storage enforces atomicity.
         Raises :class:`BackupNotFoundError` for an unknown ref, and
         :class:`BackupUnreadableError` — ``force`` or not, with ``current``
-        untouched — when the archive's bytes cannot be read back (issue #3230).
+        untouched — when the archive's bytes cannot be read back (issue #3230), or
+        hold nothing a restore can stage: an unsafe member, or members inflating
+        past the decompressed-size cap (issue #3237).
         """
 
     @abc.abstractmethod
@@ -114,7 +116,8 @@ class BackupArchiveStore(abc.ABC):
         backend it instead streams the stored archive end to end to prove the store
         can still produce it (issue #2371), returning ``0`` when it can. Either
         backend raises :class:`BackupUnreadableError` for an archive whose bytes
-        cannot be read back (issue #3230).
+        cannot be read back (issue #3230), or that restore would refuse for an
+        unsafe member or the decompressed-size cap (issue #3237).
 
         Raises :class:`BackupNotFoundError` for an unknown ref, and
         :class:`BackupStorageUnavailableError` when the backend could not serve the

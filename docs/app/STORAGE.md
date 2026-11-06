@@ -400,7 +400,8 @@ check, on the name as extraction resolves it: the fs extractor strips a leading
 extracted at that normalised name, so a member such as
 `.mcsd_generation/../server.properties` lands at `server.properties` without
 creating the reserved directory it passes through. The object backend refuses a
-`..` or absolute file member outright as traversal and stages no directory
+`..` or absolute file member outright as an unrestorable archive
+(`ArchiveUnreadableError`, Section 7.3) and stages no directory
 members, so neither shape reaches its store. The fs backup health check shares that
 extractor, so it judges exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
 inert anyway — the Worker would skip them on unpack — so dropping them only keeps
@@ -1333,8 +1334,30 @@ download and restore paths read — and requires both that the delivered byte co
 equals the declared length **and** that the bytes decompress as a gzip stream
 terminating at a well-formed CRC32 + ISIZE trailer, so silent bit-rot is caught
 and not only truncation. Decompressed output is discarded as it is produced
-(`GzipReadProbe`): nothing is staged to disk, nothing is buffered whole. It does
-not extract or region-fsck — that stays fs-only, above. An archive the store
+(`GzipReadProbe`), and nothing is buffered whole. The bytes the read delivers are
+spooled to a local temp file, which a sound read then walks member by member the
+way restore does, discarding the bytes: bytes the store can produce can still hold
+nothing restore can stage. A file member escaping the prefix raises
+`ArchiveUnreadableError`, and members inflating past the restore decompressed-size
+cap raise `ArchiveTooLargeError`, as in restore. It does not stage members or
+region-fsck — that stays fs-only, above.
+
+The spool has an operational cost that operators on this backend must provision
+for:
+
+- **Location.** Python's default temp directory (`TMPDIR`, normally `/tmp`) in
+  the API process, which is not a storage volume.
+- **Size.** About one full compressed archive per concurrent health check, with
+  no explicit cap. The decompressed-size cap does not bound it: the member walk
+  runs only after the whole archive has been downloaded into the spool.
+- **CPU.** The member walk decompresses the archive a second time, after the
+  gzip probe.
+
+A transient fault on the spool (the fs errno policy's set, such as `EIO`) is
+`StorageUnavailableError`: the sweep stops with no verdict written, exactly as for
+a store outage, and the fault never reaches the short-body classification, so it
+cannot mark an intact archive unreadable. `ENOSPC` / `EDQUOT` on the spool stay
+the raw resource error that policy keeps them as. An archive the store
 cannot reproduce raises `ArchiveUnreadableError`, which the servers seam
 translates to `BackupUnreadableError` and the sweep records as `UNREADABLE` — a
 verdict of its own, not the structural `QUARANTINED` — so the stored health, the
@@ -1354,8 +1377,11 @@ restore for it. The sweep audits the two under separate operations
 
 A restore can also be the **first** read to find an archive unreadable: on either
 backend its extraction raises `ArchiveUnreadableError` when the bytes do not read
-back as a `tar.gz` (truncated, or damaged gzip/tar framing). It answers the same
-409 and records `UNREADABLE` on the row — the verdict the sweep would have reached,
+back as a `tar.gz` (truncated, or damaged gzip/tar framing) or hold a member the
+extraction refuses, and `ArchiveTooLargeError` when the members inflate past the
+decompressed-size cap. Neither can be overridden, so the servers seam translates
+both to `BackupUnreadableError`, for the restore and for the sweep's probe alike.
+The restore answers the same 409 and records `UNREADABLE` on the row — the verdict the sweep would have reached,
 just as a refused corrupt restore records `QUARANTINED` — so the next attempt is
 refused from the verdict instead of re-reading the archive. On the object backend
 that verdict is reached only once every declared byte is in the restore's spool: a

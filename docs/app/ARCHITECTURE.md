@@ -221,6 +221,12 @@ adapter on the other side of the wire may fulfil it (e.g. the API's
 | `Sleeper` | Non-blocking awaitable pause the failure delay is built on (FR-AUTH-4) | `asyncio.sleep` adapter |
 | `ControlPlane` | Send commands to a Worker, receive its events; track liveness (FR-SRV-5, FR-WRK-2, Section 6.13) | gRPC bidi-stream server (`proto/`) |
 | `WorkerRegistry` | Connected Workers, capabilities, liveness, placement input (FR-WRK-1, FR-WRK-2, FR-WRK-3) | in-memory registry fed by the stream |
+| `WorkerDrainStore` | Durable drain intent: which Worker ids are drained, seeded into `WorkerRegistry` at startup so drain survives an API restart (FR-WRK-5) | DB-backed adapter (`worker_drain` table) |
+| `AssignedServerStopper` | Mark every server a drained Worker holds `desired=stopped`; the reconciler then drives the stops (FR-WRK-5) | servers-backed adapter over the servers stop use case |
+| `ServerStateSink` | Write control-plane observations (status reports, Worker disconnect/re-register) back into server state (FR-SRV-4, FR-WRK-4) | servers-backed adapter |
+| `LateSnapshotResultSink` | Release a stop's held assignment when a timed-out final snapshot's result arrives late (FR-DATA-4) | servers-backed adapter |
+| `ServerRouteResolver` | Resolve a relay join's slug to the server's routing facts (RELAY.md Sections 4 and 6) | servers-backed adapter |
+| `SessionSink` | Persist relay-reported game sessions (RELAY.md Sections 6 and 8) | servers-backed adapter (`game_session` table) |
 | `VersionCatalog` / JAR source | List MC versions/types, resolve & fetch the JAR (FR-VER-1, FR-VER-2) | external-manifest client with retry + cache fallback |
 | `RealTimeEvents` | Relay status/log/metric events to subscribed clients (FR-MON-1, FR-MON-2, FR-MON-4) | WebSocket/SSE publisher |
 | `AuditWriter` | Fire-after-commit, must-not-raise audit recording (FR-AUD-1, FR-AUD-2) | DB-backed writer |
