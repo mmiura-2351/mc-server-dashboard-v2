@@ -329,6 +329,25 @@ depend on a Worker.
 | `put_backup(community_id, server_id, WriteStream) -> BackupKey` | Store an uploaded archive verbatim under a fresh key | Upload: the **application** has already validated the archive (opens + traversal-safe entries) before this is called; `Storage` only stores the bytes, so the new backup is restorable through `restore_backup` like a created one. |
 | `backup_size(community_id, server_id, BackupKey) -> int` | Report a stored archive's byte count | The size recorded as `size_bytes` at create/upload. `NotFoundError` for an unknown key. |
 
+**One archive member rule.** Both backends judge a backup archive's members by
+one rule, shared code in both adapters (`refuse_unrestorable_member`), wherever
+they read them: in `restore_backup` and in the `check_backup_health` probe. So
+restore and the probe reach the same verdict for an archive on either backend
+(issue #3550). A member is restorable only when it is:
+
+- a regular file or a directory — a hard link, symlink, device, FIFO or other
+  special member is refused; and
+- at a relative name with no `..` component — an absolute name (leading `/`)
+  is refused, and so is any `..`, even one that stays inside the tree.
+
+An archive holding a refused member reads fine, but nothing can be restored
+from it, so restore and the probe both raise `ArchiveUnreadableError` whatever
+`force` says, with `current/` untouched. The servers seam answers restore with
+`409 backup_unreadable`, and the sweep records `UNREADABLE` (Section 7.3). The
+platform's own producers never emit such a member. The fs extraction also keeps
+`tarfile.data_filter`'s other protections (mode sanitising and the like) on top
+of the rule.
+
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
 JARs deployed into the server's content directory (`mods/`, `plugins/`). A
@@ -394,17 +413,11 @@ was reserved — is not refused for such an entry: refusing would leave that bac
 unrestorable. Instead `restore_backup` leaves out every archive member that
 lands at, or under, a root name starting `.mcsd_generation` before publication,
 on both backends, and logs one `WARNING` naming the backup and how many members
-it dropped. "Lands" is decided after the member passes the extraction's safety
-check, on the name as extraction resolves it: the fs extractor strips a leading
-`/` and admits an in-tree `..`, so `/.mcsd_generation/x` and
-`world/../.mcsd_generation/x` are dropped too. Every kept member is then
-extracted at that normalised name, so a member such as
-`.mcsd_generation/../server.properties` lands at `server.properties` without
-creating the reserved directory it passes through. The object backend refuses a
-`..` or absolute file member outright as an unrestorable archive
-(`ArchiveUnreadableError`, Section 7.3) and stages no directory
-members, so neither shape reaches its store. The fs backup health check shares that
-extractor, so it judges exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
+it dropped. The member rule (Section 3.3) is applied first, so an absolute or
+`..` spelling such as `/.mcsd_generation/x`, `world/../.mcsd_generation/x` or
+`.mcsd_generation/../server.properties` is refused as an unrestorable archive,
+not dropped. The backup health check judges members the same way, so it judges
+exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
 inert anyway — the Worker would skip them on unpack — so dropping them only keeps
 them out of `current/`.
 
@@ -1349,8 +1362,8 @@ and not only truncation. Decompressed output is discarded as it is produced
 (`GzipReadProbe`), and nothing is buffered whole. The bytes the read delivers are
 spooled to a local temp file, which a sound read then walks member by member the
 way restore does, discarding the bytes: bytes the store can produce can still hold
-nothing restore can stage. A file member escaping the prefix raises
-`ArchiveUnreadableError`, and members inflating past the restore decompressed-size
+nothing restore can stage. A member the archive member rule (Section 3.3)
+refuses raises `ArchiveUnreadableError`, and members inflating past the restore decompressed-size
 cap raise `ArchiveTooLargeError`, as in restore. It does not stage members or
 region-fsck — that stays fs-only, above.
 

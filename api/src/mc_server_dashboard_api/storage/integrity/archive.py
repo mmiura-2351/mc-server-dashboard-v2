@@ -18,7 +18,9 @@ accept is as harmful as passing one it would not.
 
 The paths that extract an archive with ``tarfile`` instead — restore on both
 backends, and the fs health check — reach the same verdict through
-:func:`archive_read_errors_as_unreadable` (issue #3230).
+:func:`archive_read_errors_as_unreadable` (issue #3230). The restore and health
+paths of both backends judge each member by :func:`refuse_unrestorable_member`
+(issue #3550).
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import gzip
 import tarfile
 import zlib
 from collections.abc import Iterator
+from pathlib import PurePosixPath
 
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
 
@@ -177,3 +180,28 @@ def archive_read_errors_as_unreadable() -> Iterator[None]:
             # fault it is, for the backend's own policy to classify.
             raise cause from None
         raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc
+
+
+def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
+    """Refuse a backup archive member that no restore may take (issue #3550).
+
+    The one member rule of both backends, for restore and the health probe alike:
+    a member must be a regular file or a directory, at a relative name with no
+    ``..`` component. A hard link, symlink, device, FIFO or other special member,
+    an absolute name, and a ``..`` — even one that stays inside the tree — raise
+    :class:`ArchiveUnreadableError`: the archive reads, but nothing can be
+    restored from it, override or not. The platform's own producers emit none of
+    these.
+    """
+
+    if not (member.isfile() or member.isdir()):
+        raise ArchiveUnreadableError(
+            "archive holds a member that cannot be restored: "
+            f"{member.name!r} is not a regular file or directory"
+        )
+    name = PurePosixPath(member.name)
+    if name.is_absolute() or ".." in name.parts:
+        raise ArchiveUnreadableError(
+            "archive holds a member that cannot be restored: "
+            f"{member.name!r} is absolute or has a '..' component"
+        )

@@ -95,6 +95,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
     archive_read_errors_as_unreadable,
+    refuse_unrestorable_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     WorkingSetReport,
@@ -2944,7 +2945,10 @@ def _warn_dropped_reserved_members(dropped: int, key: BackupKey) -> None:
 def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     """Extract a restore ``tar.gz`` into ``dest``, traversal-safe and size-bounded.
 
-    :func:`_plain_member_filter` refuses unsafe and link members. On top of it, the
+    :func:`refuse_unrestorable_member` judges each member first, by the rule the
+    object backend shares (issue #3550): a link, special, absolute or ``..``
+    member is :class:`ArchiveUnreadableError`. :func:`_plain_member_filter` then
+    applies ``data_filter``'s remaining protections. On top of both, the
     cumulative DECOMPRESSED bytes are counted as each file member is drained and
     bounded by ``max_bytes``: a gzip member can expand ~1000x past the compressed
     body, so the size cap aborts a bomb (:class:`ArchiveTooLargeError`) before it
@@ -2970,11 +2974,10 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
             tarfile.open(archive, mode="r:gz") as tar,
         ):
             for member in tar:
-                # Filtered first (``data_filter`` strips a leading slash and admits
-                # an in-tree ``..``), then renamed to where it lands: both the
-                # reserved decision and the extraction use that normalised name,
-                # so no directory the raw ``..`` path passes through is created
-                # on the way (issue #3433).
+                # Judged and filtered first, then renamed to where it lands: both
+                # the reserved decision and the extraction use that normalised
+                # name (issue #3433).
+                refuse_unrestorable_member(member)
                 safe = _plain_member_filter(member, str(dest))
                 safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
                 if is_reserved_root_member(safe.name):

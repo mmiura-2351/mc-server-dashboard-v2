@@ -1279,27 +1279,20 @@ async def test_restore_single_pass_rejects_traversal_escape() -> None:
 @pytest.mark.parametrize(
     "link_type", [tarfile.LNKTYPE, tarfile.SYMTYPE], ids=["hard-link", "symlink"]
 )
-@pytest.mark.parametrize("ingest", ["snapshot", "restore"])
 async def test_a_link_member_never_reaches_or_leaves_the_object_store(
-    link_type: bytes, ingest: str
+    link_type: bytes,
 ) -> None:
     """An object is a key and bytes, so the object store has nothing to hold a
-    link with: both ingest paths take the archive's regular files and leave a link
-    member behind, and a hydrate writes regular members only (issue #3371). The fs
-    adapter, which could hold one, refuses the archive instead."""
+    link with: a snapshot ingest takes the archive's regular files and leaves a
+    link member behind, and a hydrate writes regular members only (issue #3371).
+    The fs adapter, which could hold one, refuses the archive instead. A backup
+    restore refuses one on both backends (issue #3550, the port contract)."""
 
     _store, storage = _store_and_storage()
     community, server = new_scope()
-    if ingest == "snapshot":
-        handle = await storage.begin_snapshot(community, server)
-        await storage.write_snapshot(handle, stream_of(tar_with_link_member(link_type)))
-        await storage.commit_snapshot(handle)
-    else:
-        await _publish(storage, community, server, {"f": b"seed"})
-        key = await storage.put_backup(
-            community, server, stream_of(tar_with_link_member(link_type, mode="w:gz"))
-        )
-        await storage.restore_backup(community, server, key)
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, stream_of(tar_with_link_member(link_type)))
+    await storage.commit_snapshot(handle)
 
     blob = await drain(storage.open_hydrate_source(community, server))
 
