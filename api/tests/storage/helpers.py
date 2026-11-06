@@ -6,14 +6,18 @@ directory tree so a snapshot/backup can be staged from in-memory content.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import tarfile
+import threading
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -246,3 +250,104 @@ def snapshot_dir(root: Path, community: CommunityId, server: ServerId) -> Path:
     )
     target = os.readlink(link)
     return link.parent / target
+
+
+# --- observing the per-server publish lock (issue #3552) -------------------
+
+
+class _ObservedThreadLock:
+    """The fs server lock, reporting an acquire that finds it held."""
+
+    def __init__(self, on_contended: Callable[[], None]) -> None:
+        self._lock = threading.Lock()
+        self._on_contended = on_contended
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            return True
+        self._on_contended()
+        if not blocking:
+            return False
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
+class _ObservedAsyncLock:
+    """The object server lock, reporting an acquire that finds it held."""
+
+    def __init__(self, on_contended: Callable[[], None]) -> None:
+        self._lock = asyncio.Lock()
+        self._on_contended = on_contended
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def __aenter__(self) -> None:
+        if self._lock.locked():
+            self._on_contended()
+        await self._lock.acquire()
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
+def watch_lock_contention(
+    storage: Storage, community: CommunityId, server: ServerId
+) -> asyncio.Event:
+    """Observe the server's publish lock: the event marks an acquire that finds it held.
+
+    Call it before anything takes the lock. The first acquire then holds it
+    uncontended, and the event marks the first caller that has to wait for it.
+    """
+
+    loop = asyncio.get_running_loop()
+    contended = asyncio.Event()
+
+    def _signal() -> None:
+        loop.call_soon_threadsafe(contended.set)
+
+    locks: dict[Any, Any]
+    if isinstance(storage, FsStorage):
+        locks = cast(dict[Any, Any], storage._server_locks)
+        locks[storage._server_root(community, server)] = _ObservedThreadLock(_signal)
+    else:
+        object_storage = cast(ObjectStorage, storage)
+        locks = cast(dict[Any, Any], object_storage._server_locks)
+        key = object_storage._server_prefix(community, server)
+        locks[key] = _ObservedAsyncLock(_signal)
+    return contended
+
+
+async def wait_until_contended(
+    waiter: asyncio.Task[Any], contended: asyncio.Event, *, timeout: float = 10
+) -> None:
+    """Return once ``waiter`` is waiting for the held lock.
+
+    Fails if ``waiter`` finishes first, which means it never waited for the
+    lock, or if neither happens within ``timeout``.
+    """
+
+    signal = asyncio.ensure_future(contended.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {waiter, signal}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        signal.cancel()
+    assert signal in done, (
+        "finished without waiting for the held lock"
+        if waiter in done
+        else "timed out before waiting for the held lock"
+    )
+    assert not waiter.done(), "finished while the lock was still held"

@@ -1,8 +1,9 @@
 """Storage-backed adapter for the servers :class:`StoreGenerationReader` seam.
 
 Binds the reconciler's skip-hydrate threshold (issue #763) to Storage's
-authoritative ``current_generation`` — the single source of truth that advances
-atomically with the published working set. It maps the servers value objects onto
+authoritative generation — the single source of truth that advances atomically
+with the published working set — read as ``settled_generation``, so it waits for
+a publish in progress (issue #3552). It maps the servers value objects onto
 the storage value objects at the bounded-context boundary (the lifecycle layer
 never imports the storage domain).
 """
@@ -36,7 +37,7 @@ class StorageGenerationReader(StoreGenerationReader):
     async def current_generation(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
-        return await self.storage.current_generation(
+        return await self.storage.settled_generation(
             StorageCommunityId(community_id.value),
             StorageServerId(server_id.value),
         )
