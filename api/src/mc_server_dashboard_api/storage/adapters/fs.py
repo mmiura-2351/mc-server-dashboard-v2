@@ -234,6 +234,90 @@ def _translate_io_faults(
     return wrapper
 
 
+def _make_spool(prefix: str, suffix: str, directory: Path | None) -> Path:
+    """Create an empty temp file, closing its fd before returning (issue #3237)."""
+
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
+    os.close(fd)
+    return Path(name)
+
+
+def _unlink_orphaned_spool(made: asyncio.Future[Path]) -> None:
+    """Remove a spool whose creator was cancelled before it could own it."""
+
+    if not made.cancelled() and made.exception() is None:
+        made.result().unlink(missing_ok=True)
+
+
+async def _create_spool(
+    prefix: str, suffix: str, directory: Path | None = None
+) -> Path:
+    """Create a temp spool off the loop, reclaiming it if the caller is cancelled.
+
+    A cancel during the await does not stop the worker thread: the file it goes
+    on to create would be owned by no one. The thread closes the fd itself, and a
+    cancelled caller hands the still-running creation a callback that removes the
+    file once it exists (issues #3237, #3553). ``directory`` defaults to the
+    system temp dir.
+    """
+
+    made = asyncio.get_running_loop().run_in_executor(
+        None, _make_spool, prefix, suffix, directory
+    )
+    try:
+        with _translating_io_faults():
+            return await asyncio.shield(made)
+    except asyncio.CancelledError:
+        made.add_done_callback(_unlink_orphaned_spool)
+        raise
+
+
+# Spool removals still running after their caller stopped waiting (issue #3237):
+# the strong reference keeps a cancelled caller's removal alive to the end.
+_SPOOL_DISPOSALS: set[asyncio.Future[None]] = set()
+
+
+def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
+    _SPOOL_DISPOSALS.discard(disposal)
+    if disposal.cancelled():
+        # Only the loop itself cancels the removal, at shutdown — which drops an
+        # unlink still queued for a worker. Remove the spool here instead: one
+        # blocking unlink in this rare case beats leaking an archive-sized file.
+        try:
+            os.unlink(spool)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _LOG.warning("could not remove the spool %s: %s", spool, exc)
+        return
+    if (fault := disposal.exception()) is not None:
+        _LOG.warning("could not remove the spool %s: %s", spool, fault)
+
+
+async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
+    """Remove ``spool`` off the loop, surviving cancellation (issue #3237).
+
+    The removal runs as its own shielded task, so cancelling the caller — once or
+    repeatedly, even while the removal is still queued for an executor worker —
+    stops only the wait, never the removal; a removal the loop cancels at
+    shutdown falls back to a synchronous unlink. A failed removal is logged. With
+    ``raise_fault`` it is also raised, a transient fault translated by the fs
+    errno policy; without it the caller already has an outcome a cleanup fault
+    must not replace: an error propagating, or a restore that published (issue
+    #3269).
+    """
+
+    disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
+    _SPOOL_DISPOSALS.add(disposal)
+    disposal.add_done_callback(functools.partial(_spool_disposal_done, spool))
+    if not raise_fault:
+        with contextlib.suppress(OSError):
+            await asyncio.shield(disposal)
+        return
+    with _translating_io_faults():
+        await asyncio.shield(disposal)
+
+
 def _io_fault_translating_stream(inner: ByteStream) -> AsyncIterator[bytes]:
     """Wrap a backup egress stream so an I/O fault mid-read translates (issue #2555).
 
@@ -692,20 +776,21 @@ class FsStorage(Storage):
         # the same with far simpler code, and the bytes land on the same disk the
         # extraction targets anyway.
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-            fd, spool_name = await asyncio.to_thread(
-                tempfile.mkstemp, dir=str(staging), prefix=".snapshot.", suffix=".tar"
-            )
-        spool = Path(spool_name)
+            spool = await _create_spool(".snapshot.", ".tar", staging)
         try:
-            with os.fdopen(fd, "wb") as out:
-                async for chunk in stream:
-                    await asyncio.to_thread(out.write, chunk)
-            # The extraction reopens the spool by path, which a concurrent delete's
-            # prune can have removed with the rest of ``incoming/`` (issue #3481).
+            # The write and the extraction reopen the spool by path, which a
+            # concurrent delete's prune can have removed with the rest of
+            # ``incoming/`` (issue #3481).
             async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
+                with open(spool, "wb") as out:
+                    async for chunk in stream:
+                        await asyncio.to_thread(out.write, chunk)
                 await asyncio.to_thread(_extract_tar_into, spool, staging)
-        finally:
-            await asyncio.to_thread(spool.unlink, missing_ok=True)
+        except BaseException:
+            await _discard_spool(spool, raise_fault=False)
+            raise
+        # A spool left in the staging would be published with it.
+        await _discard_spool(spool, raise_fault=True)
 
     async def commit_snapshot(
         self,
@@ -1121,12 +1206,9 @@ class FsStorage(Storage):
         hasher = hashlib.sha256()
         # Stage to a temp file in the jars dir, hashing as we go, then atomically
         # rename to <sha256>.jar. Identical bytes land on the same name (idempotent).
-        fd, tmp_name = await asyncio.to_thread(
-            tempfile.mkstemp, dir=str(jars), prefix=".jar.", suffix=".tmp"
-        )
-        tmp = Path(tmp_name)
+        tmp = await _create_spool(".jar.", ".tmp", jars)
         try:
-            with os.fdopen(fd, "wb") as out:
+            with open(tmp, "wb") as out:
                 async for chunk in stream:
                     hasher.update(chunk)
                     await asyncio.to_thread(out.write, chunk)
@@ -1135,7 +1217,7 @@ class FsStorage(Storage):
             key = JarKey(hasher.hexdigest())
             await asyncio.to_thread(os.replace, tmp, self._jar_path(key))
         except BaseException:
-            await asyncio.to_thread(tmp.unlink, missing_ok=True)
+            await _discard_spool(tmp, raise_fault=False)
             raise
         return key
 
@@ -1633,12 +1715,9 @@ class FsStorage(Storage):
         await asyncio.to_thread(backups.mkdir, parents=True, exist_ok=True)
         if key is None:
             key = BackupKey(uuid.uuid4().hex)
-        fd, tmp_name = await asyncio.to_thread(
-            tempfile.mkstemp, dir=str(backups), prefix=".backup.", suffix=".tmp"
-        )
-        tmp = Path(tmp_name)
+        tmp = await _create_spool(".backup.", ".tmp", backups)
         try:
-            with os.fdopen(fd, "wb") as out:
+            with open(tmp, "wb") as out:
                 async for chunk in stream:
                     await asyncio.to_thread(out.write, chunk)
                 await asyncio.to_thread(out.flush)
@@ -1647,7 +1726,7 @@ class FsStorage(Storage):
                 os.replace, tmp, self._backup_path(community_id, server_id, key)
             )
         except BaseException:
-            await asyncio.to_thread(tmp.unlink, missing_ok=True)
+            await _discard_spool(tmp, raise_fault=False)
             raise
         await asyncio.to_thread(_fsync_dir, backups)
         return key

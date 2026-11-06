@@ -44,7 +44,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
-from mc_server_dashboard_api.storage.adapters import object_store
+from mc_server_dashboard_api.storage.adapters import fs, object_store
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -388,7 +388,7 @@ def test_a_spool_removal_cancelled_at_loop_shutdown_still_removes_it(
         finally:
             # Let the runner's cancel reach the queued removal first.
             for _ in range(100):
-                if not object_store._SPOOL_DISPOSALS:
+                if not fs._SPOOL_DISPOSALS:
                     break
                 await asyncio.sleep(0)
             worker_free.set()
@@ -416,7 +416,7 @@ def test_a_spool_removal_cancelled_at_loop_shutdown_still_removes_it(
         check.cancel()
         with pytest.raises(asyncio.CancelledError):
             await check
-        assert object_store._SPOOL_DISPOSALS  # the removal is still queued
+        assert fs._SPOOL_DISPOSALS  # the removal is still queued
         # Returned pending, so the runner's shutdown cancels it.
         return asyncio.ensure_future(_free_the_worker_once_shutdown_cancels())
 
