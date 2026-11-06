@@ -1032,7 +1032,8 @@ def _store_failing_its_restore(
     ``fault`` picks where (issue #3564): ``"generation"`` fails the generation
     write, before the flip; ``"after_flip"`` fails the restore once ``current``
     names the restored world (on fs the directory fsync, on object a pointer
-    write whose response is lost).
+    write whose response is lost). That fault fires once, so the steps after the
+    publish meet a working store.
     """
 
     faults = Faults()
@@ -1065,7 +1066,14 @@ def _store_failing_its_restore(
         faults.when = lambda op, key: op == "put_object" and key == marker
     elif backend == "object":
         pointer = server_prefix + _POINTER
-        faults.lose_response = lambda op, key: op == "put_object" and key == pointer
+
+        def _lose_once(op: str, key: str) -> bool:
+            if op != "put_object" or key != pointer:
+                return False
+            faults.clear()
+            return True
+
+        faults.lose_response = _lose_once
     elif fault == "generation":
 
         def _write_marker(*_: object) -> None:
@@ -1079,6 +1087,7 @@ def _store_failing_its_restore(
 
         def _fsync_dir(path: Path) -> None:
             if path == server_root and os.readlink(link) != prior_target:
+                monkeypatch.setattr(fs_adapter, "_fsync_dir", real_fsync_dir)
                 raise OSError(errno.EIO, "Input/output error")
             real_fsync_dir(path)
 
@@ -1102,9 +1111,11 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The store published the backup, then its restore failed (issue #3564): a
-    # forced corrupt backup is live, so the route audits the force-restore it
-    # was, and answers the retryable 503 the store failure always answered.
+    # The store published the backup, then its restore failed (issue #3564).
+    # The restored world is live, so the restore finishes like any published
+    # one: a forced corrupt backup is quarantined, the platform properties are
+    # re-applied, the route audits the force-restore it was, and the 503 says
+    # the backup was restored but did not complete.
     community_id, server_id = uuid.uuid4(), uuid.uuid4()
     storage, storage_ref = _store_failing_its_restore(
         backend,
@@ -1116,7 +1127,7 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
         server_id=server_id,
     )
 
-    resp, recorder, _, _ = _force_restore_through_the_route(
+    resp, recorder, backups, backup = _force_restore_through_the_route(
         backup_store=StorageBackupStoreAdapter(storage=storage),
         file_store=StorageFileStoreAdapter(storage=storage),
         storage_ref=storage_ref,
@@ -1126,9 +1137,51 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
     )
 
     assert resp.status_code == 503
-    assert resp.json()["reason"] == "storage_unavailable"
+    assert resp.json()["reason"] == "publish_incomplete"
     assert [e.operation for e in recorder.events] == [operation]
     assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    expected = BackupHealth.QUARANTINED if corrupt else BackupHealth.HEALTHY
+    assert persisted.health is expected
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert b"enable-rcon=" in live["server.properties"]
+
+
+@pytest.mark.parametrize("backend", ["fs", "object"])
+def test_a_step_failing_after_a_partial_publication_is_the_answer(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The store failed after its flip and the properties re-apply then failed
+    # too (issue #3564): the step's failure is the answer, as after any publish,
+    # and the forced corrupt backup is still quarantined and audited as forced.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        backend,
+        "after_flip",
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=FakeFileStore(fail_write=True),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "seed_failed"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
 
 
 @pytest.mark.parametrize("backend", ["fs", "object"])
