@@ -1139,6 +1139,47 @@ func TestRegisterTriggersStatusResyncOnNewStream(t *testing.T) {
 	<-done
 }
 
+// The resync waits for a registration the API acknowledged: a session that drops
+// before the ack does not resync, so a one-shot report the handler makes on its
+// first resync (the boot sweep's stopped servers, issues #3486, #3514) is kept
+// for the next session instead of being spent on one that never served.
+func TestRegisterWithoutAnAckDoesNotResync(t *testing.T) {
+	first := newFakeTransport(acceptedAck())
+	first.ackErr = errStreamClosed
+	second := newFakeTransport(acceptedAck())
+	dialer := &fakeDialer{transports: []*fakeTransport{first, second}}
+	clock := newFakeClock()
+	handler := newFakeHandler(CommandResult{})
+	r := NewRunner(dialer, testCaps(), clock, discardLogger(),
+		WithCommandHandler(handler), WithRandFloat(func() float64 { return 0 }))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool {
+		clock.fireNext()
+		return second.registerCount() == 1
+	})
+	// A heartbeat on the second stream proves its serve loop runs, so both
+	// sessions are past the point where they would have resynced. The first
+	// session never served, so the only heartbeat timer is the second's.
+	var timer *fakeTimer
+	waitFor(t, func() bool {
+		timer = clock.firstTimer()
+		return timer != nil
+	})
+	timer.fire()
+	waitFor(t, func() bool { return second.heartbeatCount() >= 1 })
+	if calls := handler.resyncCallsCopy(); calls != 1 {
+		t.Fatalf("ResyncStatus calls = %d, want 1 (the acknowledged register only)", calls)
+	}
+
+	cancel()
+	<-done
+}
+
 // A handler that re-emits nothing on resync (the empty-instance-map case, e.g. a
 // fresh worker process) produces no spurious StatusChange after register.
 func TestRegisterStatusResyncEmptyEmitsNothing(t *testing.T) {

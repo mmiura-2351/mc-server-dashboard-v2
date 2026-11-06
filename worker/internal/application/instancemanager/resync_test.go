@@ -136,3 +136,75 @@ func TestResyncStatusDoesNotHoldLockDuringEmit(t *testing.T) {
 		t.Fatal("ResyncStatus did not complete")
 	}
 }
+
+// statesOf drains want status events and maps each server id to its state,
+// failing on a second report for one id.
+func statesOf(t *testing.T, m *Manager, want int) map[string]string {
+	t.Helper()
+	states := map[string]string{}
+	for _, ev := range drainStatuses(t, m, want) {
+		if prev, dup := states[ev.ServerID]; dup {
+			t.Fatalf("%s reported twice: %q then %q", ev.ServerID, prev, ev.State)
+		}
+		states[ev.ServerID] = ev.State
+	}
+	return states
+}
+
+// expectNoStatus fails if another status event arrives within a short window.
+func expectNoStatus(t *testing.T, m *Manager) {
+	t.Helper()
+	select {
+	case ev := <-m.Events():
+		t.Fatalf("unexpected status event: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The servers whose containers the boot sweep removed are reported stopped on the
+// first resync after registration (issues #3486, #3514): the API row of an exited
+// container a handed-off stop left behind, or of a running orphan the sweep
+// stopped, otherwise keeps its stale state until the reconciler's slow path.
+func TestResyncStatusReportsTheBootSweptServersStopped(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil).WithSweptServers([]string{"srv-exited", "srv-orphan"})
+
+	m.ResyncStatus()
+
+	states := statesOf(t, m, 2)
+	if states["srv-exited"] != "stopped" || states["srv-orphan"] != "stopped" {
+		t.Fatalf("resync states = %v, want both swept servers stopped", states)
+	}
+}
+
+// The report is one-shot for the boot: a later resync, after a plain reconnect,
+// reports only what the manager holds and never the sweep again.
+func TestResyncStatusReportsTheBootSweptServersOnlyOnce(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil).WithSweptServers([]string{"srv-swept"})
+	m.ResyncStatus()
+	drainStatuses(t, m, 1)
+
+	m.ResyncStatus()
+
+	expectNoStatus(t, m)
+}
+
+// A swept server the Worker holds again by the time of the resync is not reported
+// stopped: a live instance, a failed-stop orphan or an in-flight command says more
+// than the sweep did, and stopped would contradict it.
+func TestResyncStatusSkipsABootSweptServerTheWorkerHoldsAgain(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil).
+		WithSweptServers([]string{"srv-live", "srv-orphan", "srv-reserved", "srv-gone"})
+	m.instances["srv-live"] = newFakeInstance("srv-live")
+	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
+	m.reserved["srv-reserved"] = true
+
+	m.ResyncStatus()
+
+	states := statesOf(t, m, 3)
+	want := map[string]string{"srv-live": "running", "srv-orphan": "unknown", "srv-gone": "stopped"}
+	if len(states) != len(want) || states["srv-live"] != want["srv-live"] ||
+		states["srv-orphan"] != want["srv-orphan"] || states["srv-gone"] != want["srv-gone"] {
+		t.Fatalf("resync states = %v, want %v", states, want)
+	}
+	expectNoStatus(t, m)
+}

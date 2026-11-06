@@ -419,8 +419,10 @@ type ScratchReclaimer interface {
 // Re-emitting moves them out of unknown within seconds. A handler that does not
 // implement it simply skips the resync (the prior behavior).
 type StatusResyncer interface {
-	// ResyncStatus re-emits a StatusChange for each currently-held instance. It
-	// must be a no-op when the handler holds no instances (e.g. a fresh process).
+	// ResyncStatus re-emits a StatusChange for each currently-held instance, and
+	// on the first call after boot one for each server the boot's orphan sweep
+	// removed (issues #3486, #3514). It must be a no-op when the handler has
+	// nothing to report.
 	ResyncStatus()
 }
 
