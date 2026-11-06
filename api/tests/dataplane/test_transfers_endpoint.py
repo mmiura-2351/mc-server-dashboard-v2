@@ -1002,7 +1002,8 @@ _FsVanish = Callable[[FsStorage, CommunityId, ServerId], None]
 
 def _fs_prune(storage: FsStorage, c: CommunityId, s: ServerId) -> None:
     # The hooked steps run on a worker thread, as the real prune does.
-    storage._prune_to_final_snapshot(c, s)
+    with storage._server_lock(c, s):
+        storage._prune_to_final_snapshot_inner(c, s)
 
 
 def _fs_drop_incoming(storage: FsStorage, c: CommunityId, s: ServerId) -> None:

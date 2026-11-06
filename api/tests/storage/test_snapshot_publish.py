@@ -665,7 +665,8 @@ async def test_commit_pruned_store_error_identifies_concurrent_delete(
 
     def _fsync_then_prune(path: Path) -> None:
         real_fsync_tree(path)
-        storage._prune_to_final_snapshot(community, server)
+        with storage._server_lock(community, server):
+            storage._prune_to_final_snapshot_inner(community, server)
 
     monkeypatch.setattr(fs_mod, "_fsync_tree", _fsync_then_prune)
 
