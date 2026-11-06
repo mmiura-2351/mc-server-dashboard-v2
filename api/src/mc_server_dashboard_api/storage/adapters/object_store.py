@@ -88,6 +88,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     PrunedStoreError,
     PublisherFencedError,
+    RestorePartiallyPublishedError,
     SnapshotHandleError,
     StaleGenerationError,
     StorageUnavailableError,
@@ -1544,13 +1545,10 @@ class ObjectStorage(Storage):
                     new_prefix = await self._copy_into_snapshot(
                         client, community_id, server_id, incoming, staged
                     )
-                    # Flip + bump under the server lock (issue #899), serializing with
+                    # Bump + flip under the server lock (issue #899), serializing with
                     # a concurrent snapshot commit's generation re-check so the restore
                     # cannot interleave with the commit's pointer flip.
                     async with self._server_lock(community_id, server_id):
-                        old_prefix = await self._flip_pointer(
-                            client, community_id, server_id, new_prefix
-                        )
                         # Bump the generation on this authoritative publish (issue
                         # #873), mirroring the fs adapter: a restore replaces
                         # ``current/`` like a snapshot commit, so it MUST advance the
@@ -1559,11 +1557,25 @@ class ObjectStorage(Storage):
                         # PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER)
                         # makes the publish-time guard refuse an in-flight stale
                         # snapshot from a real Worker (different publisher), closing the
-                        # restore-clobber window (#873).
+                        # restore-clobber window (#873). Bumped BEFORE the flip (issue
+                        # #3564): no Worker holds the restored world, so a flip without
+                        # its bump is that same rollback, while a bump whose flip fails
+                        # only makes holders hydrate the prior world again.
                         server_prefix = self._server_prefix(community_id, server_id)
                         await self._bump_generation(
                             client, server_prefix, RESTORE_PUBLISHER
                         )
+                        try:
+                            old_prefix = await self._flip_pointer(
+                                client, community_id, server_id, new_prefix
+                            )
+                        except Exception as exc:
+                            # A pointer write the store applied before it failed
+                            # (a lost response) published the backup: report it.
+                            live = await self._read_pointer(client, server_prefix)
+                            if live != new_prefix:
+                                raise
+                            raise RestorePartiallyPublishedError(exc, report) from exc
                     # Reclaim the staging + superseded prefixes after the lock (#920).
                     await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
                     return report

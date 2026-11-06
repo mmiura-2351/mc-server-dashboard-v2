@@ -24,14 +24,22 @@ from typing import Literal
 import pytest
 
 from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
+from mc_server_dashboard_api.storage.adapters.failure_seam import (
+    CrashAt,
+    InjectedCrash,
+    PublishPhase,
+)
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
     IntegrityCheckError,
     MissingRegionsError,
     PrunedStoreError,
+    RestorePartiallyPublishedError,
     StaleGenerationError,
+    StorageUnavailableError,
 )
+from mc_server_dashboard_api.storage.domain.port import RESTORE_PUBLISHER
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
@@ -731,3 +739,144 @@ async def test_missing_region_gate_runs_under_server_lock(tmp_path: Path) -> Non
         )
     finally:
         monkeypatch.undo()
+
+
+# --- restore: the generation leads the flip (issue #3564) -------------------
+
+
+async def _store_with_a_corrupt_backup(
+    tmp_path: Path,
+) -> tuple[FsStorage, CommunityId, ServerId, BackupKey, bytes]:
+    """A healthy world worker-a published at generation 1, and a corrupt backup."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+        publisher="worker-a",
+    )
+    corrupt = mode_invariant_corrupt_region_bytes()
+    key = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt}
+    )
+    return storage, community, server, key, corrupt
+
+
+async def _hydrate_with_generation(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> tuple[dict[str, bytes], int | None]:
+    source = storage.open_hydrate_source(community, server)
+    files = read_tar(await drain(source))
+    return files, source.generation
+
+
+async def _commit_tagged(
+    storage: FsStorage,
+    community: CommunityId,
+    server: ServerId,
+    level: bytes,
+    *,
+    expected_base: int,
+) -> int:
+    """worker-a publishes a healthy world tagged by ``level.dat``."""
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(
+        handle,
+        tar_stream(
+            {"world/region/r.0.0.mca": healthy_region_bytes(), "level.dat": level}
+        ),
+    )
+    return await storage.commit_snapshot(
+        handle, publisher="worker-a", expected_base=expected_base
+    )
+
+
+async def test_a_restore_whose_marker_write_fails_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The restore writes the generation marker before it flips ``current``. An
+    # I/O fault on that write leaves ``current`` where it was, so the corrupt
+    # backup is not live and the generation still names the prior world.
+    storage, community, server, key, _ = await _store_with_a_corrupt_backup(tmp_path)
+
+    def _write_marker(*_: object) -> None:
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(storage, "_write_marker", _write_marker)
+    with pytest.raises(StorageUnavailableError):
+        await storage.restore_backup(community, server, key, force=True)
+    monkeypatch.undo()
+
+    assert await _hydrate_with_generation(storage, community, server) == (
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+        1,
+    )
+    assert await storage.current_publisher(community, server) == "worker-a"
+
+
+async def test_a_restore_whose_flip_fails_leaves_the_prior_world_ahead(
+    tmp_path: Path,
+) -> None:
+    # The generation already advanced when the flip fails. The prior world is
+    # still live under the new generation: every holder of generation 1 hydrates
+    # it rather than skipping, and the restore sentinel refuses worker-a's
+    # in-flight publish from generation 1.
+    storage, community, server, key, _ = await _store_with_a_corrupt_backup(tmp_path)
+    storage._seam = CrashAt(PublishPhase.AFTER_MOVE)
+
+    with pytest.raises(InjectedCrash):
+        await storage.restore_backup(community, server, key, force=True)
+
+    assert await _hydrate_with_generation(storage, community, server) == (
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+        2,
+    )
+    assert await storage.current_publisher(community, server) == RESTORE_PUBLISHER
+    with pytest.raises(StaleGenerationError):
+        await _commit_tagged(storage, community, server, b"stale", expected_base=1)
+
+
+async def test_a_fault_after_the_restore_flip_reports_the_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The directory fsync after the flip fails: the corrupt backup is live. The
+    # restore reports it published, with the report a successful restore returns,
+    # and the generation already names the restored world. A hydrate serves it at
+    # that generation, worker-a's in-flight publish from the pre-restore world is
+    # refused, and a publish based on the restored world advances past it.
+    storage, community, server, key, corrupt = await _store_with_a_corrupt_backup(
+        tmp_path
+    )
+    server_root = snapshot_dir(tmp_path, community, server).parent.parent
+    link = server_root / "current"
+    prior_target = os.readlink(link)
+    real_fsync_dir = fs_adapter._fsync_dir
+
+    def _fsync_dir(path: Path) -> None:
+        if path == server_root and os.readlink(link) != prior_target:
+            raise OSError(errno.EIO, "Input/output error")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(fs_adapter, "_fsync_dir", _fsync_dir)
+    with pytest.raises(RestorePartiallyPublishedError) as caught:
+        await storage.restore_backup(community, server, key, force=True)
+    monkeypatch.undo()
+
+    assert isinstance(caught.value.cause, StorageUnavailableError)
+    assert len(caught.value.report.corrupt) == 1
+    assert await _hydrate_with_generation(storage, community, server) == (
+        {"world/region/r.0.0.mca": corrupt},
+        2,
+    )
+    assert await storage.current_publisher(community, server) == RESTORE_PUBLISHER
+    with pytest.raises(StaleGenerationError):
+        await _commit_tagged(storage, community, server, b"stale", expected_base=1)
+    assert (
+        await _commit_tagged(storage, community, server, b"next", expected_base=2) == 3
+    )
+    files, generation = await _hydrate_with_generation(storage, community, server)
+    assert (files["level.dat"], generation) == (b"next", 3)

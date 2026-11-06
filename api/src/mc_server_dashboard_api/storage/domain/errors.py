@@ -254,6 +254,28 @@ class PublisherFencedError(StorageError):
     """
 
 
+class RestorePartiallyPublishedError(StorageError):
+    """A restore published the backup, then a later step inside it failed (#3564).
+
+    ``restore_backup`` flipped ``current`` onto the restored working set, and the
+    call then failed before returning: on fs the directory fsync that makes the
+    flip durable, on object a pointer write that the store applied but whose
+    response was lost. The restored bytes are live, so the caller must not treat
+    the call as a restore that published nothing. The generation was advanced
+    before the flip, so it already names the restored working set.
+
+    ``report`` is the extracted working set's report, the value a successful
+    restore returns, so a forced corrupt publish keeps its identity. ``cause`` is
+    the failed step's error: :class:`StorageUnavailableError` for a transient
+    backend fault.
+    """
+
+    def __init__(self, cause: Exception, report: WorkingSetReport) -> None:
+        self.cause = cause
+        self.report = report
+        super().__init__(f"restore published, then failed: {cause}")
+
+
 class IntegrityCheckError(StorageError):
     """A working set failed the structural ``.mca`` integrity gate (issue #739).
 

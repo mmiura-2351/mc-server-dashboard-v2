@@ -98,7 +98,9 @@ class BackupArchiveStore(abc.ABC):
         :class:`BackupUnreadableError` — ``force`` or not, with ``current``
         untouched — when the archive's bytes cannot be read back (issue #3230), or
         hold nothing a restore can stage: an unsafe member, or members inflating
-        past the decompressed-size cap (issue #3237).
+        past the decompressed-size cap (issue #3237). A store failure after the
+        archive went live raises :class:`BackupRestorePartiallyPublishedError`
+        carrying the published corrupt count (issue #3564).
         """
 
     @abc.abstractmethod

@@ -20,6 +20,7 @@ import datetime as dt
 import errno
 import io
 import logging
+import os
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -135,7 +136,14 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
-from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    _GENERATION,
+    _POINTER,
+    ObjectStorage,
+)
+from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
@@ -1007,6 +1015,156 @@ def test_a_restore_spool_left_behind_still_records_the_force_restore(
         str(leaked[0]) in r.getMessage() and r.levelno == logging.WARNING
         for r in caplog.records
     )
+
+
+def _store_failing_its_restore(
+    backend: str,
+    fault: str,
+    *,
+    corrupt: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+) -> tuple[Storage, str]:
+    """A real store over a healthy live world, whose restore of a backup fails.
+
+    ``fault`` picks where (issue #3564): ``"generation"`` fails the generation
+    write, before the flip; ``"after_flip"`` fails the restore once ``current``
+    names the restored world (on fs the directory fsync, on object a pointer
+    write whose response is lost).
+    """
+
+    faults = Faults()
+    storage: Storage
+    if backend == "fs":
+        storage = FsStorage(tmp_path)
+    else:
+        storage = ObjectStorage(faulty_s3_factory(FakeS3Store(), faults))
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    region = (
+        mode_invariant_corrupt_region_bytes() if corrupt else healthy_region_bytes()
+    )
+
+    async def _seed() -> str:
+        handle = await storage.begin_snapshot(*scope)
+        await storage.write_snapshot(
+            handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
+        )
+        await storage.commit_snapshot(handle)
+        key = await storage.put_backup(
+            *scope, stream_of(region_targz({"world/region/r.0.0.mca": region}))
+        )
+        return key.value
+
+    storage_ref = asyncio.run(_seed())
+    server_prefix = f"communities/{community_id}/servers/{server_id}/"
+    server_root = tmp_path / server_prefix
+    if backend == "object" and fault == "generation":
+        marker = server_prefix + _GENERATION
+        faults.when = lambda op, key: op == "put_object" and key == marker
+    elif backend == "object":
+        pointer = server_prefix + _POINTER
+        faults.lose_response = lambda op, key: op == "put_object" and key == pointer
+    elif fault == "generation":
+
+        def _write_marker(*_: object) -> None:
+            raise OSError(errno.EIO, "Input/output error")
+
+        monkeypatch.setattr(storage, "_write_marker", _write_marker)
+    else:
+        link = server_root / "current"
+        prior_target = os.readlink(link)
+        real_fsync_dir = fs_adapter._fsync_dir
+
+        def _fsync_dir(path: Path) -> None:
+            if path == server_root and os.readlink(link) != prior_target:
+                raise OSError(errno.EIO, "Input/output error")
+            real_fsync_dir(path)
+
+        monkeypatch.setattr(fs_adapter, "_fsync_dir", _fsync_dir)
+    return storage, storage_ref
+
+
+@pytest.mark.parametrize(
+    ("backend", "corrupt", "operation"),
+    [
+        ("fs", True, ops.BACKUP_FORCE_RESTORE),
+        ("object", True, ops.BACKUP_FORCE_RESTORE),
+        ("fs", False, ops.BACKUP_RESTORE),
+        ("object", False, ops.BACKUP_RESTORE),
+    ],
+)
+def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
+    backend: str,
+    corrupt: bool,
+    operation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The store published the backup, then its restore failed (issue #3564): a
+    # forced corrupt backup is live, so the route audits the force-restore it
+    # was, and answers the retryable 503 the store failure always answered.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        backend,
+        "after_flip",
+        corrupt=corrupt,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, _, _ = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+        force=corrupt,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
+
+
+@pytest.mark.parametrize("backend", ["fs", "object"])
+def test_a_failed_restore_generation_write_publishes_nothing(
+    backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The generation is written before the flip (issue #3564), so a store
+    # failure there publishes nothing: the forced corrupt backup is not live and
+    # the route audits the restore that failed.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        backend,
+        "generation",
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, _, _ = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+    monkeypatch.undo()
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = asyncio.run(drain(storage.open_hydrate_source(*scope)))
+    assert read_tar(live)["world/region/r.0.0.mca"] == healthy_region_bytes()
 
 
 def test_restore_with_force_query_param_passes_force_true() -> None:
