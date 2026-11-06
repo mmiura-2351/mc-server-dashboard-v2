@@ -459,7 +459,11 @@ step still reads them: the fs write's staging check, spool creation and spool
 reopen, and the commit's empty check (including a staging the prune has emptied
 but not yet removed), integrity gate, fsync or object copy. A missing file or
 object without the prune signature stays the error it was, and an empty upload
-without it stays `empty_snapshot`.
+without it stays `empty_snapshot`. A failed object copy first removes the objects
+it already copied into its fresh, never-pointed-at snapshot prefix, so a prune
+that ran between two copies leaves nothing behind; if that removal fails too, the
+error is logged, the original error still propagates, and the sweep reclaims the
+prefix.
 
 ### 4.2 What "single atomic step" means per backend family
 
