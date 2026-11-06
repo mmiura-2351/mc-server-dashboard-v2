@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import gzip
 import hashlib
+import io
+import tarfile
 import threading
 import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -1239,195 +1241,53 @@ async def test_restore_drops_reserved_marker_members_of_a_legacy_archive(
     assert "3" in warnings[0].getMessage()
 
 
-# Member spellings the fs extractor resolves onto the reserved root name although
-# their raw first component is not it: ``data_filter`` strips the leading slash,
-# and admits an in-tree ``..`` (issue #3433, review round 2).
+# Member spellings that land on, or pass through, the reserved root name only
+# by an absolute or ``..`` path (issue #3433). Each is ``(name, is_dir)``.
 _RESERVED_ALIASES = [
-    "/.mcsd_generation/stray.txt",
-    "world/../.mcsd_generation/stray.txt",
+    ("/.mcsd_generation/stray.txt", False),
+    ("world/../.mcsd_generation/stray.txt", False),
+    (".mcsd_generation/../server.properties", False),
+    (".mcsd_generation-cache/../world/level.dat", False),
+    (".mcsd_generation-x/../plugins/", True),
 ]
 
 
-def _aliased_reserved_targz(alias: str, payload: bytes = b"operator") -> bytes:
-    import io
-    import tarfile
+@pytest.mark.parametrize(("alias", "is_dir"), _RESERVED_ALIASES)
+async def test_a_reserved_alias_member_is_refused_not_dropped(
+    harness: StorageHarness, alias: str, is_dir: bool
+) -> None:
+    """The member rule runs before the reserved decision (issue #3550), so an
+    aliased spelling makes the archive unrestorable on BOTH backends, for the
+    restore and the health probe, instead of being dropped as reserved. None
+    can leave a reserved root entry behind."""
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         world = tarfile.TarInfo("world")
         world.type = tarfile.DIRTYPE
         tar.addfile(world)
-        for name, data in {
-            alias: payload,
-            "server.properties": b"k=v",
-            "world/.mcsd_generation/kept.txt": b"world data",
-        }.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            tar.addfile(info, io.BytesIO(data))
-    return buf.getvalue()
-
-
-@pytest.mark.parametrize("alias", _RESERVED_ALIASES)
-async def test_fs_restore_drops_a_member_resolving_onto_the_reserved_name(
-    alias: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The filter decides on the destination the extractor resolves, not the raw
-    member name, so an aliased spelling is dropped -- and counted -- too."""
-
-    import logging
-
-    harness = build_harness("fs", tmp_path)
+        member = tarfile.TarInfo(alias)
+        if is_dir:
+            member.type = tarfile.DIRTYPE
+            tar.addfile(member)
+        else:
+            member.size = len(b"operator")
+            tar.addfile(member, io.BytesIO(b"operator"))
+        kept = tarfile.TarInfo("world/.mcsd_generation/kept.txt")
+        kept.size = len(b"world data")
+        tar.addfile(kept, io.BytesIO(b"world data"))
     community, server = new_scope()
-    key = await harness.storage.put_backup(
-        community, server, stream_of(_aliased_reserved_targz(alias))
-    )
+    live = {"server.properties": b"k=v"}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
 
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(ArchiveUnreadableError):
         await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {
-        "server.properties": b"k=v",
-        "world/.mcsd_generation/kept.txt": b"world data",
-    }
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "1" in warnings[0].getMessage()
-
-
-@pytest.mark.parametrize("alias", _RESERVED_ALIASES)
-async def test_fs_backup_health_ignores_a_member_resolving_onto_the_reserved_name(
-    alias: str, tmp_path: Path
-) -> None:
-    """The health check shares the restore's extractor, so it judges what a
-    restore would publish: a corrupt region under an aliased reserved name is
-    dropped, not reported, while a nested same-named region is still checked."""
-
-    harness = build_harness("fs", tmp_path)
-    community, server = new_scope()
-    key = await harness.storage.put_backup(
-        community,
-        server,
-        stream_of(
-            _aliased_reserved_targz(
-                alias.replace("stray.txt", "r.0.0.mca"), corrupt_region_bytes()
-            )
-        ),
-    )
-
-    report = await harness.storage.check_backup_health(community, server, key)
-
-    assert report.healthy
-
-
-# Members whose raw name passes THROUGH the reserved root name but lands
-# elsewhere (issue #3433, review round 3): the destination is ordinary, so they
-# restore, but extracting the raw name would create the reserved directory on
-# the way. Each is ``(raw name, is_dir, where it lands)``.
-_THROUGH_RESERVED = [
-    (".mcsd_generation/../server.properties", False, "server.properties"),
-    (".mcsd_generation-cache/../world/level.dat", False, "world/level.dat"),
-    (".mcsd_generation-x/../plugins/", True, "plugins"),
-]
-
-
-@pytest.mark.parametrize(("raw", "is_dir", "lands"), _THROUGH_RESERVED)
-async def test_fs_restore_through_the_reserved_name_creates_no_reserved_entry(
-    raw: str, is_dir: bool, lands: str, tmp_path: Path
-) -> None:
-    """The member is extracted at its normalised destination, so no directory
-    named by the raw path's intermediate components is ever created -- the
-    published set holds no root ``.mcsd_generation*`` entry of any type, while
-    the member itself and a nested same-named entry are restored."""
-
-    import io
-    import tarfile
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        world = tarfile.TarInfo("world")
-        world.type = tarfile.DIRTYPE
-        tar.addfile(world)
-        member = tarfile.TarInfo(raw)
-        if is_dir:
-            member.type = tarfile.DIRTYPE
-            tar.addfile(member)
-        else:
-            member.size = len(b"landed")
-            tar.addfile(member, io.BytesIO(b"landed"))
-        kept = tarfile.TarInfo("world/.mcsd_generation/kept.txt")
-        kept.size = len(b"world data")
-        tar.addfile(kept, io.BytesIO(b"world data"))
-    harness = build_harness("fs", tmp_path)
-    community, server = new_scope()
-    key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
-
-    await harness.storage.restore_backup(community, server, key)
-
-    blob = await drain(harness.storage.open_hydrate_source(community, server))
-    with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as tar:
-        members = {m.name.removeprefix("./").rstrip("/"): m for m in tar.getmembers()}
-    roots = {name.split("/")[0] for name in members}
-    assert not any(root.startswith(".mcsd_generation") for root in roots)
-    assert members[lands].isdir() is is_dir
-    files = read_tar(blob)
-    assert files["world/.mcsd_generation/kept.txt"] == b"world data"
-    if not is_dir:
-        assert files[lands] == b"landed"
-
-
-@pytest.mark.parametrize(("raw", "is_dir", "lands"), _THROUGH_RESERVED)
-async def test_object_restore_through_the_reserved_name_creates_no_reserved_entry(
-    raw: str, is_dir: bool, lands: str, tmp_path: Path
-) -> None:
-    """The object backend refuses a ``..`` FILE member as an unrestorable
-    archive before anything is staged, and stages no directory member at all (a
-    prefix store has none), so neither shape can leave a reserved root entry
-    behind."""
-
-    import io
-    import tarfile
-
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        member = tarfile.TarInfo(raw)
-        if is_dir:
-            member.type = tarfile.DIRTYPE
-            tar.addfile(member)
-        else:
-            member.size = len(b"landed")
-            tar.addfile(member, io.BytesIO(b"landed"))
-        kept = tarfile.TarInfo("world/.mcsd_generation/kept.txt")
-        kept.size = len(b"world data")
-        tar.addfile(kept, io.BytesIO(b"world data"))
-    harness = build_harness("object", tmp_path)
-    community, server = new_scope()
-    key = await harness.storage.put_backup(community, server, stream_of(buf.getvalue()))
-
-    if not is_dir:
-        with pytest.raises(ArchiveUnreadableError):
-            await harness.storage.restore_backup(community, server, key)
-        return
-    await harness.storage.restore_backup(community, server, key)
-    blob = await drain(harness.storage.open_hydrate_source(community, server))
-    assert read_tar(blob) == {"world/.mcsd_generation/kept.txt": b"world data"}
-
-
-async def test_object_restore_refuses_an_aliased_reserved_member(
-    tmp_path: Path,
-) -> None:
-    """The object backend refuses an absolute or ``..`` member name outright,
-    before anything is staged, so neither alias can publish the reserved name."""
-
-    harness = build_harness("object", tmp_path)
-    for alias in _RESERVED_ALIASES:
-        community, server = new_scope()
-        key = await harness.storage.put_backup(
-            community, server, stream_of(_aliased_reserved_targz(alias))
-        )
-        with pytest.raises(ArchiveUnreadableError):
-            await harness.storage.restore_backup(community, server, key)
+    assert read_tar(blob) == live
 
 
 # A gzip member header (no flags, no mtime) for hand-framed damaged archives.
@@ -1534,6 +1394,88 @@ async def test_archive_with_an_escaping_member_is_unreadable(
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == live
+
+
+# One member per shape the single archive member rule decides (issue #3550): a
+# backup restores only regular files and directories at relative, ``..``-free
+# names, on both backends, for restore and the health probe alike.
+_CLEAN_MEMBERS = {"server.properties": b"k=v", "world/level.dat": b"world"}
+_ODD_MEMBERS: dict[str, tuple[str, bytes, str]] = {
+    # shape: (member name, tar type, link target)
+    "hard_link": ("world/linked.dat", tarfile.LNKTYPE, "world/level.dat"),
+    "symlink": ("world/linked.dat", tarfile.SYMTYPE, "level.dat"),
+    "fifo": ("world/pipe", tarfile.FIFOTYPE, ""),
+    "absolute": ("/world/extra.dat", tarfile.REGTYPE, ""),
+    "in_tree_dotdot": ("world/../extra.dat", tarfile.REGTYPE, ""),
+    "in_tree_dotdot_dir": ("world/../plugins", tarfile.DIRTYPE, ""),
+    "escaping_dotdot": ("../escape.txt", tarfile.REGTYPE, ""),
+}
+
+
+def _member_rule_targz(shape: str) -> bytes:
+    """The clean world, plus the ``shape`` member unless the shape is ``clean``."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        world = tarfile.TarInfo("world")
+        world.type = tarfile.DIRTYPE
+        tar.addfile(world)
+        for name, data in _CLEAN_MEMBERS.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        if shape != "clean":
+            name, kind, target = _ODD_MEMBERS[shape]
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.linkname = target
+            body = b"odd" if kind == tarfile.REGTYPE else b""
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("shape", list(_ODD_MEMBERS))
+async def test_archive_member_rule_refuses_the_same_members_on_both_backends(
+    harness: StorageHarness, shape: str, force: bool
+) -> None:
+    """A link, special, absolute or ``..`` member makes the archive
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3550), for the restore —
+    ``force`` or not, the live snapshot untouched — and for the health probe."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(
+        community, server, stream_of(_member_rule_targz(shape))
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key, force=force)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+async def test_archive_member_rule_admits_the_clean_control_on_both_backends(
+    harness: StorageHarness,
+) -> None:
+    """The control archive of plain files and a directory (issue #3550) is
+    healthy and restores as-is on both backends."""
+
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(_member_rule_targz("clean"))
+    )
+
+    assert (await harness.storage.check_backup_health(community, server, key)).healthy
+    await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == _CLEAN_MEMBERS
 
 
 async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:

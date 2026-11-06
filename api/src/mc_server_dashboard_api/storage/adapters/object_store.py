@@ -113,6 +113,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.archive import (
     GzipReadProbe,
     archive_read_errors_as_unreadable,
+    refuse_unrestorable_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
@@ -2659,21 +2660,22 @@ async def _archive_file_member_streams(
     """Single-pass streaming extraction of an archive's file members (#1945).
 
     Opens the spooled archive ONCE in tar stream mode (``r|gz`` / ``r|*``),
-    iterates members with ``tar.next()``, validates each name inline (same
-    traversal rule as ``_safe_archive_members``), and yields ``(name,
-    chunk_stream)`` pairs. The caller MUST fully consume each chunk stream
-    before advancing to the next member (stream mode reads sequentially).
+    iterates members with ``tar.next()``, judges each inline, and yields
+    ``(name, chunk_stream)`` pairs for its file members. The caller MUST fully
+    consume each chunk stream before advancing to the next member (stream mode
+    reads sequentially).
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
-    member walk or from a member's chunk stream. So does one holding a file
-    member that escapes the prefix (issue #3237): it reads, but nothing can be
-    restored from it, override or not, matching the fs extraction.
+    member walk or from a member's chunk stream. So does one holding a member
+    :func:`refuse_unrestorable_member` refuses — a link, special, absolute or
+    ``..`` member, by the rule the fs extraction shares (issue #3550): it reads,
+    but nothing can be restored from it, override or not.
 
     With ``dropped``, a member landing at or under the reserved generation-marker
-    root name — of any type — is not yielded but its name appended (issue #3433).
-    A file member's name is traversal-checked first, so only a relative,
-    ``..``-free name reaches that decision.
+    root name is not yielded but its name appended (issue #3433). Every member is
+    judged first, so only a file or directory at a relative, ``..``-free name
+    reaches that decision.
     """
 
     with archive_read_errors_as_unreadable():
@@ -2684,15 +2686,9 @@ async def _archive_file_member_streams(
                 member = await asyncio.to_thread(tar.next)
             if member is None:
                 return
-            if member.isfile():
-                pure = PurePosixPath(member.name)
-                if pure.is_absolute() or ".." in pure.parts:
-                    raise ArchiveUnreadableError(
-                        "archive holds a member that cannot be restored: tar "
-                        f"member escapes the server prefix: {member.name!r}"
-                    )
-            # Decided after the traversal check, on the name the member resolves
-            # to, so an absolute or ``..`` file member is refused, not dropped.
+            # Judged before the reserved decision, so an unrestorable member at
+            # the reserved name is refused, not dropped.
+            refuse_unrestorable_member(member)
             if dropped is not None and is_reserved_root_member(member.name):
                 dropped.append(member.name)
                 continue
