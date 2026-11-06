@@ -42,6 +42,7 @@ import datetime as dt
 import hmac
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 import grpc
 from grpc import aio
@@ -292,6 +293,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._handlers: set[asyncio.Future[object]] = set()
         self._handlers_idle = asyncio.Event()
         self._handlers_idle.set()
+        # Set whenever a handler leaves, so the drain's settle phase wakes for
+        # each late hand-off rather than only once every handler is gone.
+        self._handler_left = asyncio.Event()
 
     async def drain_teardowns(self) -> None:
         """Finish every Session teardown, within one budget (issue #3555).
@@ -299,9 +303,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         The app calls this after the gRPC server stops and before it disposes
         the engine the teardowns write through. It waits for each handler to
         hand off its teardown, then for the teardowns to finish. Past
-        :data:`_TEARDOWN_DRAIN_SECONDS` it logs the workers left, cancels their
-        teardowns and waits (bounded) for them to settle, so no owned task is
-        still writing when the engine goes away.
+        :data:`_TEARDOWN_DRAIN_SECONDS` it logs the workers left and settles
+        for up to :data:`_TEARDOWN_SETTLE_SECONDS`: it cancels every teardown,
+        including one a still-unwinding handler hands off meanwhile, until no
+        handler or teardown is left. gRPC owns the handler tasks, and the stop
+        has already cancelled them, so only their teardowns are cancelled here.
         """
 
         try:
@@ -312,24 +318,42 @@ class WorkerSessionServicer(WorkerServiceServicer):
             return
         except TimeoutError:
             pass
-        pending = set(self._teardowns)
         _LOG.error(
             "session teardowns did not finish within %.1fs; cancelling them "
             "(workers: %s; %d handlers had not reached teardown)",
             _TEARDOWN_DRAIN_SECONDS,
-            sorted(self._teardowns[task].value for task in pending),
+            sorted(worker.value for worker in self._teardowns.values()),
             len(self._handlers),
         )
-        if not pending:
-            return
-        for task in pending:
-            task.cancel()
-        _, unsettled = await asyncio.wait(pending, timeout=_TEARDOWN_SETTLE_SECONDS)
-        if unsettled:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TEARDOWN_SETTLE_SECONDS
+        cancelled: set[asyncio.Future[None]] = set()
+        while self._handlers or self._teardowns:
+            for task in self._teardowns.keys() - cancelled:
+                task.cancel()
+                cancelled.add(task)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            self._handler_left.clear()
+            handler_left = asyncio.ensure_future(self._handler_left.wait())
+            waiters: set[asyncio.Future[Any]] = {*self._teardowns, handler_left}
+            try:
+                await asyncio.wait(
+                    waiters,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                handler_left.cancel()
+        if self._handlers or self._teardowns:
             _LOG.error(
                 "session teardowns did not settle within %.1fs of their cancel; "
-                "shutting down without them",
+                "shutting down without them (workers: %s; %d handlers never "
+                "handed off)",
                 _TEARDOWN_SETTLE_SECONDS,
+                sorted(worker.value for worker in self._teardowns.values()),
+                len(self._handlers),
             )
 
     def _enter_handler(self) -> asyncio.Future[object]:
@@ -344,6 +368,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
 
     def _leave_handler(self, task: asyncio.Future[object]) -> None:
         self._handlers.discard(task)
+        self._handler_left.set()
         if not self._handlers:
             self._handlers_idle.set()
 

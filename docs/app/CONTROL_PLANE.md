@@ -423,8 +423,9 @@ the cancel can arrive while the teardown is already writing. The teardown
 finishes regardless. API shutdown waits, after the gRPC server stops, for
 every `Session` to reach its teardown and for each teardown to finish, within
 one 10-second budget. A teardown still running past the budget is logged with
-its Worker id and cancelled, and shutdown waits briefly for it to settle before
-it closes the database connections.
+its Worker id and cancelled. So is any teardown a `Session` hands off after the
+budget. Shutdown waits up to 2 more seconds for them to settle before it closes
+the database connections, and logs any Worker whose teardown is still pending.
 
 ---
 

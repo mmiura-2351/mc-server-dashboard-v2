@@ -2104,3 +2104,129 @@ async def test_rpc_cancel_during_assignment_rebuild_still_tears_down() -> None:
         assert sink.unknown_for == [_WORKER_ID]
     finally:
         await h.stop()
+
+
+_WORKER_B = "33333333-3333-3333-3333-333333333333"
+
+
+class _ShutdownRaceSink(FakeServerStateSink):
+    """Stalls the writes that race a shutdown drain, with slow cancel cleanup.
+
+    A worker in ``rebuild_unwind`` blocks in the registration-time assignment
+    rebuild, and once cancelled takes that many seconds to unwind before its
+    handler hands off a teardown. Every mark-unknown write stalls until it is
+    cancelled, then takes ``mark_cleanup[worker]`` seconds (default 0) to
+    unwind. ``events`` records each write's start and cancel, in order.
+    """
+
+    def __init__(
+        self,
+        *,
+        rebuild_unwind: dict[str, float],
+        mark_cleanup: dict[str, float] | None = None,
+    ) -> None:
+        super().__init__()
+        self._rebuild_unwind = rebuild_unwind
+        self._mark_cleanup = mark_cleanup or {}
+        self.rebuild_entered = {wid: asyncio.Event() for wid in rebuild_unwind}
+        self.mark_entered = asyncio.Event()
+        self.events: list[str] = []
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        if worker_id in self._rebuild_unwind:
+            self.rebuild_entered[worker_id].set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(self._rebuild_unwind[worker_id])
+                raise
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+    async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        self.events.append(f"mark-start {worker_id}")
+        self.mark_entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(self._mark_cleanup.get(worker_id, 0.0))
+            self.events.append(f"mark-cancelled {worker_id}")
+            raise
+
+
+async def test_drain_settles_a_teardown_handed_off_after_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PR #3566 round 2: the budget can expire while a handler is still
+    # unwinding the stop's cancel, with no teardown registered yet. The
+    # teardown it hands off later must still be cancelled and settled before
+    # the drain returns, or it writes after the engine is disposed.
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_DRAIN_SECONDS", 0.1)
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_SETTLE_SECONDS", 2.0)
+    sink = _ShutdownRaceSink(rebuild_unwind={_WORKER_ID: 0.3})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await asyncio.wait_for(sink.rebuild_entered[_WORKER_ID].wait(), timeout=5)
+        assert h._server is not None and h.servicer is not None
+
+        await h._server.stop(grace=None)
+        await asyncio.wait_for(h.servicer.drain_teardowns(), timeout=5)
+        at_drain = list(sink.events)
+        pending_at_drain = _pending_teardowns()
+        await asyncio.sleep(0.5)
+
+        assert pending_at_drain == []
+        assert sink.events == at_drain, "a teardown wrote after the drain returned"
+    finally:
+        for task in _pending_teardowns():
+            task.cancel()
+        await h.stop()
+
+
+async def test_drain_cancels_a_teardown_handed_off_while_settling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # PR #3566 round 2: Worker A's stalled teardown is being cancelled (its
+    # cleanup takes a while) when Worker B's handler, still unwinding the stop's
+    # cancel in its rebuild, hands off a teardown. The settle phase must pick B
+    # up, cancel it and wait for it too.
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_DRAIN_SECONDS", 0.1)
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_SETTLE_SECONDS", 2.0)
+    sink = _ShutdownRaceSink(
+        rebuild_unwind={_WORKER_B: 0.2}, mark_cleanup={_WORKER_ID: 0.4}
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_a.write(_register_message())
+        await call_a.read()  # ack
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message(worker_id=_WORKER_B))
+        await asyncio.wait_for(sink.rebuild_entered[_WORKER_B].wait(), timeout=5)
+        assert h._server is not None and h.servicer is not None
+
+        await h._server.stop(grace=None)
+        await asyncio.wait_for(h.servicer.drain_teardowns(), timeout=5)
+        at_drain = list(sink.events)
+        pending_at_drain = _pending_teardowns()
+        await asyncio.sleep(0.5)
+
+        assert pending_at_drain == []
+        assert f"mark-cancelled {_WORKER_ID}" in at_drain
+        assert f"mark-cancelled {_WORKER_B}" in at_drain
+        assert sink.events == at_drain, "a teardown wrote after the drain returned"
+    finally:
+        for task in _pending_teardowns():
+            task.cancel()
+        await h.stop()
