@@ -426,6 +426,10 @@ type Manager struct {
 	// nothing else: a running snapshot takes no reservation (above), so a stop or a
 	// restart still proceeds over a body that is stuck. The body clears it on exit.
 	runningSnapshots map[string]bool
+	// bootSwept names the servers whose containers this boot's orphan sweep removed
+	// (WithSweptServers). The first ResyncStatus reports them stopped and clears it,
+	// so the report is made once per boot (issues #3486, #3514).
+	bootSwept []string
 
 	// workingSetLocks holds each server id's working-set lock (workingSetLock), which
 	// keeps the Worker's own renames out of the driver's hand-over walk (issue #3371).
@@ -982,6 +986,13 @@ func (m *Manager) snapshotContext(ctx context.Context, running bool) (context.Co
 		d -= restoreSaveTimeout
 	}
 	return context.WithTimeout(ctx, d)
+}
+
+// WithSweptServers records the servers whose containers the boot's orphan sweep
+// removed, for the first ResyncStatus to report stopped (issues #3486, #3514).
+func (m *Manager) WithSweptServers(serverIDs []string) *Manager {
+	m.bootSwept = serverIDs
+	return m
 }
 
 // WithWorkerID sets this Worker's own id, stamped on a snapshot publish so the
@@ -4476,7 +4487,7 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool 
 // control-plane reconnects, so its instances map still names the live servers;
 // re-emitting their current Status() reflects reality (running/starting/etc.).
 // On a fresh process both maps are empty (the orphan sweep removed leftovers and
-// no instances are re-created), so this is a harmless no-op.
+// no instances are re-created).
 //
 // Failed-stop orphans are reported too, as `unknown` (issue #2468 item 3): they
 // have been evicted from instances, so a resync that snapshotted only that map
@@ -4486,7 +4497,19 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool 
 // an instance is evicted before its orphan record is written — so no id is
 // reported twice.
 //
-// Both maps are snapshotted under the lock, which is then RELEASED before any
+// The servers whose containers the boot's orphan sweep removed are reported
+// `stopped` on the first resync and never again (issues #3486, #3514). That
+// sweep runs before the first registration and its removals are never reported
+// otherwise, so without this the API row of an exited container a handed-off
+// stop left behind sat at `unknown`, and that of a running orphan the sweep
+// stopped at `running`, until the reconciler's slow path. A swept id that now has
+// a live instance, an orphan record or a reservation is skipped: what the Worker
+// holds for it says more than the sweep did. The session resyncs only after a
+// registration the API acknowledged, so a session that drops before that keeps
+// the report for the next one. From the resync on, the report is an ordinary
+// status event: one still queued when the session drops goes out on the next.
+//
+// Everything is snapshotted under the lock, which is then RELEASED before any
 // emit: sendStatus can coalesce and wake the dispatcher, so it must never run
 // while m.mu is held.
 func (m *Manager) ResyncStatus() {
@@ -4495,13 +4518,22 @@ func (m *Manager) ResyncStatus() {
 		serverID string
 		state    string
 	}
-	snaps := make([]snap, 0, len(m.instances)+len(m.orphans))
+	snaps := make([]snap, 0, len(m.instances)+len(m.orphans)+len(m.bootSwept))
 	for serverID, inst := range m.instances {
 		snaps = append(snaps, snap{serverID: serverID, state: inst.Status().String()})
 	}
 	for serverID := range m.orphans {
 		snaps = append(snaps, snap{serverID: serverID, state: orphanUnknownState})
 	}
+	for _, serverID := range m.bootSwept {
+		_, live := m.instances[serverID]
+		_, orphan := m.orphans[serverID]
+		if live || orphan || m.reserved[serverID] {
+			continue
+		}
+		snaps = append(snaps, snap{serverID: serverID, state: execution.StateStopped.String()})
+	}
+	m.bootSwept = nil
 	m.mu.Unlock()
 
 	for _, s := range snaps {

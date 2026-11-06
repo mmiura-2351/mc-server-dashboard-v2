@@ -822,6 +822,63 @@ async def test_worker_disconnect_mid_stop_wedge_recovered_by_reconciler(
     assert restarted.assigned_worker_id == WorkerId(next_worker)
 
 
+async def test_worker_boot_stopped_report_converges_a_mid_stop_unknown_row(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop handed off mid-shutdown (stopped, unknown, assigned) -> the
+    restarted Worker's boot sweep removed the exited container and its first resync
+    reports STOPPED (real sink) -> (stopped, stopped, assigned) -> the existing
+    stale-stop arm releases the assignment.
+
+    Issue #3486. The report is an ordinary StatusChange from the assigned Worker, so
+    the row leaves ``unknown`` at once instead of at the reconciler's slow path. The
+    release stays with the reconciler's convergence path; the sink never unassigns.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    class _SnapshotTimeout(FakeControlPlane):
+        async def snapshot(self, **kwargs: object) -> CommandOutcome:
+            raise WorkerUnavailableError("timeout", upload_may_be_live=True)
+
+    await _stop_server_use_case(
+        engine, _SnapshotTimeout(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    sink = _sink(engine, clock)
+    await sink.mark_worker_servers_unknown(worker_id=str(worker))
+    wedged = await _load(engine, server_id)
+    assert wedged is not None
+    assert (wedged.desired_state, wedged.observed_state) == (
+        DesiredState.STOPPED,
+        ObservedState.UNKNOWN,
+    )
+
+    applied = await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="stopped"
+    )
+    assert applied is True
+    reported = await _load(engine, server_id)
+    assert reported is not None
+    assert reported.observed_state is ObservedState.STOPPED
+    assert reported.assigned_worker_id == WorkerId(worker)
+
+    reconcile_cp = FakeControlPlane(connected={WorkerId(worker): True})
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert [kind for kind, _, _ in reconcile_cp.dispatched] == ["snapshot"]
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.observed_state is ObservedState.STOPPED
+    assert released.assigned_worker_id is None
+
+
 # --- Chain 6: stopped/crashed/assigned wedge recovery (issue #2439) --------
 
 
@@ -1065,10 +1122,12 @@ async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconcil
 ) -> None:
     """running -> Worker killed (unknown) -> Worker back, orphan swept -> restart.
 
-    Issue #3394. The disconnect writes ``unknown`` and keeps the assignment. The
-    restarted Worker force-removes the orphaned container at boot and reports
-    nothing for it, so the row stays ``(running, unknown)`` until the reconciler,
-    seeing the Worker connected again, re-dispatches the start to it.
+    Issue #3394. The disconnect writes ``unknown`` and keeps the assignment. Here
+    the restarted Worker reports nothing for the server (since #3514 it reports
+    stopped for an orphan its boot sweep removed; that case is
+    ``test_current_held_scratch_restarts_command_only_after_the_held_grace``), so
+    the row stays ``(running, unknown)`` until the reconciler, seeing the Worker
+    connected again, re-dispatches the start to it.
     """
 
     clock = _AdvancingClock(_NOW)
@@ -1119,17 +1178,18 @@ async def _go_down(
     """Report the server running, then take it down; return the divergence instant.
 
     ``crashed``: the process exited (crash or ``docker kill``). ``unknown``: the
-    Worker's session dropped (it was killed); its restart sweeps the orphan and
-    reports nothing for it.
+    Worker's session dropped (it was killed), and its restart reports nothing for
+    the server. ``stopped``: the restarted Worker's boot sweep stopped the orphan
+    and its first resync reports it stopped (issue #3514).
     """
 
     sink = _sink(engine, clock)
     await sink.record_observed_state(
         server_id=str(server_id.value), worker_id=str(worker.value), state="running"
     )
-    if how == "crashed":
+    if how in ("crashed", "stopped"):
         await sink.record_observed_state(
-            server_id=str(server_id.value), worker_id=str(worker.value), state="crashed"
+            server_id=str(server_id.value), worker_id=str(worker.value), state=how
         )
     else:
         await sink.mark_worker_servers_unknown(worker_id=str(worker.value))
@@ -1157,7 +1217,7 @@ async def _timed_tick(
     )
 
 
-@pytest.mark.parametrize("how", ["crashed", "unknown"])
+@pytest.mark.parametrize("how", ["crashed", "unknown", "stopped"])
 async def test_current_held_scratch_restarts_command_only_after_the_held_grace(
     engine: AsyncEngine, how: str
 ) -> None:

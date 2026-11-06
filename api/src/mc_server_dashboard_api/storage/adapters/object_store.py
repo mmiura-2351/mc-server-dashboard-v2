@@ -1238,15 +1238,33 @@ class ObjectStorage(Storage):
         writes a new, not-yet-pointed-at prefix -- so it runs BEFORE the per-server
         lock (issue #920) to keep the lock's critical section short. Returns the new
         snapshot prefix for :meth:`_flip_pointer`.
+
+        A failed copy removes what it already copied before the error propagates:
+        a concurrent prune can delete ``snapshots/`` before an in-flight copy lands
+        and ``incoming/`` before the next one, which would otherwise strand the
+        landed objects for the pruned server (issue #3512). The removal is best
+        effort; if it fails too, the sweep reclaims the never-pointed-at prefix.
         """
 
         self._seam.reach(PublishPhase.AFTER_STAGE)
 
         snapshot_id = SnapshotId.new()
         new_prefix = self._snapshot_prefix(community_id, server_id, snapshot_id.value)
-        for obj in staged:
-            rest = obj.key[len(staged_prefix) :]
-            await client.copy_object(obj.key, new_prefix + rest)
+        try:
+            for obj in staged:
+                rest = obj.key[len(staged_prefix) :]
+                await client.copy_object(obj.key, new_prefix + rest)
+        except Exception:
+            try:
+                await _delete_prefix(client, new_prefix)
+            except Exception:
+                _LOG.warning(
+                    "could not remove the partial snapshot copy %s; the sweep "
+                    "reclaims it",
+                    new_prefix,
+                    exc_info=True,
+                )
+            raise
 
         self._seam.reach(PublishPhase.AFTER_MOVE)
         return new_prefix
