@@ -519,10 +519,12 @@ targeted by `current` and any leftover `incoming/` staging dir, and re-running
 then on a periodic loop (`storage_sweep.interval_seconds`, daily by default;
 CONFIGURATION.md Section 5.15).
 
-The post-flip reclaim is best-effort on every backend. The fs reclaim ignores
-removal errors. On the object backend a store outage while deleting the staging
-or prior prefix is logged and left to the sweep (#3269). Either way the publish
-or restore still returns its result, because its content is already live.
+The post-flip reclaim is best-effort on every backend (#3269). On fs, a fault
+reclaiming the prior snapshot is logged and the tree is left to the sweep. On
+the object backend, a store outage while deleting the staging or prior prefix is
+handled the same way. The object restore's local archive spool is removed last,
+and a failure to remove it is logged too. Either way the publish or restore
+still returns its result, because its content is already live.
 
 For the fs / remote-fs backends, the staged tree's file data is fsynced
 (`_fsync_tree`) before the flip and the prior snapshot is reclaimed only

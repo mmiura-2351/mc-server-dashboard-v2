@@ -17,10 +17,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import errno
 import io
+import logging
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx2
@@ -892,14 +895,11 @@ def test_a_lock_release_failure_after_the_publish_keeps_the_restore_audit(
     assert recorder.events[0].outcome is Outcome.ERROR
 
 
-def test_a_post_publish_cleanup_outage_still_records_the_force_restore() -> None:
-    # On the object backend the restore flips the pointer, then reclaims the
-    # staging and superseded prefixes (issue #3269). An outage in that cleanup
-    # comes after the corrupt bytes are live: it is not a failed restore, so the
-    # route answers 204 and audits the force-restore that published, and the
-    # leftovers wait for the storage sweep.
-    community_id, server_id = uuid.uuid4(), uuid.uuid4()
-    faults = Faults()
+def _object_store_with_a_corrupt_backup(
+    community_id: uuid.UUID, server_id: uuid.UUID, faults: Faults
+) -> tuple[ObjectStorage, FakeS3Store, str, bytes]:
+    """A real ObjectStorage over fake S3: a healthy live world, a corrupt backup."""
+
     backing = FakeS3Store()
     storage = ObjectStorage(faulty_s3_factory(backing, faults))
     scope = (StorageCommunityId(community_id), StorageServerId(server_id))
@@ -916,7 +916,21 @@ def test_a_post_publish_cleanup_outage_still_records_the_force_restore() -> None
         )
         return key.value
 
-    storage_ref = asyncio.run(_seed())
+    return storage, backing, asyncio.run(_seed()), corrupt_region
+
+
+def test_a_post_publish_cleanup_outage_still_records_the_force_restore() -> None:
+    # On the object backend the restore flips the pointer, then reclaims the
+    # staging and superseded prefixes (issue #3269). An outage in that cleanup
+    # comes after the corrupt bytes are live: it is not a failed restore, so the
+    # route answers 204 and audits the force-restore that published, and the
+    # leftovers wait for the storage sweep.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    faults = Faults()
+    storage, backing, storage_ref, corrupt_region = _object_store_with_a_corrupt_backup(
+        community_id, server_id, faults
+    )
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
     faults.when = lambda op, key: op == "delete_object"
 
     resp, recorder, backups, backup = _force_restore_through_the_route(
@@ -949,6 +963,50 @@ def test_a_post_publish_cleanup_outage_still_records_the_force_restore() -> None
         k.split("/snapshots/")[1].split("/")[0] for k in keys if "/snapshots/" in k
     }
     assert len(snapshots) == 1
+
+
+def test_a_restore_spool_left_behind_still_records_the_force_restore(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The object restore removes its local archive spool last, after the flip and
+    # the generation bump (issue #3269). A removal that fails then cannot undo
+    # the publish: the route answers 204 and audits the force-restore, and the
+    # leaked spool is logged.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, _, storage_ref, _ = _object_store_with_a_corrupt_backup(
+        community_id, server_id, Faults()
+    )
+    real_unlink = Path.unlink
+    leaked: list[Path] = []
+
+    def _unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.startswith(".restore."):
+            leaked.append(self)
+            raise OSError(errno.EIO, "Input/output error")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
+
+    with caplog.at_level(logging.WARNING):
+        resp, recorder, _, _ = _force_restore_through_the_route(
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            file_store=StorageFileStoreAdapter(storage=storage),
+            storage_ref=storage_ref,
+            community_id=community_id,
+            server_id=server_id,
+        )
+    monkeypatch.undo()
+    for spool in leaked:
+        spool.unlink(missing_ok=True)
+
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert len(leaked) == 1
+    assert any(
+        str(leaked[0]) in r.getMessage() and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
 
 
 def test_restore_with_force_query_param_passes_force_true() -> None:

@@ -11,7 +11,10 @@ reach into the filesystem tree and so cannot be backend-neutral.
 
 from __future__ import annotations
 
+import asyncio
+import errno
 import io
+import logging
 import os
 import tarfile
 from collections.abc import AsyncIterator
@@ -20,6 +23,7 @@ from typing import Literal
 
 import pytest
 
+from mc_server_dashboard_api.storage.adapters import fs as fs_adapter
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
@@ -178,6 +182,46 @@ async def test_second_publish_supersedes_and_reclaims_old_snapshot(
     assert [p.name for p in snapshots.iterdir()] == [second_live.name]
     blob = await drain(storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"v2"}
+
+
+async def test_a_failed_reclaim_after_a_forced_restore_leaves_it_to_the_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The restore published before it reclaims the prior snapshot (issue #3269).
+
+    A fault reclaiming it is logged rather than raised, so the forced restore
+    still returns its report, and the sweep reclaims the tree later.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
+    )
+    prior = snapshot_dir(tmp_path, community, server)
+    corrupt = mode_invariant_corrupt_region_bytes()
+    key = await _put_backup(
+        storage, community, server, {"world/region/r.0.0.mca": corrupt}
+    )
+    real_rmtree = fs_adapter._rmtree
+
+    def _rmtree(path: Path) -> None:
+        if path == prior:
+            raise OSError(errno.EIO, "Input/output error")
+        real_rmtree(path)
+
+    monkeypatch.setattr(fs_adapter, "_rmtree", _rmtree)
+    with caplog.at_level(logging.WARNING):
+        report = await storage.restore_backup(community, server, key, force=True)
+    monkeypatch.undo()
+
+    assert len(report.corrupt) == 1
+    blob = await drain(storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt}
+    assert prior.exists()
+    assert any(str(prior) in r.getMessage() for r in caplog.records)
+    await asyncio.to_thread(storage.sweep)
+    assert not prior.exists()
 
 
 async def test_abort_discards_staging_and_leaves_current_untouched(

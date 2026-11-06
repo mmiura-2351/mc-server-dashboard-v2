@@ -1549,7 +1549,10 @@ class ObjectStorage(Storage):
                     await _delete_prefix(client, incoming)
                     raise
                 finally:
-                    await asyncio.to_thread(spool.unlink, missing_ok=True)
+                    # Never fatal (issue #3269): after the flip the restore has
+                    # published, and before it an error is already on its way
+                    # out, so a spool that cannot be removed is logged, not raised.
+                    await _discard_spool(spool, raise_fault=False)
         finally:
             self._release_staging(incoming)
 
@@ -2490,10 +2493,10 @@ def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
         except FileNotFoundError:
             pass
         except OSError as exc:
-            _LOG.warning("could not remove a backup health-check spool: %s", exc)
+            _LOG.warning("could not remove the backup spool %s: %s", spool, exc)
         return
     if (fault := disposal.exception()) is not None:
-        _LOG.warning("could not remove a backup health-check spool: %s", fault)
+        _LOG.warning("could not remove the backup spool %s: %s", spool, fault)
 
 
 async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
@@ -2504,8 +2507,9 @@ async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
     stops only the wait, never the removal; a removal the loop cancels at
     shutdown falls back to a synchronous unlink. A failed removal is logged. With
     ``raise_fault`` it is also raised, a transient fault translated by the fs
-    errno policy; without it the caller already has an error propagating, which
-    a cleanup fault must not replace.
+    errno policy; without it the caller already has an outcome a cleanup fault
+    must not replace: an error propagating, or a restore that published (issue
+    #3269).
     """
 
     disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
