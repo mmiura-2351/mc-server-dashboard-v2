@@ -704,16 +704,18 @@ async def test_lock_waiter_leaves_the_executor_to_a_publish_fence(
     commit = asyncio.create_task(
         storage.commit_snapshot(handle, publisher_fence=_fence_needing_the_executor)
     )
+    # The bounds below only keep a hung run finite, so they are generous for a
+    # loaded host's fsyncs. The fence's own bound is what detects the starvation.
     try:
-        await asyncio.wait_for(in_fence.wait(), 10)
+        await asyncio.wait_for(in_fence.wait(), 60)
         waiting = asyncio.create_task(waiter(storage, community, server))
-        await wait_until_contended(waiting, contended)
+        await wait_until_contended(waiting, contended, timeout=60)
     finally:
         release.set()
 
     try:
         committed, waited = await asyncio.wait_for(
-            asyncio.gather(commit, waiting, return_exceptions=True), 20
+            asyncio.gather(commit, waiting, return_exceptions=True), 60
         )
     finally:
         executor.shutdown(wait=False)

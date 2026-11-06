@@ -820,8 +820,7 @@ class FsStorage(Storage):
         try:
             # ``_publish_and_bump`` fsyncs the staged tree before it takes the lock.
             async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-                generation = await asyncio.to_thread(
-                    self._publish_and_bump,
+                generation = await self._publish_and_bump(
                     fs_handle.community_id,
                     fs_handle.server_id,
                     staging,
@@ -913,7 +912,7 @@ class FsStorage(Storage):
             return current
         return None
 
-    def _publish_and_bump(
+    async def _publish_and_bump(
         self,
         community_id: CommunityId,
         server_id: ServerId,
@@ -955,15 +954,19 @@ class FsStorage(Storage):
         ``fence`` is the commit's publisher fence (issue #3544), called under the
         lock immediately before the publish; ``False`` raises
         :class:`PublisherFencedError`.
+
+        The lock is taken through ``_under_server_lock``, so a publish contending for
+        it holds no executor thread while it waits (issue #3569).
         """
 
         # Make the staged tree's file data durable BEFORE acquiring the lock and
         # flipping current (issue #1943). Runs pre-lock per the #920 discipline —
         # staging is complete and leased, so no concurrent writer can mutate it.
-        _fsync_tree(staging)
+        await asyncio.to_thread(_fsync_tree, staging)
 
         server_root = self._server_root(community_id, server_id)
-        with self._server_lock(community_id, server_id):
+
+        def _locked() -> tuple[int, Path | None]:
             if expected_base is not None:
                 current = self._read_generation(server_root)
                 if current != expected_base:
@@ -983,12 +986,12 @@ class FsStorage(Storage):
             # a concurrent publish/restore cannot flip ``current`` between the
             # prior-read and the publish. The object adapter evaluates this gate
             # inside its locked section; the fs adapter must match.
-            # ``check_missing_regions`` is a sync directory-entry scan;
-            # ``_publish_and_bump`` runs on a worker thread, so calling it directly
-            # is correct. A restore skips the gate (issue #3446): it is an
-            # operator-chosen rollback to a complete backup, which legitimately
-            # holds fewer regions than the world it replaces, while the gate exists
-            # to catch a snapshot that silently lost regions.
+            # ``check_missing_regions`` is a sync directory-entry scan; this
+            # section runs on a worker thread, so calling it directly is correct.
+            # A restore skips the gate (issue #3446): it is an operator-chosen
+            # rollback to a complete backup, which legitimately holds fewer regions
+            # than the world it replaces, while the gate exists to catch a snapshot
+            # that silently lost regions.
             if gate_missing_regions:
                 try:
                     prior = self._current_dir(community_id, server_id)
@@ -1003,6 +1006,11 @@ class FsStorage(Storage):
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
             self._write_marker(server_root, generation, publisher)
+            return generation, old_snapshot
+
+        generation, old_snapshot = await self._under_server_lock(
+            community_id, server_id, _locked
+        )
         # Reclaim the superseded snapshot AFTER releasing the lock (issue #920): the
         # ``_rmtree`` can be gigabytes and must not block edits. Safe outside the lock
         # because every edit re-resolves ``current`` UNDER the lock after the flip, so
@@ -1011,7 +1019,7 @@ class FsStorage(Storage):
         # is logged and the tree left for :meth:`sweep`, not raised over it.
         if old_snapshot is not None:
             try:
-                _rmtree(old_snapshot)
+                await asyncio.to_thread(_rmtree, old_snapshot)
             except OSError:
                 _LOG.warning(
                     "post-publish reclaim of %s failed; the sweep reclaims it",
@@ -1382,8 +1390,7 @@ class FsStorage(Storage):
             # the PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER) makes
             # the publish-time guard refuse an in-flight stale snapshot from a real
             # Worker (different publisher), closing the restore-clobber window (#873).
-            await asyncio.to_thread(
-                self._publish_and_bump,
+            await self._publish_and_bump(
                 community_id,
                 server_id,
                 staging,
