@@ -401,6 +401,9 @@ class RestoreBackup:
     surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
     error and carrying the corrupt count of a forced corrupt backup that
     published, so the edge audits the force-restore whatever failed after it.
+    A store that fails past its flip has published, so both steps still run over
+    the restored working set; one of them failing is then the answer, with the
+    store's failure logged.
     """
 
     uow: UnitOfWork
@@ -436,6 +439,7 @@ class RestoreBackup:
         # #3269) -- it never replaces a step failure already on its way out.
         published: int | None = None
         incomplete: BackupRestoreIncompleteError | None = None
+        partial: BackupRestorePartiallyPublishedError | None = None
         try:
             async with self.lifecycle_lock.hold(server_id):
                 async with self.uow:
@@ -470,15 +474,11 @@ class RestoreBackup:
                     raise
                 except BackupRestorePartiallyPublishedError as exc:
                     # The store published the backup, then failed before its
-                    # restore returned (issue #3564): the same post-publish failure
-                    # as the steps below, carrying the published corrupt count.
-                    published = exc.corrupt_count
-                    incomplete = BackupRestoreIncompleteError(
-                        str(server_id.value),
-                        cause=exc.cause,
-                        forced_corrupt_count=exc.corrupt_count,
-                    )
-                    raise incomplete from exc
+                    # restore returned (issue #3564). The restored working set is
+                    # live, so the steps below still run over it; the store's
+                    # failure is raised once they have.
+                    partial = exc
+                    corrupt_count = exc.corrupt_count
                 published = corrupt_count
                 # Published: the restored working set stands whatever fails from here
                 # on, so every later step's failure carries the restore's identity —
@@ -493,12 +493,25 @@ class RestoreBackup:
                         corrupt_count=corrupt_count,
                     )
                 except Exception as exc:
+                    if partial is not None:
+                        _LOG.warning(
+                            "the store failed after publishing a restore",
+                            exc_info=partial,
+                            extra={"server_id": str(server_id.value)},
+                        )
                     incomplete = BackupRestoreIncompleteError(
                         str(server_id.value),
                         cause=exc,
                         forced_corrupt_count=corrupt_count,
                     )
                     raise incomplete from exc
+                if partial is not None:
+                    incomplete = BackupRestoreIncompleteError(
+                        str(server_id.value),
+                        cause=partial.cause,
+                        forced_corrupt_count=corrupt_count,
+                    )
+                    raise incomplete from partial
                 return RestoreResult(
                     forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
                 )

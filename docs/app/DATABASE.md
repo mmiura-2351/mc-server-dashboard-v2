@@ -909,7 +909,7 @@ caller. Routes that follow this rule:
 A failure raised before the commit records no event, since nothing changed.
 Backup restore is the exception: any failure after its publish records `error`.
 That covers 503 `seed_failed`, 503 `plugin_reconcile_incomplete`, 503
-`storage_unavailable` from a store that failed after its flip (#3564), and an
+`publish_incomplete` from a store that failed after its flip (#3564), and an
 unmapped 500. When the published backup was a forced corrupt one, that `error`
 is recorded as `backup:force_restore`, not `backup:restore` (#3269).
 

@@ -85,7 +85,7 @@ describe("backupRestoreErrorPresentation", () => {
   // The backup WAS published and only a follow-up step failed (issue #3269):
   // the bare-503 arm would blame the server host, while the remedy is to retry
   // the restore.
-  it.each(["seed_failed", "plugin_reconcile_incomplete"])(
+  it.each(["seed_failed", "plugin_reconcile_incomplete", "publish_incomplete"])(
     "names the incomplete follow-up step for a 503 %s",
     (reason) => {
       const key = backupRestoreErrorPresentation(503, reason);

@@ -553,7 +553,9 @@ async def restore_backup(
     set that IS restored — retrying the restore heals both: ``seed_failed`` when
     the platform-managed ``server.properties`` keys could not be re-applied
     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
-    could not be read, leaving the plugin rows unreconciled (#3221). Any failure
+    could not be read, leaving the plugin rows unreconciled (#3221). The store
+    itself can also fail after it published, answering ``publish_incomplete``
+    (#3564); both steps still run over that working set. Any failure
     after the publish is audited ``error``, under ``backup:force_restore`` when a
     forced corrupt backup was the one published (#3269).
     """
@@ -676,9 +678,11 @@ async def restore_backup(
             # re-running the restore completes it).
             raise _service_unavailable("plugin_reconcile_incomplete") from exc
         if isinstance(exc.cause, BackupStorageUnavailableError):
-            # The store failed after it published the backup (issue #3564): the
-            # same retryable 503 as the outage that publishes nothing.
-            raise _service_unavailable("storage_unavailable") from exc
+            # The store failed after it had published the backup (issue #3564).
+            # Unlike ``storage_unavailable``, which publishes nothing, the restored
+            # working set is live: a mapped 503 the caller retries, since a
+            # re-run of the restore completes it.
+            raise _service_unavailable("publish_incomplete") from exc
         # Any other failure stays the unmapped 500 it was, now audited.
         raise
     if result.forced_corrupt:
