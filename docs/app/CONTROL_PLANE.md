@@ -420,7 +420,11 @@ leaves that Worker online and its servers' states untouched. The teardown runs
 in a task the API owns, not in the RPC task. When a Worker's transport dies,
 gRPC reports the end of the inbound stream and cancels the RPC separately, and
 the cancel can arrive while the teardown is already writing. The teardown
-finishes regardless, and API shutdown waits for any teardown still running.
+finishes regardless. API shutdown waits, after the gRPC server stops, for
+every `Session` to reach its teardown and for each teardown to finish, within
+one 10-second budget. A teardown still running past the budget is logged with
+its Worker id and cancelled, and shutdown waits briefly for it to settle before
+it closes the database connections.
 
 ---
 

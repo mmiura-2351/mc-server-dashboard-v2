@@ -26,6 +26,7 @@ import grpc
 import pytest
 from grpc import aio
 
+from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _MAX_CONSECUTIVE_HANDLER_FAILURES,
@@ -1941,4 +1942,132 @@ async def test_failed_mark_unknown_is_logged_and_the_teardown_finishes(
         assert failures[0].levelno == logging.ERROR
         assert len(_disconnect_logs(caplog)) == 1
     finally:
+        await h.stop()
+
+
+async def test_shutdown_drain_waits_for_a_live_session_to_tear_down() -> None:
+    # PR #3566 review: the gRPC stop does not wait for the Python handlers, so a
+    # live Session may not have reached its teardown when the drain starts. The
+    # drain must still return only after that teardown's write. Repeated because
+    # the ordering is a race (it lost about half the runs before the fix).
+    for _ in range(20):
+        h = _Harness(
+            InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+            FakeClock(_T0),
+        )
+        try:
+            stub = await h.start()
+            call = stub.Session(metadata=_auth(_CREDENTIAL))
+            await call.write(_register_message())
+            await call.read()  # ack
+            assert h._server is not None and h.servicer is not None
+
+            await h._server.stop(grace=None)
+            await h.servicer.drain_teardowns()
+
+            assert h.state_sink.unknown_for == [_WORKER_ID]
+        finally:
+            await h.stop()
+
+
+def _pending_teardowns() -> list[asyncio.Task[Any]]:
+    return [
+        t
+        for t in asyncio.all_tasks()
+        if not t.done()
+        and getattr(t.get_coro(), "__qualname__", "").endswith("._teardown")
+    ]
+
+
+async def test_drain_cancels_a_stalled_teardown_after_its_budget(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A mark-unknown write that never returns (a held row lock; the engine sets
+    # no statement timeout) must not block shutdown: past the budget the drain
+    # logs the worker, cancels the teardown and waits for it to settle.
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_DRAIN_SECONDS", 0.2)
+    cancelled = asyncio.Event()
+
+    class _StalledSink(FakeServerStateSink):
+        async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_StalledSink(),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+        assert h._server is not None and h.servicer is not None
+        await h._server.stop(grace=None)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(h.servicer.drain_teardowns(), timeout=5)
+        elapsed = loop.time() - started
+
+        assert elapsed < 0.2 + 1.0
+        assert cancelled.is_set()
+        assert _pending_teardowns() == []
+        errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR
+            and r.getMessage().startswith("session teardowns did not finish")
+        ]
+        assert len(errors) == 1
+        assert _WORKER_ID in errors[0].getMessage()
+    finally:
+        await h.stop()
+
+
+async def test_drain_gives_up_on_a_teardown_that_ignores_its_cancel(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A driver that swallows the cancel cannot hang shutdown either: the settle
+    # wait is bounded too, and the drain logs that it proceeded without it.
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_DRAIN_SECONDS", 0.2)
+    monkeypatch.setattr(grpc_server, "_TEARDOWN_SETTLE_SECONDS", 0.2)
+
+    class _StubbornSink(FakeServerStateSink):
+        async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_StubbornSink(),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await call.read()  # ack
+        assert h._server is not None and h.servicer is not None
+        await h._server.stop(grace=None)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(h.servicer.drain_teardowns(), timeout=5)
+
+        assert loop.time() - started < 0.4 + 1.0
+        assert any(
+            r.levelno == logging.ERROR
+            and r.getMessage().startswith("session teardowns did not settle")
+            for r in caplog.records
+        )
+    finally:
+        for task in _pending_teardowns():
+            task.cancel()
         await h.stop()

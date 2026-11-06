@@ -159,6 +159,17 @@ _REGISTRATION_TIMEOUT_SECONDS = 10.0
 # fires mark_worker_servers_unknown (issue #1600).
 _KEEPALIVE_TIMEOUT_MS = 20_000
 
+# Shutdown budget for the Session teardowns (issue #3555): the wait for every
+# handler to reach its teardown and for those teardowns to finish. A normal
+# mark-unknown write takes milliseconds, so this is wide headroom; past it the
+# drain cancels what is left. The engine sets no statement timeout, so without
+# a bound a held row lock would block shutdown forever.
+_TEARDOWN_DRAIN_SECONDS = 10.0
+
+# Bound on the wait for cancelled teardowns to settle once the budget is spent,
+# in case a DB driver does not honour the cancel promptly.
+_TEARDOWN_SETTLE_SECONDS = 2.0
+
 # Floor on how often the server accepts client keepalive PINGs. The Worker
 # dials with client-side keepalive (Time=20s, worker/cmd/worker/main.go, issue
 # #1709), and C-core's default ping-strike enforcement (min interval 5 min,
@@ -271,21 +282,70 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._control_plane = control_plane
         self._state_sink = state_sink
         self._real_time_events = real_time_events
-        # Session teardowns still in flight, held so a teardown that outlives its
-        # cancelled RPC task is neither garbage-collected nor cut off at shutdown
-        # (issue #3555, :meth:`drain_teardowns`).
-        self._teardowns: set[asyncio.Future[None]] = set()
+        # Session teardowns still in flight, by worker, held so a teardown that
+        # outlives its cancelled RPC task is neither garbage-collected nor cut
+        # off at shutdown (issue #3555, :meth:`drain_teardowns`).
+        self._teardowns: dict[asyncio.Future[None], WorkerId] = {}
+        # Session handlers that have not yet handed off their teardown. Stopping
+        # the gRPC server cancels them but does not wait for them, so the drain
+        # waits for this set to empty before it looks at ``_teardowns``.
+        self._handlers: set[asyncio.Future[object]] = set()
+        self._handlers_idle = asyncio.Event()
+        self._handlers_idle.set()
 
     async def drain_teardowns(self) -> None:
-        """Wait for every Session teardown still in flight (issue #3555).
+        """Finish every Session teardown, within one budget (issue #3555).
 
-        A teardown can outlive its RPC task, so stopping the gRPC server does not
-        wait for it. The app calls this after the server stops and before it
-        disposes the engine the teardown writes through.
+        The app calls this after the gRPC server stops and before it disposes
+        the engine the teardowns write through. It waits for each handler to
+        hand off its teardown, then for the teardowns to finish. Past
+        :data:`_TEARDOWN_DRAIN_SECONDS` it logs the workers left, cancels their
+        teardowns and waits (bounded) for them to settle, so no owned task is
+        still writing when the engine goes away.
         """
 
-        while self._teardowns:
-            await asyncio.wait(set(self._teardowns))
+        try:
+            async with asyncio.timeout(_TEARDOWN_DRAIN_SECONDS):
+                await self._handlers_idle.wait()
+                while self._teardowns:
+                    await asyncio.wait(set(self._teardowns))
+            return
+        except TimeoutError:
+            pass
+        pending = set(self._teardowns)
+        _LOG.error(
+            "session teardowns did not finish within %.1fs; cancelling them "
+            "(workers: %s; %d handlers had not reached teardown)",
+            _TEARDOWN_DRAIN_SECONDS,
+            sorted(self._teardowns[task].value for task in pending),
+            len(self._handlers),
+        )
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        _, unsettled = await asyncio.wait(pending, timeout=_TEARDOWN_SETTLE_SECONDS)
+        if unsettled:
+            _LOG.error(
+                "session teardowns did not settle within %.1fs of their cancel; "
+                "shutting down without them",
+                _TEARDOWN_SETTLE_SECONDS,
+            )
+
+    def _enter_handler(self) -> asyncio.Future[object]:
+        task = asyncio.current_task()
+        assert task is not None
+        self._handlers.add(task)
+        self._handlers_idle.clear()
+        # An exit before the teardown hand-off (an abort, a cancel during
+        # registration) ends the RPC task, which leaves the set here.
+        task.add_done_callback(self._leave_handler)
+        return task
+
+    def _leave_handler(self, task: asyncio.Future[object]) -> None:
+        self._handlers.discard(task)
+        if not self._handlers:
+            self._handlers_idle.set()
 
     async def _watch_liveness(self, worker_id: WorkerId, session: SessionToken) -> None:
         """Poll worker liveness and return when heartbeats lapse (issue #1600).
@@ -315,6 +375,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         request_iterator: AsyncIterator[pb.WorkerMessage],
         context: aio.ServicerContext,
     ) -> AsyncIterator[pb.ApiMessage]:
+        handler = self._enter_handler()
         await self._authenticate(context)
 
         worker_id, correlation_id, session, held_ids = await self._register(
@@ -421,9 +482,13 @@ class WorkerSessionServicer(WorkerServiceServicer):
             teardown = asyncio.ensure_future(
                 self._teardown(worker_id, session, outbound, reader, watchdog)
             )
-            self._teardowns.add(teardown)
-            teardown.add_done_callback(self._teardowns.discard)
+            self._teardowns[teardown] = worker_id
+            teardown.add_done_callback(self._forget_teardown)
+            self._leave_handler(handler)
             await asyncio.shield(teardown)
+
+    def _forget_teardown(self, teardown: asyncio.Future[None]) -> None:
+        self._teardowns.pop(teardown, None)
 
     async def _teardown(
         self,
