@@ -142,7 +142,10 @@ func startSweep(t *testing.T, docker *sweepDocker, worlds map[string]*fakeWorld,
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	r := &sweepRun{t: t, clock: docker.clock, docker: docker, done: make(chan error, 1), cancel: cancel, watched: len(worlds)}
-	go func() { r.done <- d.Sweep(ctx) }()
+	go func() {
+		_, err := d.Sweep(ctx)
+		r.done <- err
+	}()
 	return r
 }
 

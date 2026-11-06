@@ -472,6 +472,41 @@ func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *t
 	}
 }
 
+// A server whose container the boot's orphan sweep removed is reported stopped once the
+// Worker has registered (issues #3486, #3514): nothing else ever tells the API, so its row
+// kept the state from before the restart until the reconciler's slow path. The sweep's
+// result has to reach the manager at the call site, which is what this pins: the fake
+// daemon lists one exited container for s1 and accepts its remove.
+func TestBootReportsTheServerItsOrphanSweepRemovedStopped(t *testing.T) {
+	statuses := make(chan *controlplanev1.Event, 4)
+	cp := newRegistrationRecorder()
+	cp.afterAck = func(_ int, stream controlplanev1.WorkerService_SessionServer) error {
+		for {
+			msg, err := stream.Recv()
+			if err != nil {
+				return err
+			}
+			if ev := msg.GetEvent(); ev.GetStatusChange() != nil {
+				statuses <- ev
+			}
+		}
+	}
+	setBootEnv(t, t.TempDir(), sweptDockerSocket(t, s1), cp.start(t))
+	stop := runInBackground(t)
+	defer stop()
+	cp.nextRegister(t)
+
+	select {
+	case ev := <-statuses:
+		if ev.GetServerId() != s1 || ev.GetStatusChange().GetState() != controlplanev1.ServerState_SERVER_STATE_STOPPED {
+			t.Fatalf("first status after Register = %s %v, want %s STOPPED",
+				ev.GetServerId(), ev.GetStatusChange().GetState(), s1)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("no StatusChange reached the control plane for the swept server")
+	}
+}
+
 // soundTreeTransfer is the repair leg's data plane: Hydrate replaces the working set with
 // a structurally sound one and reports gen as the store generation it served. It writes
 // no marker itself, so the marker the next Register reads is handleHydrate's own write.
@@ -675,6 +710,36 @@ func fakeDockerSocket(t *testing.T) string {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte("[]"))
+		}),
+	}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return "unix://" + sock
+}
+
+// sweptDockerSocket serves the Engine calls a sweep of one exited orphan makes: the
+// labelled container list, naming one exited container of serverID, and its remove.
+func sweptDockerSocket(t *testing.T, serverID string) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "docker.sock")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{
+		ReadHeaderTimeout: 5 * time.Second,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/containers/json"):
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`[{"Id":"c1","Names":["/mcsd-` + serverID + `"],"State":"exited",` +
+					`"Labels":{"mcsd.worker.id":"11111111-1111-1111-1111-111111111111","mcsd.server.id":"` + serverID + `"}}]`))
+			case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/containers/c1"):
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				t.Errorf("fake docker: unexpected Engine call %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}
 		}),
 	}
 	go func() { _ = srv.Serve(l) }()

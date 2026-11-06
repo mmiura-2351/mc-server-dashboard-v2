@@ -41,6 +41,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
+    ArchiveUnreadableError,
     IntegrityCheckError,
     MissingRegionsError,
     ObjectStoreUnavailableError,
@@ -1219,7 +1220,8 @@ async def test_restore_opens_gzip_spool_exactly_once() -> None:
 
 async def test_restore_single_pass_rejects_traversal_escape() -> None:
     """The single-pass restore path must still reject hostile ``../`` members
-    with PathTraversalError, leaving no leftover staging objects (#1945)."""
+    as an unrestorable archive (ArchiveUnreadableError, #3237), leaving no
+    leftover staging objects (#1945)."""
 
     store, storage = _store_and_storage()
     community, server = new_scope()
@@ -1236,7 +1238,7 @@ async def test_restore_single_pass_rejects_traversal_escape() -> None:
 
     backup_key = await storage.put_backup(community, server, stream_of(hostile_targz))
 
-    with pytest.raises(PathTraversalError):
+    with pytest.raises(ArchiveUnreadableError):
         await storage.restore_backup(community, server, backup_key)
 
     # No leftover staging objects.
