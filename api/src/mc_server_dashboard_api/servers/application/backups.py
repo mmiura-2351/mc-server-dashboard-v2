@@ -96,6 +96,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupRestoreIncompleteError,
     BackupUnreadableError,
     BackupUnsettledError,
     FileTooLargeError,
@@ -388,7 +389,12 @@ class RestoreBackup:
     Both post-publication steps run for EVERY restore that published, a forced
     corrupt one included (issue #3222): a corrupt world region says nothing about
     the jars beside it. A restored plugin directory that cannot be listed raises
-    :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221).
+    :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
+    and so does a listed jar that cannot be read (issue #3269). Any failure after
+    the publish — the quarantine write and the lifecycle lock's release included —
+    surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
+    error and carrying the corrupt count of a forced corrupt backup that
+    published, so the edge audits the force-restore whatever failed after it.
     """
 
     uow: UnitOfWork
@@ -418,59 +424,109 @@ class RestoreBackup:
         # desired=running must serialize with this restore, not race the
         # ``current`` republish underneath it. The lock spans the two transactions
         # the at-rest check and the (re)publish straddle.
-        async with self.lifecycle_lock.hold(server_id):
-            async with self.uow:
-                server = await _load(self.uow, community_id, server_id)
-                backup = await self.uow.backups.get_by_id(backup_id)
-                if backup is None or backup.server_id != server_id:
-                    raise BackupNotFoundError(str(backup_id.value))
-                if backup.health is BackupHealth.UNREADABLE:
-                    raise BackupUnreadableError(str(backup_id.value))
-                storage_ref = backup.storage_ref
-            if not server.is_at_rest():
-                raise ServerNotStoppedError(str(server_id.value))
-            try:
-                corrupt_count = await self.backup_store.restore(
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                    force=force,
+        # The corrupt count once Storage has published (``None`` before): the
+        # lock's release on exit comes after the publish, so a release that fails
+        # is a post-publish failure too and keeps the restore's identity (issue
+        # #3269) -- it never replaces a step failure already on its way out.
+        published: int | None = None
+        incomplete: BackupRestoreIncompleteError | None = None
+        try:
+            async with self.lifecycle_lock.hold(server_id):
+                async with self.uow:
+                    server = await _load(self.uow, community_id, server_id)
+                    backup = await self.uow.backups.get_by_id(backup_id)
+                    if backup is None or backup.server_id != server_id:
+                        raise BackupNotFoundError(str(backup_id.value))
+                    if backup.health is BackupHealth.UNREADABLE:
+                        raise BackupUnreadableError(str(backup_id.value))
+                    storage_ref = backup.storage_ref
+                if not server.is_at_rest():
+                    raise ServerNotStoppedError(str(server_id.value))
+                try:
+                    corrupt_count = await self.backup_store.restore(
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                        force=force,
+                    )
+                except BackupCorruptError:
+                    # Refused restore (corrupt, no force): quarantine the backup so an
+                    # operator sees it is corrupt, then re-raise for the edge to surface
+                    # and audit. ``current`` was left untouched by Storage.
+                    await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+                    raise
+                except BackupUnreadableError:
+                    # The restore was the read that found the archive's bytes gone
+                    # (issue #3230). Record the verdict the sweep would have, so the
+                    # next attempt is refused up front instead of re-reading the
+                    # archive; a sweep that later reads it back sound revises it.
+                    await self._mark_health(backup_id, BackupHealth.UNREADABLE)
+                    raise
+                published = corrupt_count
+                # Published: the restored working set stands whatever fails from here
+                # on, so every later step's failure carries the restore's identity —
+                # above all a forced corrupt one, which the edge must still audit as
+                # the force-restore it was (issue #3269).
+                try:
+                    await self._after_publish(
+                        community_id=community_id,
+                        server_id=server_id,
+                        server=server,
+                        backup_id=backup_id,
+                        corrupt_count=corrupt_count,
+                    )
+                except Exception as exc:
+                    incomplete = BackupRestoreIncompleteError(
+                        str(server_id.value),
+                        cause=exc,
+                        forced_corrupt_count=corrupt_count,
+                    )
+                    raise incomplete from exc
+                return RestoreResult(
+                    forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
                 )
-            except BackupCorruptError:
-                # Refused restore (corrupt, no force): quarantine the backup so an
-                # operator sees it is corrupt, then re-raise for the edge to surface
-                # and audit. ``current`` was left untouched by Storage.
-                await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+        except Exception as exc:
+            if published is None or exc is incomplete:
                 raise
-            except BackupUnreadableError:
-                # The restore was the read that found the archive's bytes gone
-                # (issue #3230). Record the verdict the sweep would have, so the
-                # next attempt is refused up front instead of re-reading the
-                # archive; a sweep that later reads it back sound revises it.
-                await self._mark_health(backup_id, BackupHealth.UNREADABLE)
-                raise
-            if corrupt_count > 0:
-                # Forced restore of a known-corrupt backup: it published, but the
-                # backup IS corrupt, so quarantine it; the edge audits the forced
-                # corrupt restore. Quarantine BEFORE the properties re-apply, so a
-                # failure there cannot leave a known-corrupt backup unmarked.
-                await self._mark_health(backup_id, BackupHealth.QUARANTINED)
-            await self._reapply_platform_properties(
-                community_id=community_id, server_id=server_id, server=server
-            )
-            # Reconcile plugin rows against the restored filesystem (#1336).
-            if self.file_store is not None:
-                await _reconcile_plugins(
-                    uow=self.uow,
-                    file_store=self.file_store,
-                    cache=self.cache,
-                    clock=self.clock,
-                    community_id=community_id,
-                    server_id=server_id,
-                    server=server,
+            if incomplete is not None:
+                _LOG.warning(
+                    "releasing the lifecycle lock after an incomplete restore failed",
+                    exc_info=exc,
+                    extra={"server_id": str(server_id.value)},
                 )
-            return RestoreResult(
-                forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
+                raise incomplete
+            raise BackupRestoreIncompleteError(
+                str(server_id.value), cause=exc, forced_corrupt_count=published
+            ) from exc
+
+    async def _after_publish(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        server: Server,
+        backup_id: BackupId,
+        corrupt_count: int,
+    ) -> None:
+        if corrupt_count > 0:
+            # Forced restore of a known-corrupt backup: it published, but the
+            # backup IS corrupt, so quarantine it; the edge audits the forced
+            # corrupt restore. Quarantine BEFORE the properties re-apply, so a
+            # failure there cannot leave a known-corrupt backup unmarked.
+            await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+        await self._reapply_platform_properties(
+            community_id=community_id, server_id=server_id, server=server
+        )
+        # Reconcile plugin rows against the restored filesystem (#1336).
+        if self.file_store is not None:
+            await _reconcile_plugins(
+                uow=self.uow,
+                file_store=self.file_store,
+                cache=self.cache,
+                clock=self.clock,
+                community_id=community_id,
+                server_id=server_id,
+                server=server,
             )
 
     async def _mark_health(self, backup_id: BackupId, health: BackupHealth) -> None:
@@ -553,7 +609,8 @@ async def _reconcile_plugins(
        Updated with new checksums and re-parsed manifest metadata.
 
     Errors during ghost ingestion or manifest parsing for a single file are
-    logged and skipped (the restore must not fail for a bad jar).
+    logged and skipped (the restore must not fail for a bad jar). A listed jar
+    gone by its read (the typed miss) is skipped too.
 
     The listing of the content directory is the evidence every step above rests
     on, so only the typed miss (:class:`ServerFileNotFoundError`) reads as "no
@@ -561,6 +618,9 @@ async def _reconcile_plugins(
     error — raises :class:`PluginReconcileIncompleteError` before a single row is
     touched (issue #3221): treating an unread directory as an empty one deleted
     every tracked row, provenance included, while the jars were still there.
+    A listed jar whose read fails any other way raises it too (issue #3269): the
+    jar is not known to be bad, only unread, so skipping it would report a partial
+    reconciliation as complete. The transaction is discarded, not committed.
     """
 
     try:
@@ -617,14 +677,13 @@ async def _reconcile_plugins(
         for jar_path in sorted(disk_jars):
             if jar_path in db_by_path:
                 continue
-            try:
-                jar_bytes = await file_store.read_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=jar_path,
-                )
-            except Exception:  # noqa: BLE001
-                _LOG.warning("plugin reconcile: could not read %s; skipping", jar_path)
+            jar_bytes = await _read_listed_jar(
+                file_store,
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=jar_path,
+            )
+            if jar_bytes is None:
                 continue
             try:
                 # In a savepoint, so a refused INSERT (a racing install taking
@@ -655,13 +714,13 @@ async def _reconcile_plugins(
         for plugin in db_plugins:
             if plugin.rel_path not in disk_jars:
                 continue  # Already deleted as orphan.
-            try:
-                jar_bytes = await file_store.read_file(
-                    community_id=community_id,
-                    server_id=server_id,
-                    rel_path=plugin.rel_path,
-                )
-            except Exception:  # noqa: BLE001
+            jar_bytes = await _read_listed_jar(
+                file_store,
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=plugin.rel_path,
+            )
+            if jar_bytes is None:
                 continue
             new_checksum = hashlib.sha512(jar_bytes).hexdigest()
             if new_checksum == plugin.checksum_sha512:
@@ -691,6 +750,36 @@ async def _reconcile_plugins(
 
         if changed:
             await uow.commit()
+
+
+async def _read_listed_jar(
+    file_store: FileStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rel_path: str,
+) -> bytes | None:
+    """Read a jar the listing named; ``None`` if it is gone by now (issue #3269).
+
+    Any other failure is a read that never happened, not a bad jar, so it raises
+    :class:`PluginReconcileIncompleteError`, as a failed listing does (#3221).
+    """
+
+    try:
+        return await file_store.read_file(
+            community_id=community_id, server_id=server_id, rel_path=rel_path
+        )
+    except ServerFileNotFoundError:
+        _LOG.warning("plugin reconcile: %s is gone; skipping", rel_path)
+        return None
+    except Exception as exc:
+        _LOG.warning(
+            "plugin reconcile: could not read %s after a restore; plugin rows "
+            "left unreconciled",
+            rel_path,
+            extra={"server_id": str(server_id.value)},
+        )
+        raise PluginReconcileIncompleteError(str(server_id.value)) from exc
 
 
 async def _ingest_ghost(

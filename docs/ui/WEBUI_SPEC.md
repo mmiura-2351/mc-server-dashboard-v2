@@ -713,6 +713,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   storage) cannot be restored at all: its restore action is disabled with a
   hover explanation, and its condition badge names the storage-side remedy
   rather than the damaged-world one.
+  A restore answering 503 `seed_failed` or `plugin_reconcile_incomplete`
+  published the backup and then failed a follow-up step, so its message says
+  the backup was restored and asks the user to retry the restore.
 - Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker).
 - Schedule: backup cadence is a first-class `backup` schedule on the general

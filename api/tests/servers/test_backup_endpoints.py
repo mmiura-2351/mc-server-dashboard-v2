@@ -14,12 +14,16 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import datetime as dt
+import errno
 import io
+import logging
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 import httpx2
@@ -71,8 +75,15 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.servers.adapters.backup_store import (
+    StorageBackupStoreAdapter,
+)
+from mc_server_dashboard_api.servers.adapters.file_store import (
+    StorageFileStoreAdapter,
+)
 from mc_server_dashboard_api.servers.application.backups import (
     ListedBackup,
+    RestoreBackup,
     RestoreResult,
     UploadBackup,
     download_grant_resource,
@@ -85,12 +96,15 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupStatistics,
 )
 from mc_server_dashboard_api.servers.domain.backup_retention import RetentionPolicy
+from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupRestoreIncompleteError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
     BackupUnsettledError,
@@ -105,19 +119,53 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotStoppedError,
     WorkingSetSeedFailedError,
 )
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
+)
+from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServerCommunityId,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    DesiredState,
+    ObservedState,
     ServerId,
+    ServerName,
+    ServerType,
+)
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    CommunityId as StorageCommunityId,
+)
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    ServerId as StorageServerId,
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
-from tests.servers.fakes import FakeBackupArchiveStore
+from tests.servers.fakes import (
+    FakeBackupArchiveStore,
+    FakeBackupRepository,
+    FakeFileStore,
+    FakePluginCacheStore,
+    FakePluginRepository,
+    FakeServerRepository,
+)
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
+from tests.storage.fake_s3 import FakeS3Store
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
+from tests.storage.helpers import (
+    drain,
+    healthy_region_bytes,
+    mode_invariant_corrupt_region_bytes,
+    read_tar,
+    region_targz,
+    stream_of,
+    tar_stream,
+)
 
 if TYPE_CHECKING:
     from mc_server_dashboard_api.servers.application.backups import DownloadBackup
@@ -231,7 +279,7 @@ def _app(
     resolve: _FakeUseCase | None = None,
     create: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
-    restore: _FakeUseCase | None = None,
+    restore: _FakeUseCase | RestoreBackup | None = None,
     delete: _FakeUseCase | None = None,
     download: _DownloadUseCase | None = None,
     upload: _FakeUseCase | None = None,
@@ -607,13 +655,20 @@ def test_restore_storage_unavailable_is_503_with_reason() -> None:
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
 
 
+def _incomplete(cause: Exception, forced_corrupt_count: int = 0) -> Exception:
+    # What the use case raises when a step after the publish failed (#3269).
+    return BackupRestoreIncompleteError(
+        "x", cause=cause, forced_corrupt_count=forced_corrupt_count
+    )
+
+
 def test_restore_seed_failure_is_503_with_reason() -> None:
     # The archive published but re-applying the platform-managed
     # server.properties keys afterwards failed (issue #2621): the working set is
     # restored yet not fully seeded, so 503 seed_failed (the create / port-PATCH
     # posture) tells the caller to retry rather than reporting a clean restore
     # over a file that binds a stale port.
-    use_case = _FakeUseCase(error=WorkingSetSeedFailedError("x"))
+    use_case = _FakeUseCase(error=_incomplete(WorkingSetSeedFailedError("x")))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = _client(app)
@@ -630,7 +685,7 @@ def test_restore_incomplete_plugin_reconcile_is_503_with_reason() -> None:
     # so the plugin rows were left as they were (issue #3221). Same posture as the
     # seed failure above: a 503 the caller retries, never a 204 claiming the rows
     # describe the restored working set.
-    use_case = _FakeUseCase(error=PluginReconcileIncompleteError("x"))
+    use_case = _FakeUseCase(error=_incomplete(PluginReconcileIncompleteError("x")))
     recorder = RecordingAuditRecorder()
     app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
     client = _client(app)
@@ -640,6 +695,318 @@ def test_restore_incomplete_plugin_reconcile_is_503_with_reason() -> None:
     assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
     assert recorder.events[0].outcome is Outcome.ERROR
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+@pytest.mark.parametrize(
+    ("cause", "status", "reason"),
+    [
+        (WorkingSetSeedFailedError("x"), 503, "seed_failed"),
+        (PluginReconcileIncompleteError("x"), 503, "plugin_reconcile_incomplete"),
+        # Any other failure after the publish is still the unmapped 500.
+        (RuntimeError("database went away"), 500, "internal_error"),
+    ],
+)
+def test_forced_corrupt_restore_failing_after_publication_records_force_restore(
+    cause: Exception, status: int, reason: str
+) -> None:
+    # A forced corrupt backup was published before the follow-up step failed
+    # (issue #3269): who force-published it is recorded under the distinct
+    # backup:force_restore operation, with the failed request's ERROR outcome,
+    # not as a routine backup:restore.
+    use_case = _FakeUseCase(error=_incomplete(cause, forced_corrupt_count=2))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = enter_client(TestClient(app, raise_server_exceptions=False))  # type: ignore[arg-type]
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore?force=true")
+    )
+    assert resp.status_code == status
+    assert resp.json()["reason"] == reason
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+# The same identity through the real use case behind the route (issue #3269): a
+# failure injected at each step after a forced corrupt publish.
+
+_FORCED_CORRUPT_COUNT = 2
+
+
+class _FailingQuarantine(FakeBackupRepository):
+    async def update_health(self, backup_id: BackupId, health: BackupHealth) -> None:
+        raise RuntimeError("database went away")
+
+
+class _FailingPluginListing(FakePluginRepository):
+    async def list_for_server(self, server_id: ServerId) -> list[ServerPlugin]:
+        raise RuntimeError("database went away")
+
+
+def _stopped_server(community_id: uuid.UUID, server_id: uuid.UUID) -> Server:
+    return Server(
+        id=ServerId(server_id),
+        community_id=ServerCommunityId(community_id),
+        name=ServerName("survival"),
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type=ServerType.FABRIC,
+        config={},
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+        observed_at=None,
+        assigned_worker_id=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _backup_row(server_id: uuid.UUID, storage_ref: str) -> Backup:
+    return Backup(
+        id=BackupId.new(),
+        server_id=ServerId(server_id),
+        storage_ref=storage_ref,
+        size_bytes=None,
+        source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
+        created_by=None,
+        created_at=_NOW,
+    )
+
+
+def _force_restore_through_the_route(
+    *,
+    backup_store: BackupArchiveStore,
+    file_store: FileStore,
+    storage_ref: str,
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    backups: FakeBackupRepository | None = None,
+    plugins: FakePluginRepository | None = None,
+    lifecycle_lock: LifecycleLock | None = None,
+    force: bool = True,
+) -> tuple[httpx2.Response, RecordingAuditRecorder, FakeBackupRepository, Backup]:
+    servers = FakeServerRepository()
+    servers.seed(_stopped_server(community_id, server_id))
+    backups = backups if backups is not None else FakeBackupRepository()
+    backup = _backup_row(server_id, storage_ref)
+    backups.seed(backup)
+    use_case = RestoreBackup(
+        uow=ServersFakeUnitOfWork(servers=servers, backups=backups, plugins=plugins),
+        backup_store=backup_store,
+        lifecycle_lock=lifecycle_lock or NullLifecycleLock(),
+        file_store=file_store,
+        cache=FakePluginCacheStore(),
+        clock=ServersFakeClock(_NOW),
+    )
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = enter_client(TestClient(app, raise_server_exceptions=False))  # type: ignore[arg-type]
+    query = "?force=true" if force else ""
+    resp = client.post(
+        _url(community_id, server_id, f"/{backup.id.value}/restore{query}")
+    )
+    return resp, recorder, backups, backup
+
+
+def _corrupt_fake_archive() -> FakeBackupArchiveStore:
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    archive.corrupt_refs.add("ref")
+    archive.corrupt_count = _FORCED_CORRUPT_COUNT
+    return archive
+
+
+@pytest.mark.parametrize(
+    ("step", "status"),
+    [("quarantine", 500), ("properties", 503), ("plugin_listing", 500)],
+)
+def test_a_failure_after_a_forced_corrupt_publish_records_force_restore(
+    step: str, status: int
+) -> None:
+    file_store = FakeFileStore(fail_write=step == "properties")
+    resp, recorder, _, _ = _force_restore_through_the_route(
+        backup_store=_corrupt_fake_archive(),
+        file_store=file_store,
+        storage_ref="ref",
+        community_id=uuid.uuid4(),
+        server_id=uuid.uuid4(),
+        backups=_FailingQuarantine() if step == "quarantine" else None,
+        plugins=_FailingPluginListing() if step == "plugin_listing" else None,
+    )
+
+    assert resp.status_code == status
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+
+
+class _UnlockFailingLifecycleLock(LifecycleLock):
+    """A lock whose release fails, as ``pg_advisory_unlock`` on a lost connection."""
+
+    @contextlib.asynccontextmanager
+    async def _hold(self) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            raise OSError("connection to the lock's database was lost")
+
+    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+        return self._hold()
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "fail_properties", "status", "operation"),
+    [
+        # The forced corrupt publish otherwise succeeded: the lock's release is
+        # the only failure, still after the publish.
+        (True, False, 500, ops.BACKUP_FORCE_RESTORE),
+        # The properties step already failed: that failure stays the answer,
+        # with the lock's release failure behind it.
+        (True, True, 503, ops.BACKUP_FORCE_RESTORE),
+        # A healthy publish keeps the routine operation.
+        (False, False, 500, ops.BACKUP_RESTORE),
+    ],
+)
+def test_a_lock_release_failure_after_the_publish_keeps_the_restore_audit(
+    corrupt: bool, fail_properties: bool, status: int, operation: str
+) -> None:
+    # The lifecycle lock is released after the post-publish steps; a release
+    # that fails is still a failure after the publish (issue #3269), so it must
+    # neither escape unaudited nor replace the step failure that preceded it.
+    if corrupt:
+        archive = _corrupt_fake_archive()
+    else:
+        archive = FakeBackupArchiveStore()
+        archive.archives.add("ref")
+    resp, recorder, _, _ = _force_restore_through_the_route(
+        backup_store=archive,
+        file_store=FakeFileStore(fail_write=fail_properties),
+        storage_ref="ref",
+        community_id=uuid.uuid4(),
+        server_id=uuid.uuid4(),
+        lifecycle_lock=_UnlockFailingLifecycleLock(),
+        force=corrupt,
+    )
+
+    assert resp.status_code == status
+    if fail_properties:
+        assert resp.json()["reason"] == "seed_failed"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
+
+
+def _object_store_with_a_corrupt_backup(
+    community_id: uuid.UUID, server_id: uuid.UUID, faults: Faults
+) -> tuple[ObjectStorage, FakeS3Store, str, bytes]:
+    """A real ObjectStorage over fake S3: a healthy live world, a corrupt backup."""
+
+    backing = FakeS3Store()
+    storage = ObjectStorage(faulty_s3_factory(backing, faults))
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    corrupt_region = mode_invariant_corrupt_region_bytes()
+
+    async def _seed() -> str:
+        handle = await storage.begin_snapshot(*scope)
+        await storage.write_snapshot(
+            handle, tar_stream({"world/region/r.0.0.mca": healthy_region_bytes()})
+        )
+        await storage.commit_snapshot(handle)
+        key = await storage.put_backup(
+            *scope, stream_of(region_targz({"world/region/r.0.0.mca": corrupt_region}))
+        )
+        return key.value
+
+    return storage, backing, asyncio.run(_seed()), corrupt_region
+
+
+def test_a_post_publish_cleanup_outage_still_records_the_force_restore() -> None:
+    # On the object backend the restore flips the pointer, then reclaims the
+    # staging and superseded prefixes (issue #3269). An outage in that cleanup
+    # comes after the corrupt bytes are live: it is not a failed restore, so the
+    # route answers 204 and audits the force-restore that published, and the
+    # leftovers wait for the storage sweep.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    faults = Faults()
+    storage, backing, storage_ref, corrupt_region = _object_store_with_a_corrupt_backup(
+        community_id, server_id, faults
+    )
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    faults.when = lambda op, key: op == "delete_object"
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
+    faults.clear()
+
+    async def _live_and_swept() -> tuple[bytes, list[str]]:
+        live = await drain(storage.open_hydrate_source(*scope))
+        await storage.sweep()
+        return live, sorted(backing.objects)
+
+    live, keys = asyncio.run(_live_and_swept())
+    assert read_tar(live)["world/region/r.0.0.mca"] == corrupt_region
+    # The sweep reclaimed what the failed cleanup left: no staging remains, and
+    # only the one snapshot prefix the pointer names.
+    assert not [k for k in keys if "/incoming/" in k]
+    snapshots = {
+        k.split("/snapshots/")[1].split("/")[0] for k in keys if "/snapshots/" in k
+    }
+    assert len(snapshots) == 1
+
+
+def test_a_restore_spool_left_behind_still_records_the_force_restore(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The object restore removes its local archive spool last, after the flip and
+    # the generation bump (issue #3269). A removal that fails then cannot undo
+    # the publish: the route answers 204 and audits the force-restore, and the
+    # leaked spool is logged.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, _, storage_ref, _ = _object_store_with_a_corrupt_backup(
+        community_id, server_id, Faults()
+    )
+    real_unlink = Path.unlink
+    leaked: list[Path] = []
+
+    def _unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.startswith(".restore."):
+            leaked.append(self)
+            raise OSError(errno.EIO, "Input/output error")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
+
+    with caplog.at_level(logging.WARNING):
+        resp, recorder, _, _ = _force_restore_through_the_route(
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            file_store=StorageFileStoreAdapter(storage=storage),
+            storage_ref=storage_ref,
+            community_id=community_id,
+            server_id=server_id,
+        )
+    monkeypatch.undo()
+    for spool in leaked:
+        spool.unlink(missing_ok=True)
+
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
+    assert len(leaked) == 1
+    assert any(
+        str(leaked[0]) in r.getMessage() and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
 
 
 def test_restore_with_force_query_param_passes_force_true() -> None:

@@ -946,8 +946,17 @@ class FsStorage(Storage):
         # ``_rmtree`` can be gigabytes and must not block edits. Safe outside the lock
         # because every edit re-resolves ``current`` UNDER the lock after the flip, so
         # once the flip is published no edit can still be writing into the old tree.
+        # Best-effort (issue #3269): the publish already happened, so a fault here
+        # is logged and the tree left for :meth:`sweep`, not raised over it.
         if old_snapshot is not None:
-            _rmtree(old_snapshot)
+            try:
+                _rmtree(old_snapshot)
+            except OSError:
+                _LOG.warning(
+                    "post-publish reclaim of %s failed; the sweep reclaims it",
+                    old_snapshot,
+                    exc_info=True,
+                )
         return generation
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:

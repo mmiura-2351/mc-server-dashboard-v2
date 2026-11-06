@@ -33,7 +33,10 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import WorkingSetSeedFailedError
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupRestoreIncompleteError,
+    WorkingSetSeedFailedError,
+)
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackAssignment,
@@ -322,7 +325,7 @@ async def test_restore_reports_seed_failure_when_the_rewrite_fails() -> None:
     backup_store = FakeBackupArchiveStore()
     backup_store.archives.add("ref")
 
-    with pytest.raises(WorkingSetSeedFailedError):
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
         await RestoreBackup(
             uow=FakeUnitOfWork(servers=servers, backups=backups),
             backup_store=backup_store,
@@ -330,6 +333,40 @@ async def test_restore_reports_seed_failure_when_the_rewrite_fails() -> None:
             cache=FakePluginCacheStore(),
             clock=FakeClock(_NOW),
         )(community_id=community_id, server_id=server_id, backup_id=backup.id)
+    assert isinstance(excinfo.value.cause, WorkingSetSeedFailedError)
+
+
+async def test_a_seed_failure_names_the_forced_corrupt_publish() -> None:
+    # A forced corrupt backup was already published when the rewrite failed, so
+    # the seed failure carries its corrupt count for the edge to audit the
+    # force-restore under its own operation (issue #3269).
+    community_id, server_id = CommunityId(uuid.uuid4()), ServerId(uuid.uuid4())
+    servers = FakeServerRepository()
+    servers.seed(_server(server_id, community_id))
+    backups = FakeBackupRepository()
+    backup = _backup(server_id, "ref")
+    backups.seed(backup)
+    backup_store = FakeBackupArchiveStore()
+    backup_store.archives.add("ref")
+    backup_store.corrupt_refs.add("ref")
+    backup_store.corrupt_count = 3
+
+    with pytest.raises(BackupRestoreIncompleteError) as excinfo:
+        await RestoreBackup(
+            uow=FakeUnitOfWork(servers=servers, backups=backups),
+            backup_store=backup_store,
+            file_store=FakeFileStore(fail_write=True),
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+        )(
+            community_id=community_id,
+            server_id=server_id,
+            backup_id=backup.id,
+            force=True,
+        )
+    assert isinstance(excinfo.value.cause, WorkingSetSeedFailedError)
+
+    assert excinfo.value.forced_corrupt_count == 3
 
 
 async def test_restore_seeds_properties_when_the_backup_has_none(

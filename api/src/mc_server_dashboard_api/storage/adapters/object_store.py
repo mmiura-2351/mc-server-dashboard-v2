@@ -84,6 +84,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PublisherFencedError,
     SnapshotHandleError,
     StaleGenerationError,
+    StorageUnavailableError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
@@ -1311,15 +1312,28 @@ class ObjectStorage(Storage):
         readers of ``old_prefix`` left are active hydrate streams, which hold a lease
         and are skipped here exactly as before (Section 4.2/4.3). A leased old prefix
         is left for the next sweep to reclaim once the reader releases.
+
+        Best-effort (issue #3269): the flip already published ``new_prefix``, so a
+        store outage here cannot undo or fail that publish. It is logged and the
+        leftovers stay for :meth:`sweep`, which reclaims every ``incoming/`` object
+        and every snapshot prefix the pointer does not name. Raising instead
+        reported a published restore as failed, losing what it had published.
         """
 
-        await _delete_prefix(client, staged_prefix)
-        if (
-            old_prefix is not None
-            and old_prefix != new_prefix
-            and not self._is_leased(old_prefix)
-        ):
-            await _delete_prefix(client, old_prefix)
+        try:
+            await _delete_prefix(client, staged_prefix)
+            if (
+                old_prefix is not None
+                and old_prefix != new_prefix
+                and not self._is_leased(old_prefix)
+            ):
+                await _delete_prefix(client, old_prefix)
+        except StorageUnavailableError:
+            _LOG.warning(
+                "post-publish cleanup of %s failed; the sweep reclaims it",
+                staged_prefix,
+                exc_info=True,
+            )
 
     # --- JAR store / reuse (Section 3.2) -----------------------------------
 
@@ -1553,7 +1567,10 @@ class ObjectStorage(Storage):
                     await _delete_prefix(client, incoming)
                     raise
                 finally:
-                    await asyncio.to_thread(spool.unlink, missing_ok=True)
+                    # Never fatal (issue #3269): after the flip the restore has
+                    # published, and before it an error is already on its way
+                    # out, so a spool that cannot be removed is logged, not raised.
+                    await _discard_spool(spool, raise_fault=False)
         finally:
             self._release_staging(incoming)
 
@@ -2494,10 +2511,10 @@ def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
         except FileNotFoundError:
             pass
         except OSError as exc:
-            _LOG.warning("could not remove a backup health-check spool: %s", exc)
+            _LOG.warning("could not remove the backup spool %s: %s", spool, exc)
         return
     if (fault := disposal.exception()) is not None:
-        _LOG.warning("could not remove a backup health-check spool: %s", fault)
+        _LOG.warning("could not remove the backup spool %s: %s", spool, fault)
 
 
 async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
@@ -2508,8 +2525,9 @@ async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
     stops only the wait, never the removal; a removal the loop cancels at
     shutdown falls back to a synchronous unlink. A failed removal is logged. With
     ``raise_fault`` it is also raised, a transient fault translated by the fs
-    errno policy; without it the caller already has an error propagating, which
-    a cleanup fault must not replace.
+    errno policy; without it the caller already has an outcome a cleanup fault
+    must not replace: an error propagating, or a restore that published (issue
+    #3269).
     """
 
     disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))

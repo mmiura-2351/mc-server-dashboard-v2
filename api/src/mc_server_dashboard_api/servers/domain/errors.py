@@ -662,7 +662,31 @@ class PluginReconcileIncompleteError(ServerError):
     of a read that never happened; they may now describe the pre-restore working
     set. The edge maps this to 503 ``plugin_reconcile_incomplete``: the
     reconciliation is idempotent, so re-running the restore completes it.
+
+    A listed jar whose read fails the same way leaves the reconciliation just as
+    partial (issue #3269).
     """
+
+
+class BackupRestoreIncompleteError(ServerError):
+    """A restore published its backup, then a step after the publish failed (#3269).
+
+    The published working set stands whatever failed after it, so the restore's
+    audit identity must survive the failure: ``forced_corrupt_count`` is the
+    corrupt region count of a forced corrupt backup that was published (``0`` for
+    a healthy one), so the edge records ``backup:force_restore`` rather than a
+    routine ``backup:restore``. ``cause`` is the failed step's own error, which
+    decides the response: :class:`WorkingSetSeedFailedError` and
+    :class:`PluginReconcileIncompleteError` are their mapped 503s, anything else
+    stays an unmapped 500.
+    """
+
+    def __init__(
+        self, server_id: str, *, cause: Exception, forced_corrupt_count: int
+    ) -> None:
+        super().__init__(server_id)
+        self.cause = cause
+        self.forced_corrupt_count = forced_corrupt_count
 
 
 class PluginCacheBlobNotFoundError(ServerError):

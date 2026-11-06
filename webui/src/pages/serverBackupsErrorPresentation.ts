@@ -76,7 +76,9 @@ export function backupErrorPresentation(
  * Select the restore dialog's message. A 409 `server_not_stopped` means the
  * state changed mid-flight, so it names restoring rather than the generic
  * stopped-only operation. A 409 `backup_unreadable` (#2374) means the backup's
- * archive cannot be read back, so no retry or override will restore it.
+ * archive cannot be read back, so no retry or override will restore it. A 503
+ * `seed_failed` or `plugin_reconcile_incomplete` (#3269) means the backup WAS
+ * published and only a follow-up step failed, so retrying the restore heals it.
  */
 export function backupRestoreErrorPresentation(
   status: number | undefined,
@@ -87,6 +89,9 @@ export function backupRestoreErrorPresentation(
   }
   if (reason === "backup_unreadable") {
     return "backups.error.unreadable";
+  }
+  if (reason === "seed_failed" || reason === "plugin_reconcile_incomplete") {
+    return "backups.error.restoreIncomplete";
   }
   return backupErrorPresentation(status, reason);
 }
