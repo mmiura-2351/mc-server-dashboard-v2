@@ -56,7 +56,10 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
 from mc_server_dashboard_api.fleet.adapters.drain_store import (
     SqlAlchemyWorkerDrainStore,
 )
-from mc_server_dashboard_api.fleet.adapters.grpc_server import make_grpc_server
+from mc_server_dashboard_api.fleet.adapters.grpc_server import (
+    WorkerSessionServicer,
+    make_grpc_server,
+)
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
@@ -881,6 +884,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "api starting", extra={"config": settings.masked_dump()}
         )
         grpc_server = None
+        worker_sessions: WorkerSessionServicer | None = None
         snapshot_task: asyncio.Task[None] | None = None
         schedule_task: asyncio.Task[None] | None = None
         reconciler_task: asyncio.Task[None] | None = None
@@ -912,7 +916,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # asyncio event loop as FastAPI (grpc.aio): one process, one loop,
             # the registry shared in-memory between the two surfaces.
             assert settings.control.worker_credential is not None
-            grpc_server = make_grpc_server(
+            grpc_server, worker_sessions = make_grpc_server(
                 registry=registry,
                 clock=FleetSystemClock(),
                 worker_credential=settings.control.worker_credential,
@@ -1340,6 +1344,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await snapshot_task
             if grpc_server is not None:
                 await grpc_server.stop(grace=None)
+            # A Session teardown can outlive its cancelled RPC, so the stop above
+            # does not wait for it; it writes through the engine disposed below.
+            if worker_sessions is not None:
+                await worker_sessions.drain_teardowns()
             await assignment_fence_engine.dispose()
             await engine.dispose()
 

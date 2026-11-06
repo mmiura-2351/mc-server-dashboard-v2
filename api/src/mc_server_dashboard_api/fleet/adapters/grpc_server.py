@@ -42,6 +42,7 @@ import datetime as dt
 import hmac
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 import grpc
 from grpc import aio
@@ -159,6 +160,17 @@ _REGISTRATION_TIMEOUT_SECONDS = 10.0
 # fires mark_worker_servers_unknown (issue #1600).
 _KEEPALIVE_TIMEOUT_MS = 20_000
 
+# Shutdown budget for the Session teardowns (issue #3555): the wait for every
+# handler to reach its teardown and for those teardowns to finish. A normal
+# mark-unknown write takes milliseconds, so this is wide headroom; past it the
+# drain cancels what is left. The engine sets no statement timeout, so without
+# a bound a held row lock would block shutdown forever.
+_TEARDOWN_DRAIN_SECONDS = 10.0
+
+# Bound on the wait for cancelled teardowns to settle once the budget is spent,
+# in case a DB driver does not honour the cancel promptly.
+_TEARDOWN_SETTLE_SECONDS = 2.0
+
 # Floor on how often the server accepts client keepalive PINGs. The Worker
 # dials with client-side keepalive (Time=20s, worker/cmd/worker/main.go, issue
 # #1709), and C-core's default ping-strike enforcement (min interval 5 min,
@@ -271,6 +283,94 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._control_plane = control_plane
         self._state_sink = state_sink
         self._real_time_events = real_time_events
+        # Session teardowns still in flight, by worker, held so a teardown that
+        # outlives its cancelled RPC task is neither garbage-collected nor cut
+        # off at shutdown (issue #3555, :meth:`drain_teardowns`).
+        self._teardowns: dict[asyncio.Future[None], WorkerId] = {}
+        # Session handlers that have not yet handed off their teardown. Stopping
+        # the gRPC server cancels them but does not wait for them, so the drain
+        # waits for this set to empty before it looks at ``_teardowns``.
+        self._handlers: set[asyncio.Future[object]] = set()
+        self._handlers_idle = asyncio.Event()
+        self._handlers_idle.set()
+        # Set whenever a handler leaves, so the drain's settle phase wakes for
+        # each late hand-off rather than only once every handler is gone.
+        self._handler_left = asyncio.Event()
+
+    async def drain_teardowns(self) -> None:
+        """Finish every Session teardown, within one budget (issue #3555).
+
+        The app calls this after the gRPC server stops and before it disposes
+        the engine the teardowns write through. It waits for each handler to
+        hand off its teardown, then for the teardowns to finish. Past
+        :data:`_TEARDOWN_DRAIN_SECONDS` it logs the workers left and settles
+        for up to :data:`_TEARDOWN_SETTLE_SECONDS`: it cancels every teardown,
+        including one a still-unwinding handler hands off meanwhile, until no
+        handler or teardown is left. gRPC owns the handler tasks, and the stop
+        has already cancelled them, so only their teardowns are cancelled here.
+        """
+
+        try:
+            async with asyncio.timeout(_TEARDOWN_DRAIN_SECONDS):
+                await self._handlers_idle.wait()
+                while self._teardowns:
+                    await asyncio.wait(set(self._teardowns))
+            return
+        except TimeoutError:
+            pass
+        _LOG.error(
+            "session teardowns did not finish within %.1fs; cancelling them "
+            "(workers: %s; %d handlers had not reached teardown)",
+            _TEARDOWN_DRAIN_SECONDS,
+            sorted(worker.value for worker in self._teardowns.values()),
+            len(self._handlers),
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _TEARDOWN_SETTLE_SECONDS
+        cancelled: set[asyncio.Future[None]] = set()
+        while self._handlers or self._teardowns:
+            for task in self._teardowns.keys() - cancelled:
+                task.cancel()
+                cancelled.add(task)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            self._handler_left.clear()
+            handler_left = asyncio.ensure_future(self._handler_left.wait())
+            waiters: set[asyncio.Future[Any]] = {*self._teardowns, handler_left}
+            try:
+                await asyncio.wait(
+                    waiters,
+                    timeout=remaining,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                handler_left.cancel()
+        if self._handlers or self._teardowns:
+            _LOG.error(
+                "session teardowns did not settle within %.1fs of their cancel; "
+                "shutting down without them (workers: %s; %d handlers never "
+                "handed off)",
+                _TEARDOWN_SETTLE_SECONDS,
+                sorted(worker.value for worker in self._teardowns.values()),
+                len(self._handlers),
+            )
+
+    def _enter_handler(self) -> asyncio.Future[object]:
+        task = asyncio.current_task()
+        assert task is not None
+        self._handlers.add(task)
+        self._handlers_idle.clear()
+        # An exit before the teardown hand-off (an abort, a cancel during
+        # registration) ends the RPC task, which leaves the set here.
+        task.add_done_callback(self._leave_handler)
+        return task
+
+    def _leave_handler(self, task: asyncio.Future[object]) -> None:
+        self._handlers.discard(task)
+        self._handler_left.set()
+        if not self._handlers:
+            self._handlers_idle.set()
 
     async def _watch_liveness(self, worker_id: WorkerId, session: SessionToken) -> None:
         """Poll worker liveness and return when heartbeats lapse (issue #1600).
@@ -300,68 +400,78 @@ class WorkerSessionServicer(WorkerServiceServicer):
         request_iterator: AsyncIterator[pb.WorkerMessage],
         context: aio.ServicerContext,
     ) -> AsyncIterator[pb.ApiMessage]:
+        handler = self._enter_handler()
         await self._authenticate(context)
 
         worker_id, correlation_id, session, held_ids = await self._register(
             request_iterator, context
         )
-        # The registry resets this Worker's load to zero on (re)registration;
-        # rebuild it from the authoritative running-server tally so placement is
-        # correct after a reconnect (epic #7 reconciliation obligation).
-        try:
-            await self._rebuild_assignments(worker_id)
-        except Exception:
-            _LOG.warning(
-                "assignment rebuild failed; tearing down registration",
-                extra={"worker_id": worker_id.value},
-                exc_info=True,
-            )
-            self._registry.mark_disconnected(worker_id, session)
-            await context.abort(
-                grpc.StatusCode.UNAVAILABLE,
-                "assignment rebuild failed during registration",
-            )
-
-        # Compute which held servers the Worker advertised no longer exist (issue
-        # #924). Fail-safe: any exception returns an empty list so a DB error
-        # never misclassifies a live server as deleted.
-        unknown_held_ids: list[str] = []
-        if held_ids:
-            try:
-                existing = await self._state_sink.existing_server_ids(
-                    server_ids=held_ids
-                )
-                unknown_held_ids = [sid for sid in held_ids if sid not in existing]
-            except Exception:
-                _LOG.warning(
-                    "failed to compute unknown held servers; sending empty list",
-                    extra={"worker_id": worker_id.value},
-                    exc_info=True,
-                )
-
-        # Race-free under cooperative scheduling (no await between this check
-        # and open_session): a stale session that lost the registry to a newer
-        # reconnect during its DB awaits is aborted before it can overwrite the
-        # current session's outbound queue (issue #1694).
-        if not self._registry.is_current_session(worker_id, session):
-            await context.abort(
-                grpc.StatusCode.ABORTED,
-                "registration superseded by a newer session",
-            )
-        outbound = self._control_plane.open_session(worker_id, session)
-        # Read inbound events/results in a background task while this generator
-        # yields the Worker's outbound commands; both share the one stream.
-        reader = asyncio.ensure_future(self._read_inbound(worker_id, request_iterator))
-        # Application-level heartbeat watchdog (issue #1600): polls the
-        # registry's derived liveness at heartbeat_interval; returns when
-        # heartbeats lapse, ending the Session through the normal teardown.
-        watchdog = asyncio.ensure_future(self._watch_liveness(worker_id, session))
         # Tracks the in-flight outbound.get() so the finally can cancel it even if
         # this generator is cancelled mid-await (an abrupt gRPC RPC cancel): an
         # uncancelled get() would await the orphaned queue forever, leaking a
         # Task+Queue per disconnect (issue #788).
         outbound_get: asyncio.Future[pb.ApiMessage] | None = None
+        outbound: asyncio.Queue[pb.ApiMessage] | None = None
+        reader: asyncio.Future[None] | None = None
+        watchdog: asyncio.Future[None] | None = None
+        # The teardown owns everything from the registry write on (issue #3555):
+        # a cancel or abort before the stream is serving (during the rebuild or
+        # the held-server lookup below) must still offline the Worker and mark
+        # its servers unknown, under the same session guards.
         try:
+            # The registry resets this Worker's load to zero on (re)registration;
+            # rebuild it from the authoritative running-server tally so placement is
+            # correct after a reconnect (epic #7 reconciliation obligation).
+            try:
+                await self._rebuild_assignments(worker_id)
+            except Exception:
+                _LOG.warning(
+                    "assignment rebuild failed; tearing down registration",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
+                self._registry.mark_disconnected(worker_id, session)
+                await context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "assignment rebuild failed during registration",
+                )
+
+            # Compute which held servers the Worker advertised no longer exist (issue
+            # #924). Fail-safe: any exception returns an empty list so a DB error
+            # never misclassifies a live server as deleted.
+            unknown_held_ids: list[str] = []
+            if held_ids:
+                try:
+                    existing = await self._state_sink.existing_server_ids(
+                        server_ids=held_ids
+                    )
+                    unknown_held_ids = [sid for sid in held_ids if sid not in existing]
+                except Exception:
+                    _LOG.warning(
+                        "failed to compute unknown held servers; sending empty list",
+                        extra={"worker_id": worker_id.value},
+                        exc_info=True,
+                    )
+
+            # Race-free under cooperative scheduling (no await between this check
+            # and open_session): a stale session that lost the registry to a newer
+            # reconnect during its DB awaits is aborted before it can overwrite the
+            # current session's outbound queue (issue #1694).
+            if not self._registry.is_current_session(worker_id, session):
+                await context.abort(
+                    grpc.StatusCode.ABORTED,
+                    "registration superseded by a newer session",
+                )
+            outbound = self._control_plane.open_session(worker_id, session)
+            # Read inbound events/results in a background task while this generator
+            # yields the Worker's outbound commands; both share the one stream.
+            reader = asyncio.ensure_future(
+                self._read_inbound(worker_id, request_iterator)
+            )
+            # Application-level heartbeat watchdog (issue #1600): polls the
+            # registry's derived liveness at heartbeat_interval; returns when
+            # heartbeats lapse, ending the Session through the normal teardown.
+            watchdog = asyncio.ensure_future(self._watch_liveness(worker_id, session))
             yield self._register_ack(
                 correlation_id=correlation_id,
                 unknown_held_server_ids=unknown_held_ids,
@@ -396,13 +506,46 @@ class WorkerSessionServicer(WorkerServiceServicer):
         finally:
             if outbound_get is not None:
                 outbound_get.cancel()
-            reader.cancel()
-            watchdog.cancel()
-            # Retrieve the reader's outcome so a transport error it raised is not
-            # logged as an unretrieved task exception; a cancellation is expected.
-            # A genuine terminal error (e.g. a transport drop, or an unexpected
-            # error escaping the handler) is logged at warning with the worker id
-            # so the cause is not silently lost (issue #776).
+            if reader is not None:
+                reader.cancel()
+            if watchdog is not None:
+                watchdog.cancel()
+            # The rest of the teardown runs in a task this servicer owns, shielded
+            # from the RPC task (issue #3555). gRPC cancels the RPC task when the
+            # peer's transport dies, and that cancel can land after the inbound
+            # EOF has already started this teardown; awaited here, it would cut
+            # the mark-unknown write and the log line, with only a DEBUG trace.
+            teardown = asyncio.ensure_future(
+                self._teardown(worker_id, session, outbound, reader, watchdog)
+            )
+            self._teardowns[teardown] = worker_id
+            teardown.add_done_callback(self._forget_teardown)
+            self._leave_handler(handler)
+            await asyncio.shield(teardown)
+
+    def _forget_teardown(self, teardown: asyncio.Future[None]) -> None:
+        self._teardowns.pop(teardown, None)
+
+    async def _teardown(
+        self,
+        worker_id: WorkerId,
+        session: SessionToken,
+        outbound: asyncio.Queue[pb.ApiMessage] | None,
+        reader: asyncio.Future[None] | None,
+        watchdog: asyncio.Future[None] | None,
+    ) -> None:
+        """Finish a Session whose stream ended (FR-WRK-4, CONTROL_PLANE.md 4.4).
+
+        ``outbound``, ``reader`` and ``watchdog`` are ``None`` when the Session
+        ended after registering but before it opened them.
+        """
+
+        # Retrieve the reader's outcome so a transport error it raised is not
+        # logged as an unretrieved task exception; a cancellation is expected.
+        # A genuine terminal error (e.g. a transport drop, or an unexpected
+        # error escaping the handler) is logged at warning with the worker id
+        # so the cause is not silently lost (issue #776).
+        if reader is not None:
             try:
                 await reader
             except asyncio.CancelledError:
@@ -413,6 +556,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     extra={"worker_id": worker_id.value},
                     exc_info=True,
                 )
+        if watchdog is not None:
             try:
                 await watchdog
             except asyncio.CancelledError:
@@ -423,38 +567,48 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     extra={"worker_id": worker_id.value},
                     exc_info=True,
                 )
-            # Fail this worker's in-flight commands immediately: its outbound
-            # stream is gone, so they can never be answered. Awaiters get a typed
-            # WorkerNotConnectedError now instead of riding the full timeout.
-            # Guarded by this Session's token so a stale teardown after a
-            # reconnect does not fail the NEW session's in-flight futures
-            # (CONTROL_PLANE.md Section 4.4). Runs before close_session, which
-            # drops this worker's session record.
-            self._control_plane.fail_worker_pending(
-                worker_id, session, WorkerNotConnectedError(worker_id.value)
-            )
+        # Fail this worker's in-flight commands immediately: its outbound
+        # stream is gone, so they can never be answered. Awaiters get a typed
+        # WorkerNotConnectedError now instead of riding the full timeout.
+        # Guarded by this Session's token so a stale teardown after a
+        # reconnect does not fail the NEW session's in-flight futures
+        # (CONTROL_PLANE.md Section 4.4). Runs before close_session, which
+        # drops this worker's session record.
+        self._control_plane.fail_worker_pending(
+            worker_id, session, WorkerNotConnectedError(worker_id.value)
+        )
+        if outbound is not None:
             self._control_plane.close_session(worker_id, outbound)
-            # Pass this Session's token so a delayed teardown only offlines the
-            # Worker if it has not reconnected on a newer Session (Section 4.4).
-            self._registry.mark_disconnected(worker_id, session)
-            # Guard the bulk observed=unknown write with this Session's token too:
-            # the write deliberately bypasses the per-server monotonic guard, so a
-            # stale teardown after a reconnect would otherwise clobber the NEW
-            # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
-            # There is an accepted one-roundtrip TOCTOU window here: a reconnect
-            # on a newer Session could win the is_current_session check between
-            # this read and the bulk unknown-write below, so the write could
-            # still clobber the NEW session's live states with unknown. The
-            # window is judged acceptable (PR #802 review): it is bounded to a
-            # single observation and the reconciler self-heals — the live worker
-            # re-reports its servers' states on its next StatusChange, restoring
-            # them. Closing it fully would need the write itself to be guarded by
-            # the session token atomically, which is not worth the complexity.
-            if self._registry.is_current_session(worker_id, session):
+        # Pass this Session's token so a delayed teardown only offlines the
+        # Worker if it has not reconnected on a newer Session (Section 4.4).
+        self._registry.mark_disconnected(worker_id, session)
+        # Guard the bulk observed=unknown write with this Session's token too:
+        # the write deliberately bypasses the per-server monotonic guard, so a
+        # stale teardown after a reconnect would otherwise clobber the NEW
+        # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
+        # There is an accepted one-roundtrip TOCTOU window here: a reconnect
+        # on a newer Session could win the is_current_session check between
+        # this read and the bulk unknown-write below, so the write could
+        # still clobber the NEW session's live states with unknown. The
+        # window is judged acceptable (PR #802 review): it is bounded to a
+        # single observation and the reconciler self-heals — the live worker
+        # re-reports its servers' states on its next StatusChange, restoring
+        # them. Closing it fully would need the write itself to be guarded by
+        # the session token atomically, which is not worth the complexity.
+        if self._registry.is_current_session(worker_id, session):
+            # Logged here rather than raised: once the RPC's cancel has broken
+            # the shield, nothing awaits this task's outcome.
+            try:
                 await self._state_sink.mark_worker_servers_unknown(
                     worker_id=worker_id.value
                 )
-            _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
+            except Exception:
+                _LOG.error(
+                    "failed to mark the disconnected worker's servers unknown",
+                    extra={"worker_id": worker_id.value},
+                    exc_info=True,
+                )
+        _LOG.info("worker disconnected", extra={"worker_id": worker_id.value})
 
     async def _read_inbound(
         self,
@@ -796,12 +950,14 @@ def make_grpc_server(
     cert_file: str | None = None,
     key_file: str | None = None,
     insecure: bool = False,
-) -> aio.Server:
+) -> tuple[aio.Server, WorkerSessionServicer]:
     """Build (but do not start) the control-plane gRPC server bound to host:port.
 
     The listener serves over TLS when ``cert_file``/``key_file`` are given, else
     plaintext when ``insecure`` is set (NFR-SEC-1). The required-unless-insecure
-    rule is enforced at the edge before this is called.
+    rule is enforced at the edge before this is called. The servicer is returned
+    too, so shutdown can wait for its Session teardowns
+    (:meth:`WorkerSessionServicer.drain_teardowns`).
     """
 
     server = aio.server(options=_server_options(heartbeat_timeout))
@@ -823,4 +979,4 @@ def make_grpc_server(
         key_file=key_file,
         insecure=insecure,
     )
-    return server
+    return server, servicer
