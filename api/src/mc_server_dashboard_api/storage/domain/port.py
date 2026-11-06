@@ -579,6 +579,11 @@ class BackupStore(abc.ABC):
         backends (issue #3237), and on the fs backend a link (issue #3371). An
         archive inflating past the decompressed-size cap raises
         :class:`~.errors.ArchiveTooLargeError`, ``force`` or not.
+
+        The generation is bumped before the flip (issue #3564), so a failure
+        before the flip leaves the prior working set live at the advanced
+        generation. A failure after it — the restored working set live — raises
+        :class:`~.errors.RestorePartiallyPublishedError` carrying the report.
         """
 
     @abc.abstractmethod
