@@ -610,8 +610,26 @@ async def _upload_whose_staging_vanished(
     return None
 
 
+async def _second_commit(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(_COMMITTED))
+    return await storage.commit_snapshot(handle)
+
+
+async def _restore(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    key = await storage.create_backup_from_current(community, server)
+    await storage.restore_backup(community, server, key)
+    return await storage.current_generation(community, server)
+
+
 _LOCK_WAITERS = [
     pytest.param(_settled_generation, 2, id="settled_generation"),
+    pytest.param(_second_commit, 3, id="commit_snapshot"),
+    pytest.param(_restore, 3, id="restore_backup"),
     pytest.param(_hydrate, _COMMITTED, id="open_hydrate_source"),
     pytest.param(
         _upload_whose_staging_vanished, SnapshotHandleError, id="pruned_generation"
