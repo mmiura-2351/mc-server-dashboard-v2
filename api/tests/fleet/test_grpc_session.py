@@ -2071,3 +2071,36 @@ async def test_drain_gives_up_on_a_teardown_that_ignores_its_cancel(
         for task in _pending_teardowns():
             task.cancel()
         await h.stop()
+
+
+async def test_rpc_cancel_during_assignment_rebuild_still_tears_down() -> None:
+    # Issue #3555, same class: a cancel that lands after the registry write but
+    # before the stream is serving (here, in the assignment rebuild) used to skip
+    # the teardown, leaving the Worker ONLINE with no session behind it.
+    entered = asyncio.Event()
+
+    class _BlockingRebuildSink(FakeServerStateSink):
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")  # pragma: no cover
+
+    sink = _BlockingRebuildSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        call.cancel()
+        assert h.servicer is not None
+        await h.servicer.drain_teardowns()
+
+        assert h.registry.list_workers()[0].status is WorkerStatus.OFFLINE
+        assert sink.unknown_for == [_WORKER_ID]
+    finally:
+        await h.stop()
