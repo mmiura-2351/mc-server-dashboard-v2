@@ -65,6 +65,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     PrunedStoreError,
     PublisherFencedError,
+    RestorePartiallyPublishedError,
     SnapshotHandleError,
     StaleGenerationError,
     StorageUnavailableError,
@@ -937,7 +938,6 @@ class FsStorage(Storage):
                     staging,
                     publisher,
                     expected_base,
-                    gate_missing_regions=True,
                     fence=fence,
                 )
         except (StaleGenerationError, MissingRegionsError, PublisherFencedError):
@@ -1031,18 +1031,15 @@ class FsStorage(Storage):
         publisher: str | None,
         expected_base: int | None = None,
         *,
-        gate_missing_regions: bool,
         fence: Callable[[], bool] | None = None,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
         The generation advances on every authoritative publish that replaces
         ``current/`` — a snapshot commit (the worker pushed a new working set) and a
-        backup restore (issue #873). A restore that did NOT bump would let a
-        same-worker scratch with held == store skip the hydrate (#767) on the next
-        start and boot the PRE-restore world. It is bumped after ``current`` points
-        at the new snapshot, so the persisted generation never claims a set newer
-        than ``current`` resolves to.
+        backup restore (:meth:`_publish_restore`). A commit's is bumped after
+        ``current`` points at the new snapshot, so the persisted generation never
+        claims a set newer than ``current`` resolves to.
 
         The generation and the ``publisher`` (the producing Worker's id, issue #847)
         are written as ONE atomic marker: a crash between two separate writes could
@@ -1058,9 +1055,6 @@ class FsStorage(Storage):
         validated against. Holding the lock across the re-check, the pointer flip, and
         the bump is what closes the window: an edit cannot land between the re-check
         and the flip. ``None`` skips the re-check (no base claim).
-
-        ``gate_missing_regions`` selects whether the missing-region gate runs: a
-        snapshot commit passes ``True``, a backup restore ``False`` (issue #3446).
 
         ``fence`` is the commit's publisher fence (issue #3544), called under the
         lock immediately before the publish; ``False`` raises
@@ -1099,19 +1093,14 @@ class FsStorage(Storage):
             # inside its locked section; the fs adapter must match.
             # ``check_missing_regions`` is a sync directory-entry scan; this
             # section runs on a worker thread, so calling it directly is correct.
-            # A restore skips the gate (issue #3446): it is an operator-chosen
-            # rollback to a complete backup, which legitimately holds fewer regions
-            # than the world it replaces, while the gate exists to catch a snapshot
-            # that silently lost regions.
-            if gate_missing_regions:
-                try:
-                    prior = self._current_dir(community_id, server_id)
-                except NotFoundError:
-                    prior = None
-                if prior is not None:
-                    missing = check_missing_regions(staging, prior)
-                    if not missing.complete:
-                        raise MissingRegionsError(missing)
+            try:
+                prior = self._current_dir(community_id, server_id)
+            except NotFoundError:
+                prior = None
+            if prior is not None:
+                missing = check_missing_regions(staging, prior)
+                if not missing.complete:
+                    raise MissingRegionsError(missing)
             if fence is not None and not fence():
                 raise PublisherFencedError("the publisher fence refused the publish")
             old_snapshot = self._publish(community_id, server_id, staging)
@@ -1122,22 +1111,47 @@ class FsStorage(Storage):
         generation, old_snapshot = await self._under_server_lock(
             community_id, server_id, _locked
         )
-        # Reclaim the superseded snapshot AFTER releasing the lock (issue #920): the
-        # ``_rmtree`` can be gigabytes and must not block edits. Safe outside the lock
-        # because every edit re-resolves ``current`` UNDER the lock after the flip, so
-        # once the flip is published no edit can still be writing into the old tree.
-        # Best-effort (issue #3269): the publish already happened, so a fault here
-        # is logged and the tree left for :meth:`sweep`, not raised over it.
-        if old_snapshot is not None:
-            try:
-                await asyncio.to_thread(_rmtree, old_snapshot)
-            except OSError:
-                _LOG.warning(
-                    "post-publish reclaim of %s failed; the sweep reclaims it",
-                    old_snapshot,
-                    exc_info=True,
-                )
+        await _reclaim_superseded(old_snapshot)
         return generation
+
+    async def _publish_restore(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        staging: Path,
+        report: WorkingSetReport,
+    ) -> None:
+        """Publish a restored backup, bumping the generation first (issue #3564).
+
+        The restore stamps the RESTORE_PUBLISHER sentinel (issue #873), and bumps
+        BEFORE the flip, the reverse of a commit: no Worker holds the restored
+        world, so a flip whose bump never landed would let a same-worker scratch
+        with held == store skip the hydrate (#767) and boot the PRE-restore world,
+        then publish it over the restore. A bump whose flip never lands only makes
+        holders hydrate the prior world again.
+
+        The missing-region gate does not run (issue #3446): a restore is an
+        operator-chosen rollback to a complete backup, which legitimately holds
+        fewer regions than the world it replaces. A fault after the flip raises
+        :class:`RestorePartiallyPublishedError` carrying ``report``.
+        """
+
+        await asyncio.to_thread(_fsync_tree, staging)
+        server_root = self._server_root(community_id, server_id)
+
+        def _locked() -> Path | None:
+            self._bump_marker(server_root, RESTORE_PUBLISHER)
+            prior = self._live_snapshot_name(server_root)
+            try:
+                with _translating_io_faults():
+                    return self._publish(community_id, server_id, staging)
+            except Exception as exc:
+                if self._live_snapshot_name(server_root) == prior:
+                    raise
+                raise RestorePartiallyPublishedError(exc, report) from exc
+
+        old_snapshot = await self._under_server_lock(community_id, server_id, _locked)
+        await _reclaim_superseded(old_snapshot)
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
         fs_handle = _as_fs_handle(handle)
@@ -1498,13 +1512,7 @@ class FsStorage(Storage):
             # the PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER) makes
             # the publish-time guard refuse an in-flight stale snapshot from a real
             # Worker (different publisher), closing the restore-clobber window (#873).
-            await self._publish_and_bump(
-                community_id,
-                server_id,
-                staging,
-                RESTORE_PUBLISHER,
-                gate_missing_regions=False,
-            )
+            await self._publish_restore(community_id, server_id, staging, report)
             return report
         except BaseException:
             await asyncio.to_thread(_rmtree, staging)
@@ -2557,6 +2565,28 @@ def _rmtree(path: Path) -> None:
         path.unlink(missing_ok=True)
     elif path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+async def _reclaim_superseded(old_snapshot: Path | None) -> None:
+    """Reclaim a publish's superseded snapshot, after the server lock is released.
+
+    The ``_rmtree`` can be gigabytes and must not block edits (issue #920). Safe
+    outside the lock because every edit re-resolves ``current`` UNDER the lock after
+    the flip, so once the flip is published no edit can still be writing into the
+    old tree. Best-effort (issue #3269): the publish already happened, so a fault
+    here is logged and the tree left for the sweep, not raised over it.
+    """
+
+    if old_snapshot is None:
+        return
+    try:
+        await asyncio.to_thread(_rmtree, old_snapshot)
+    except OSError:
+        _LOG.warning(
+            "post-publish reclaim of %s failed; the sweep reclaims it",
+            old_snapshot,
+            exc_info=True,
+        )
 
 
 def _fsync_dir(path: Path) -> None:

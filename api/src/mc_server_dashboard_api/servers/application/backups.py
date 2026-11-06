@@ -97,6 +97,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupRestoreIncompleteError,
+    BackupRestorePartiallyPublishedError,
     BackupUnreadableError,
     BackupUnsettledError,
     FileTooLargeError,
@@ -391,7 +392,8 @@ class RestoreBackup:
     the jars beside it. A restored plugin directory that cannot be listed raises
     :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
     and so does a listed jar that cannot be read (issue #3269). Any failure after
-    the publish — the quarantine write and the lifecycle lock's release included —
+    the publish — a store failure past its flip (issue #3564), the quarantine
+    write and the lifecycle lock's release included —
     surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
     error and carrying the corrupt count of a forced corrupt backup that
     published, so the edge audits the force-restore whatever failed after it.
@@ -462,6 +464,17 @@ class RestoreBackup:
                     # archive; a sweep that later reads it back sound revises it.
                     await self._mark_health(backup_id, BackupHealth.UNREADABLE)
                     raise
+                except BackupRestorePartiallyPublishedError as exc:
+                    # The store published the backup, then failed before its
+                    # restore returned (issue #3564): the same post-publish failure
+                    # as the steps below, carrying the published corrupt count.
+                    published = exc.corrupt_count
+                    incomplete = BackupRestoreIncompleteError(
+                        str(server_id.value),
+                        cause=exc.cause,
+                        forced_corrupt_count=exc.corrupt_count,
+                    )
+                    raise incomplete from exc
                 published = corrupt_count
                 # Published: the restored working set stands whatever fails from here
                 # on, so every later step's failure carries the restore's identity —

@@ -675,6 +675,10 @@ async def restore_backup(
             # mapped 503 the caller retries (the reconciliation is idempotent;
             # re-running the restore completes it).
             raise _service_unavailable("plugin_reconcile_incomplete") from exc
+        if isinstance(exc.cause, BackupStorageUnavailableError):
+            # The store failed after it published the backup (issue #3564): the
+            # same retryable 503 as the outage that publishes nothing.
+            raise _service_unavailable("storage_unavailable") from exc
         # Any other failure stays the unmapped 500 it was, now audited.
         raise
     if result.forced_corrupt:
