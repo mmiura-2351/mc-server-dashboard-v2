@@ -469,6 +469,13 @@ class StartServer:
         # Hydrating would unpack the snapshot OVER the Worker's newer scratch,
         # rolling back region data while playerdata survives. Check the held
         # generation exactly as redispatch_start does (#763).
+        # The store read waits for a publish already past its assignment fence
+        # (issue #3552). A final snapshot that failed at the Worker's deadline
+        # released the hold, but its upload can still be committing, and its fence
+        # passed while nobody was assigned. Read before that publish, the
+        # generation would let this Worker skip the hydrate and run on the world
+        # that publish replaces. The assignment committed above, so the fence
+        # refuses any publish that reaches it after this read.
         # A failure of these reads (a transient Storage error on
         # ``current_generation``) is a PRE-dispatch failure: no start command has
         # been sent, so the committed intent compensates back exactly as a failed

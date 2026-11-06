@@ -11,7 +11,9 @@ authoritative data even with extra orphan snapshots around.
 
 from __future__ import annotations
 
+import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -22,6 +24,8 @@ from tests.storage.helpers import (
     read_tar,
     snapshot_dir,
     tar_stream,
+    wait_until_contended,
+    watch_lock_contention,
 )
 
 
@@ -562,3 +566,54 @@ async def test_check_current_health_survives_concurrent_publish_reclaim(
     # The report must reflect the OLD corrupt content (scanned >= 1, not healthy).
     assert report.scanned >= 1
     assert not report.healthy
+
+
+async def test_settled_read_leaves_the_executor_to_a_publish_fence(
+    tmp_path: Path,
+) -> None:
+    # Issue #3552: a publish holds the server lock on an executor thread while its
+    # fence runs on the loop, and the fence can need the executor itself (the
+    # assignment lookup's DB reconnect resolves its host via loop.getaddrinfo). A
+    # settled read waiting for that lock must not hold the remaining executor
+    # capacity, or neither the publish nor the read ever finishes.
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=2)
+    loop.set_default_executor(executor)
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"v1"})
+    contended = watch_lock_contention(storage, community, server)
+    in_fence, release = asyncio.Event(), asyncio.Event()
+    starved: list[bool] = []
+
+    async def _fence_needing_the_executor() -> bool:
+        in_fence.set()
+        await release.wait()
+        try:
+            await asyncio.wait_for(loop.run_in_executor(None, lambda: None), 5)
+        except TimeoutError:
+            # Refuse, so the commit drops the lock and the test can fail cleanly.
+            starved.append(True)
+            return False
+        return True
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    commit = asyncio.create_task(
+        storage.commit_snapshot(handle, publisher_fence=_fence_needing_the_executor)
+    )
+    try:
+        await asyncio.wait_for(in_fence.wait(), 10)
+        settled = asyncio.create_task(storage.settled_generation(community, server))
+        await wait_until_contended(settled, contended)
+    finally:
+        release.set()
+
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(commit, settled, return_exceptions=True), 20
+        )
+    finally:
+        executor.shutdown(wait=False)
+    assert starved == [], "the fence found no free executor thread"
+    assert list(results) == [2, 2]

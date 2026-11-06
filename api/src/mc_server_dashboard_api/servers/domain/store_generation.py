@@ -38,4 +38,9 @@ class StoreGenerationReader(abc.ABC):
 
         0 when no snapshot has ever been published (no working set to skip a
         hydrate for), matching the Worker's "nothing held" / generation-0 default.
+
+        Waits for a publish that has passed its assignment fence (issue #3552).
+        Read after the caller's assignment commits, it therefore sees every
+        publish that fence lets through, so a late publish of the previous
+        Worker's final snapshot cannot land after a skip-hydrate decision.
         """

@@ -59,6 +59,8 @@ from tests.storage.helpers import (
     tar_bytes,
     tar_stream,
     unaligned_live_region_bytes,
+    wait_until_contended,
+    watch_lock_contention,
 )
 
 # --- working-set hydrate / snapshot (Section 3.1) --------------------------
@@ -110,6 +112,40 @@ async def test_commit_bumps_generation_and_round_trips(
     second = await harness.storage.commit_snapshot(handle)
     assert second == 2
     assert await harness.storage.current_generation(community, server) == 2
+
+
+async def test_settled_generation_waits_for_a_publish_past_its_fence(
+    harness: StorageHarness,
+) -> None:
+    # Issue #3552: a commit whose publisher fence has passed has not bumped yet.
+    # The settled read waits for it instead of answering the old generation. The
+    # commit holds at its fence until the read is waiting for the publish lock.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    contended = watch_lock_contention(harness.storage, community, server)
+    passed, release = asyncio.Event(), asyncio.Event()
+
+    async def _held_fence() -> bool:
+        passed.set()
+        await release.wait()
+        return True
+
+    handle = await harness.storage.begin_snapshot(community, server)
+    await harness.storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    commit = asyncio.create_task(
+        harness.storage.commit_snapshot(handle, publisher_fence=_held_fence)
+    )
+    try:
+        await asyncio.wait_for(passed.wait(), 10)
+        settled = asyncio.create_task(
+            harness.storage.settled_generation(community, server)
+        )
+        await wait_until_contended(settled, contended)
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(commit, 10) == 2
+    assert await asyncio.wait_for(settled, 10) == 2
 
 
 async def test_commit_records_publisher_and_reads_it_back(
