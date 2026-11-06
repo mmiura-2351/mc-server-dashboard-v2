@@ -70,6 +70,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 from mc_server_dashboard_api.storage.adapters.fs import (
     _create_spool,
     _discard_spool,
+    _run_spool_writer,
     _translating_io_faults,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -2656,7 +2657,7 @@ async def _write_backup_targz(
 ) -> None:
     """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``."""
 
-    tar = await asyncio.to_thread(tarfile.open, str(spool), "w:gz")
+    tar = await _run_spool_writer(spool, tarfile.open, str(spool), "w:gz")
     try:
         for obj in objs:
             name = obj.key[len(snapshot_prefix) :]

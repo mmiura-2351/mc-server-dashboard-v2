@@ -13,6 +13,7 @@ import asyncio
 import errno
 import gzip
 import os
+import tarfile
 import tempfile
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -238,6 +239,70 @@ async def test_a_temp_file_is_removed_through_repeated_cancellation(
 
     worker_free.set()
     await occupied[0]
+    await _until(lambda: not os.path.exists(name))
+    assert not os.path.exists(name)
+
+
+# The operations that open their spool by path on a worker in a mode that creates
+# it: the archive build's ``tarfile.open(spool, "w:gz")``.
+_PATH_WRITERS = [
+    op
+    for op in _ACQUISITIONS
+    if op.id in ("object-create_backup_from_current", "object-prune_to_final_snapshot")
+]
+
+_REAL_TARFILE_OPEN: Any = tarfile.open
+
+
+@pytest.mark.parametrize("executor_gone", [False, True], ids=["running", "shut-down"])
+@pytest.mark.parametrize("op", _PATH_WRITERS, ids=lambda op: op.id)
+async def test_a_spool_a_late_writer_recreates_is_removed(
+    op: _Operation,
+    executor_gone: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelled while a worker is about to open the spool for writing: the
+    cancelled caller's removal runs first, the writer then recreates the file,
+    and that file is removed too once the writer finishes — synchronously when
+    the executor has already shut down, as it has by then at loop shutdown."""
+
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=4)
+    loop.set_default_executor(executor)
+    harness = build_harness(op.backend, tmp_path)
+    community, server = new_scope()
+    call = await op.arrange(harness, community, server)
+    created = _spy_creation(monkeypatch, op.prefix)
+    reached = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _open(name: Any = None, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if mode != "w:gz" or str(name) not in created:
+            return _REAL_TARFILE_OPEN(name, mode, *args, **kwargs)
+        reached.set()
+        release.wait(timeout=10)
+        try:
+            return _REAL_TARFILE_OPEN(name, mode, *args, **kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(tarfile, "open", _open)
+    task = asyncio.ensure_future(call(stream_of(op.payload)))
+    assert await asyncio.to_thread(reached.wait, 10)
+    [name] = created
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await _until(lambda: not os.path.exists(name))
+    assert not os.path.exists(name)  # the cancelled caller removed it first
+    if executor_gone:
+        executor.shutdown(wait=False)
+    release.set()
+
+    assert finished.wait(10)
     await _until(lambda: not os.path.exists(name))
     assert not os.path.exists(name)
 

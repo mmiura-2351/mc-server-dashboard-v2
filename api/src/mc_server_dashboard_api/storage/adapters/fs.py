@@ -279,19 +279,30 @@ _SPOOL_DISPOSALS: set[asyncio.Future[None]] = set()
 
 def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
     _SPOOL_DISPOSALS.discard(disposal)
-    if disposal.cancelled():
-        # Only the loop itself cancels the removal, at shutdown — which drops an
-        # unlink still queued for a worker. Remove the spool here instead: one
-        # blocking unlink in this rare case beats leaking an archive-sized file.
+    fault = None if disposal.cancelled() else disposal.exception()
+    if isinstance(fault, OSError):
+        _LOG.warning("could not remove the spool %s: %s", spool, fault)
+        return
+    if disposal.cancelled() or fault is not None:
+        # The unlink never ran: the loop cancelled the removal at shutdown, which
+        # drops an unlink still queued for a worker, or the executor had already
+        # shut down. Remove the spool here instead: one blocking unlink in this
+        # rare case beats leaking an archive-sized file.
         try:
             os.unlink(spool)
         except FileNotFoundError:
             pass
         except OSError as exc:
             _LOG.warning("could not remove the spool %s: %s", spool, exc)
-        return
-    if (fault := disposal.exception()) is not None:
-        _LOG.warning("could not remove the spool %s: %s", spool, fault)
+
+
+def _start_spool_disposal(spool: Path) -> asyncio.Future[None]:
+    """Start removing ``spool`` off the loop as its own task (issue #3237)."""
+
+    disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
+    _SPOOL_DISPOSALS.add(disposal)
+    disposal.add_done_callback(functools.partial(_spool_disposal_done, spool))
+    return disposal
 
 
 async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
@@ -307,15 +318,30 @@ async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
     #3269).
     """
 
-    disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
-    _SPOOL_DISPOSALS.add(disposal)
-    disposal.add_done_callback(functools.partial(_spool_disposal_done, spool))
+    disposal = _start_spool_disposal(spool)
     if not raise_fault:
         with contextlib.suppress(OSError):
             await asyncio.shield(disposal)
         return
     with _translating_io_faults():
         await asyncio.shield(disposal)
+
+
+async def _run_spool_writer(spool: Path, fn: Callable[..., _R], *args: Any) -> _R:
+    """Run ``fn(*args)`` — a job that opens ``spool`` by path — off the loop.
+
+    A cancel during the await does not stop the worker thread, and a job that
+    opens the spool for writing recreates it if the cancelled caller has already
+    removed it. So the job is awaited shielded, and a cancelled caller hands it a
+    callback that removes the spool again once the job finishes (issue #3553).
+    """
+
+    writer = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    try:
+        return await asyncio.shield(writer)
+    except asyncio.CancelledError:
+        writer.add_done_callback(lambda _writer: _start_spool_disposal(spool))
+        raise
 
 
 def _io_fault_translating_stream(inner: ByteStream) -> AsyncIterator[bytes]:
