@@ -687,6 +687,16 @@ class BackupRestorePartiallyPublishedError(ServerError):
         self.corrupt_count = corrupt_count
 
 
+class BackupRestorePublicationUnknownError(BackupRestorePartiallyPublishedError):
+    """The store may have published a restored backup (issue #3564).
+
+    The seam translation of the storage ``RestorePublicationUnknownError``: the
+    store's pointer write failed and no read could confirm whether it landed. A
+    subclass, because the restore use case handles it exactly as a publication;
+    the edge answers it with its own reason, since the backup may not be live.
+    """
+
+
 class BackupRestoreIncompleteError(ServerError):
     """A restore published its backup, then a step after the publish failed (#3269).
 

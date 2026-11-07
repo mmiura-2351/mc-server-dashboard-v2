@@ -1033,7 +1033,9 @@ def _store_failing_its_restore(
     write, before the flip; ``"after_flip"`` fails the restore once ``current``
     names the restored world (on fs the directory fsync, on object a pointer
     write whose response is lost). That fault fires once, so the steps after the
-    publish meet a working store.
+    publish meet a working store. Two object-only faults add to the lost
+    response: ``"after_flip_cleanup"`` fails removing the staging, and
+    ``"after_flip_unconfirmed"`` fails every read confirming the pointer.
     """
 
     faults = Faults()
@@ -1066,14 +1068,26 @@ def _store_failing_its_restore(
         faults.when = lambda op, key: op == "put_object" and key == marker
     elif backend == "object":
         pointer = server_prefix + _POINTER
+        unconfirmed_reads: list[str] = []
 
         def _lose_once(op: str, key: str) -> bool:
             if op != "put_object" or key != pointer:
                 return False
-            faults.clear()
+            faults.lose_response = lambda op, key: False
+            if fault == "after_flip_unconfirmed":
+                unconfirmed_reads.extend(["head_object"] * 3)
             return True
 
+        def _fail(op: str, key: str) -> bool:
+            if fault == "after_flip_cleanup":
+                return op == "delete_object" and "/incoming/" in key
+            if unconfirmed_reads and key == pointer:
+                unconfirmed_reads.pop()
+                return True
+            return False
+
         faults.lose_response = _lose_once
+        faults.when = _fail
     elif fault == "generation":
 
         def _write_marker(*_: object) -> None:
@@ -1144,6 +1158,52 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
     assert persisted is not None
     expected = BackupHealth.QUARANTINED if corrupt else BackupHealth.HEALTHY
     assert persisted.health is expected
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert b"enable-rcon=" in live["server.properties"]
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        ("after_flip_cleanup", "publish_incomplete"),
+        ("after_flip_unconfirmed", "publish_unknown"),
+    ],
+)
+def test_an_object_restore_that_may_have_published_finishes_as_published(
+    fault: str, reason: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pointer write landed and lost its response (issue #3564), and then the
+    # staging cleanup failed, or no read could confirm the pointer. Neither may
+    # turn the restore into one that published nothing: the forced corrupt
+    # backup is quarantined, the platform properties are re-applied, the route
+    # audits the force-restore, and the 503 says the restore did not complete.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        "object",
+        fault,
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == reason
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
     scope = (StorageCommunityId(community_id), StorageServerId(server_id))
     live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
     assert b"enable-rcon=" in live["server.properties"]

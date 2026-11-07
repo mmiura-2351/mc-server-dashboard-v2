@@ -100,7 +100,9 @@ class BackupArchiveStore(abc.ABC):
         hold nothing a restore can stage: an unsafe member, or members inflating
         past the decompressed-size cap (issue #3237). A store failure after the
         archive went live raises :class:`BackupRestorePartiallyPublishedError`
-        carrying the published corrupt count (issue #3564).
+        carrying the published corrupt count, and one that cannot tell whether it
+        went live its subclass :class:`BackupRestorePublicationUnknownError`
+        (issue #3564).
         """
 
     @abc.abstractmethod

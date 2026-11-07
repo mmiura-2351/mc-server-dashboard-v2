@@ -96,6 +96,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupRestoreIncompleteError,
+    BackupRestorePartiallyPublishedError,
+    BackupRestorePublicationUnknownError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
     BackupUnsettledError,
@@ -554,8 +556,9 @@ async def restore_backup(
     the platform-managed ``server.properties`` keys could not be re-applied
     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
     could not be read, leaving the plugin rows unreconciled (#3221). The store
-    itself can also fail after it published, answering ``publish_incomplete``
-    (#3564); both steps still run over that working set. Any failure
+    itself can also fail after it published, answering ``publish_incomplete``, or
+    fail to confirm whether it published, answering ``publish_unknown`` (#3564);
+    both steps still run over that working set. Any failure
     after the publish is audited ``error``, under ``backup:force_restore`` when a
     forced corrupt backup was the one published (#3269).
     """
@@ -677,7 +680,14 @@ async def restore_backup(
             # mapped 503 the caller retries (the reconciliation is idempotent;
             # re-running the restore completes it).
             raise _service_unavailable("plugin_reconcile_incomplete") from exc
-        if isinstance(exc.cause, BackupStorageUnavailableError):
+        if isinstance(exc.cause, BackupRestorePublicationUnknownError):
+            # The store's flip failed and no read could confirm it (issue #3564):
+            # the backup may be live. A mapped 503 the caller retries; a re-run of
+            # the restore settles it either way.
+            raise _service_unavailable("publish_unknown") from exc
+        if isinstance(exc.cause, BackupRestorePartiallyPublishedError) and isinstance(
+            exc.cause.cause, BackupStorageUnavailableError
+        ):
             # The store failed after it had published the backup (issue #3564).
             # Unlike ``storage_unavailable``, which publishes nothing, the restored
             # working set is live: a mapped 503 the caller retries, since a

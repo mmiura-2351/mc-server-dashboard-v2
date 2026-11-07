@@ -934,8 +934,9 @@ export interface paths {
          *     the platform-managed ``server.properties`` keys could not be re-applied
          *     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
          *     could not be read, leaving the plugin rows unreconciled (#3221). The store
-         *     itself can also fail after it published, answering ``publish_incomplete``
-         *     (#3564); both steps still run over that working set. Any failure
+         *     itself can also fail after it published, answering ``publish_incomplete``, or
+         *     fail to confirm whether it published, answering ``publish_unknown`` (#3564);
+         *     both steps still run over that working set. Any failure
          *     after the publish is audited ``error``, under ``backup:force_restore`` when a
          *     forced corrupt backup was the one published (#3269).
          */

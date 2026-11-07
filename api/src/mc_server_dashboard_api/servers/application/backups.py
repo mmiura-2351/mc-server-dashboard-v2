@@ -470,9 +470,10 @@ class RestoreBackup:
                     raise
                 except BackupRestorePartiallyPublishedError as exc:
                     # The store published the backup, then failed before its
-                    # restore returned (issue #3564). The restored working set is
-                    # live, so the steps below still run over it; the store's
-                    # failure is raised once they have.
+                    # restore returned, or cannot tell whether it published (issue
+                    # #3564). The restored working set is (or may be) live, so the
+                    # steps below still run over it; they are harmless over the
+                    # prior one. The store's failure is raised once they have.
                     partial = exc
                     corrupt_count = exc.corrupt_count
                 published = corrupt_count
@@ -504,7 +505,7 @@ class RestoreBackup:
                 if partial is not None:
                     incomplete = BackupRestoreIncompleteError(
                         str(server_id.value),
-                        cause=partial.cause,
+                        cause=partial,
                         forced_corrupt_count=corrupt_count,
                     )
                     raise incomplete from partial

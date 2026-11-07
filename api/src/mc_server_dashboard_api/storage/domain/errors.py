@@ -276,6 +276,24 @@ class RestorePartiallyPublishedError(StorageError):
         super().__init__(f"restore published, then failed: {cause}")
 
 
+class RestorePublicationUnknownError(StorageError):
+    """A restore's flip failed, and whether it published is unknown (issue #3564).
+
+    The object backend's pointer write failed, and every read that could confirm
+    which snapshot the pointer names failed as well. The write may have landed (a
+    lost response), so the restored working set may be live: the caller handles
+    it as a publication rather than a restore that published nothing. Deliberately
+    distinct from :class:`RestorePartiallyPublishedError`, which the read
+    confirmed. ``cause`` is the pointer write's failure and ``report`` the
+    extracted working set's report.
+    """
+
+    def __init__(self, cause: Exception, report: WorkingSetReport) -> None:
+        self.cause = cause
+        self.report = report
+        super().__init__(f"restore may have published: {cause}")
+
+
 class IntegrityCheckError(StorageError):
     """A working set failed the structural ``.mca`` integrity gate (issue #739).
 
