@@ -98,6 +98,7 @@ from mc_server_dashboard_api.storage.integrity.archive import (
     archive_read_errors_as_unreadable,
     is_canonical_name,
     refuse_unrestorable_member,
+    without_tar_root_prefix,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     WorkingSetReport,
@@ -3130,7 +3131,15 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
     """
 
     with open(spool, "rb") as fileobj, tarfile.open(fileobj=fileobj, mode="r|*") as tar:
-        tar.extractall(dest, filter=_plain_member_filter)
+        tar.extractall(dest, filter=_ingest_member_filter)
+
+
+def _ingest_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
+    """:func:`_plain_member_filter` on the member read without the tar root
+    prefix (issue #3574); the ``./`` root entry itself is skipped."""
+
+    plain = without_tar_root_prefix(member)
+    return None if plain is None else _plain_member_filter(plain, dest)
 
 
 def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
@@ -3204,10 +3213,13 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
             archive_read_errors_as_unreadable(),
             tarfile.open(archive, mode="r:gz") as tar,
         ):
-            for member in tar:
-                # Judged and filtered first, then renamed to where it lands: both
-                # the reserved decision and the extraction use that normalised
-                # name (issue #3433).
+            for read in tar:
+                # Read without the tar root prefix, judged and filtered, then
+                # renamed to where it lands: both the reserved decision and the
+                # extraction use that normalised name (issues #3433, #3574).
+                member = without_tar_root_prefix(read)
+                if member is None:
+                    continue
                 refuse_unrestorable_member(member)
                 safe = _plain_member_filter(member, str(dest))
                 safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)

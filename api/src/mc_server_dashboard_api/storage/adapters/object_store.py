@@ -117,6 +117,7 @@ from mc_server_dashboard_api.storage.integrity.archive import (
     archive_read_errors_as_unreadable,
     is_canonical_name,
     refuse_unrestorable_member,
+    without_tar_root_prefix,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
@@ -841,11 +842,12 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             spool = await _spool_stream(stream, ".snapshot.", ".tar")
             try:
-                for name in await asyncio.to_thread(
+                for member_name, name in await asyncio.to_thread(
                     _safe_archive_members, spool, "r:*"
                 ):
                     await client.upload_multipart(
-                        incoming + name, _archive_member_parts(spool, name, "r:*")
+                        incoming + name,
+                        _archive_member_parts(spool, member_name, "r:*"),
                     )
             finally:
                 await _discard_spool(spool, raise_fault=False)
@@ -2531,16 +2533,22 @@ async def _tar_stream_from_objects(
     yield b"\0" * (blocksize * 2)
 
 
-def _safe_archive_members(spool: Path, mode: Literal["r:*", "r:gz"]) -> list[str]:
-    """List the regular-file member names of the spooled (tar / tar.gz) archive,
-    refusing ``..``/absolute names (the tar-side traversal defence, matching the
-    fs adapter's ``filter="data"`` posture) so a hostile archive cannot place
-    objects outside the server's key prefix, and any member at a non-canonical
-    name (issue #3574)."""
+def _safe_archive_members(
+    spool: Path, mode: Literal["r:*", "r:gz"]
+) -> list[tuple[str, str]]:
+    """List the regular-file members of the spooled (tar / tar.gz) archive as
+    ``(member name, key name)`` pairs, refusing ``..``/absolute names (the tar-side
+    traversal defence, matching the fs adapter's ``filter="data"`` posture) so a
+    hostile archive cannot place objects outside the server's key prefix, and any
+    member at a non-canonical name (issue #3574). The key name is the member's
+    without the tar root prefix (:func:`without_tar_root_prefix`)."""
 
-    names: list[str] = []
+    names: list[tuple[str, str]] = []
     with tarfile.open(str(spool), mode=mode) as tar:
-        for member in tar.getmembers():
+        for read in tar.getmembers():
+            member = without_tar_root_prefix(read)
+            if member is None:
+                continue
             if member.isfile():
                 pure = PurePosixPath(member.name)
                 if pure.is_absolute() or ".." in pure.parts:
@@ -2554,7 +2562,7 @@ def _safe_archive_members(spool: Path, mode: Literal["r:*", "r:gz"]) -> list[str
                     f"tar member name is not canonical: {member.name!r}"
                 )
             if member.isfile():
-                names.append(member.name)
+                names.append((read.name, member.name))
     return names
 
 
@@ -2637,18 +2645,22 @@ async def _archive_file_member_streams(
     try:
         while True:
             with archive_read_errors_as_unreadable():
-                member = await asyncio.to_thread(tar.next)
-            if member is None:
+                read = await asyncio.to_thread(tar.next)
+            if read is None:
                 return
-            # Judged before the reserved decision, so an unrestorable member at
-            # the reserved name is refused, not dropped.
+            # Read without the tar root prefix (issue #3574), then judged before
+            # the reserved decision, so an unrestorable member at the reserved
+            # name is refused, not dropped.
+            member = without_tar_root_prefix(read)
+            if member is None:
+                continue
             refuse_unrestorable_member(member)
             if dropped is not None and is_reserved_root_member(member.name):
                 dropped.append(member.name)
                 continue
             if not member.isfile():
                 continue
-            member_file = tar.extractfile(member)
+            member_file = tar.extractfile(read)
             if member_file is None:
                 continue
             yield member.name, _fileobj_parts(member_file)

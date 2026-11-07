@@ -333,15 +333,21 @@ depend on a Worker.
 one rule, shared code in both adapters (`refuse_unrestorable_member`), wherever
 they read them: in `restore_backup` and in the `check_backup_health` probe. So
 restore and the probe reach the same verdict for an archive on either backend
-(issue #3550). A member is restorable only when it is:
+(issue #3550). Each member is first read without the conventional tar root
+prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
+`./` directory entry is skipped, and exactly one leading `./` is stripped from
+every other member, so `./world/level.dat` is judged, restored and checked
+against the reserved names below as `world/level.dat`. A member is restorable
+only when it is then:
 
 - a regular file or a directory — a hard link, symlink, device, FIFO or other
   special member is refused;
 - at a relative name with no `..` component — an absolute name (leading `/`)
   is refused, and so is any `..`, even one that stays inside the tree; and
 - at a canonical name, with no empty or `.` segment — `world//level.dat`,
-  `world/./level.dat` and `./level.dat` are refused (issue #3574). The one
-  trailing `/` tar writes on a directory member is fine.
+  `world/./level.dat` and `././level.dat` (a second `./` once the root prefix
+  is gone) are refused (issue #3574). The one trailing `/` tar writes on a
+  directory member is fine.
 
 An archive holding a refused member reads fine, but nothing can be restored
 from it, so restore and the probe both raise `ArchiveUnreadableError` whatever
@@ -364,9 +370,9 @@ both out (issue #3574):
   at its canonical name.
 
 The fs extraction also keeps `tarfile.data_filter`'s other protections (mode
-sanitising and the like) on top of the rule. Snapshot ingest takes only
-canonical names too, on both backends, so no new non-canonical key is ever
-stored.
+sanitising and the like) on top of the rule. Snapshot ingest reads members the
+same way — root prefix stripped, root entry skipped — and takes only canonical
+names, on both backends, so no new non-canonical key is ever stored.
 
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
@@ -436,7 +442,9 @@ on both backends, and logs one `WARNING` naming the backup and how many members
 it dropped. The member rule (Section 3.3) is applied first, so an absolute or
 `..` spelling such as `/.mcsd_generation/x`, `world/../.mcsd_generation/x` or
 `.mcsd_generation/../server.properties` is refused as an unrestorable archive,
-not dropped. The backup health check judges members the same way, so it judges
+not dropped. A `./.mcsd_generation-cache` member is the same member as
+`.mcsd_generation-cache` once the tar root prefix is stripped, so it is dropped.
+The backup health check judges members the same way, so it judges
 exactly what a restore would publish. A nested same-named member is restored as usual. The dropped entries are
 inert anyway — the Worker would skip them on unpack — so dropping them only keeps
 them out of `current/`.

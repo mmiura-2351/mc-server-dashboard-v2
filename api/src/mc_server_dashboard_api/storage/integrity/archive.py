@@ -21,7 +21,8 @@ backends, and the fs health check — reach the same verdict through
 :func:`archive_read_errors_as_unreadable` (issue #3230). The restore and health
 paths of both backends judge each member by :func:`refuse_unrestorable_member`
 (issue #3550), and both backends' snapshot ingest takes only the canonical names
-:func:`is_canonical_name` admits (issue #3574).
+:func:`is_canonical_name` admits (issue #3574). Every one of those paths first
+reads a member through :func:`without_tar_root_prefix`.
 """
 
 from __future__ import annotations
@@ -183,13 +184,34 @@ def archive_read_errors_as_unreadable() -> Iterator[None]:
         raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc
 
 
+def without_tar_root_prefix(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    """Read ``member`` without the conventional tar root prefix (issue #3574).
+
+    ``tar -C dir -cf - .`` writes the root itself as a ``.`` (``./``) directory
+    entry and every other member under a leading ``./``. The root entry returns
+    ``None``: it is the directory everything restores into, not a member of it.
+    Any other member comes back with exactly one leading ``./`` stripped, so
+    ``./world/level.dat`` is judged — by :func:`refuse_unrestorable_member`,
+    :func:`is_canonical_name` and the reserved-name decision — as
+    ``world/level.dat``. A second ``./`` stays and is refused as non-canonical.
+    """
+
+    if member.isdir() and member.name.removesuffix("/") == ".":
+        return None
+    if member.name.startswith("./"):
+        return member.replace(name=member.name[2:], deep=False)
+    return member
+
+
 def is_canonical_name(name: str, *, is_dir: bool = False) -> bool:
     """Whether a slash-separated name has no empty or ``.`` segment (issue #3574).
 
     ``a//b``, ``a/./b`` and ``./a`` name the same place as a canonical spelling, but
     a store that keeps them verbatim lists an empty or ``.`` directory whose child
     path is its parent again. One trailing ``/`` on a directory member is allowed:
-    it is how tar writes one. ``..`` is judged separately, as traversal.
+    it is how tar writes one. ``..`` is judged separately, as traversal. An
+    archive member is judged after :func:`without_tar_root_prefix`, which strips
+    the one leading ``./`` tar writes.
     """
 
     if is_dir:
@@ -206,11 +228,13 @@ def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
     member, an absolute name, a ``..`` — even one that stays inside the tree — and
     an empty or ``.`` segment (:func:`is_canonical_name`) raise
     :class:`ArchiveUnreadableError`: the archive reads, but nothing can be
-    restored from it, override or not. The platform's own producers emit none of
-    these: the Worker's pack and the fs writer name members after real directory
-    entries, and the object backend's archive writer leaves out the legacy keys a
-    store can still hold — the ``//.dir`` key of issue #1944, and a non-canonical
-    key ingest accepted before issue #3574 (issue #3574).
+    restored from it, override or not. ``member`` is the one
+    :func:`without_tar_root_prefix` returned, so a leading ``./`` is already gone.
+    The platform's own producers emit none of these: the Worker's pack and the fs
+    writer name members after real directory entries, and the object backend's
+    archive writer leaves out the legacy keys a store can still hold — the
+    ``//.dir`` key of issue #1944, and a non-canonical key ingest accepted before
+    issue #3574 (issue #3574).
     """
 
     if not (member.isfile() or member.isdir()):
