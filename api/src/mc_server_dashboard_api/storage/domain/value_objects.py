@@ -92,17 +92,6 @@ class SnapshotId:
         return cls(uuid.uuid4().hex)
 
 
-@dataclass(frozen=True)
-class LiveSnapshot:
-    """What a server's ``current`` named at one read (issue #3564).
-
-    ``snapshot`` is the published snapshot it resolved to, ``None`` when nothing
-    was published. Two reads are equal exactly when they saw the same publish.
-    """
-
-    snapshot: SnapshotId | None
-
-
 # Version ids are minted by _new_version_id (digits + hex), so only
 # alphanumerics, hyphens and underscores are legitimate.  Rejecting everything
 # else blocks path-traversal payloads (e.g. ``../../../etc/passwd``) before the

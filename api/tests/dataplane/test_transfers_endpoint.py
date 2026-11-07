@@ -18,9 +18,9 @@ import tarfile
 import tempfile
 import threading
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi import FastAPI
@@ -46,6 +46,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     SnapshotHandleError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
+    API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
     SnapshotHandle,
     Storage,
@@ -53,7 +54,6 @@ from mc_server_dashboard_api.storage.domain.port import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
-    LiveSnapshot,
     RelPath,
     ServerId,
 )
@@ -591,23 +591,23 @@ def test_snapshot_refused_when_edit_lands_during_upload_window(
     base = asyncio.run(storage.current_generation(c, s))
 
     # Simulate the at-rest edit landing in the upload window by hooking the guard's
-    # current_generation read: the FIRST call (the guard) returns the base, then
+    # settled_generation read: the FIRST call (the guard) returns the base, then
     # mutates current/ in place so the store advances past it before the commit's
     # re-check. The commit re-reads the now-advanced generation and refuses.
-    real_current_generation = storage.current_generation
+    real_settled_generation = storage.settled_generation
     edited = False
 
-    async def _hooked_current_generation(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
     ) -> int:
         nonlocal edited
-        value = await real_current_generation(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not edited:
             edited = True
             await storage.write_file(c, s, RelPath("k"), b"edited-mid-upload")
         return value
 
-    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     body = _tar_bytes({"k": b"in-flight"})
     with client:
@@ -624,7 +624,7 @@ def test_snapshot_refused_when_edit_lands_during_upload_window(
     assert resp.status_code == 409
     assert resp.json()["reason"] == "stale_generation"
 
-    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = real_settled_generation  # type: ignore[method-assign]
 
     # The edit that landed in the window survives; the stale worker upload is discarded.
     async def _read() -> bytes:
@@ -650,23 +650,23 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     asyncio.run(_publish(storage, community, server, {"k": b"snap"}))
     base = asyncio.run(storage.current_generation(c, s))
 
-    # Same upload-window hook as the declared-base test: the guard's current_generation
+    # Same upload-window hook as the declared-base test: the guard's settled_generation
     # read returns the base, then mutates current/ in place so the store advances before
     # the commit's re-check.
-    real_current_generation = storage.current_generation
+    real_settled_generation = storage.settled_generation
     edited = False
 
-    async def _hooked_current_generation(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
     ) -> int:
         nonlocal edited
-        value = await real_current_generation(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not edited:
             edited = True
             await storage.write_file(c, s, RelPath("k"), b"edited-mid-upload")
         return value
 
-    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     body = _tar_bytes({"k": b"in-flight"})
     with client:
@@ -681,7 +681,7 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     # The 409 carries the guard-time current (= expected_base) as base_generation.
     assert resp.json()["base_generation"] == base
 
-    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = real_settled_generation  # type: ignore[method-assign]
 
     # The edit that landed in the window survives; the stale worker upload is discarded.
     async def _read() -> bytes:
@@ -713,23 +713,23 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     base = asyncio.run(storage.current_generation(c, s))
 
     # Simulate the concurrent delete landing in the upload window by hooking the
-    # guard's current_generation read: the FIRST call (the guard) returns the base,
+    # guard's settled_generation read: the FIRST call (the guard) returns the base,
     # then prunes the store (as DeleteServer's retention prune does) before the
     # commit's re-check.
-    real_current_generation = storage.current_generation
+    real_settled_generation = storage.settled_generation
     pruned = False
 
-    async def _hooked_current_generation(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
     ) -> int:
         nonlocal pruned
-        value = await real_current_generation(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not pruned:
             pruned = True
             await storage.prune_to_final_snapshot(c, s)
         return value
 
-    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     body = _tar_bytes({"k": b"in-flight"})
     with client:
@@ -746,7 +746,7 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     assert resp.status_code == 409
     assert resp.json()["reason"] == "deleted_during_upload"
 
-    storage.current_generation = real_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = real_settled_generation  # type: ignore[method-assign]
 
 
 def _fs_storage(tmp_path: Path) -> Storage:
@@ -775,20 +775,20 @@ def test_first_upload_refused_when_delete_prunes_never_published_store(
     community, server = _scope()
     c, s = CommunityId(community), ServerId(server)
 
-    real_current_generation = storage.current_generation
+    real_settled_generation = storage.settled_generation
     pruned = False
 
-    async def _hooked_current_generation(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
     ) -> int:
         nonlocal pruned
-        value = await real_current_generation(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not pruned:
             pruned = True
             await storage.prune_to_final_snapshot(c, s)
         return value
 
-    storage.current_generation = _hooked_current_generation  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     with client:
         resp = client.post(
@@ -2558,7 +2558,6 @@ def test_hydrate_send_stall_releases_reader_lease(
         )
 
         from collections.abc import MutableMapping
-        from typing import Any
 
         async def stalling_send(message: MutableMapping[str, Any]) -> None:
             if message.get("type") == "http.response.body" and message.get("body"):
@@ -2904,269 +2903,311 @@ def test_releasing_propagates_aclose_to_inner_iterator() -> None:
     asyncio.run(_drive())
 
 
-# How long a test waits for a paused restore to reach its bump (issue #3564).
-# Generous, because the restore's staging fsync runs first; the wait asserts, so
-# a slow host fails the test rather than letting the guard read outside the
-# window and pass.
-_WINDOW_WAIT_SECONDS = 120
+# --- the guard observes the store atomically (issue #3564) -------------------
 
+# How long a test waits on a mutation it paused. Generous, because a restore's
+# staging fsync runs before its bump; every wait asserts, so a slow host fails
+# the test instead of letting it pass without the schedule it names.
+_MUTATION_WAIT_SECONDS = 120
 
-def _pause_restores_after_their_bump(
-    storage: Storage,
-) -> tuple[threading.Event, threading.Event]:
-    """Hold a restore between its generation bump and its flip (issue #3564).
+# How long a paused mutation stays paused once the guard has started: long
+# enough for an unlocked guard read to return and the guard to move on.
+_GUARD_HEADSTART_SECONDS = 0.5
 
-    Returns ``(bumped, release)``: ``bumped`` is set once a restore has bumped,
-    and the restore then waits, holding the server lock, until ``release``.
-    """
+_OTHER_WORKER = "other-worker"
 
-    bumped, release = threading.Event(), threading.Event()
-    if isinstance(storage, FsStorage):
-        real_bump_marker = storage._bump_marker
-
-        def _bump_marker(server_root: Path, publisher: str | None) -> None:
-            real_bump_marker(server_root, publisher)
-            if publisher == RESTORE_PUBLISHER:
-                bumped.set()
-                release.wait(_WINDOW_WAIT_SECONDS)
-
-        storage._bump_marker = _bump_marker  # type: ignore[method-assign]
-        return bumped, release
-    assert isinstance(storage, ObjectStorage)
-    real_bump_generation = storage._bump_generation
-
-    async def _bump_generation(
-        client: object, server_prefix: str, publisher: str | None
-    ) -> int:
-        generation = await real_bump_generation(
-            client,  # type: ignore[arg-type]
-            server_prefix,
-            publisher,
-        )
-        if publisher == RESTORE_PUBLISHER:
-            bumped.set()
-            await asyncio.to_thread(release.wait, _WINDOW_WAIT_SECONDS)
-        return generation
-
-    storage._bump_generation = _bump_generation  # type: ignore[method-assign]
-    return bumped, release
-
-
-@pytest.mark.parametrize(
-    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
-)
-def test_snapshot_guarded_inside_a_restore_window_cannot_overwrite_the_restore(
-    tmp_path: Path, make_storage: Callable[[Path], Storage]
-) -> None:
-    # Issue #3564: a restore bumps the generation before it flips. A snapshot
-    # whose guard reads the store in between (no base header, so the guard's
-    # reading is its only base) must still be refused once the restore has
-    # flipped, or its pre-restore world would replace the restored one.
-    storage = make_storage(tmp_path)
-    client, _ = _setup(tmp_path)
-    _shared_app.dependency_overrides[get_storage] = lambda: storage
-    community, server = _scope()
-    c, s = CommunityId(community), ServerId(server)
-
-    async def _publish_files(files: dict[str, bytes]) -> None:
-        handle = await storage.begin_snapshot(c, s)
-
-        async def _stream() -> AsyncIterator[bytes]:
-            yield _tar_bytes(files)
-
-        await storage.write_snapshot(handle, _stream())
-        await storage.commit_snapshot(handle)
-
-    async def _arrange() -> BackupKey:
-        await _publish_files({"k": b"backed-up"})
-        key = await storage.create_backup_from_current(c, s)
-        await _publish_files({"k": b"pre-restore"})
-        return key
-
-    key = asyncio.run(_arrange())
-    bumped, release = _pause_restores_after_their_bump(storage)
-    restores: list[asyncio.Task[object]] = []
-    real_current_generation = storage.current_generation
-    real_write_snapshot = storage.write_snapshot
-
-    async def _guard_reads_inside_the_window(
-        community_id: CommunityId, server_id: ServerId
-    ) -> int:
-        if not restores:
-            restores.append(asyncio.create_task(storage.restore_backup(c, s, key)))
-            assert await asyncio.to_thread(bumped.wait, _WINDOW_WAIT_SECONDS)
-        return await real_current_generation(community_id, server_id)
-
-    async def _restore_flips_during_the_upload(
-        handle: SnapshotHandle,
-        stream: AsyncIterator[bytes],
-        *,
-        expected_base: int | None = None,
-    ) -> None:
-        await real_write_snapshot(handle, stream, expected_base=expected_base)
-        release.set()
-        await restores[0]
-
-    storage.current_generation = _guard_reads_inside_the_window  # type: ignore[method-assign]
-    storage.write_snapshot = _restore_flips_during_the_upload  # type: ignore[method-assign]
-    try:
-        with client:
-            resp = client.post(
-                _url(community, server, "snapshot"),
-                content=_tar_bytes({"k": b"in-flight"}),
-                headers={**_auth(), "X-Worker-Id": str(uuid.uuid4())},
-            )
-    finally:
-        release.set()
-        storage.current_generation = real_current_generation  # type: ignore[method-assign]
-        storage.write_snapshot = real_write_snapshot  # type: ignore[method-assign]
-
-    assert resp.status_code == 409
-    assert resp.json()["reason"] == "stale_generation"
-
-    async def _live() -> bytes:
-        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
-
-    assert _read_tar(asyncio.run(_live())) == {"k": b"backed-up"}
-
-
-_Step = Callable[[Storage, CommunityId, ServerId], Awaitable[None]]
-
-
-async def _nothing(storage: Storage, c: CommunityId, s: ServerId) -> None:
-    del storage, c, s
-
-
-def _post_stale_snapshot_around_the_guard_reads(
-    tmp_path: Path, storage: Storage, *, before: _Step, between: _Step
-) -> tuple[int, dict[str, bytes]]:
-    """POST a stale snapshot, running ``before`` and ``between`` at its guard reads.
-
-    The guard reads the store twice, the live snapshot and the generation (issue
-    #3564). On the first of them, whichever it is, ``before`` runs just before the
-    read and ``between`` right after it, so ``between`` lands between the two.
-    The POST carries a Worker id and no base header, so the guard's readings are
-    its only base. Returns the status and the world live afterwards.
-    """
-
-    client, _ = _setup(tmp_path)
-    _shared_app.dependency_overrides[get_storage] = lambda: storage
-    community, server = _scope()
-    c, s = CommunityId(community), ServerId(server)
-    real_current_generation = storage.current_generation
-    real_live_snapshot = storage.live_snapshot
-    first: list[bool] = []
-
-    async def _around[T](read: Callable[[], Awaitable[T]]) -> T:
-        if first:
-            return await read()
-        first.append(True)
-        await before(storage, c, s)
-        value = await read()
-        await between(storage, c, s)
-        return value
-
-    async def _current_generation(
-        community_id: CommunityId, server_id: ServerId
-    ) -> int:
-        return await _around(lambda: real_current_generation(community_id, server_id))
-
-    async def _live_snapshot(
-        community_id: CommunityId, server_id: ServerId
-    ) -> LiveSnapshot:
-        return await _around(lambda: real_live_snapshot(community_id, server_id))
-
-    storage.current_generation = _current_generation  # type: ignore[method-assign]
-    storage.live_snapshot = _live_snapshot  # type: ignore[method-assign]
-    try:
-        with client:
-            resp = client.post(
-                _url(community, server, "snapshot"),
-                content=_tar_bytes({"k": b"in-flight"}),
-                headers={**_auth(), "X-Worker-Id": str(uuid.uuid4())},
-            )
-    finally:
-        storage.current_generation = real_current_generation  # type: ignore[method-assign]
-        storage.live_snapshot = real_live_snapshot  # type: ignore[method-assign]
-
-    async def _live() -> bytes:
-        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
-
-    return resp.status_code, _read_tar(asyncio.run(_live()))
+_Mutation = Callable[
+    [Storage, CommunityId, ServerId, BackupKey], Coroutine[Any, Any, object]
+]
 
 
 async def _publish_to(
-    storage: Storage, c: CommunityId, s: ServerId, files: dict[str, bytes]
-) -> None:
+    storage: Storage,
+    c: CommunityId,
+    s: ServerId,
+    files: dict[str, bytes],
+    *,
+    publisher: str | None = None,
+) -> int:
     handle = await storage.begin_snapshot(c, s)
 
     async def _stream() -> AsyncIterator[bytes]:
         yield _tar_bytes(files)
 
     await storage.write_snapshot(handle, _stream())
-    await storage.commit_snapshot(handle)
+    return await storage.commit_snapshot(handle, publisher=publisher)
 
 
+async def _restore(
+    storage: Storage, c: CommunityId, s: ServerId, key: BackupKey
+) -> object:
+    return await storage.restore_backup(c, s, key)
+
+
+async def _commit(
+    storage: Storage, c: CommunityId, s: ServerId, key: BackupKey
+) -> object:
+    del key
+    return await _publish_to(
+        storage, c, s, {"k": b"committed"}, publisher=_OTHER_WORKER
+    )
+
+
+async def _edit(
+    storage: Storage, c: CommunityId, s: ServerId, key: BackupKey
+) -> object:
+    del key
+    await storage.write_file(c, s, RelPath("k"), b"edited")
+    return None
+
+
+# Each mutation of the published working set: how to run it, the publisher its
+# generation marker records, whether its world changes before ("after") or
+# after ("before") that marker write, and the world it leaves.
+_MUTATIONS: dict[str, tuple[_Mutation, str, str, dict[str, bytes]]] = {
+    "restore": (_restore, RESTORE_PUBLISHER, "after", {"k": b"backed-up"}),
+    "commit": (_commit, _OTHER_WORKER, "before", {"k": b"committed"}),
+    "edit": (_edit, API_EDIT_PUBLISHER, "before", {"k": b"edited"}),
+}
+
+
+def _pause_mutation_at_its_marker(
+    storage: Storage, target: str, when: str
+) -> tuple[threading.Event, threading.Event]:
+    """Hold the mutation recording ``target`` at its generation marker write.
+
+    ``when`` is ``"before"`` or ``"after"`` that write, so the pause splits the
+    mutation: a restore after its bump and before its flip, a commit after its
+    flip and before its bump, an edit after its file write and before its bump.
+    The mutation holds the server lock while paused. Returns ``(paused,
+    release)``.
+    """
+
+    paused, release = threading.Event(), threading.Event()
+    if isinstance(storage, FsStorage):
+        real_write_marker = storage._write_marker
+
+        def _hold() -> None:
+            paused.set()
+            assert release.wait(_MUTATION_WAIT_SECONDS)
+
+        def _write_marker(
+            server_root: Path, generation: int, publisher: str | None
+        ) -> None:
+            if publisher == target and when == "before":
+                _hold()
+            real_write_marker(server_root, generation, publisher)
+            if publisher == target and when == "after":
+                _hold()
+
+        storage._write_marker = _write_marker  # type: ignore[method-assign]
+        return paused, release
+    assert isinstance(storage, ObjectStorage)
+    real_bump_generation = storage._bump_generation
+
+    async def _hold_on_the_loop() -> None:
+        paused.set()
+        assert await asyncio.to_thread(release.wait, _MUTATION_WAIT_SECONDS)
+
+    async def _bump_generation(
+        client: Any, server_prefix: str, publisher: str | None
+    ) -> int:
+        if publisher == target and when == "before":
+            await _hold_on_the_loop()
+        generation = await real_bump_generation(client, server_prefix, publisher)
+        if publisher == target and when == "after":
+            await _hold_on_the_loop()
+        return generation
+
+    storage._bump_generation = _bump_generation  # type: ignore[method-assign]
+    return paused, release
+
+
+_Hook = Callable[[], Awaitable[None]]
+
+
+def _post_stale_snapshot(
+    tmp_path: Path,
+    storage: Storage,
+    community: uuid.UUID,
+    server: uuid.UUID,
+    *,
+    before: _Hook,
+    after: _Hook,
+    began: list[bool] | None = None,
+) -> tuple[int, dict[str, bytes], list[int | None]]:
+    """POST a stale snapshot, with ``before`` and ``after`` around its guard read.
+
+    The POST carries a Worker id and no base header, so the guard's reading of
+    the store is its only base. ``before`` runs as the guard's first store read
+    starts and ``after`` once it has returned, whichever read that is.
+    ``began`` gets an entry once the guard has finished observing (the route
+    calls ``begin_snapshot``). Returns the status, the world live afterwards,
+    and the base the upload was staged against.
+    """
+
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    observed: list[int | None] = []
+    began = began if began is not None else []
+    first: list[bool] = []
+    hooked: dict[str, Callable[..., Awaitable[object]]] = {}
+
+    def _guard_read(name: str) -> Callable[..., Awaitable[object]]:
+        real = getattr(storage, name)
+
+        async def _read(*args: object) -> object:
+            if first:
+                return await real(*args)
+            first.append(True)
+            await before()
+            value = await real(*args)
+            await after()
+            return value
+
+        return _read
+
+    for name in ("live_snapshot", "current_generation", "settled_generation"):
+        if hasattr(storage, name):
+            hooked[name] = getattr(storage, name)
+            setattr(storage, name, _guard_read(name))
+    real_begin_snapshot = storage.begin_snapshot
+    real_write_snapshot = storage.write_snapshot
+
+    async def _begin_snapshot(
+        community_id: CommunityId, server_id: ServerId
+    ) -> SnapshotHandle:
+        began.append(True)
+        return await real_begin_snapshot(community_id, server_id)
+
+    async def _write_snapshot(
+        handle: SnapshotHandle,
+        stream: AsyncIterator[bytes],
+        *,
+        expected_base: int | None = None,
+    ) -> None:
+        observed.append(expected_base)
+        await real_write_snapshot(handle, stream, expected_base=expected_base)
+
+    storage.begin_snapshot = _begin_snapshot  # type: ignore[method-assign]
+    storage.write_snapshot = _write_snapshot  # type: ignore[method-assign]
+    try:
+        with client:
+            resp = client.post(
+                _url(community, server, "snapshot"),
+                content=_tar_bytes({"k": b"in-flight"}),
+                headers={**_auth(), "X-Worker-Id": str(uuid.uuid4())},
+            )
+    finally:
+        for name, real in hooked.items():
+            setattr(storage, name, real)
+        storage.begin_snapshot = real_begin_snapshot  # type: ignore[method-assign]
+        storage.write_snapshot = real_write_snapshot  # type: ignore[method-assign]
+
+    c, s = CommunityId(community), ServerId(server)
+
+    async def _live() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    return resp.status_code, _read_tar(asyncio.run(_live())), observed
+
+
+async def _arrange_a_backup(storage: Storage, c: CommunityId, s: ServerId) -> BackupKey:
+    """A backed-up world, then a newer one: the restore's and the upload's base."""
+
+    await _publish_to(storage, c, s, {"k": b"backed-up"})
+    key = await storage.create_backup_from_current(c, s)
+    await _publish_to(storage, c, s, {"k": b"pre-mutation"})
+    return key
+
+
+async def _no_hook() -> None:
+    pass
+
+
+@pytest.mark.parametrize("mutation", list(_MUTATIONS))
 @pytest.mark.parametrize(
     "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
 )
-def test_a_restore_flipping_between_the_guard_reads_cannot_be_overwritten(
-    tmp_path: Path, make_storage: Callable[[Path], Storage]
+def test_a_mutation_completing_after_the_guard_observes_refuses_the_upload(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], mutation: str
 ) -> None:
-    # Issue #3564: a restore that has bumped is released and flips between the
-    # guard's two reads. Read generation first, the guard saw the restore's
-    # generation and then its snapshot, so the pre-restore upload matched both
-    # at commit and replaced the restore. Read snapshot first, it sees the
-    # replaced snapshot beside the new generation, which the commit refuses.
+    # Issue #3564: a restore, a commit or an at-rest edit completes right after
+    # the guard's first store read, while the stale upload is on its way. It
+    # advances the generation the guard observed, so the commit is refused and
+    # the mutation's world stays live. (Read as two unlocked reads, snapshot
+    # first, an edit between them was seen whole and overwritten.)
     storage = make_storage(tmp_path)
-    bumped, release = _pause_restores_after_their_bump(storage)
-    restores: list[asyncio.Task[object]] = []
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+    key = asyncio.run(_arrange_a_backup(storage, c, s))
+    run, _, _, world = _MUTATIONS[mutation]
 
-    async def _restore_to_its_bump(
-        storage: Storage, c: CommunityId, s: ServerId
-    ) -> None:
-        await _publish_to(storage, c, s, {"k": b"backed-up"})
-        key = await storage.create_backup_from_current(c, s)
-        await _publish_to(storage, c, s, {"k": b"pre-restore"})
-        restores.append(asyncio.create_task(storage.restore_backup(c, s, key)))
-        assert await asyncio.to_thread(bumped.wait, _WINDOW_WAIT_SECONDS)
+    async def _the_mutation() -> None:
+        await run(storage, c, s, key)
 
-    async def _restore_flips(storage: Storage, c: CommunityId, s: ServerId) -> None:
+    status_code, live, _ = _post_stale_snapshot(
+        tmp_path, storage, community, server, before=_no_hook, after=_the_mutation
+    )
+
+    assert status_code == 409
+    assert live == world
+
+
+@pytest.mark.parametrize("mutation", list(_MUTATIONS))
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+def test_a_guard_starting_during_a_mutation_observes_it_whole(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], mutation: str
+) -> None:
+    # Issue #3564: the mutation is paused half done while holding the server
+    # lock (a restore bumped but not flipped, a commit flipped but not bumped,
+    # an edit written but not bumped) when the guard starts. The guard's read
+    # waits for the lock, so it never moves on while the mutation is paused,
+    # and it observes the mutation's final generation, never a half of it.
+    # The upload is then ordered after the mutation, exactly as one sent once
+    # the mutation had finished; only a mutation completing AFTER the
+    # observation refuses it (the test above).
+    storage = make_storage(tmp_path)
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+    key = asyncio.run(_arrange_a_backup(storage, c, s))
+    final_generation = asyncio.run(storage.current_generation(c, s)) + 1
+    run, publisher, when, _ = _MUTATIONS[mutation]
+    paused, release = _pause_mutation_at_its_marker(storage, publisher, when)
+    moved_on_while_paused: list[bool] = []
+    began: list[bool] = []
+    tasks: list[asyncio.Task[object]] = []
+
+    async def _release_after_a_headstart(begun: int) -> object:
+        # ``began`` already counts a commit's own ``begin_snapshot``; only one
+        # past ``begun`` is the guard moving on.
+        await asyncio.sleep(_GUARD_HEADSTART_SECONDS)
+        moved_on_while_paused.append(len(began) > begun)
         release.set()
-        await restores[0]
+        return None
+
+    async def _pause_the_mutation() -> None:
+        tasks.append(asyncio.create_task(run(storage, c, s, key)))
+        assert await asyncio.to_thread(paused.wait, _MUTATION_WAIT_SECONDS)
+        tasks.append(asyncio.create_task(_release_after_a_headstart(len(began))))
 
     try:
-        status_code, live = _post_stale_snapshot_around_the_guard_reads(
-            tmp_path, storage, before=_restore_to_its_bump, between=_restore_flips
+        status_code, live, observed = _post_stale_snapshot(
+            tmp_path,
+            storage,
+            community,
+            server,
+            before=_pause_the_mutation,
+            after=_no_hook,
+            began=began,
         )
     finally:
         release.set()
 
-    assert status_code == 409
-    assert live == {"k": b"backed-up"}
-
-
-@pytest.mark.parametrize(
-    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
-)
-def test_a_commit_between_the_guard_reads_cannot_be_overwritten(
-    tmp_path: Path, make_storage: Callable[[Path], Storage]
-) -> None:
-    # Issue #3564: another snapshot commits (flip, then bump) between the
-    # guard's two reads. Snapshot first, the guard holds the snapshot that
-    # commit replaced; generation first, the generation it advanced. Either
-    # way the commit's locked re-check refuses the stale upload.
-    storage = make_storage(tmp_path)
-
-    async def _seed(storage: Storage, c: CommunityId, s: ServerId) -> None:
-        await _publish_to(storage, c, s, {"k": b"seeded"})
-
-    async def _another_commit(storage: Storage, c: CommunityId, s: ServerId) -> None:
-        await _publish_to(storage, c, s, {"k": b"committed-between"})
-
-    status_code, live = _post_stale_snapshot_around_the_guard_reads(
-        tmp_path, storage, before=_seed, between=_another_commit
-    )
-
-    assert status_code == 409
-    assert live == {"k": b"committed-between"}
+    assert moved_on_while_paused == [False]
+    # The last staging is the upload's (a commit stages its own one first).
+    assert observed[-1] == final_generation
+    assert status_code == 204
+    assert live == {"k": b"in-flight"}

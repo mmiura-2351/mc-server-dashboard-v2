@@ -500,18 +500,17 @@ async def publish_snapshot(
         # publish / restore performed by storage internals, which read
         # ``current`` under the same lock themselves).
         #
-        # The live snapshot is captured too and re-checked at commit the same
-        # way (issue #3564), and it MUST be read BEFORE the generation. A
-        # restore bumps the generation, then flips ``current``; a commit flips,
-        # then bumps. Reading the snapshot first, an operation that lands
-        # between or around the two reads either leaves one of them stale
-        # (the old snapshot beside a restore's new generation, or a commit's
-        # old generation), which the commit's locked re-check refuses, or is
-        # seen whole. Reading the generation first, a restore that flips
-        # between the reads is seen as its generation AND its snapshot, so an
-        # upload of the world it replaced would pass the re-check.
-        expected_snapshot = await storage.live_snapshot(*scope)
-        current = await storage.current_generation(*scope)
+        # The read is ``settled_generation``, taken under the per-server
+        # lock (issue #3564). Every mutation of the published working set
+        # (a commit's flip and bump, a restore's bump and flip, an at-rest
+        # edit's write and bump, a prune) runs whole under that lock, so this
+        # observation can never land inside one: it waits for a mutation in
+        # progress and sees it complete. Any mutation that completes after
+        # it advances the generation, which the commit's locked re-check
+        # refuses. An unlocked read could see a restore's bump without its
+        # flip, or an edit's write without its bump, and adopt a base that
+        # still matches once that mutation finishes.
+        current = await storage.settled_generation(*scope)
         expected_base: int | None = current
         if base_generation is not None:
             if base_generation < current:
@@ -598,7 +597,6 @@ async def publish_snapshot(
                 handle,
                 publisher=publisher,
                 expected_base=expected_base,
-                expected_snapshot=expected_snapshot,
                 publisher_fence=publisher_fence,
             )
             # Stamp the new authoritative generation on the response (issue #763): the
