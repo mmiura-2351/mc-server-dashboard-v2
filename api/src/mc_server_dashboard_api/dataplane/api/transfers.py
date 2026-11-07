@@ -499,13 +499,20 @@ async def publish_snapshot(
         # callers genuinely outside this upload guard (e.g. an initial
         # publish / restore performed by storage internals, which read
         # ``current`` under the same lock themselves).
+        #
+        # The live snapshot is captured too and re-checked at commit the same
+        # way (issue #3564), and it MUST be read BEFORE the generation. A
+        # restore bumps the generation, then flips ``current``; a commit flips,
+        # then bumps. Reading the snapshot first, an operation that lands
+        # between or around the two reads either leaves one of them stale
+        # (the old snapshot beside a restore's new generation, or a commit's
+        # old generation), which the commit's locked re-check refuses, or is
+        # seen whole. Reading the generation first, a restore that flips
+        # between the reads is seen as its generation AND its snapshot, so an
+        # upload of the world it replaced would pass the re-check.
+        expected_snapshot = await storage.live_snapshot(*scope)
         current = await storage.current_generation(*scope)
         expected_base: int | None = current
-        # The live snapshot beside it, re-checked at commit the same way (issue
-        # #3564): a restore bumps the generation before it flips ``current``, so a
-        # guard reading between the two sees the restore's generation over the
-        # snapshot it replaces. Read in either order, one of the two then moves.
-        expected_snapshot = await storage.live_snapshot(*scope)
         if base_generation is not None:
             if base_generation < current:
                 # The publisher's working set was hydrated from
