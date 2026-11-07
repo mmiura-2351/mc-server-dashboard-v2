@@ -46,19 +46,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import functools
 import hashlib
 import io
 import json
 import logging
-import os
 import tarfile
-import tempfile
 import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -70,7 +67,12 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     FailureSeam,
     PublishPhase,
 )
-from mc_server_dashboard_api.storage.adapters.fs import _translating_io_faults
+from mc_server_dashboard_api.storage.adapters.fs import (
+    _create_spool,
+    _discard_spool,
+    _run_spool_writer,
+    _translating_io_faults,
+)
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     ArchiveUnreadableError,
@@ -847,7 +849,7 @@ class ObjectStorage(Storage):
                         incoming + name, _archive_member_parts(spool, name, "r:*")
                     )
             finally:
-                await asyncio.to_thread(spool.unlink, missing_ok=True)
+                await _discard_spool(spool, raise_fault=False)
 
     async def commit_snapshot(
         self,
@@ -1124,18 +1126,14 @@ class ObjectStorage(Storage):
                     # BEFORE any working-set object is deleted, so a pack/upload
                     # failure leaves the working set intact and the error propagates
                     # (fail-closed, #777).
-                    fd, spool_name = await asyncio.to_thread(
-                        tempfile.mkstemp, prefix=".final.", suffix=".tar.gz"
-                    )
-                    await asyncio.to_thread(_close_fd, fd)
-                    spool = Path(spool_name)
+                    spool = await _create_spool(".final.", ".tar.gz")
                     try:
                         await _write_backup_targz(client, snapshot_prefix, objs, spool)
                         await client.upload_multipart(
                             server_prefix + "final.tar.gz", _file_parts(spool)
                         )
                     finally:
-                        await asyncio.to_thread(spool.unlink, missing_ok=True)
+                        await _discard_spool(spool, raise_fault=False)
                     # Advance the generation BEFORE the pointer goes (issue #3434):
                     # this is where the prune guarantees it never lowers the store
                     # generation. DeleteServer commits the row delete only AFTER this
@@ -1358,7 +1356,7 @@ class ObjectStorage(Storage):
                     )
             return key
         finally:
-            await asyncio.to_thread(spool.unlink, missing_ok=True)
+            await _discard_spool(spool, raise_fault=False)
 
     async def has_jar(self, key: JarKey) -> bool:
         async with self._client_factory() as client:
@@ -1434,11 +1432,7 @@ class ObjectStorage(Storage):
                     raise IntegrityCheckError(report)
                 # Build the self-contained tar.gz to local scratch (gzip streams, so
                 # the bodies are not all held at once), then upload it as one object.
-                fd, spool_name = await asyncio.to_thread(
-                    tempfile.mkstemp, prefix=".backup.", suffix=".tar.gz"
-                )
-                await asyncio.to_thread(_close_fd, fd)
-                spool = Path(spool_name)
+                spool = await _create_spool(".backup.", ".tar.gz")
                 try:
                     await _write_backup_targz(client, snapshot_prefix, objs, spool)
                     await client.upload_multipart(
@@ -1446,7 +1440,7 @@ class ObjectStorage(Storage):
                         _file_parts(spool),
                     )
                 finally:
-                    await asyncio.to_thread(spool.unlink, missing_ok=True)
+                    await _discard_spool(spool, raise_fault=False)
             finally:
                 self._release_lease(snapshot_prefix)
         return key
@@ -2364,12 +2358,6 @@ def _new_version_id() -> str:
     return f"{time.time_ns():020d}-{uuid.uuid4().hex[:8]}"
 
 
-def _close_fd(fd: int) -> None:
-    import os
-
-    os.close(fd)
-
-
 def _group_by_server(objs: list[S3Object]) -> dict[str, list[str]]:
     """Bucket listing keys by their ``communities/<cid>/servers/<sid>/`` prefix."""
 
@@ -2455,97 +2443,17 @@ async def _spool_stream(
     """Spool an async byte stream to a local temp file (bounded disk), optionally
     hashing as it lands. Returns the spool path; the caller unlinks it."""
 
-    fd, name = await asyncio.to_thread(tempfile.mkstemp, prefix=prefix, suffix=suffix)
-    spool = Path(name)
+    spool = await _create_spool(prefix, suffix)
     try:
-        with open(fd, "wb") as out:
+        with open(spool, "wb") as out:
             async for chunk in stream:
                 if hasher is not None:
                     hasher.update(chunk)
                 await asyncio.to_thread(out.write, chunk)
     except BaseException:
-        spool.unlink(missing_ok=True)
+        await _discard_spool(spool, raise_fault=False)
         raise
     return spool
-
-
-def _make_spool(prefix: str, suffix: str) -> Path:
-    """Create an empty temp file, closing its fd before returning (issue #3237)."""
-
-    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix)
-    os.close(fd)
-    return Path(name)
-
-
-def _unlink_orphaned_spool(made: asyncio.Future[Path]) -> None:
-    """Remove a spool whose creator was cancelled before it could own it."""
-
-    if not made.cancelled() and made.exception() is None:
-        made.result().unlink(missing_ok=True)
-
-
-async def _create_spool(prefix: str, suffix: str) -> Path:
-    """Create a temp spool off the loop, reclaiming it if the caller is cancelled.
-
-    A cancel during the await does not stop the worker thread: the file it goes
-    on to create would be owned by no one. The thread closes the fd itself, and a
-    cancelled caller hands the still-running creation a callback that removes the
-    file once it exists (issue #3237).
-    """
-
-    made = asyncio.get_running_loop().run_in_executor(None, _make_spool, prefix, suffix)
-    try:
-        with _translating_io_faults():
-            return await asyncio.shield(made)
-    except asyncio.CancelledError:
-        made.add_done_callback(_unlink_orphaned_spool)
-        raise
-
-
-# Spool removals still running after their caller stopped waiting (issue #3237):
-# the strong reference keeps a cancelled health check's removal alive to the end.
-_SPOOL_DISPOSALS: set[asyncio.Future[None]] = set()
-
-
-def _spool_disposal_done(spool: Path, disposal: asyncio.Future[None]) -> None:
-    _SPOOL_DISPOSALS.discard(disposal)
-    if disposal.cancelled():
-        # Only the loop itself cancels the removal, at shutdown — which drops an
-        # unlink still queued for a worker. Remove the spool here instead: one
-        # blocking unlink in this rare case beats leaking an archive-sized file.
-        try:
-            os.unlink(spool)
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            _LOG.warning("could not remove the backup spool %s: %s", spool, exc)
-        return
-    if (fault := disposal.exception()) is not None:
-        _LOG.warning("could not remove the backup spool %s: %s", spool, fault)
-
-
-async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
-    """Remove ``spool`` off the loop, surviving cancellation (issue #3237).
-
-    The removal runs as its own shielded task, so cancelling the caller — once or
-    repeatedly, even while the removal is still queued for an executor worker —
-    stops only the wait, never the removal; a removal the loop cancels at
-    shutdown falls back to a synchronous unlink. A failed removal is logged. With
-    ``raise_fault`` it is also raised, a transient fault translated by the fs
-    errno policy; without it the caller already has an outcome a cleanup fault
-    must not replace: an error propagating, or a restore that published (issue
-    #3269).
-    """
-
-    disposal = asyncio.ensure_future(asyncio.to_thread(spool.unlink, missing_ok=True))
-    _SPOOL_DISPOSALS.add(disposal)
-    disposal.add_done_callback(functools.partial(_spool_disposal_done, spool))
-    if not raise_fault:
-        with suppress(OSError):
-            await asyncio.shield(disposal)
-        return
-    with _translating_io_faults():
-        await asyncio.shield(disposal)
 
 
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
@@ -2749,7 +2657,7 @@ async def _write_backup_targz(
 ) -> None:
     """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``."""
 
-    tar = await asyncio.to_thread(tarfile.open, str(spool), "w:gz")
+    tar = await _run_spool_writer(spool, tarfile.open, str(spool), "w:gz")
     try:
         for obj in objs:
             name = obj.key[len(snapshot_prefix) :]
