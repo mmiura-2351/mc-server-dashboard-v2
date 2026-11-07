@@ -150,11 +150,13 @@ async def _assert_reclaim_waits_for_the_thread(
     pause: _Pause,
     released: threading.Event,
 ) -> None:
-    await publish(storage, community, server, {"a.txt": b"NEW"})
-    storage.sweep()
-    assert snapshot.exists()
+    try:
+        await publish(storage, community, server, {"a.txt": b"NEW"})
+        storage.sweep()
+        assert snapshot.exists()
+    finally:
+        pause.resume.set()
 
-    pause.resume.set()
     assert await asyncio.to_thread(released.wait, 10)
     storage.sweep()
     assert not snapshot.exists()
