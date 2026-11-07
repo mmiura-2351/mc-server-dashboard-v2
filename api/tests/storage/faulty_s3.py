@@ -30,6 +30,9 @@ class Faults:
 
     def __init__(self) -> None:
         self.when: Fault = lambda op, key: False
+        # The calls the store APPLIES and then answers with an outage: a write
+        # whose response was lost after it landed (issue #3564).
+        self.lose_response: Fault = lambda op, key: False
         # Clients currently inside their ``async with``: what a stream that was
         # opened and not yet closed is still holding. Counted down only once the
         # client's exit has run to completion (see :class:`_FaultyContext`).
@@ -45,6 +48,7 @@ class Faults:
 
     def clear(self) -> None:
         self.when = lambda op, key: False
+        self.lose_response = lambda op, key: False
 
 
 class _FaultyClient:
@@ -58,9 +62,12 @@ class _FaultyClient:
         method = getattr(self._inner, name)
 
         async def _call(*args: Any, **kwargs: Any) -> Any:
-            if self._faults.when(name, str(args[0]) if args else ""):
+            key = str(args[0]) if args else ""
+            if self._faults.when(name, key):
                 raise ObjectStoreUnavailableError(f"injected outage: {name}")
             result = await method(*args, **kwargs)
+            if self._faults.lose_response(name, key):
+                raise ObjectStoreUnavailableError(f"injected lost response: {name}")
             if name == "get_object" and self._faults.stall_body(str(args[0])):
                 return _stalling(result, self._faults)
             return result

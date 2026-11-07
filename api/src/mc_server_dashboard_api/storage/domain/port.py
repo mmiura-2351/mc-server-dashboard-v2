@@ -32,6 +32,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
     JarKey,
+    LiveSnapshot,
     RelPath,
     ServerId,
     VersionId,
@@ -275,6 +276,7 @@ class WorkingSetStore(abc.ABC):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        expected_snapshot: LiveSnapshot | None = None,
         publisher_fence: PublisherFence | None = None,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
@@ -322,6 +324,12 @@ class WorkingSetStore(abc.ABC):
         that never hydrated, or an older Worker that sends no base) skips the
         re-check, matching the pre-stream guard's backward-compatible posture.
 
+        ``expected_snapshot`` is what :meth:`live_snapshot` read at guard time
+        (issue #3564), re-checked under the same lock: a different live snapshot
+        refuses with :class:`~.errors.StaleGenerationError` too. A publish changes
+        both the generation and the snapshot, so this only catches a guard that read
+        inside a restore's bump-then-flip window. ``None`` skips it.
+
         ``publisher_fence`` is awaited once under the same per-server lock,
         immediately before the publish (issue #3544): the caller's pre-commit
         fence ran before the commit's slow steps (the staging fsync, the object
@@ -340,6 +348,21 @@ class WorkingSetStore(abc.ABC):
         the world. The byte-precise check still catches realistic tears (a referenced
         chunk overrunning EOF, an entry past EOF, a severed prefix). See the STORAGE.md
         Section 8 region-rule note.
+        """
+
+    @abc.abstractmethod
+    async def live_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> LiveSnapshot:
+        """Return what ``current`` names now, without the server lock (issue #3564).
+
+        The upload guard reads it BEFORE :meth:`current_generation` and hands it
+        to :meth:`commit_snapshot` as ``expected_snapshot``. A restore bumps the
+        generation, then flips ``current``; a commit flips, then bumps. Read in
+        that order, either operation landing between or around the two reads
+        leaves one of them stale, which the commit's re-check of both, under the
+        lock, refuses, or is seen whole. Read the other way, a restore flipping
+        between the reads would be seen as both its generation and its snapshot.
         """
 
     @abc.abstractmethod
@@ -579,6 +602,16 @@ class BackupStore(abc.ABC):
         backends (issue #3237), and on the fs backend a link (issue #3371). An
         archive inflating past the decompressed-size cap raises
         :class:`~.errors.ArchiveTooLargeError`, ``force`` or not.
+
+        The generation is bumped before the flip (issue #3564), so a failure
+        before the flip leaves the prior working set live at the advanced
+        generation. Holders of the old generation then hydrate it again, which
+        displaces and loses a stopped Worker's never-published scratch progress
+        on its next start: the accepted cost. A failure after the flip — the
+        restored working set live — raises
+        :class:`~.errors.RestorePartiallyPublishedError` carrying the report, and
+        one that cannot be confirmed either way
+        :class:`~.errors.RestorePublicationUnknownError`.
         """
 
     @abc.abstractmethod

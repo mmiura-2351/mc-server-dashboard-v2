@@ -613,6 +613,8 @@ export const ja: Record<TranslationKey, string> = {
     "このバックアップのファイルをストレージから読み出せなかったため、復元できません。",
   "backups.error.restoreIncomplete":
     "バックアップは復元されましたが、後続の処理が完了しませんでした。もう一度復元してください。",
+  "backups.error.restoreOutcomeUnknown":
+    "バックアップが復元された可能性がありますが、復元は完了しませんでした。もう一度復元してください。",
   "backups.error.unsettled":
     "サーバーが起動／停止の途中です。完全に停止または稼働してから再度お試しください。",
   "backups.error.invalidArchive":

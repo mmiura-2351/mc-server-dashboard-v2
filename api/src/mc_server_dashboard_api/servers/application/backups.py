@@ -97,6 +97,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupRestoreIncompleteError,
+    BackupRestorePartiallyPublishedError,
     BackupUnreadableError,
     BackupUnsettledError,
     FileTooLargeError,
@@ -391,10 +392,14 @@ class RestoreBackup:
     the jars beside it. A restored plugin directory that cannot be listed raises
     :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
     and so does a listed jar that cannot be read (issue #3269). Any failure after
-    the publish — the quarantine write and the lifecycle lock's release included —
+    the publish — a store failure past its flip (issue #3564), the quarantine
+    write and the lifecycle lock's release included —
     surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
     error and carrying the corrupt count of a forced corrupt backup that
     published, so the edge audits the force-restore whatever failed after it.
+    A store that fails past its flip has published, so both steps still run over
+    the restored working set; one of them failing is then the answer, with the
+    store's failure logged.
     """
 
     uow: UnitOfWork
@@ -430,6 +435,7 @@ class RestoreBackup:
         # #3269) -- it never replaces a step failure already on its way out.
         published: int | None = None
         incomplete: BackupRestoreIncompleteError | None = None
+        partial: BackupRestorePartiallyPublishedError | None = None
         try:
             async with self.lifecycle_lock.hold(server_id):
                 async with self.uow:
@@ -462,6 +468,14 @@ class RestoreBackup:
                     # archive; a sweep that later reads it back sound revises it.
                     await self._mark_health(backup_id, BackupHealth.UNREADABLE)
                     raise
+                except BackupRestorePartiallyPublishedError as exc:
+                    # The store published the backup, then failed before its
+                    # restore returned, or cannot tell whether it published (issue
+                    # #3564). The restored working set is (or may be) live, so the
+                    # steps below still run over it; they are harmless over the
+                    # prior one. The store's failure is raised once they have.
+                    partial = exc
+                    corrupt_count = exc.corrupt_count
                 published = corrupt_count
                 # Published: the restored working set stands whatever fails from here
                 # on, so every later step's failure carries the restore's identity —
@@ -476,12 +490,25 @@ class RestoreBackup:
                         corrupt_count=corrupt_count,
                     )
                 except Exception as exc:
+                    if partial is not None:
+                        _LOG.warning(
+                            "the store failed after publishing a restore",
+                            exc_info=partial,
+                            extra={"server_id": str(server_id.value)},
+                        )
                     incomplete = BackupRestoreIncompleteError(
                         str(server_id.value),
                         cause=exc,
                         forced_corrupt_count=corrupt_count,
                     )
                     raise incomplete from exc
+                if partial is not None:
+                    incomplete = BackupRestoreIncompleteError(
+                        str(server_id.value),
+                        cause=partial,
+                        forced_corrupt_count=corrupt_count,
+                    )
+                    raise incomplete from partial
                 return RestoreResult(
                     forced_corrupt=corrupt_count > 0, corrupt_count=corrupt_count
                 )

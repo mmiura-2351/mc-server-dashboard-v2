@@ -254,6 +254,46 @@ class PublisherFencedError(StorageError):
     """
 
 
+class RestorePartiallyPublishedError(StorageError):
+    """A restore published the backup, then a later step inside it failed (#3564).
+
+    ``restore_backup`` flipped ``current`` onto the restored working set, and the
+    call then failed before returning: on fs the directory fsync that makes the
+    flip durable, on object a pointer write that the store applied but whose
+    response was lost. The restored bytes are live, so the caller must not treat
+    the call as a restore that published nothing. The generation was advanced
+    before the flip, so it already names the restored working set.
+
+    ``report`` is the extracted working set's report, the value a successful
+    restore returns, so a forced corrupt publish keeps its identity. ``cause`` is
+    the failed step's error: :class:`StorageUnavailableError` for a transient
+    backend fault.
+    """
+
+    def __init__(self, cause: Exception, report: WorkingSetReport) -> None:
+        self.cause = cause
+        self.report = report
+        super().__init__(f"restore published, then failed: {cause}")
+
+
+class RestorePublicationUnknownError(StorageError):
+    """A restore's flip failed, and whether it published is unknown (issue #3564).
+
+    The object backend's pointer write failed, and every read that could confirm
+    which snapshot the pointer names failed as well. The write may have landed (a
+    lost response), so the restored working set may be live: the caller handles
+    it as a publication rather than a restore that published nothing. Deliberately
+    distinct from :class:`RestorePartiallyPublishedError`, which the read
+    confirmed. ``cause`` is the pointer write's failure and ``report`` the
+    extracted working set's report.
+    """
+
+    def __init__(self, cause: Exception, report: WorkingSetReport) -> None:
+        self.cause = cause
+        self.report = report
+        super().__init__(f"restore may have published: {cause}")
+
+
 class IntegrityCheckError(StorageError):
     """A working set failed the structural ``.mca`` integrity gate (issue #739).
 
