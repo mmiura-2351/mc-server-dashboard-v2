@@ -546,6 +546,39 @@ async def test_write_snapshot_sandboxes_malicious_members(
         await harness.storage.write_snapshot(handle, _stream())
 
 
+@pytest.mark.parametrize(
+    "name", ["world//level.dat", "world/./level.dat", "./level.dat", "world//plugins/"]
+)
+async def test_write_snapshot_refuses_a_non_canonical_member_name(
+    harness: StorageHarness, name: str
+) -> None:
+    """A member name with an empty or ``.`` segment is refused at ingest on both
+    backends (issue #3574), so the store never holds a key the listing cannot
+    name; the published snapshot is left as it was."""
+
+    community, server = new_scope()
+    live = {"server.properties": b"k=v"}
+    await harness.publish(community, server, live)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name)
+        if name.endswith("/"):
+            info.type = tarfile.DIRTYPE
+        else:
+            info.size = 3
+        tar.addfile(info, io.BytesIO(b"odd"))
+    handle = await harness.storage.begin_snapshot(community, server)
+
+    # Each backend refuses with the type its ingest already raises for an unsafe
+    # member: the object walk's PathTraversalError, the fs filter's FilterError.
+    with pytest.raises((PathTraversalError, tarfile.FilterError)):
+        await harness.storage.write_snapshot(handle, stream_of(buf.getvalue()))
+    await harness.storage.abort_snapshot(handle)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
 # --- content-integrity gate on the authoritative-create paths (#703/#750) ---
 
 
@@ -1215,7 +1248,7 @@ async def test_restore_drops_reserved_marker_members_of_a_legacy_archive(
         tar.addfile(reserved_dir)
         for name, data in {
             ".mcsd_generation/stray.txt": b"operator",
-            "./.mcsd_generation-cache": b"temp",
+            ".mcsd_generation-cache": b"temp",
             "server.properties": b"k=v",
             "world/.mcsd_generation/kept.txt": b"world data",
         }.items():
@@ -1242,9 +1275,11 @@ async def test_restore_drops_reserved_marker_members_of_a_legacy_archive(
 
 
 # Member spellings that land on, or pass through, the reserved root name only
-# by an absolute or ``..`` path (issue #3433). Each is ``(name, is_dir)``.
+# by an absolute, ``..`` or ``.`` path (issues #3433, #3574). Each is
+# ``(name, is_dir)``.
 _RESERVED_ALIASES = [
     ("/.mcsd_generation/stray.txt", False),
+    ("./.mcsd_generation-cache", False),
     ("world/../.mcsd_generation/stray.txt", False),
     (".mcsd_generation/../server.properties", False),
     (".mcsd_generation-cache/../world/level.dat", False),
@@ -1257,9 +1292,9 @@ async def test_a_reserved_alias_member_is_refused_not_dropped(
     harness: StorageHarness, alias: str, is_dir: bool
 ) -> None:
     """The member rule runs before the reserved decision (issue #3550), so an
-    aliased spelling makes the archive unrestorable on BOTH backends, for the
-    restore and the health probe, instead of being dropped as reserved. None
-    can leave a reserved root entry behind."""
+    aliased spelling — a ``.`` one too, since issue #3574 — makes the archive
+    unrestorable on BOTH backends, for the restore and the health probe, instead
+    of being dropped as reserved. None can leave a reserved root entry behind."""
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -1397,8 +1432,9 @@ async def test_archive_with_an_escaping_member_is_unreadable(
 
 
 # One member per shape the single archive member rule decides (issue #3550): a
-# backup restores only regular files and directories at relative, ``..``-free
-# names, on both backends, for restore and the health probe alike.
+# backup restores only regular files and directories at relative, ``..``-free,
+# canonical names (no empty or ``.`` segment, issue #3574), on both backends, for
+# restore and the health probe alike.
 _CLEAN_MEMBERS = {"server.properties": b"k=v", "world/level.dat": b"world"}
 _ODD_MEMBERS: dict[str, tuple[str, bytes, str]] = {
     # shape: (member name, tar type, link target)
@@ -1409,6 +1445,10 @@ _ODD_MEMBERS: dict[str, tuple[str, bytes, str]] = {
     "in_tree_dotdot": ("world/../extra.dat", tarfile.REGTYPE, ""),
     "in_tree_dotdot_dir": ("world/../plugins", tarfile.DIRTYPE, ""),
     "escaping_dotdot": ("../escape.txt", tarfile.REGTYPE, ""),
+    "empty_segment": ("world//level.dat", tarfile.REGTYPE, ""),
+    "empty_segment_dir": ("world//plugins", tarfile.DIRTYPE, ""),
+    "dot_segment": ("world/./level.dat", tarfile.REGTYPE, ""),
+    "leading_dot": ("./extra.dat", tarfile.REGTYPE, ""),
 }
 
 
@@ -1417,7 +1457,9 @@ def _member_rule_targz(shape: str) -> bytes:
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        world = tarfile.TarInfo("world")
+        # The trailing ``/`` a directory member carries as tar emits it (the
+        # Worker's pack included) is canonical (issue #3574).
+        world = tarfile.TarInfo("world/")
         world.type = tarfile.DIRTYPE
         tar.addfile(world)
         for name, data in _CLEAN_MEMBERS.items():

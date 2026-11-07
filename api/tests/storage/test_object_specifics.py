@@ -970,6 +970,69 @@ async def test_listing_hides_a_poisoned_root_dir_marker() -> None:
     assert [e.name for e in view_entries] == expected
 
 
+def _plant_in_live_snapshot(
+    store: FakeS3Store, community: CommunityId, server: ServerId, suffix: str
+) -> str:
+    """Store ``suffix`` under the live snapshot prefix directly; return the key."""
+
+    pointer_raw = store.objects[_server_prefix(community, server) + _POINTER]
+    key: str = json.loads(pointer_raw)["snapshot"] + suffix
+    store.objects[key] = b"legacy"
+    return key
+
+
+async def test_listing_skips_a_legacy_empty_segment_key_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stored key with an internal empty segment (``world//extra.dat``), which
+    ingest accepted before issue #3574, is not listed as a nameless directory: the
+    listing skips it, so a walk ends, and a WARNING names the whole key."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"server.properties": b"x", "world/level": b"y"}
+    )
+    key = _plant_in_live_snapshot(store, community, server, "world//extra.dat")
+
+    with caplog.at_level(logging.WARNING):
+        entries = await storage.list_dir(community, server, RelPath("world"))
+        async with storage.open_working_set_view(community, server) as view:
+            view_entries = await view.list_dir(RelPath("world"))
+
+    assert [e.name for e in entries] == ["level"]
+    assert [e.name for e in view_entries] == ["level"]
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 2
+    assert all(key in r.getMessage() for r in warned)
+
+
+async def test_backup_leaves_out_a_legacy_empty_segment_key_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The backup writer leaves the same legacy key out, with a WARNING naming it,
+    rather than write a member the member rule refuses (issue #3574)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"server.properties": b"x", "world/level": b"y"}
+    )
+    key = _plant_in_live_snapshot(store, community, server, "world//extra.dat")
+
+    with caplog.at_level(logging.WARNING):
+        backup = await storage.create_backup_from_current(community, server)
+
+    assert any(
+        r.levelno == logging.WARNING and key in r.getMessage() for r in caplog.records
+    )
+    report = await storage.check_backup_health(community, server, backup)
+    assert report.healthy
+    await storage.restore_backup(community, server, backup)
+    members = read_tar(await drain(storage.open_hydrate_source(community, server)))
+    assert members == {"server.properties": b"x", "world/level": b"y"}
+
+
 async def test_file_stream_rereads_when_gc_lands_in_lease_gap() -> None:
     """Same as hydrate but for open_file_stream (issue #1607): a concurrent
     restore in the resolve-lease gap must not yield a stale/deleted file."""

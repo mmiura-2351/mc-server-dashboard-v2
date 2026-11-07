@@ -336,21 +336,37 @@ restore and the probe reach the same verdict for an archive on either backend
 (issue #3550). A member is restorable only when it is:
 
 - a regular file or a directory — a hard link, symlink, device, FIFO or other
-  special member is refused; and
+  special member is refused;
 - at a relative name with no `..` component — an absolute name (leading `/`)
-  is refused, and so is any `..`, even one that stays inside the tree.
+  is refused, and so is any `..`, even one that stays inside the tree; and
+- at a canonical name, with no empty or `.` segment — `world//level.dat`,
+  `world/./level.dat` and `./level.dat` are refused (issue #3574). The one
+  trailing `/` tar writes on a directory member is fine.
 
 An archive holding a refused member reads fine, but nothing can be restored
 from it, so restore and the probe both raise `ArchiveUnreadableError` whatever
 `force` says, with `current/` untouched. The servers seam answers restore with
 `409 backup_unreadable`, and the sweep records `UNREADABLE` (Section 7.3). The
-platform's own producers never emit such a member. That includes an object
-snapshot that still holds a legacy `//.dir` key from a past root `make_dir` bug
-(issue #1944): the backup and `final.tar.gz` writers leave it out, as hydrate and
-the directory listing do, so its absolute member `/.dir` is never written
-(issue #3574). The fs extraction also keeps
-`tarfile.data_filter`'s other protections (mode sanitising and the like) on top
-of the rule.
+platform's own producers never emit such a member: the Worker's pack and the fs
+writer name members after real directory entries. An object snapshot can still
+hold two kinds of legacy key, and the backup and `final.tar.gz` writers leave
+both out (issue #3574):
+
+- the `//.dir` key from a past root `make_dir` bug (issue #1944), whose member
+  would be the absolute `/.dir`. Hydrate and the directory listing hide it too.
+- a **legacy non-canonical key** — one with an empty or `.` segment, such as
+  `world//level.dat`, which snapshot ingest and restore accepted before issue
+  #3574. Each one left out is logged as a WARNING naming the key. The directory
+  listing skips the empty- or `.`-named entry such a key would make, with the
+  same WARNING, so a walk over it (the directory download, the server export)
+  ends instead of listing the same level forever. Hydrate still hands it to the
+  Worker, whose unpack cleans the path, so the Worker's next snapshot stores it
+  at its canonical name.
+
+The fs extraction also keeps `tarfile.data_filter`'s other protections (mode
+sanitising and the like) on top of the rule. Snapshot ingest takes only
+canonical names too, on both backends, so no new non-canonical key is ever
+stored.
 
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod

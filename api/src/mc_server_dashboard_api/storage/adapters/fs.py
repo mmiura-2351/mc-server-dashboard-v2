@@ -96,6 +96,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
     archive_read_errors_as_unreadable,
+    is_canonical_name,
     refuse_unrestorable_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
@@ -3107,9 +3108,13 @@ def _plain_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
     and directories only (issue #3371): the Worker's hydrate refuses a link member
     outright, so a link taken in here would come back out in an archive no Worker
     can unpack, on every hydrate of the server. A link member is refused the way
-    ``data`` refuses its unsafe ones, with a :class:`tarfile.FilterError`.
+    ``data`` refuses its unsafe ones, with a :class:`tarfile.FilterError`, and so
+    is a non-canonical name (:func:`is_canonical_name`, issue #3574), which
+    ``data`` would accept.
     """
 
+    if not is_canonical_name(member.name, is_dir=member.isdir()):
+        raise tarfile.FilterError(f"{member.name!r} is not a canonical name")
     safe = tarfile.data_filter(member, dest)
     if not (safe.isfile() or safe.isdir()):
         raise tarfile.FilterError(f"{member.name!r} is a link")

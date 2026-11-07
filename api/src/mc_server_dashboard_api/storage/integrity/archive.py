@@ -20,7 +20,8 @@ The paths that extract an archive with ``tarfile`` instead — restore on both
 backends, and the fs health check — reach the same verdict through
 :func:`archive_read_errors_as_unreadable` (issue #3230). The restore and health
 paths of both backends judge each member by :func:`refuse_unrestorable_member`
-(issue #3550).
+(issue #3550), and both backends' snapshot ingest takes only the canonical names
+:func:`is_canonical_name` admits (issue #3574).
 """
 
 from __future__ import annotations
@@ -182,17 +183,34 @@ def archive_read_errors_as_unreadable() -> Iterator[None]:
         raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc
 
 
+def is_canonical_name(name: str, *, is_dir: bool = False) -> bool:
+    """Whether a slash-separated name has no empty or ``.`` segment (issue #3574).
+
+    ``a//b``, ``a/./b`` and ``./a`` name the same place as a canonical spelling, but
+    a store that keeps them verbatim lists an empty or ``.`` directory whose child
+    path is its parent again. One trailing ``/`` on a directory member is allowed:
+    it is how tar writes one. ``..`` is judged separately, as traversal.
+    """
+
+    if is_dir:
+        name = name.removesuffix("/")
+    return all(part not in ("", ".") for part in name.split("/"))
+
+
 def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
     """Refuse a backup archive member that no restore may take (issue #3550).
 
     The one member rule of both backends, for restore and the health probe alike:
-    a member must be a regular file or a directory, at a relative name with no
-    ``..`` component. A hard link, symlink, device, FIFO or other special member,
-    an absolute name, and a ``..`` — even one that stays inside the tree — raise
+    a member must be a regular file or a directory, at a relative, canonical name
+    with no ``..`` component. A hard link, symlink, device, FIFO or other special
+    member, an absolute name, a ``..`` — even one that stays inside the tree — and
+    an empty or ``.`` segment (:func:`is_canonical_name`) raise
     :class:`ArchiveUnreadableError`: the archive reads, but nothing can be
     restored from it, override or not. The platform's own producers emit none of
-    these: the object backend's archive writer leaves out the legacy ``//.dir`` key
-    of issue #1944, whose member would be absolute (issue #3574).
+    these: the Worker's pack and the fs writer name members after real directory
+    entries, and the object backend's archive writer leaves out the legacy keys a
+    store can still hold — the ``//.dir`` key of issue #1944, and a non-canonical
+    key ingest accepted before issue #3574 (issue #3574).
     """
 
     if not (member.isfile() or member.isdir()):
@@ -205,4 +223,9 @@ def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
         raise ArchiveUnreadableError(
             "archive holds a member that cannot be restored: "
             f"{member.name!r} is absolute or has a '..' component"
+        )
+    if not is_canonical_name(member.name, is_dir=member.isdir()):
+        raise ArchiveUnreadableError(
+            "archive holds a member that cannot be restored: "
+            f"{member.name!r} has an empty or '.' segment"
         )

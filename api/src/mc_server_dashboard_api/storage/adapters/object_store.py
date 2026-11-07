@@ -115,6 +115,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.archive import (
     GzipReadProbe,
     archive_read_errors_as_unreadable,
+    is_canonical_name,
     refuse_unrestorable_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
@@ -1894,7 +1895,7 @@ class ObjectStorage(Storage):
             # A prefix with no members is an empty (non-existent) directory; the
             # root (sub == "") always lists, even when empty.
             raise NotFoundError(f"directory not found: {rel_path.value}")
-        return _entries_at_level(objs, snapshot_prefix + dir_suffix)
+        return _entries_at_level(objs, snapshot_prefix, dir_suffix)
 
     async def path_exists(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -2407,33 +2408,57 @@ async def _delete_prefix(client: S3Client, prefix: str) -> None:
 
 
 def _is_poisoned_key_suffix(suffix: str) -> bool:
-    """Whether a key suffix under a snapshot is a legacy poisoned key (issue #1944).
+    """Whether a key's suffix relative to its SNAPSHOT prefix is the legacy poisoned
+    key of issue #1944.
 
-    A prior root ``make_dir`` bug wrote ``<snapshot>//.dir``: its suffix starts with
-    ``/``, so as a tar member it is the absolute ``/.dir`` and as a listing entry a
-    directory with no name. No current writer produces one (``_safe_subkey`` and
-    the ingest's member check refuse it), but already-poisoned snapshots still hold
-    it, so every reader that turns snapshot keys into names skips it: hydrate, the
-    backup and final ``tar.gz`` writer, and the directory listing (issue #3574).
+    A prior root ``make_dir`` bug wrote ``<snapshot>//.dir``: its snapshot-relative
+    suffix starts with ``/``, so as a tar member it is the absolute ``/.dir`` and as
+    a root listing entry a directory with no name. No current writer produces one,
+    but already-poisoned snapshots still hold it, so every reader that turns
+    snapshot keys into names skips it: hydrate, the backup and final ``tar.gz``
+    writer, and the directory listing (issue #3574). Only a snapshot-relative
+    suffix is judged here: below the root, a suffix that starts with ``/`` is a
+    non-canonical key (:func:`is_canonical_name`), not this one.
     """
 
     return suffix.startswith("/")
 
 
-def _entries_at_level(objs: list[S3Object], dir_prefix: str) -> list[DirEntry]:
+def _warn_non_canonical_key(key: str, where: str) -> None:
+    """Say that a legacy non-canonical snapshot key is left out (issue #3574)."""
+
+    _LOG.warning(
+        "snapshot key %r has an empty or '.' path segment (a legacy non-canonical "
+        "key ingest accepted before issue #3574); leaving it out of the %s",
+        key,
+        where,
+    )
+
+
+def _entries_at_level(
+    objs: list[S3Object], snapshot_prefix: str, dir_suffix: str
+) -> list[DirEntry]:
     """Collapse a prefix scan into one directory level's entries (Section 3.4).
 
-    Keys directly under ``dir_prefix`` are files; keys with a further ``/`` are a
-    subdirectory, reported once with size 0 (object stores have no directory size).
+    Keys directly under ``snapshot_prefix + dir_suffix`` are files; keys with a
+    further ``/`` are a subdirectory, reported once with size 0 (object stores have
+    no directory size). A key whose entry at this level would have an empty or
+    ``.`` name is left out with a warning (issue #3574): a walk into that entry
+    would list this level again, forever.
     """
 
+    dir_prefix = snapshot_prefix + dir_suffix
     files: dict[str, int] = {}
     dirs: set[str] = set()
     for obj in objs:
+        if _is_poisoned_key_suffix(obj.key[len(snapshot_prefix) :]):
+            continue
         rest = obj.key[len(dir_prefix) :]
-        if rest == _DIR_MARKER or _is_poisoned_key_suffix(rest):
-            # Marker placed by make_dir (issue #1125) — hide it from listings, and
-            # the poisoned one (issue #1944) along with it.
+        if rest == _DIR_MARKER:
+            # Marker placed by make_dir (issue #1125) — hide it from listings.
+            continue
+        if not is_canonical_name(rest.split("/", 1)[0]):
+            _warn_non_canonical_key(obj.key, "listing")
             continue
         if "/" in rest:
             dirs.add(rest.split("/", 1)[0])
@@ -2510,7 +2535,8 @@ def _safe_archive_members(spool: Path, mode: Literal["r:*", "r:gz"]) -> list[str
     """List the regular-file member names of the spooled (tar / tar.gz) archive,
     refusing ``..``/absolute names (the tar-side traversal defence, matching the
     fs adapter's ``filter="data"`` posture) so a hostile archive cannot place
-    objects outside the server's key prefix."""
+    objects outside the server's key prefix, and any member at a non-canonical
+    name (issue #3574)."""
 
     names: list[str] = []
     with tarfile.open(str(spool), mode=mode) as tar:
@@ -2521,6 +2547,13 @@ def _safe_archive_members(spool: Path, mode: Literal["r:*", "r:gz"]) -> list[str
                     raise PathTraversalError(
                         f"tar member escapes the server prefix: {member.name!r}"
                     )
+            # Every member, as the fs ingest's filter judges every member: a
+            # non-canonical name would become a key no listing can name (#3574).
+            if not is_canonical_name(member.name, is_dir=member.isdir()):
+                raise PathTraversalError(
+                    f"tar member name is not canonical: {member.name!r}"
+                )
+            if member.isfile():
                 names.append(member.name)
     return names
 
@@ -2671,7 +2704,8 @@ async def _write_backup_targz(
     """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``.
 
     A #1944 poisoned key is left out, as hydrate leaves it out: its member would be
-    absolute, which the member rule refuses (issue #3574).
+    absolute, which the member rule refuses (issue #3574). So is a legacy
+    non-canonical key, with a warning: the member rule refuses its name too.
     """
 
     tar = await _run_spool_writer(spool, tarfile.open, str(spool), "w:gz")
@@ -2679,6 +2713,9 @@ async def _write_backup_targz(
         for obj in objs:
             name = obj.key[len(snapshot_prefix) :]
             if _is_poisoned_key_suffix(name):
+                continue
+            if not is_canonical_name(name):
+                _warn_non_canonical_key(obj.key, "archive")
                 continue
             info = tarfile.TarInfo(name=name)
             info.size = obj.size
@@ -2755,7 +2792,7 @@ class _ObjectWorkingSetView(WorkingSetView):
             objs = await client.list_objects(self._snapshot_prefix + dir_suffix)
         if not objs and sub:
             raise NotFoundError(f"directory not found: {rel_path.value}")
-        return _entries_at_level(objs, self._snapshot_prefix + dir_suffix)
+        return _entries_at_level(objs, self._snapshot_prefix, dir_suffix)
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._snapshot_prefix is None:
