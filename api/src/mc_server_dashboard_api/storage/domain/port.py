@@ -356,11 +356,13 @@ class WorkingSetStore(abc.ABC):
     ) -> LiveSnapshot:
         """Return what ``current`` names now, without the server lock (issue #3564).
 
-        The upload guard reads it beside :meth:`current_generation` and hands it
+        The upload guard reads it BEFORE :meth:`current_generation` and hands it
         to :meth:`commit_snapshot` as ``expected_snapshot``. A restore bumps the
-        generation before it flips ``current``, so a guard reading between the two
-        sees the new generation over the old snapshot; the commit's re-check of
-        both, under the lock, refuses it either way.
+        generation, then flips ``current``; a commit flips, then bumps. Read in
+        that order, either operation landing between or around the two reads
+        leaves one of them stale, which the commit's re-check of both, under the
+        lock, refuses, or is seen whole. Read the other way, a restore flipping
+        between the reads would be seen as both its generation and its snapshot.
         """
 
     @abc.abstractmethod
