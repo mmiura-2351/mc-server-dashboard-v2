@@ -716,7 +716,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   A restore answering 503 `seed_failed`, `plugin_reconcile_incomplete` or
   `publish_incomplete` (the store failed after it published, #3564) published
   the backup and then failed a follow-up step, so its message says the backup
-  was restored and asks the user to retry the restore.
+  was restored and asks the user to retry the restore. A restore answering 503
+  `publish_unknown` (the store could not confirm whether it published, #3564)
+  says the backup may have been restored and asks the user to retry.
 - Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker).
 - Schedule: backup cadence is a first-class `backup` schedule on the general

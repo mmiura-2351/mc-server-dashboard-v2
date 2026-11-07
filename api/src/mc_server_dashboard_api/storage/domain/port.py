@@ -603,8 +603,13 @@ class BackupStore(abc.ABC):
 
         The generation is bumped before the flip (issue #3564), so a failure
         before the flip leaves the prior working set live at the advanced
-        generation. A failure after it — the restored working set live — raises
-        :class:`~.errors.RestorePartiallyPublishedError` carrying the report.
+        generation. Holders of the old generation then hydrate it again, which
+        displaces and loses a stopped Worker's never-published scratch progress
+        on its next start: the accepted cost. A failure after the flip — the
+        restored working set live — raises
+        :class:`~.errors.RestorePartiallyPublishedError` carrying the report, and
+        one that cannot be confirmed either way
+        :class:`~.errors.RestorePublicationUnknownError`.
         """
 
     @abc.abstractmethod

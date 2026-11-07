@@ -95,6 +95,15 @@ describe("backupRestoreErrorPresentation", () => {
     },
   );
 
+  // The store could not confirm whether the backup went live (issue #3564):
+  // the message must not claim it was restored, only that it may have been.
+  it("names the unconfirmed restore for a 503 publish_unknown", () => {
+    const key = backupRestoreErrorPresentation(503, "publish_unknown");
+    expect(key).toBe("backups.error.restoreOutcomeUnknown");
+    expect(en[key]).toMatch(/may have been restored.*retry the restore/i);
+    expect(ja[key]).toMatch(/復元された可能性.*もう一度/);
+  });
+
   it.each([
     [503, "storage_unavailable", "backups.error.storageUnavailable"],
     [404, "not_found", "backups.error.generic"],
