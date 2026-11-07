@@ -785,14 +785,12 @@ class ObjectStorage(Storage):
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
-                # Scrub poisoned keys whose relative name starts with ``/``
-                # (issue #1944): a prior root ``make_dir`` bug could write
-                # ``<prefix>//.dir`` whose tar member ``/.dir`` is absolute and
-                # the worker's ``safeJoin`` rejects, blocking hydrate forever.
+                # Scrub the #1944 poisoned keys: the worker's ``safeJoin`` rejects
+                # their absolute member, which would block hydrate forever.
                 members = [
                     m
                     for m in members
-                    if not m.key[len(snapshot_prefix) :].startswith("/")
+                    if not _is_poisoned_key_suffix(m.key[len(snapshot_prefix) :])
                 ]
                 # Filter out excluded top-level members (issue #1942): the
                 # relative key's first path segment is checked against the set.
@@ -2408,6 +2406,20 @@ async def _delete_prefix(client: S3Client, prefix: str) -> None:
         await client.delete_object(obj.key)
 
 
+def _is_poisoned_key_suffix(suffix: str) -> bool:
+    """Whether a key suffix under a snapshot is a legacy poisoned key (issue #1944).
+
+    A prior root ``make_dir`` bug wrote ``<snapshot>//.dir``: its suffix starts with
+    ``/``, so as a tar member it is the absolute ``/.dir`` and as a listing entry a
+    directory with no name. No current writer produces one (``_safe_subkey`` and
+    the ingest's member check refuse it), but already-poisoned snapshots still hold
+    it, so every reader that turns snapshot keys into names skips it: hydrate, the
+    backup and final ``tar.gz`` writer, and the directory listing (issue #3574).
+    """
+
+    return suffix.startswith("/")
+
+
 def _entries_at_level(objs: list[S3Object], dir_prefix: str) -> list[DirEntry]:
     """Collapse a prefix scan into one directory level's entries (Section 3.4).
 
@@ -2419,8 +2431,9 @@ def _entries_at_level(objs: list[S3Object], dir_prefix: str) -> list[DirEntry]:
     dirs: set[str] = set()
     for obj in objs:
         rest = obj.key[len(dir_prefix) :]
-        if rest == _DIR_MARKER:
-            # Marker placed by make_dir (issue #1125) — hide it from listings.
+        if rest == _DIR_MARKER or _is_poisoned_key_suffix(rest):
+            # Marker placed by make_dir (issue #1125) — hide it from listings, and
+            # the poisoned one (issue #1944) along with it.
             continue
         if "/" in rest:
             dirs.add(rest.split("/", 1)[0])
@@ -2655,12 +2668,18 @@ async def _write_backup_targz(
     objs: list[S3Object],
     spool: Path,
 ) -> None:
-    """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``."""
+    """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``.
+
+    A #1944 poisoned key is left out, as hydrate leaves it out: its member would be
+    absolute, which the member rule refuses (issue #3574).
+    """
 
     tar = await _run_spool_writer(spool, tarfile.open, str(spool), "w:gz")
     try:
         for obj in objs:
             name = obj.key[len(snapshot_prefix) :]
+            if _is_poisoned_key_suffix(name):
+                continue
             info = tarfile.TarInfo(name=name)
             info.size = obj.size
             buf = io.BytesIO()
