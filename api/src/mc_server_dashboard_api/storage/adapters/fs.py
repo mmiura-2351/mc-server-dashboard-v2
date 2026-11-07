@@ -244,11 +244,44 @@ def _make_spool(prefix: str, suffix: str, directory: Path | None) -> Path:
     return Path(name)
 
 
-def _unlink_orphaned_spool(made: asyncio.Future[Path]) -> None:
+def _reclaim_orphan(
+    reclaim: Callable[[_R], None], acquiring: asyncio.Future[_R]
+) -> None:
+    if not acquiring.cancelled() and acquiring.exception() is None:
+        reclaim(acquiring.result())
+
+
+async def _acquire_off_loop(
+    reclaim: Callable[[_R], None], fn: Callable[..., _R], *args: Any
+) -> _R:
+    """Run ``fn(*args)`` — a job that acquires something — off the loop.
+
+    A cancel during the await does not stop the worker thread: what it goes on to
+    acquire would be owned by no one. So the job is awaited shielded, and a
+    cancelled caller hands the still-running job a callback that passes what it
+    acquired to ``reclaim`` once it finishes (issues #3237, #3553, #3571).
+    ``reclaim`` runs on the loop, so it must not block.
+    """
+
+    acquiring = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    try:
+        return await asyncio.shield(acquiring)
+    except asyncio.CancelledError:
+        acquiring.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
+        raise
+
+
+def _unlink_orphaned_spool(spool: Path) -> None:
     """Remove a spool whose creator was cancelled before it could own it."""
 
-    if not made.cancelled() and made.exception() is None:
-        made.result().unlink(missing_ok=True)
+    spool.unlink(missing_ok=True)
+
+
+def _release_orphaned_lease(leased: tuple[Path, Callable[[], None]]) -> None:
+    """Release a reader lease whose taker was cancelled before it could own it."""
+
+    _path, release = leased
+    release()
 
 
 async def _create_spool(
@@ -256,22 +289,15 @@ async def _create_spool(
 ) -> Path:
     """Create a temp spool off the loop, reclaiming it if the caller is cancelled.
 
-    A cancel during the await does not stop the worker thread: the file it goes
-    on to create would be owned by no one. The thread closes the fd itself, and a
-    cancelled caller hands the still-running creation a callback that removes the
-    file once it exists (issues #3237, #3553). ``directory`` defaults to the
-    system temp dir.
+    The thread closes the fd itself, and a cancelled caller's spool is removed
+    once it exists (issues #3237, #3553). ``directory`` defaults to the system
+    temp dir.
     """
 
-    made = asyncio.get_running_loop().run_in_executor(
-        None, _make_spool, prefix, suffix, directory
-    )
-    try:
-        with _translating_io_faults():
-            return await asyncio.shield(made)
-    except asyncio.CancelledError:
-        made.add_done_callback(_unlink_orphaned_spool)
-        raise
+    with _translating_io_faults():
+        return await _acquire_off_loop(
+            _unlink_orphaned_spool, _make_spool, prefix, suffix, directory
+        )
 
 
 # Spool removals still running after their caller stopped waiting (issue #3237):
@@ -454,6 +480,8 @@ class FsStorage(Storage):
         community_id: CommunityId,
         server_id: ServerId,
         work: Callable[[], _R],
+        *,
+        reclaim: Callable[[_R], None] | None = None,
     ) -> _R:
         """Run ``work`` on a worker thread under the server lock; return its result.
 
@@ -463,13 +491,30 @@ class FsStorage(Storage):
         take that capacity away from the fence (issues #3552, #3569). So each
         attempt only tries the lock, and runs ``work`` and releases on a worker
         thread if it got it; the wait between attempts is a sleep on the loop.
+
+        ``reclaim`` is for a ``work`` that acquires something: a caller cancelled
+        while ``work`` runs never receives its result, so ``reclaim`` is handed it
+        once ``work`` finishes (issue #3571).
         """
+
+        def _reclaim_unless_held(outcome: _R | _LockHeld) -> None:
+            if reclaim is not None and not isinstance(outcome, _LockHeld):
+                reclaim(outcome)
 
         delay = _LOCK_POLL_INITIAL_SECONDS
         while True:
-            outcome = await asyncio.to_thread(
-                self._run_if_unlocked, community_id, server_id, work
-            )
+            if reclaim is None:
+                outcome = await asyncio.to_thread(
+                    self._run_if_unlocked, community_id, server_id, work
+                )
+            else:
+                outcome = await _acquire_off_loop(
+                    _reclaim_unless_held,
+                    self._run_if_unlocked,
+                    community_id,
+                    server_id,
+                    work,
+                )
             if not isinstance(outcome, _LockHeld):
                 return outcome
             await asyncio.sleep(delay)
@@ -570,9 +615,20 @@ class FsStorage(Storage):
                 self._release_lease(current)
                 raise
             if recheck == current:
-                snapshot = current
-                return snapshot, lambda: self._release_lease(snapshot)
+                return current, self._lease_release(current)
             self._release_lease(current)
+
+    def _lease_release(self, snapshot: Path) -> Callable[[], None]:
+        """Release one lease on ``snapshot``; calls after the first are no-ops."""
+
+        # A lock taken without blocking succeeds exactly once, from any thread.
+        unreleased = threading.Lock()
+
+        def release() -> None:
+            if unreleased.acquire(blocking=False):
+                self._release_lease(snapshot)
+
+        return release
 
     # --- active-staging leases (issue #183) --------------------------------
 
@@ -808,7 +864,10 @@ class FsStorage(Storage):
 
         async def _open() -> tuple[Path, Callable[[], None]]:
             return await self._under_server_lock(
-                community_id, server_id, _lease_with_generation
+                community_id,
+                server_id,
+                _lease_with_generation,
+                reclaim=_release_orphaned_lease,
             )
 
         source._inner = _tar_stream(_open, self._tar_member_hook, exclude)
@@ -1374,8 +1433,8 @@ class FsStorage(Storage):
     ) -> BackupKey:
         # Lease the live snapshot for the duration of the integrity walk + pack so a
         # concurrent publish cannot reclaim it mid-operation (issue #1702).
-        current, release = await asyncio.to_thread(
-            self._lease_current, community_id, server_id
+        current, release = await _acquire_off_loop(
+            _release_orphaned_lease, self._lease_current, community_id, server_id
         )
         try:
             # Content-integrity gate (issue #739): never archive a known-corrupt
@@ -1586,8 +1645,8 @@ class FsStorage(Storage):
         # published. The single region rule set (issue #927) tolerates a published
         # snapshot's legitimate unpadded tail or the sweep would falsely quarantine a
         # healthy live-format snapshot.
-        current, release = await asyncio.to_thread(
-            self._lease_current, community_id, server_id
+        current, release = await _acquire_off_loop(
+            _release_orphaned_lease, self._lease_current, community_id, server_id
         )
         try:
             return await asyncio.to_thread(check_working_set, current)
@@ -3022,7 +3081,7 @@ def _leased_file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        path, on_close = await asyncio.to_thread(open_source)
+        path, on_close = await _acquire_off_loop(_release_orphaned_lease, open_source)
         try:
             handle = await _open_readable(path, not_found)
             try:
@@ -3252,8 +3311,11 @@ class _FsWorkingSetView(WorkingSetView):
             # Unpublished server — no snapshot to pin.
             self._pinned = None
             return self
-        pinned, release = await asyncio.to_thread(
-            self._storage._lease_current, self._community_id, self._server_id
+        pinned, release = await _acquire_off_loop(
+            _release_orphaned_lease,
+            self._storage._lease_current,
+            self._community_id,
+            self._server_id,
         )
         self._pinned = pinned
         self._release = release
