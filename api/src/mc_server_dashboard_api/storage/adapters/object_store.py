@@ -2693,19 +2693,26 @@ class _ObjectWorkingSetView(WorkingSetView):
         self._leased = False
 
     async def __aenter__(self) -> WorkingSetView:
-        async with shielded_exit(self._storage._client_factory()) as client:
-            server_prefix = self._storage._server_prefix(
-                self._community_id, self._server_id
-            )
-            pointer = await self._storage._read_pointer(client, server_prefix)
-            if pointer is None:
-                # Unpublished server — no snapshot to pin.
-                self._snapshot_prefix = None
-                return self
-            self._snapshot_prefix = await self._storage._lease_live_snapshot(
-                client, self._community_id, self._server_id
-            )
-            self._leased = True
+        try:
+            async with shielded_exit(self._storage._client_factory()) as client:
+                server_prefix = self._storage._server_prefix(
+                    self._community_id, self._server_id
+                )
+                pointer = await self._storage._read_pointer(client, server_prefix)
+                if pointer is None:
+                    # Unpublished server — no snapshot to pin.
+                    self._snapshot_prefix = None
+                    return self
+                self._snapshot_prefix = await self._storage._lease_live_snapshot(
+                    client, self._community_id, self._server_id
+                )
+                self._leased = True
+        except BaseException:
+            # The client's exit runs after the lease is taken, and a task cancel
+            # still reaches it through the shield. No ``__aexit__`` follows a failed
+            # ``__aenter__``, so release the lease here (issue #3571).
+            await self.__aexit__(None, None, None)
+            raise
         return self
 
     async def __aexit__(
