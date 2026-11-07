@@ -640,7 +640,9 @@ forbidden_modules = [
 # `ls src/mc_server_dashboard_api/*.py` except `rfc3339` — a pure RFC 3339
 # formatter with no HTTP, config or wiring dependency, which the inward layers
 # are deliberately free to import (the export manifest's `exported_at` stamp is
-# a file format, not an HTTP header). Keep the list in step with that `ls`: a
+# a file format, not an HTTP header) — and `archive_member`, the standard-library
+# backup archive member rule that storage's restore and the servers upload gate
+# both judge members by (issue #3579). Keep the list in step with that `ls`: a
 # new root-level module belongs here unless it is neutral in the same way.
 [[tool.importlinter.contracts]]
 name = "no context's domain or application imports a root-level module"

@@ -63,6 +63,10 @@ from typing import Any, Literal, Protocol
 
 import anyio
 
+from mc_server_dashboard_api.archive_member import (
+    is_canonical_name,
+    without_tar_root_prefix,
+)
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
     FailureSeam,
     PublishPhase,
@@ -115,9 +119,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.archive import (
     GzipReadProbe,
     archive_read_errors_as_unreadable,
-    is_canonical_name,
     refuse_unrestorable_member,
-    without_tar_root_prefix,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
