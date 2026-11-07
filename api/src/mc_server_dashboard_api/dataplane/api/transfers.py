@@ -501,6 +501,11 @@ async def publish_snapshot(
         # ``current`` under the same lock themselves).
         current = await storage.current_generation(*scope)
         expected_base: int | None = current
+        # The live snapshot beside it, re-checked at commit the same way (issue
+        # #3564): a restore bumps the generation before it flips ``current``, so a
+        # guard reading between the two sees the restore's generation over the
+        # snapshot it replaces. Read in either order, one of the two then moves.
+        expected_snapshot = await storage.live_snapshot(*scope)
         if base_generation is not None:
             if base_generation < current:
                 # The publisher's working set was hydrated from
@@ -586,6 +591,7 @@ async def publish_snapshot(
                 handle,
                 publisher=publisher,
                 expected_base=expected_base,
+                expected_snapshot=expected_snapshot,
                 publisher_fence=publisher_fence,
             )
             # Stamp the new authoritative generation on the response (issue #763): the

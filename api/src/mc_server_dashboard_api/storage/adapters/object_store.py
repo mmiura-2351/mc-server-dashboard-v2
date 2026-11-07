@@ -110,6 +110,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
     JarKey,
+    LiveSnapshot,
     RelPath,
     ServerId,
     SnapshotId,
@@ -861,6 +862,7 @@ class ObjectStorage(Storage):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        expected_snapshot: LiveSnapshot | None = None,
         publisher_fence: PublisherFence | None = None,
     ) -> int:
         h = _as_object_handle(handle)
@@ -955,6 +957,21 @@ class ObjectStorage(Storage):
                 # rollback to a complete backup, which legitimately holds fewer
                 # regions than the world it replaces.
                 prior_prefix = await self._read_pointer(client, server_prefix)
+                if (
+                    expected_snapshot is not None
+                    and _live(prior_prefix) != expected_snapshot
+                ):
+                    # The guard read inside a restore's bump-then-flip window
+                    # (issue #3564): the generation it saw is the restore's, the
+                    # pointer the one the restore replaced. Refuse as above.
+                    current = await self._read_generation(client, server_prefix)
+                    await _delete_prefix(client, new_prefix)
+                    await _delete_prefix(client, incoming)
+                    self._release_staging(incoming)
+                    h.consumed = True
+                    raise StaleGenerationError(
+                        current if expected_base is None else expected_base, current
+                    )
                 if prior_prefix is not None:
                     prior_objs = await client.list_objects(prior_prefix)
                     missing = compare_region_name_sets(
@@ -1072,6 +1089,13 @@ class ObjectStorage(Storage):
         server_prefix = self._server_prefix(community_id, server_id)
         async with self._client_factory() as client:
             return await self._read_generation(client, server_prefix)
+
+    async def live_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> LiveSnapshot:
+        server_prefix = self._server_prefix(community_id, server_id)
+        async with self._client_factory() as client:
+            return _live(await self._read_pointer(client, server_prefix))
 
     async def settled_generation(
         self, community_id: CommunityId, server_id: ServerId
@@ -2360,6 +2384,12 @@ def _as_object_handle(handle: SnapshotHandle) -> _ObjectSnapshotHandle:
     if not isinstance(handle, _ObjectSnapshotHandle):
         raise SnapshotHandleError("handle was not issued by this adapter")
     return handle
+
+
+def _live(pointer: str | None) -> LiveSnapshot:
+    """The :class:`LiveSnapshot` a pointer value names (issue #3564)."""
+
+    return LiveSnapshot(None if pointer is None else SnapshotId(pointer))
 
 
 def _new_version_id() -> str:
