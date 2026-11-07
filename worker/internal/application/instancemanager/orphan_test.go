@@ -186,7 +186,7 @@ func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.reserved[s1] {
+	if _, held := m.reserved[s1]; held {
 		t.Fatal("a refused take claimed the reservation; the id is now wedged against every lifecycle command")
 	}
 	if m.instances[s1] != replaced {

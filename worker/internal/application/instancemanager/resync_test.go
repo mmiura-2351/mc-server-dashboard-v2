@@ -1,6 +1,7 @@
 package instancemanager
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -196,7 +197,7 @@ func TestResyncStatusSkipsABootSweptServerTheWorkerHoldsAgain(t *testing.T) {
 		WithSweptServers([]string{"srv-live", "srv-orphan", "srv-reserved", "srv-gone"})
 	m.instances["srv-live"] = newFakeInstance("srv-live")
 	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
-	m.reserved["srv-reserved"] = true
+	m.reserved["srv-reserved"] = legNone
 
 	m.ResyncStatus()
 
@@ -205,6 +206,137 @@ func TestResyncStatusSkipsABootSweptServerTheWorkerHoldsAgain(t *testing.T) {
 	if len(states) != len(want) || states["srv-live"] != want["srv-live"] ||
 		states["srv-orphan"] != want["srv-orphan"] || states["srv-gone"] != want["srv-gone"] {
 		t.Fatalf("resync states = %v, want %v", states, want)
+	}
+	expectNoStatus(t, m)
+}
+
+// startHeld starts s1 on d and consumes the running report its pump forwards, so
+// the next status event a test reads is the one it is asserting on.
+func startHeld(t *testing.T, m *Manager) {
+	t.Helper()
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("seed running instance: %+v", res)
+	}
+	drainStatuses(t, m, 1)
+}
+
+// A reconnect while a stop is confirming termination reports the server stopping
+// (issue #3302). The stop evicted the instance and holds the id only as a
+// reservation, so a resync that read the instances map alone left the API row at
+// the unknown the disconnect wrote until the stop's terminal report.
+func TestResyncStatusReportsAStopInFlightStopping(t *testing.T) {
+	d := &gatedStopDriver{}
+	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
+	startHeld(t, m)
+	done := make(chan session.CommandResult, 1)
+	go func() {
+		done <- m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
+	}()
+	awaitEnter(t, d.inst.stopEntered)
+
+	m.ResyncStatus()
+
+	if states := statesOf(t, m, 1); states[s1] != "stopping" {
+		t.Fatalf("resync states = %v, want %s stopping", states, s1)
+	}
+	expectNoStatus(t, m)
+	close(d.inst.stopRelease)
+	if res := <-done; !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+}
+
+// The same holds for a restart's stop leg (issue #3302): the row then reads
+// (running, stopping), which is what the reconciler's restart stand-back
+// recognises, instead of (running, unknown), which it redispatches a start for.
+func TestResyncStatusReportsARestartStopLegStopping(t *testing.T) {
+	d := &gatedStopDriver{}
+	m := newManager(t, d, nil).WithTransfer(&fakeTransfer{})
+	startHeld(t, m)
+	stopping := d.inst
+	done := make(chan session.CommandResult, 1)
+	go func() {
+		done <- m.Handle(context.Background(), session.Command{CommandID: "restart", ServerID: s1, Kind: "RestartServer"})
+	}()
+	awaitEnter(t, stopping.stopEntered)
+
+	m.ResyncStatus()
+
+	if states := statesOf(t, m, 1); states[s1] != "stopping" {
+		t.Fatalf("resync states = %v, want %s stopping", states, s1)
+	}
+	expectNoStatus(t, m)
+	close(stopping.stopRelease)
+	if res := <-done; !res.Success {
+		t.Fatalf("restart = %+v, want success", res)
+	}
+}
+
+// A reconnect while a start is reserved but not yet launched reports it starting
+// (issue #3302): the instance is registered only once driver.Start returns.
+func TestResyncStatusReportsAReservedStartStarting(t *testing.T) {
+	d := newGatedDriver()
+	m := newManager(t, d, nil)
+	seedScratch(t, m, s1)
+	done := make(chan session.CommandResult, 1)
+	go func() { done <- m.Handle(context.Background(), startCmd()) }()
+	awaitEnter(t, d.entered)
+
+	m.ResyncStatus()
+
+	if states := statesOf(t, m, 1); states[s1] != "starting" {
+		t.Fatalf("resync states = %v, want %s starting", states, s1)
+	}
+	expectNoStatus(t, m)
+	close(d.release)
+	if res := <-done; !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+}
+
+// Once a restart's stop is confirmed, the reservation is the relaunch's, and a
+// reconnect reports starting rather than the stop leg it has left (issue #3302).
+func TestResyncStatusReportsARestartRelaunchStarting(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	startHeld(t, m)
+	relaunch := newGatedDriver()
+	m.drivers["container"] = relaunch
+	done := make(chan session.CommandResult, 1)
+	go func() {
+		done <- m.Handle(context.Background(), session.Command{CommandID: "restart", ServerID: s1, Kind: "RestartServer"})
+	}()
+	awaitEnter(t, relaunch.entered)
+	if ev := drainStatuses(t, m, 1)[0]; ev.State != "stopped" {
+		t.Fatalf("stop leg reported %+v, want stopped", ev)
+	}
+
+	m.ResyncStatus()
+
+	if states := statesOf(t, m, 1); states[s1] != "starting" {
+		t.Fatalf("resync states = %v, want %s starting", states, s1)
+	}
+	expectNoStatus(t, m)
+	close(relaunch.release)
+	if res := <-done; !res.Success {
+		t.Fatalf("restart = %+v, want success", res)
+	}
+}
+
+// A reservation that is not a lifecycle leg (a hydrate, a stopped-id snapshot, the
+// scratch reclaim) reports nothing, and an orphan whose retry stop holds the
+// reservation is still reported unknown, once: what the orphan record says about
+// the process outranks the leg of the stop being retried on it.
+func TestResyncStatusReportsNoLegForAQuietReservationAndKeepsTheOrphanUnknown(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	m.reserved["srv-hydrating"] = legNone
+	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
+	m.reserved["srv-orphan"] = legStopping
+
+	m.ResyncStatus()
+
+	if states := statesOf(t, m, 1); len(states) != 1 || states["srv-orphan"] != "unknown" {
+		t.Fatalf("resync states = %v, want only srv-orphan unknown", states)
 	}
 	expectNoStatus(t, m)
 }

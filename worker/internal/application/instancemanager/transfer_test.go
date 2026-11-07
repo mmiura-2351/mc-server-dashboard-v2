@@ -363,7 +363,7 @@ func TestSnapshotTriggerRefusedWhenScratchHoldsNoWorkingSet(t *testing.T) {
 			// The stopped path's reservation is released, so the corrective hydrate is not
 			// refused BUSY behind this refusal (the leak shape of issue #1950).
 			m.mu.Lock()
-			leaked := m.reserved[s1]
+			_, leaked := m.reserved[s1]
 			m.mu.Unlock()
 			if leaked {
 				t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective hydrate would be refused BUSY")
