@@ -344,7 +344,11 @@ An archive holding a refused member reads fine, but nothing can be restored
 from it, so restore and the probe both raise `ArchiveUnreadableError` whatever
 `force` says, with `current/` untouched. The servers seam answers restore with
 `409 backup_unreadable`, and the sweep records `UNREADABLE` (Section 7.3). The
-platform's own producers never emit such a member. The fs extraction also keeps
+platform's own producers never emit such a member. That includes an object
+snapshot that still holds a legacy `//.dir` key from a past root `make_dir` bug
+(issue #1944): the backup and `final.tar.gz` writers leave it out, as hydrate and
+the directory listing do, so its absolute member `/.dir` is never written
+(issue #3574). The fs extraction also keeps
 `tarfile.data_filter`'s other protections (mode sanitising and the like) on top
 of the rule.
 

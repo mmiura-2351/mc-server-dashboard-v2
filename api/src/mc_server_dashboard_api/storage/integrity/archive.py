@@ -191,7 +191,8 @@ def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
     an absolute name, and a ``..`` — even one that stays inside the tree — raise
     :class:`ArchiveUnreadableError`: the archive reads, but nothing can be
     restored from it, override or not. The platform's own producers emit none of
-    these.
+    these: the object backend's archive writer leaves out the legacy ``//.dir`` key
+    of issue #1944, whose member would be absolute (issue #3574).
     """
 
     if not (member.isfile() or member.isdir()):
