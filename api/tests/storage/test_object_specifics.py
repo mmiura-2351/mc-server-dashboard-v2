@@ -50,6 +50,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     StaleGenerationError,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
+    BackupKey,
     CommunityId,
     RelPath,
     ServerId,
@@ -890,6 +891,146 @@ async def test_hydrate_skips_poisoned_root_dir_marker() -> None:
     assert "/.dir" not in members
     # The legitimate file must still be present.
     assert "server.properties" in members
+
+
+async def _publish_with_poisoned_root_dir_marker(
+    store: FakeS3Store, storage: ObjectStorage
+) -> tuple[CommunityId, ServerId]:
+    """Publish a snapshot, then plant the ``//.dir`` key of issue #1944 in it."""
+
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"server.properties": b"x", "world/level": b"y"}
+    )
+    pointer_raw = store.objects[_server_prefix(community, server) + _POINTER]
+    snapshot_prefix = json.loads(pointer_raw)["snapshot"]
+    store.objects[snapshot_prefix + "/" + _DIR_MARKER] = b""
+    return community, server
+
+
+async def _assert_restorable(
+    storage: ObjectStorage, community: CommunityId, server: ServerId, key: BackupKey
+) -> None:
+    """The backup passes the health probe and restores the snapshot's real files."""
+
+    report = await storage.check_backup_health(community, server, key)
+    assert report.healthy
+    await storage.restore_backup(community, server, key)
+    members = read_tar(await drain(storage.open_hydrate_source(community, server)))
+    assert members == {"server.properties": b"x", "world/level": b"y"}
+
+
+async def test_backup_of_a_snapshot_with_a_poisoned_root_dir_marker_restores() -> None:
+    """Backup creation scrubs the #1944 ``//.dir`` key the way hydrate does (#3574).
+
+    Copied verbatim, the key became the absolute member ``/.dir``, which the one
+    member rule (#3550) refuses, so the backup could never be restored.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = await _publish_with_poisoned_root_dir_marker(store, storage)
+
+    key = await storage.create_backup_from_current(community, server)
+
+    await _assert_restorable(storage, community, server, key)
+
+
+async def test_final_archive_of_a_poisoned_snapshot_restores() -> None:
+    """The prune's ``final.tar.gz`` scrubs the #1944 key too (#3574): it is the
+    recommended recovery source, so it must pass the member rule once uploaded."""
+
+    store, storage = _store_and_storage()
+    community, server = await _publish_with_poisoned_root_dir_marker(store, storage)
+
+    await storage.prune_to_final_snapshot(community, server)
+    final = store.objects[_server_prefix(community, server) + "final.tar.gz"]
+    target_community, target_server = new_scope()
+    await _publish(storage, target_community, target_server, {"f": b"z"})
+    key = await storage.put_backup(target_community, target_server, stream_of(final))
+
+    await _assert_restorable(storage, target_community, target_server, key)
+
+
+async def test_listing_hides_a_poisoned_root_dir_marker() -> None:
+    """The #1944 ``//.dir`` key lists as no entry, not a nameless directory (#3574).
+
+    The nameless directory is what the directory-download walk descended into:
+    its child path is the root again, so the walk never ended.
+    """
+
+    store, storage = _store_and_storage()
+    community, server = await _publish_with_poisoned_root_dir_marker(store, storage)
+    expected = ["server.properties", "world"]
+
+    entries = await storage.list_dir(community, server, RelPath("."))
+    async with storage.open_working_set_view(community, server) as view:
+        view_entries = await view.list_dir(RelPath("."))
+
+    assert [e.name for e in entries] == expected
+    assert [e.name for e in view_entries] == expected
+
+
+def _plant_in_live_snapshot(
+    store: FakeS3Store, community: CommunityId, server: ServerId, suffix: str
+) -> str:
+    """Store ``suffix`` under the live snapshot prefix directly; return the key."""
+
+    pointer_raw = store.objects[_server_prefix(community, server) + _POINTER]
+    key: str = json.loads(pointer_raw)["snapshot"] + suffix
+    store.objects[key] = b"legacy"
+    return key
+
+
+async def test_listing_skips_a_legacy_empty_segment_key_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stored key with an internal empty segment (``world//extra.dat``), which
+    ingest accepted before issue #3574, is not listed as a nameless directory: the
+    listing skips it, so a walk ends, and a WARNING names the whole key."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"server.properties": b"x", "world/level": b"y"}
+    )
+    key = _plant_in_live_snapshot(store, community, server, "world//extra.dat")
+
+    with caplog.at_level(logging.WARNING):
+        entries = await storage.list_dir(community, server, RelPath("world"))
+        async with storage.open_working_set_view(community, server) as view:
+            view_entries = await view.list_dir(RelPath("world"))
+
+    assert [e.name for e in entries] == ["level"]
+    assert [e.name for e in view_entries] == ["level"]
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warned) == 2
+    assert all(key in r.getMessage() for r in warned)
+
+
+async def test_backup_leaves_out_a_legacy_empty_segment_key_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The backup writer leaves the same legacy key out, with a WARNING naming it,
+    rather than write a member the member rule refuses (issue #3574)."""
+
+    store, storage = _store_and_storage()
+    community, server = new_scope()
+    await _publish(
+        storage, community, server, {"server.properties": b"x", "world/level": b"y"}
+    )
+    key = _plant_in_live_snapshot(store, community, server, "world//extra.dat")
+
+    with caplog.at_level(logging.WARNING):
+        backup = await storage.create_backup_from_current(community, server)
+
+    assert any(
+        r.levelno == logging.WARNING and key in r.getMessage() for r in caplog.records
+    )
+    report = await storage.check_backup_health(community, server, backup)
+    assert report.healthy
+    await storage.restore_backup(community, server, backup)
+    members = read_tar(await drain(storage.open_hydrate_source(community, server)))
+    assert members == {"server.properties": b"x", "world/level": b"y"}
 
 
 async def test_file_stream_rereads_when_gc_lands_in_lease_gap() -> None:

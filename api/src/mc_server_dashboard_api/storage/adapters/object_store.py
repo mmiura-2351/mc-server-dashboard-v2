@@ -115,7 +115,9 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.archive import (
     GzipReadProbe,
     archive_read_errors_as_unreadable,
+    is_canonical_name,
     refuse_unrestorable_member,
+    without_tar_root_prefix,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
     RegionFinding,
@@ -785,14 +787,12 @@ class ObjectStorage(Storage):
                 members = sorted(
                     await client.list_objects(snapshot_prefix), key=lambda o: o.key
                 )
-                # Scrub poisoned keys whose relative name starts with ``/``
-                # (issue #1944): a prior root ``make_dir`` bug could write
-                # ``<prefix>//.dir`` whose tar member ``/.dir`` is absolute and
-                # the worker's ``safeJoin`` rejects, blocking hydrate forever.
+                # Scrub the #1944 poisoned keys: the worker's ``safeJoin`` rejects
+                # their absolute member, which would block hydrate forever.
                 members = [
                     m
                     for m in members
-                    if not m.key[len(snapshot_prefix) :].startswith("/")
+                    if not _is_poisoned_key_suffix(m.key[len(snapshot_prefix) :])
                 ]
                 # Filter out excluded top-level members (issue #1942): the
                 # relative key's first path segment is checked against the set.
@@ -842,11 +842,12 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             spool = await _spool_stream(stream, ".snapshot.", ".tar")
             try:
-                for name in await asyncio.to_thread(
+                for member_name, name in await asyncio.to_thread(
                     _safe_archive_members, spool, "r:*"
                 ):
                     await client.upload_multipart(
-                        incoming + name, _archive_member_parts(spool, name, "r:*")
+                        incoming + name,
+                        _archive_member_parts(spool, member_name, "r:*"),
                     )
             finally:
                 await _discard_spool(spool, raise_fault=False)
@@ -1896,7 +1897,7 @@ class ObjectStorage(Storage):
             # A prefix with no members is an empty (non-existent) directory; the
             # root (sub == "") always lists, even when empty.
             raise NotFoundError(f"directory not found: {rel_path.value}")
-        return _entries_at_level(objs, snapshot_prefix + dir_suffix)
+        return _entries_at_level(objs, snapshot_prefix, dir_suffix)
 
     async def path_exists(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -2408,19 +2409,58 @@ async def _delete_prefix(client: S3Client, prefix: str) -> None:
         await client.delete_object(obj.key)
 
 
-def _entries_at_level(objs: list[S3Object], dir_prefix: str) -> list[DirEntry]:
-    """Collapse a prefix scan into one directory level's entries (Section 3.4).
+def _is_poisoned_key_suffix(suffix: str) -> bool:
+    """Whether a key's suffix relative to its SNAPSHOT prefix is the legacy poisoned
+    key of issue #1944.
 
-    Keys directly under ``dir_prefix`` are files; keys with a further ``/`` are a
-    subdirectory, reported once with size 0 (object stores have no directory size).
+    A prior root ``make_dir`` bug wrote ``<snapshot>//.dir``: its snapshot-relative
+    suffix starts with ``/``, so as a tar member it is the absolute ``/.dir`` and as
+    a root listing entry a directory with no name. No current writer produces one,
+    but already-poisoned snapshots still hold it, so every reader that turns
+    snapshot keys into names skips it: hydrate, the backup and final ``tar.gz``
+    writer, and the directory listing (issue #3574). Only a snapshot-relative
+    suffix is judged here: below the root, a suffix that starts with ``/`` is a
+    non-canonical key (:func:`is_canonical_name`), not this one.
     """
 
+    return suffix.startswith("/")
+
+
+def _warn_non_canonical_key(key: str, where: str) -> None:
+    """Say that a legacy non-canonical snapshot key is left out (issue #3574)."""
+
+    _LOG.warning(
+        "snapshot key %r has an empty or '.' path segment (a legacy non-canonical "
+        "key ingest accepted before issue #3574); leaving it out of the %s",
+        key,
+        where,
+    )
+
+
+def _entries_at_level(
+    objs: list[S3Object], snapshot_prefix: str, dir_suffix: str
+) -> list[DirEntry]:
+    """Collapse a prefix scan into one directory level's entries (Section 3.4).
+
+    Keys directly under ``snapshot_prefix + dir_suffix`` are files; keys with a
+    further ``/`` are a subdirectory, reported once with size 0 (object stores have
+    no directory size). A key whose entry at this level would have an empty or
+    ``.`` name is left out with a warning (issue #3574): a walk into that entry
+    would list this level again, forever.
+    """
+
+    dir_prefix = snapshot_prefix + dir_suffix
     files: dict[str, int] = {}
     dirs: set[str] = set()
     for obj in objs:
+        if _is_poisoned_key_suffix(obj.key[len(snapshot_prefix) :]):
+            continue
         rest = obj.key[len(dir_prefix) :]
         if rest == _DIR_MARKER:
             # Marker placed by make_dir (issue #1125) — hide it from listings.
+            continue
+        if not is_canonical_name(rest.split("/", 1)[0]):
+            _warn_non_canonical_key(obj.key, "listing")
             continue
         if "/" in rest:
             dirs.add(rest.split("/", 1)[0])
@@ -2493,22 +2533,36 @@ async def _tar_stream_from_objects(
     yield b"\0" * (blocksize * 2)
 
 
-def _safe_archive_members(spool: Path, mode: Literal["r:*", "r:gz"]) -> list[str]:
-    """List the regular-file member names of the spooled (tar / tar.gz) archive,
-    refusing ``..``/absolute names (the tar-side traversal defence, matching the
-    fs adapter's ``filter="data"`` posture) so a hostile archive cannot place
-    objects outside the server's key prefix."""
+def _safe_archive_members(
+    spool: Path, mode: Literal["r:*", "r:gz"]
+) -> list[tuple[str, str]]:
+    """List the regular-file members of the spooled (tar / tar.gz) archive as
+    ``(member name, key name)`` pairs, refusing ``..``/absolute names (the tar-side
+    traversal defence, matching the fs adapter's ``filter="data"`` posture) so a
+    hostile archive cannot place objects outside the server's key prefix, and any
+    member at a non-canonical name (issue #3574). The key name is the member's
+    without the tar root prefix (:func:`without_tar_root_prefix`)."""
 
-    names: list[str] = []
+    names: list[tuple[str, str]] = []
     with tarfile.open(str(spool), mode=mode) as tar:
-        for member in tar.getmembers():
+        for read in tar.getmembers():
+            member = without_tar_root_prefix(read)
+            if member is None:
+                continue
             if member.isfile():
                 pure = PurePosixPath(member.name)
                 if pure.is_absolute() or ".." in pure.parts:
                     raise PathTraversalError(
                         f"tar member escapes the server prefix: {member.name!r}"
                     )
-                names.append(member.name)
+            # Every member, as the fs ingest's filter judges every member: a
+            # non-canonical name would become a key no listing can name (#3574).
+            if not is_canonical_name(member.name, is_dir=member.isdir()):
+                raise PathTraversalError(
+                    f"tar member name is not canonical: {member.name!r}"
+                )
+            if member.isfile():
+                names.append((read.name, member.name))
     return names
 
 
@@ -2591,18 +2645,22 @@ async def _archive_file_member_streams(
     try:
         while True:
             with archive_read_errors_as_unreadable():
-                member = await asyncio.to_thread(tar.next)
-            if member is None:
+                read = await asyncio.to_thread(tar.next)
+            if read is None:
                 return
-            # Judged before the reserved decision, so an unrestorable member at
-            # the reserved name is refused, not dropped.
+            # Read without the tar root prefix (issue #3574), then judged before
+            # the reserved decision, so an unrestorable member at the reserved
+            # name is refused, not dropped.
+            member = without_tar_root_prefix(read)
+            if member is None:
+                continue
             refuse_unrestorable_member(member)
             if dropped is not None and is_reserved_root_member(member.name):
                 dropped.append(member.name)
                 continue
             if not member.isfile():
                 continue
-            member_file = tar.extractfile(member)
+            member_file = tar.extractfile(read)
             if member_file is None:
                 continue
             yield member.name, _fileobj_parts(member_file)
@@ -2655,12 +2713,22 @@ async def _write_backup_targz(
     objs: list[S3Object],
     spool: Path,
 ) -> None:
-    """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``."""
+    """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``.
+
+    A #1944 poisoned key is left out, as hydrate leaves it out: its member would be
+    absolute, which the member rule refuses (issue #3574). So is a legacy
+    non-canonical key, with a warning: the member rule refuses its name too.
+    """
 
     tar = await _run_spool_writer(spool, tarfile.open, str(spool), "w:gz")
     try:
         for obj in objs:
             name = obj.key[len(snapshot_prefix) :]
+            if _is_poisoned_key_suffix(name):
+                continue
+            if not is_canonical_name(name):
+                _warn_non_canonical_key(obj.key, "archive")
+                continue
             info = tarfile.TarInfo(name=name)
             info.size = obj.size
             buf = io.BytesIO()
@@ -2736,7 +2804,7 @@ class _ObjectWorkingSetView(WorkingSetView):
             objs = await client.list_objects(self._snapshot_prefix + dir_suffix)
         if not objs and sub:
             raise NotFoundError(f"directory not found: {rel_path.value}")
-        return _entries_at_level(objs, self._snapshot_prefix + dir_suffix)
+        return _entries_at_level(objs, self._snapshot_prefix, dir_suffix)
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._snapshot_prefix is None:
