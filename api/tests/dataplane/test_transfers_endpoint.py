@@ -45,8 +45,13 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     SnapshotHandleError,
 )
-from mc_server_dashboard_api.storage.domain.port import SnapshotHandle, Storage
+from mc_server_dashboard_api.storage.domain.port import (
+    RESTORE_PUBLISHER,
+    SnapshotHandle,
+    Storage,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
+    BackupKey,
     CommunityId,
     RelPath,
     ServerId,
@@ -480,8 +485,6 @@ def test_snapshot_in_flight_stale_publish_refused_after_restore(
     # generation AND recorded a DIFFERENT publisher (the sentinel), the publish guard
     # refuses (409 stale_generation) — the just-restored data is NOT clobbered.
     import asyncio
-
-    from mc_server_dashboard_api.storage.domain.value_objects import BackupKey
 
     worker = str(uuid.uuid4())
 
@@ -2898,3 +2901,122 @@ def test_releasing_propagates_aclose_to_inner_iterator() -> None:
         assert not sem.locked()
 
     asyncio.run(_drive())
+
+
+def _pause_restores_after_their_bump(
+    storage: Storage,
+) -> tuple[threading.Event, threading.Event]:
+    """Hold a restore between its generation bump and its flip (issue #3564).
+
+    Returns ``(bumped, release)``: ``bumped`` is set once a restore has bumped,
+    and the restore then waits, holding the server lock, until ``release``.
+    """
+
+    bumped, release = threading.Event(), threading.Event()
+    if isinstance(storage, FsStorage):
+        real_bump_marker = storage._bump_marker
+
+        def _bump_marker(server_root: Path, publisher: str | None) -> None:
+            real_bump_marker(server_root, publisher)
+            if publisher == RESTORE_PUBLISHER:
+                bumped.set()
+                release.wait(10)
+
+        storage._bump_marker = _bump_marker  # type: ignore[method-assign]
+        return bumped, release
+    assert isinstance(storage, ObjectStorage)
+    real_bump_generation = storage._bump_generation
+
+    async def _bump_generation(
+        client: object, server_prefix: str, publisher: str | None
+    ) -> int:
+        generation = await real_bump_generation(
+            client,  # type: ignore[arg-type]
+            server_prefix,
+            publisher,
+        )
+        if publisher == RESTORE_PUBLISHER:
+            bumped.set()
+            await asyncio.to_thread(release.wait, 10)
+        return generation
+
+    storage._bump_generation = _bump_generation  # type: ignore[method-assign]
+    return bumped, release
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+def test_snapshot_guarded_inside_a_restore_window_cannot_overwrite_the_restore(
+    tmp_path: Path, make_storage: Callable[[Path], Storage]
+) -> None:
+    # Issue #3564: a restore bumps the generation before it flips. A snapshot
+    # whose guard reads the store in between (no base header, so the guard's
+    # reading is its only base) must still be refused once the restore has
+    # flipped, or its pre-restore world would replace the restored one.
+    storage = make_storage(tmp_path)
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+
+    async def _publish_files(files: dict[str, bytes]) -> None:
+        handle = await storage.begin_snapshot(c, s)
+
+        async def _stream() -> AsyncIterator[bytes]:
+            yield _tar_bytes(files)
+
+        await storage.write_snapshot(handle, _stream())
+        await storage.commit_snapshot(handle)
+
+    async def _arrange() -> BackupKey:
+        await _publish_files({"k": b"backed-up"})
+        key = await storage.create_backup_from_current(c, s)
+        await _publish_files({"k": b"pre-restore"})
+        return key
+
+    key = asyncio.run(_arrange())
+    bumped, release = _pause_restores_after_their_bump(storage)
+    restores: list[asyncio.Task[object]] = []
+    real_current_generation = storage.current_generation
+    real_write_snapshot = storage.write_snapshot
+
+    async def _guard_reads_inside_the_window(
+        community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        if not restores:
+            restores.append(asyncio.create_task(storage.restore_backup(c, s, key)))
+            await asyncio.to_thread(bumped.wait, 10)
+        return await real_current_generation(community_id, server_id)
+
+    async def _restore_flips_during_the_upload(
+        handle: SnapshotHandle,
+        stream: AsyncIterator[bytes],
+        *,
+        expected_base: int | None = None,
+    ) -> None:
+        await real_write_snapshot(handle, stream, expected_base=expected_base)
+        release.set()
+        await restores[0]
+
+    storage.current_generation = _guard_reads_inside_the_window  # type: ignore[method-assign]
+    storage.write_snapshot = _restore_flips_during_the_upload  # type: ignore[method-assign]
+    try:
+        with client:
+            resp = client.post(
+                _url(community, server, "snapshot"),
+                content=_tar_bytes({"k": b"in-flight"}),
+                headers={**_auth(), "X-Worker-Id": str(uuid.uuid4())},
+            )
+    finally:
+        release.set()
+        storage.current_generation = real_current_generation  # type: ignore[method-assign]
+        storage.write_snapshot = real_write_snapshot  # type: ignore[method-assign]
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    async def _live() -> bytes:
+        return b"".join([chunk async for chunk in storage.open_hydrate_source(c, s)])
+
+    assert _read_tar(asyncio.run(_live())) == {"k": b"backed-up"}

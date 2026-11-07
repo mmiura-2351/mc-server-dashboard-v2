@@ -32,6 +32,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
     JarKey,
+    LiveSnapshot,
     RelPath,
     ServerId,
     VersionId,
@@ -275,6 +276,7 @@ class WorkingSetStore(abc.ABC):
         *,
         publisher: str | None = None,
         expected_base: int | None = None,
+        expected_snapshot: LiveSnapshot | None = None,
         publisher_fence: PublisherFence | None = None,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
@@ -322,6 +324,12 @@ class WorkingSetStore(abc.ABC):
         that never hydrated, or an older Worker that sends no base) skips the
         re-check, matching the pre-stream guard's backward-compatible posture.
 
+        ``expected_snapshot`` is what :meth:`live_snapshot` read at guard time
+        (issue #3564), re-checked under the same lock: a different live snapshot
+        refuses with :class:`~.errors.StaleGenerationError` too. A publish changes
+        both the generation and the snapshot, so this only catches a guard that read
+        inside a restore's bump-then-flip window. ``None`` skips it.
+
         ``publisher_fence`` is awaited once under the same per-server lock,
         immediately before the publish (issue #3544): the caller's pre-commit
         fence ran before the commit's slow steps (the staging fsync, the object
@@ -340,6 +348,19 @@ class WorkingSetStore(abc.ABC):
         the world. The byte-precise check still catches realistic tears (a referenced
         chunk overrunning EOF, an entry past EOF, a severed prefix). See the STORAGE.md
         Section 8 region-rule note.
+        """
+
+    @abc.abstractmethod
+    async def live_snapshot(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> LiveSnapshot:
+        """Return what ``current`` names now, without the server lock (issue #3564).
+
+        The upload guard reads it beside :meth:`current_generation` and hands it
+        to :meth:`commit_snapshot` as ``expected_snapshot``. A restore bumps the
+        generation before it flips ``current``, so a guard reading between the two
+        sees the new generation over the old snapshot; the commit's re-check of
+        both, under the lock, refuses it either way.
         """
 
     @abc.abstractmethod
