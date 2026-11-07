@@ -25,7 +25,7 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx2
 import pytest
@@ -1035,7 +1035,9 @@ def _store_failing_its_restore(
     write whose response is lost). That fault fires once, so the steps after the
     publish meet a working store. Two object-only faults add to the lost
     response: ``"after_flip_cleanup"`` fails removing the staging, and
-    ``"after_flip_unconfirmed"`` fails every read confirming the pointer.
+    ``"after_flip_unconfirmed"`` fails every read confirming the pointer. An
+    fs-only one adds to the directory fsync: ``"after_flip_unreadable"`` also
+    fails the restore's next read of the ``current`` link, inside the restore.
     """
 
     faults = Faults()
@@ -1099,13 +1101,38 @@ def _store_failing_its_restore(
         prior_target = os.readlink(link)
         real_fsync_dir = fs_adapter._fsync_dir
 
+        unreadable: list[bool] = []
+
         def _fsync_dir(path: Path) -> None:
             if path == server_root and os.readlink(link) != prior_target:
                 monkeypatch.setattr(fs_adapter, "_fsync_dir", real_fsync_dir)
+                if fault == "after_flip_unreadable":
+                    unreadable.append(True)
                 raise OSError(errno.EIO, "Input/output error")
             real_fsync_dir(path)
 
         monkeypatch.setattr(fs_adapter, "_fsync_dir", _fsync_dir)
+        if fault == "after_flip_unreadable":
+            assert isinstance(storage, FsStorage)
+            real_live_snapshot_name = storage._live_snapshot_name
+            real_publish_restore = storage._publish_restore
+
+            def _live_snapshot_name(server_root: Path) -> str | None:
+                if unreadable:
+                    unreadable.clear()
+                    raise OSError(errno.EIO, "Input/output error")
+                return real_live_snapshot_name(server_root)
+
+            async def _publish_restore(*args: Any, **kwargs: Any) -> None:
+                # The link read fails only inside the restore, so the steps
+                # after it meet a working store.
+                try:
+                    await real_publish_restore(*args, **kwargs)
+                finally:
+                    unreadable.clear()
+
+            monkeypatch.setattr(storage, "_live_snapshot_name", _live_snapshot_name)
+            monkeypatch.setattr(storage, "_publish_restore", _publish_restore)
     return storage, storage_ref
 
 
@@ -1158,6 +1185,45 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
     assert persisted is not None
     expected = BackupHealth.QUARANTINED if corrupt else BackupHealth.HEALTHY
     assert persisted.health is expected
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert b"enable-rcon=" in live["server.properties"]
+
+
+def test_an_fs_restore_whose_flip_cannot_be_reread_finishes_as_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fs restore flipped ``current``, then the directory fsync failed and so
+    # did the next read of the ``current`` link (issue #3564). The flip returned,
+    # so the restore published whatever a later read says: the forced corrupt
+    # backup is quarantined, the properties are re-applied, the route audits the
+    # force-restore, and the 503 says the restore did not complete.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        "fs",
+        "after_flip_unreadable",
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "publish_incomplete"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
     scope = (StorageCommunityId(community_id), StorageServerId(server_id))
     live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
     assert b"enable-rcon=" in live["server.properties"]

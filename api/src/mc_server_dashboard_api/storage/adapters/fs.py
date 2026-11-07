@@ -1236,12 +1236,19 @@ class FsStorage(Storage):
 
         def _locked() -> Path | None:
             self._bump_marker(server_root, RESTORE_PUBLISHER)
-            prior = self._live_snapshot_name(server_root)
+            flipped: list[bool] = []
             try:
                 with _translating_io_faults():
-                    return self._publish(community_id, server_id, staging)
+                    return self._publish(
+                        community_id,
+                        server_id,
+                        staging,
+                        on_flip=lambda: flipped.append(True),
+                    )
             except Exception as exc:
-                if self._live_snapshot_name(server_root) == prior:
+                # The replace of ``current`` returned, so the backup is live
+                # whatever failed after it; no re-read can be wrong about that.
+                if not flipped:
                     raise
                 raise RestorePartiallyPublishedError(exc, report) from exc
 
@@ -1258,7 +1265,12 @@ class FsStorage(Storage):
         fs_handle.consumed = True
 
     def _publish(
-        self, community_id: CommunityId, server_id: ServerId, staging: Path
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        staging: Path,
+        *,
+        on_flip: Callable[[], None] | None = None,
     ) -> Path | None:
         """The atomic-publish core (Section 4.2), driven on a worker thread.
 
@@ -1278,6 +1290,10 @@ class FsStorage(Storage):
         #920), keeping the lock's critical section short. Returns ``None`` when there
         is nothing to reclaim (first publish, or the old snapshot is still leased by
         an active hydrate reader — left for the next sweep, Section 4.2 reader safety).
+
+        ``on_flip`` is called once the replace of ``current`` has returned, so a
+        caller knows the flip took effect even when a later step raises (issue
+        #3564): the replace either flips ``current`` or raises without flipping it.
         """
 
         server_root = self._server_root(community_id, server_id)
@@ -1305,6 +1321,8 @@ class FsStorage(Storage):
         tmp_link = server_root / f".current.{uuid.uuid4().hex}"
         os.symlink(os.path.join("snapshots", snapshot_id.value), tmp_link)
         os.replace(tmp_link, link)
+        if on_flip is not None:
+            on_flip()
 
         self._seam.reach(PublishPhase.AFTER_FLIP)
 
