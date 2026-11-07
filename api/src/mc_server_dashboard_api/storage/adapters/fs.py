@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import enum
 import errno
 import functools
 import hashlib
@@ -122,9 +123,10 @@ _SPOOL_SWEEP_MIN_AGE_S = 3600
 # world; a constant is intentional (no config knob requested).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 
-# The backoff of ``settled_generation``'s wait for the server lock (issue #3552).
-_SETTLED_POLL_INITIAL_SECONDS = 0.005
-_SETTLED_POLL_MAX_SECONDS = 0.1
+# The backoff of ``_under_server_lock``'s wait for the server lock (issues #3552,
+# #3569).
+_LOCK_POLL_INITIAL_SECONDS = 0.005
+_LOCK_POLL_MAX_SECONDS = 0.1
 
 # The errnos an fs backup operation translates to a retryable "store unavailable"
 # outcome (issue #2555). The object backend answers a backend 5xx / transport
@@ -321,6 +323,8 @@ class FsStorage(Storage):
         # single-process deployment, consistent with the in-process staging leases). A
         # future multi-process deployment would need a shared lock (e.g. an OS file
         # lock on the server root) or it silently reopens this race.
+        # Waiters take it through ``_under_server_lock``, which never parks a thread
+        # on it (issue #3569).
         self._server_locks: dict[Path, threading.Lock] = {}
         self._server_locks_guard = threading.Lock()
 
@@ -334,6 +338,52 @@ class FsStorage(Storage):
                 lock = threading.Lock()
                 self._server_locks[root] = lock
             return lock
+
+    async def _under_server_lock(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        work: Callable[[], _R],
+    ) -> _R:
+        """Run ``work`` on a worker thread under the server lock; return its result.
+
+        No thread ever blocks on the server lock here. A publish that holds it
+        awaits its fence on the event loop, and that fence can need the default
+        executor (a DNS lookup on a DB reconnect). A worker parked on the lock would
+        take that capacity away from the fence (issues #3552, #3569). So each
+        attempt only tries the lock, and runs ``work`` and releases on a worker
+        thread if it got it; the wait between attempts is a sleep on the loop.
+        """
+
+        delay = _LOCK_POLL_INITIAL_SECONDS
+        while True:
+            outcome = await asyncio.to_thread(
+                self._run_if_unlocked, community_id, server_id, work
+            )
+            if not isinstance(outcome, _LockHeld):
+                return outcome
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _LOCK_POLL_MAX_SECONDS)
+
+    def _run_if_unlocked(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        work: Callable[[], _R],
+    ) -> _R | _LockHeld:
+        """``work()`` under the server lock, or ``LOCK_HELD`` if the lock is held.
+
+        The lock is taken and released within this call, so a cancelled caller
+        cannot leave it held.
+        """
+
+        lock = self._server_lock(community_id, server_id)
+        if not lock.acquire(blocking=False):
+            return _LockHeld.LOCK_HELD
+        try:
+            return work()
+        finally:
+            lock.release()
 
     # --- layout helpers ----------------------------------------------------
 
@@ -589,7 +639,7 @@ class FsStorage(Storage):
                     _rmtree(staging)
         # Sweep stale ``.backup.*.tmp`` spools left by a crash mid-pack in
         # create_backup_from_current or mid-upload in put_backup (issue #859). These
-        # mirror the ``.final.*.tmp`` sweep _prune_to_final_snapshot does at its own
+        # mirror the ``.final.*.tmp`` sweep prune_to_final_snapshot does at its own
         # write site; centralising backup tmp hygiene here covers both write paths.
         # An mtime age threshold skips a spool a live write may still be filling
         # (issue #903), so the sweep stays safe if it ever runs outside startup.
@@ -636,17 +686,20 @@ class FsStorage(Storage):
         source = HydrateSource.__new__(HydrateSource)
         source.generation = None
 
-        def _open() -> tuple[Path, Callable[[], None]]:
+        def _lease_with_generation() -> tuple[Path, Callable[[], None]]:
             server_root = self._server_root(community_id, server_id)
-            lock = self._server_lock(community_id, server_id)
-            with lock:
-                path, release = self._lease_current(community_id, server_id)
-                try:
-                    source.generation = self._read_generation(server_root)
-                except BaseException:
-                    release()
-                    raise
+            path, release = self._lease_current(community_id, server_id)
+            try:
+                source.generation = self._read_generation(server_root)
+            except BaseException:
+                release()
+                raise
             return path, release
+
+        async def _open() -> tuple[Path, Callable[[], None]]:
+            return await self._under_server_lock(
+                community_id, server_id, _lease_with_generation
+            )
 
         source._inner = _tar_stream(_open, self._tar_member_hook, exclude)
         return source
@@ -767,8 +820,7 @@ class FsStorage(Storage):
         try:
             # ``_publish_and_bump`` fsyncs the staged tree before it takes the lock.
             async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-                generation = await asyncio.to_thread(
-                    self._publish_and_bump,
+                generation = await self._publish_and_bump(
                     fs_handle.community_id,
                     fs_handle.server_id,
                     staging,
@@ -824,11 +876,15 @@ class FsStorage(Storage):
 
         if expected_base is None:
             return
-        pruned = await asyncio.to_thread(
-            self._pruned_generation,
+        pruned = await self._under_server_lock(
             fs_handle.community_id,
             fs_handle.server_id,
-            expected_base,
+            functools.partial(
+                self._pruned_generation,
+                fs_handle.community_id,
+                fs_handle.server_id,
+                expected_base,
+            ),
         )
         if pruned is None:
             return
@@ -848,16 +904,15 @@ class FsStorage(Storage):
         is observed either complete or not at all.
         """
 
-        with self._server_lock(community_id, server_id):
-            current = self._read_generation(self._server_root(community_id, server_id))
-            if (
-                current != expected_base
-                and not self._current_link(community_id, server_id).is_symlink()
-            ):
-                return current
+        current = self._read_generation(self._server_root(community_id, server_id))
+        if (
+            current != expected_base
+            and not self._current_link(community_id, server_id).is_symlink()
+        ):
+            return current
         return None
 
-    def _publish_and_bump(
+    async def _publish_and_bump(
         self,
         community_id: CommunityId,
         server_id: ServerId,
@@ -899,15 +954,19 @@ class FsStorage(Storage):
         ``fence`` is the commit's publisher fence (issue #3544), called under the
         lock immediately before the publish; ``False`` raises
         :class:`PublisherFencedError`.
+
+        The lock is taken through ``_under_server_lock``, so a publish contending for
+        it holds no executor thread while it waits (issue #3569).
         """
 
         # Make the staged tree's file data durable BEFORE acquiring the lock and
         # flipping current (issue #1943). Runs pre-lock per the #920 discipline —
         # staging is complete and leased, so no concurrent writer can mutate it.
-        _fsync_tree(staging)
+        await asyncio.to_thread(_fsync_tree, staging)
 
         server_root = self._server_root(community_id, server_id)
-        with self._server_lock(community_id, server_id):
+
+        def _locked() -> tuple[int, Path | None]:
             if expected_base is not None:
                 current = self._read_generation(server_root)
                 if current != expected_base:
@@ -927,12 +986,12 @@ class FsStorage(Storage):
             # a concurrent publish/restore cannot flip ``current`` between the
             # prior-read and the publish. The object adapter evaluates this gate
             # inside its locked section; the fs adapter must match.
-            # ``check_missing_regions`` is a sync directory-entry scan;
-            # ``_publish_and_bump`` runs on a worker thread, so calling it directly
-            # is correct. A restore skips the gate (issue #3446): it is an
-            # operator-chosen rollback to a complete backup, which legitimately
-            # holds fewer regions than the world it replaces, while the gate exists
-            # to catch a snapshot that silently lost regions.
+            # ``check_missing_regions`` is a sync directory-entry scan; this
+            # section runs on a worker thread, so calling it directly is correct.
+            # A restore skips the gate (issue #3446): it is an operator-chosen
+            # rollback to a complete backup, which legitimately holds fewer regions
+            # than the world it replaces, while the gate exists to catch a snapshot
+            # that silently lost regions.
             if gate_missing_regions:
                 try:
                     prior = self._current_dir(community_id, server_id)
@@ -947,6 +1006,11 @@ class FsStorage(Storage):
             old_snapshot = self._publish(community_id, server_id, staging)
             generation = self._read_generation(server_root) + 1
             self._write_marker(server_root, generation, publisher)
+            return generation, old_snapshot
+
+        generation, old_snapshot = await self._under_server_lock(
+            community_id, server_id, _locked
+        )
         # Reclaim the superseded snapshot AFTER releasing the lock (issue #920): the
         # ``_rmtree`` can be gigabytes and must not block edits. Safe outside the lock
         # because every edit re-resolves ``current`` UNDER the lock after the flip, so
@@ -955,7 +1019,7 @@ class FsStorage(Storage):
         # is logged and the tree left for :meth:`sweep`, not raised over it.
         if old_snapshot is not None:
             try:
-                _rmtree(old_snapshot)
+                await asyncio.to_thread(_rmtree, old_snapshot)
             except OSError:
                 _LOG.warning(
                     "post-publish reclaim of %s failed; the sweep reclaims it",
@@ -1233,7 +1297,7 @@ class FsStorage(Storage):
         # rename it into place, then fsync the directory. A power cut mid-pack leaves
         # only a ``.backup.*.tmp`` spool — never a torn ``<key>.tar.gz`` listed as a
         # normal backup (issue #837). Mirrors ``put_backup`` (the upload path) and
-        # ``_prune_to_final_snapshot`` (the final-archive path).
+        # ``prune_to_final_snapshot`` (the final-archive path).
         fd, tmp_name = tempfile.mkstemp(
             dir=str(archive.parent), prefix=".backup.", suffix=".tmp"
         )
@@ -1326,8 +1390,7 @@ class FsStorage(Storage):
             # the PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER) makes
             # the publish-time guard refuse an in-flight stale snapshot from a real
             # Worker (different publisher), closing the restore-clobber window (#873).
-            await asyncio.to_thread(
-                self._publish_and_bump,
+            await self._publish_and_bump(
                 community_id,
                 server_id,
                 staging,
@@ -1392,38 +1455,12 @@ class FsStorage(Storage):
     async def settled_generation(
         self, community_id: CommunityId, server_id: ServerId
     ) -> int:
-        # No thread ever blocks on the server lock here. A publish that holds it
-        # awaits its fence on the event loop, and that fence can need the default
-        # executor (a DNS lookup on a DB reconnect). A worker parked on the lock
-        # would take that capacity away from the fence (issue #3552). So each
-        # attempt only tries the lock, reads and releases on a worker thread, and
-        # the wait between attempts is a sleep on the loop.
-        delay = _SETTLED_POLL_INITIAL_SECONDS
-        while True:
-            generation = await asyncio.to_thread(
-                self._generation_if_unlocked, community_id, server_id
-            )
-            if generation is not None:
-                return generation
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, _SETTLED_POLL_MAX_SECONDS)
-
-    def _generation_if_unlocked(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> int | None:
-        """The generation, read under the server lock, or None if the lock is held.
-
-        The lock is taken and released within this call, so a cancelled caller
-        cannot leave it held.
-        """
-
-        lock = self._server_lock(community_id, server_id)
-        if not lock.acquire(blocking=False):
-            return None
-        try:
-            return self._read_generation(self._server_root(community_id, server_id))
-        finally:
-            lock.release()
+        server_root = self._server_root(community_id, server_id)
+        return await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(self._read_generation, server_root),
+        )
 
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId
@@ -1456,19 +1493,17 @@ class FsStorage(Storage):
         # The DeleteServer reclaim path (issue #777): pack ``current/`` into a single
         # retained ``final.tar.gz`` at the server root, then drop the working-set
         # tree. Backups are pruned by the caller and are left untouched here.
-        await asyncio.to_thread(self._prune_to_final_snapshot, community_id, server_id)
-
-    def _prune_to_final_snapshot(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> None:
         # Hold the per-server lock for the entire prune (issue #1704): this
         # serializes against ``_publish_and_bump`` (commit_snapshot) which takes
         # the same lock, so a late commit cannot land while the prune is removing
-        # the working-set tree and advancing the generation marker. The method
-        # already runs on a worker thread via ``asyncio.to_thread``, so blocking is
-        # fine.
-        with self._server_lock(community_id, server_id):
-            self._prune_to_final_snapshot_inner(community_id, server_id)
+        # the working-set tree and advancing the generation marker.
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(
+                self._prune_to_final_snapshot_inner, community_id, server_id
+            ),
+        )
 
     def _prune_to_final_snapshot_inner(
         self, community_id: CommunityId, server_id: ServerId
@@ -1795,8 +1830,12 @@ class FsStorage(Storage):
         rel_path: RelPath,
         data: bytes,
     ) -> None:
-        await asyncio.to_thread(
-            self._write_file, community_id, server_id, rel_path, data
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(
+                self._write_file, community_id, server_id, rel_path, data
+            ),
         )
 
     def _write_file(
@@ -1822,54 +1861,53 @@ class FsStorage(Storage):
         # commit takes for its re-check + publish + bump, so a concurrent commit
         # cannot read a pre-edit generation and clobber this edit during its upload
         # window.
-        with self._server_lock(community_id, server_id):
-            # A never-snapshotted server has no live snapshot to edit in place (issue
-            # #205). This check reads ``current`` and so must be under the lock too
-            # (#920): a first-snapshot commit must not flip ``current`` between the
-            # check and ``_publish_initial``'s own flip. Initialize the first
-            # published version containing just this file through the same
-            # atomic-publish path a snapshot uses: stage the file into an incoming/
-            # dir, then flip ``current`` onto it.
-            if not self._current_link(community_id, server_id).is_symlink():
-                # The write is a DESTINATION mutation even on the first-publish path,
-                # so an over-long name is the same 422 as below (issue #2433).
-                with _dest_mutation_errnos(rel_path):
-                    self._publish_initial(community_id, server_id, rel_path, data)
-                return
-            current = self._current_dir(community_id, server_id)
-            target = self._safe_target(current, rel_path)
-            # A leaf symlink is refused, never followed (issue #2429): a write must
-            # not edit the target the link points at, nor materialize a dangling
-            # link's target. Checked before the is_dir probe below, which follows it.
-            if _is_symlink(target):
-                raise SymlinkRefusedError(f"rel_path {rel_path.value!r} is a symlink")
-            # Translate the raw fs errnos this destination mutation can raise into
-            # the modelled storage outcomes (issue #2433): an over-long name is a 422
-            # (NameTooLongError), a non-directory blocking the parent is a 409
-            # (PathOccupiedError). The ``is_dir`` probe is inside the block because it
-            # is what raises ENAMETOOLONG for an over-long leaf.
+        # A never-snapshotted server has no live snapshot to edit in place (issue
+        # #205). This check reads ``current`` and so must be under the lock too
+        # (#920): a first-snapshot commit must not flip ``current`` between the
+        # check and ``_publish_initial``'s own flip. Initialize the first
+        # published version containing just this file through the same
+        # atomic-publish path a snapshot uses: stage the file into an incoming/
+        # dir, then flip ``current`` onto it.
+        if not self._current_link(community_id, server_id).is_symlink():
+            # The write is a DESTINATION mutation even on the first-publish path,
+            # so an over-long name is the same 422 as below (issue #2433).
             with _dest_mutation_errnos(rel_path):
-                # Refuse to overwrite a directory with file bytes (issue #542): the
-                # atomic rename onto an existing directory raises IsADirectoryError, so
-                # reject it as an invalid path rather than crashing.
-                if target.is_dir():
-                    raise PathTraversalError(
-                        f"rel_path names a directory, not a file: {rel_path.value}"
-                    )
-                # Capture the prior version BEFORE overwriting (Section 4.4/5), so a
-                # crash mid-write leaves both the old content and the retained version
-                # consistent.
-                if target.is_file():
-                    self._capture_version(community_id, server_id, rel_path, target)
-                self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                self._atomic_write(target, data)
-            # Bump the generation on this authoritative edit (issue #889): an in-place
-            # write replaces the published world just like a snapshot/restore, so it
-            # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
-            self._bump_marker(
-                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-            )
+                self._publish_initial(community_id, server_id, rel_path, data)
+            return
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        # A leaf symlink is refused, never followed (issue #2429): a write must
+        # not edit the target the link points at, nor materialize a dangling
+        # link's target. Checked before the is_dir probe below, which follows it.
+        if _is_symlink(target):
+            raise SymlinkRefusedError(f"rel_path {rel_path.value!r} is a symlink")
+        # Translate the raw fs errnos this destination mutation can raise into
+        # the modelled storage outcomes (issue #2433): an over-long name is a 422
+        # (NameTooLongError), a non-directory blocking the parent is a 409
+        # (PathOccupiedError). The ``is_dir`` probe is inside the block because it
+        # is what raises ENAMETOOLONG for an over-long leaf.
+        with _dest_mutation_errnos(rel_path):
+            # Refuse to overwrite a directory with file bytes (issue #542): the
+            # atomic rename onto an existing directory raises IsADirectoryError, so
+            # reject it as an invalid path rather than crashing.
+            if target.is_dir():
+                raise PathTraversalError(
+                    f"rel_path names a directory, not a file: {rel_path.value}"
+                )
+            # Capture the prior version BEFORE overwriting (Section 4.4/5), so a
+            # crash mid-write leaves both the old content and the retained version
+            # consistent.
+            if target.is_file():
+                self._capture_version(community_id, server_id, rel_path, target)
+            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(target, data)
+        # Bump the generation on this authoritative edit (issue #889): an in-place
+        # write replaces the published world just like a snapshot/restore, so it
+        # advances the store generation and stamps the API_EDIT_PUBLISHER sentinel.
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     def _publish_initial(
         self,
@@ -1885,9 +1923,9 @@ class FsStorage(Storage):
         uses. The staging dir is pinned with an active-staging lease for the life
         of the operation so a concurrent sweep does not reclaim it (issue #183).
 
-        The CALLER (``_write_file``) already holds the per-server lock (issue
-        #920) -- it took the lock before the never-snapshotted check that routes
-        here, so the flip below cannot interleave with a concurrent commit's
+        The CALLER (``_write_file``) already runs under the per-server lock (issue
+        #920) -- ``write_file`` took the lock before the never-snapshotted check that
+        routes here, so the flip below cannot interleave with a concurrent commit's
         re-check and the lock is NOT re-acquired here (``threading.Lock`` is not
         reentrant).
         """
@@ -1917,7 +1955,11 @@ class FsStorage(Storage):
     async def delete_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        await asyncio.to_thread(self._delete_file, community_id, server_id, rel_path)
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(self._delete_file, community_id, server_id, rel_path),
+        )
 
     def _delete_file(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1927,42 +1969,45 @@ class FsStorage(Storage):
         # flip+``_rmtree`` target, so resolving it outside the lock would delete
         # from -- and bump over -- a dead tree. Same lock the commit's re-check
         # takes.
-        with self._server_lock(community_id, server_id):
-            current = self._current_dir(community_id, server_id)
-            target = self._safe_target(current, rel_path)
-            # A leaf symlink is the one mutation a link supports besides listing
-            # (issue #2429): unlink the LINK dirent itself -- working, dangling and
-            # looping alike -- never the target it points at. No version is
-            # captured: a link has no Port-readable content to retain (the read
-            # refuses it), so rollback is asymmetric here (see the Port docs).
-            # Checked before ``_existing_file``, which follows the link.
-            if _is_symlink(target):
-                target.unlink()
-                _fsync_dir(target.parent)
-                self._bump_marker(
-                    self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-                )
-                return
-            # The path is a SOURCE, so an over-long name is a miss like a read's
-            # (issue #2433): ``_existing_file`` answers False rather than raising
-            # ENAMETOOLONG, so it takes the not-found path below instead of a 500.
-            if not _existing_file(target):
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            # Capture the content BEFORE removing it (Section 5), so a delete is
-            # reversible by rollback exactly like an overwrite is.
-            self._capture_version(community_id, server_id, rel_path, target)
-            self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        # A leaf symlink is the one mutation a link supports besides listing
+        # (issue #2429): unlink the LINK dirent itself -- working, dangling and
+        # looping alike -- never the target it points at. No version is
+        # captured: a link has no Port-readable content to retain (the read
+        # refuses it), so rollback is asymmetric here (see the Port docs).
+        # Checked before ``_existing_file``, which follows the link.
+        if _is_symlink(target):
             target.unlink()
             _fsync_dir(target.parent)
-            # Authoritative edit -> bump the generation (issue #889).
             self._bump_marker(
                 self._server_root(community_id, server_id), API_EDIT_PUBLISHER
             )
+            return
+        # The path is a SOURCE, so an over-long name is a miss like a read's
+        # (issue #2433): ``_existing_file`` answers False rather than raising
+        # ENAMETOOLONG, so it takes the not-found path below instead of a 500.
+        if not _existing_file(target):
+            raise NotFoundError(f"file not found: {rel_path.value}")
+        # Capture the content BEFORE removing it (Section 5), so a delete is
+        # reversible by rollback exactly like an overwrite is.
+        self._capture_version(community_id, server_id, rel_path, target)
+        self._seam.reach(PublishPhase.AFTER_VERSION_CAPTURE)
+        target.unlink()
+        _fsync_dir(target.parent)
+        # Authoritative edit -> bump the generation (issue #889).
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     async def delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        await asyncio.to_thread(self._delete_dir, community_id, server_id, rel_path)
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(self._delete_dir, community_id, server_id, rel_path),
+        )
 
     def _delete_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -1975,26 +2020,25 @@ class FsStorage(Storage):
         # flip+``_rmtree`` target, so resolving it outside the lock would delete
         # from -- and bump over -- a dead tree. Same lock the commit's re-check
         # takes.
-        with self._server_lock(community_id, server_id):
-            current = self._current_dir(community_id, server_id)
-            target = self._safe_target(current, rel_path)
-            # A leaf symlink is never a directory dirent under lstat semantics,
-            # matching the listing's ``is_dir=False`` (issue #2429): a link to a
-            # directory misses here rather than rmtree-ing the subtree it points at.
-            # Checked before ``_existing_dir``, which follows the link.
-            if _is_symlink(target):
-                raise NotFoundError(f"directory not found: {rel_path.value}")
-            # A SOURCE path, so an over-long name is a miss (issue #2433):
-            # ``_existing_dir`` answers False rather than raising ENAMETOOLONG.
-            if not _existing_dir(target):
-                raise NotFoundError(f"directory not found: {rel_path.value}")
-            # rmtree is per-member unlinks — not crash-atomic (#1608).
-            shutil.rmtree(target)
-            _fsync_dir(target.parent)
-            # Authoritative edit -> bump the generation (issue #889).
-            self._bump_marker(
-                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-            )
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        # A leaf symlink is never a directory dirent under lstat semantics,
+        # matching the listing's ``is_dir=False`` (issue #2429): a link to a
+        # directory misses here rather than rmtree-ing the subtree it points at.
+        # Checked before ``_existing_dir``, which follows the link.
+        if _is_symlink(target):
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        # A SOURCE path, so an over-long name is a miss (issue #2433):
+        # ``_existing_dir`` answers False rather than raising ENAMETOOLONG.
+        if not _existing_dir(target):
+            raise NotFoundError(f"directory not found: {rel_path.value}")
+        # rmtree is per-member unlinks — not crash-atomic (#1608).
+        shutil.rmtree(target)
+        _fsync_dir(target.parent)
+        # Authoritative edit -> bump the generation (issue #889).
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     async def rename_file(
         self,
@@ -2003,8 +2047,12 @@ class FsStorage(Storage):
         from_path: RelPath,
         to_path: RelPath,
     ) -> None:
-        await asyncio.to_thread(
-            self._rename_file, community_id, server_id, from_path, to_path
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(
+                self._rename_file, community_id, server_id, from_path, to_path
+            ),
         )
 
     def _rename_file(
@@ -2019,30 +2067,29 @@ class FsStorage(Storage):
         # or backups cover recovery.
         # Resolve ``current`` and check the precondition INSIDE the server lock
         # (issue #899/#920).
-        with self._server_lock(community_id, server_id):
-            current = self._current_dir(community_id, server_id)
-            src = self._safe_target(current, from_path)
-            dst = self._safe_target(current, to_path)
-            # A leaf symlink SOURCE is refused, never followed (issue #2429): a
-            # rename must not move the target the link points at. Checked before
-            # ``_existing_file``, which follows the link. (A DESTINATION that names
-            # a link is refused a step earlier by the route's never-clobber probe.)
-            if _is_symlink(src):
-                raise SymlinkRefusedError(f"rel_path {from_path.value!r} is a symlink")
-            # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
-            # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
-            if not _existing_file(src):
-                raise NotFoundError(f"file not found: {from_path.value}")
-            with _dest_mutation_errnos(to_path):
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                os.rename(src, dst)
-            _fsync_dir(src.parent)
-            if dst.parent != src.parent:
-                _fsync_dir(dst.parent)
-            # Authoritative edit -> bump the generation (issue #889).
-            self._bump_marker(
-                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-            )
+        current = self._current_dir(community_id, server_id)
+        src = self._safe_target(current, from_path)
+        dst = self._safe_target(current, to_path)
+        # A leaf symlink SOURCE is refused, never followed (issue #2429): a
+        # rename must not move the target the link points at. Checked before
+        # ``_existing_file``, which follows the link. (A DESTINATION that names
+        # a link is refused a step earlier by the route's never-clobber probe.)
+        if _is_symlink(src):
+            raise SymlinkRefusedError(f"rel_path {from_path.value!r} is a symlink")
+        # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
+        # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
+        if not _existing_file(src):
+            raise NotFoundError(f"file not found: {from_path.value}")
+        with _dest_mutation_errnos(to_path):
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src, dst)
+        _fsync_dir(src.parent)
+        if dst.parent != src.parent:
+            _fsync_dir(dst.parent)
+        # Authoritative edit -> bump the generation (issue #889).
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     async def rename_dir(
         self,
@@ -2051,8 +2098,12 @@ class FsStorage(Storage):
         from_path: RelPath,
         to_path: RelPath,
     ) -> None:
-        await asyncio.to_thread(
-            self._rename_dir, community_id, server_id, from_path, to_path
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(
+                self._rename_dir, community_id, server_id, from_path, to_path
+            ),
         )
 
     def _rename_dir(
@@ -2066,37 +2117,40 @@ class FsStorage(Storage):
         # the backups' job (Section 3.3).
         # Resolve ``current`` and check the precondition INSIDE the server lock
         # (issue #899/#920).
-        with self._server_lock(community_id, server_id):
-            current = self._current_dir(community_id, server_id)
-            src = self._safe_target(current, from_path)
-            dst = self._safe_target(current, to_path)
-            # A leaf symlink SOURCE is refused, never followed (issue #2429): a
-            # rename must not move the directory the link points at. Checked before
-            # ``_existing_dir``, which follows the link. (A DESTINATION that names a
-            # link is refused a step earlier by the route's never-clobber probe.)
-            if _is_symlink(src):
-                raise SymlinkRefusedError(f"rel_path {from_path.value!r} is a symlink")
-            # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
-            # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
-            if not _existing_dir(src):
-                raise NotFoundError(f"directory not found: {from_path.value}")
-            with _dest_mutation_errnos(to_path):
-                # Ensure parent directories exist for the destination (e.g. renaming
-                # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                os.rename(src, dst)
-            _fsync_dir(src.parent)
-            if dst.parent != src.parent:
-                _fsync_dir(dst.parent)
-            # Authoritative edit -> bump the generation (issue #889).
-            self._bump_marker(
-                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-            )
+        current = self._current_dir(community_id, server_id)
+        src = self._safe_target(current, from_path)
+        dst = self._safe_target(current, to_path)
+        # A leaf symlink SOURCE is refused, never followed (issue #2429): a
+        # rename must not move the directory the link points at. Checked before
+        # ``_existing_dir``, which follows the link. (A DESTINATION that names a
+        # link is refused a step earlier by the route's never-clobber probe.)
+        if _is_symlink(src):
+            raise SymlinkRefusedError(f"rel_path {from_path.value!r} is a symlink")
+        # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
+        # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
+        if not _existing_dir(src):
+            raise NotFoundError(f"directory not found: {from_path.value}")
+        with _dest_mutation_errnos(to_path):
+            # Ensure parent directories exist for the destination (e.g. renaming
+            # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src, dst)
+        _fsync_dir(src.parent)
+        if dst.parent != src.parent:
+            _fsync_dir(dst.parent)
+        # Authoritative edit -> bump the generation (issue #889).
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     async def make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        await asyncio.to_thread(self._make_dir, community_id, server_id, rel_path)
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(self._make_dir, community_id, server_id, rel_path),
+        )
 
     def _make_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -2111,31 +2165,30 @@ class FsStorage(Storage):
         # flip+``_rmtree`` target, so resolving it outside the lock would mkdir
         # into -- and bump over -- a dead tree. Same lock the commit's re-check
         # takes.
-        with self._server_lock(community_id, server_id):
-            current = self._current_dir(community_id, server_id)
-            target = self._safe_target(current, rel_path)
-            # A leaf symlink is refused, never followed (issue #2429): make_dir must
-            # not materialize the directory a dangling link points at, nor treat a
-            # link-to-a-directory as an idempotent hit. Checked before the mkdir,
-            # which follows the link.
-            if _is_symlink(target):
-                raise SymlinkRefusedError(f"rel_path {rel_path.value!r} is a symlink")
-            # A DESTINATION mutation (issue #2433): an over-long name is a 422
-            # (NameTooLongError) and a non-directory already at the target/an ancestor
-            # is a 409 (PathOccupiedError, EEXIST/ENOTDIR) — matching the never-clobber
-            # 409. An existing DIRECTORY stays idempotent (``exist_ok=True``).
-            with _dest_mutation_errnos(rel_path):
-                target.mkdir(parents=True, exist_ok=True)
-            _fsync_dir(target.parent)
-            # Authoritative edit -> bump the generation (issue #889). An empty
-            # directory arguably adds no world content, but bumping uniformly across
-            # every authoritative ``current/`` mutation keeps the staleness invariant
-            # simple (consistency over a per-op carve-out): the hydrate-skip / clobber
-            # reasoning never has to special-case which edit "really" changed the
-            # world.
-            self._bump_marker(
-                self._server_root(community_id, server_id), API_EDIT_PUBLISHER
-            )
+        current = self._current_dir(community_id, server_id)
+        target = self._safe_target(current, rel_path)
+        # A leaf symlink is refused, never followed (issue #2429): make_dir must
+        # not materialize the directory a dangling link points at, nor treat a
+        # link-to-a-directory as an idempotent hit. Checked before the mkdir,
+        # which follows the link.
+        if _is_symlink(target):
+            raise SymlinkRefusedError(f"rel_path {rel_path.value!r} is a symlink")
+        # A DESTINATION mutation (issue #2433): an over-long name is a 422
+        # (NameTooLongError) and a non-directory already at the target/an ancestor
+        # is a 409 (PathOccupiedError, EEXIST/ENOTDIR) — matching the never-clobber
+        # 409. An existing DIRECTORY stays idempotent (``exist_ok=True``).
+        with _dest_mutation_errnos(rel_path):
+            target.mkdir(parents=True, exist_ok=True)
+        _fsync_dir(target.parent)
+        # Authoritative edit -> bump the generation (issue #889). An empty
+        # directory arguably adds no world content, but bumping uniformly across
+        # every authoritative ``current/`` mutation keeps the staleness invariant
+        # simple (consistency over a per-op carve-out): the hydrate-skip / clobber
+        # reasoning never has to special-case which edit "really" changed the
+        # world.
+        self._bump_marker(
+            self._server_root(community_id, server_id), API_EDIT_PUBLISHER
+        )
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
         """temp-sibling + fsync + atomic rename (Section 4.4)."""
@@ -2203,8 +2256,12 @@ class FsStorage(Storage):
     async def retain_file_version(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> None:
-        await asyncio.to_thread(
-            self._retain_file_version, community_id, server_id, rel_path
+        await self._under_server_lock(
+            community_id,
+            server_id,
+            functools.partial(
+                self._retain_file_version, community_id, server_id, rel_path
+            ),
         )
 
     def _retain_file_version(
@@ -2220,27 +2277,26 @@ class FsStorage(Storage):
         # (issue #1953): without it, a concurrent snapshot commit can flip
         # ``current`` and rmtree the resolved snapshot between resolve and
         # read, yielding a FileNotFoundError → 500 on the edit request.
-        with self._server_lock(community_id, server_id):
-            try:
-                current = self._current_dir(community_id, server_id)
-            except NotFoundError:
-                return  # never-published server: nothing authoritative to retain
-            target = self._safe_target(current, rel_path)
-            # A leaf symlink has no Port-readable content to retain (issue #2429):
-            # a no-op, matching the read refusal, checked before ``_existing_file``
-            # (which follows the link and would capture the target's bytes).
-            if _is_symlink(target):
-                return
-            # A SOURCE read of the authoritative copy: an over-long name names
-            # nothing to retain, so it is the same no-op as a missing file rather than
-            # a raw ENAMETOOLONG (issue #2433), keeping this sibling's over-long answer
-            # consistent with the other mutations' 404-for-a-source.
-            if not _existing_file(target):
-                return  # no authoritative copy yet: nothing to retain
-            versions = self._versions_dir(community_id, server_id, rel_path)
-            if self._matches_newest_version(versions, target):
-                return  # unchanged since the newest retained version: skip the churn
-            self._capture_version(community_id, server_id, rel_path, target)
+        try:
+            current = self._current_dir(community_id, server_id)
+        except NotFoundError:
+            return  # never-published server: nothing authoritative to retain
+        target = self._safe_target(current, rel_path)
+        # A leaf symlink has no Port-readable content to retain (issue #2429):
+        # a no-op, matching the read refusal, checked before ``_existing_file``
+        # (which follows the link and would capture the target's bytes).
+        if _is_symlink(target):
+            return
+        # A SOURCE read of the authoritative copy: an over-long name names
+        # nothing to retain, so it is the same no-op as a missing file rather than
+        # a raw ENAMETOOLONG (issue #2433), keeping this sibling's over-long answer
+        # consistent with the other mutations' 404-for-a-source.
+        if not _existing_file(target):
+            return  # no authoritative copy yet: nothing to retain
+        versions = self._versions_dir(community_id, server_id, rel_path)
+        if self._matches_newest_version(versions, target):
+            return  # unchanged since the newest retained version: skip the churn
+        self._capture_version(community_id, server_id, rel_path, target)
 
     def _matches_newest_version(self, versions: Path, source: Path) -> bool:
         """True if ``source`` equals the newest retained version under ``versions``.
@@ -2411,6 +2467,12 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+class _LockHeld(enum.Enum):
+    """The answer of a ``_run_if_unlocked`` attempt that found the lock held."""
+
+    LOCK_HELD = enum.auto()
+
+
 def _fence_from_thread(fence: PublisherFence, loop: asyncio.AbstractEventLoop) -> bool:
     """Await the commit's publisher fence on ``loop`` from a worker thread.
 
@@ -2450,7 +2512,7 @@ def _fsync_tree(root: Path) -> None:
 
 
 def _tar_stream(
-    open_source: Callable[[], tuple[Path, Callable[[], None]]],
+    open_source: Callable[[], Coroutine[Any, Any, tuple[Path, Callable[[], None]]]],
     member_hook: Callable[[Path], None] | None = None,
     exclude: frozenset[str] = frozenset(),
 ) -> AsyncIterator[bytes]:
@@ -2475,7 +2537,7 @@ def _tar_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        directory, on_close = await asyncio.to_thread(open_source)
+        directory, on_close = await open_source()
         try:
             read_fd, write_fd = os.pipe()
             holder: list[BaseException] = []

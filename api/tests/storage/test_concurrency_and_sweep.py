@@ -13,10 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
-from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+import pytest
+
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage, _as_fs_handle
+from mc_server_dashboard_api.storage.domain.errors import SnapshotHandleError
+from mc_server_dashboard_api.storage.domain.value_objects import (
+    CommunityId,
+    RelPath,
+    ServerId,
+)
 from tests.storage.helpers import (
     drain,
     new_scope,
@@ -568,20 +579,111 @@ async def test_check_current_health_survives_concurrent_publish_reclaim(
     assert not report.healthy
 
 
-async def test_settled_read_leaves_the_executor_to_a_publish_fence(
-    tmp_path: Path,
+# --- lock waiters under a saturated executor (issues #3552, #3569) ---------
+
+_PUBLISHED = {"f": b"v1", "d/g": b"g"}
+_COMMITTED = {"f": b"v2", "d/g": b"g"}
+
+_Waiter = Callable[[FsStorage, CommunityId, ServerId], Coroutine[Any, Any, object]]
+
+
+async def _settled_generation(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    return await storage.settled_generation(community, server)
+
+
+async def _hydrate(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    return read_tar(await drain(storage.open_hydrate_source(community, server)))
+
+
+async def _upload_whose_staging_vanished(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    # The vanished staging asks the server lock whether a prune ran (issue #3481).
+    handle = await storage.begin_snapshot(community, server)
+    transfer_id = _as_fs_handle(handle).transfer_id
+    shutil.rmtree(storage._staging_dir(community, server, transfer_id))
+    await storage.write_snapshot(handle, tar_stream({"f": b"x"}), expected_base=1)
+    return None
+
+
+async def _second_commit(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(_COMMITTED))
+    return await storage.commit_snapshot(handle)
+
+
+async def _restore(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    key = await storage.create_backup_from_current(community, server)
+    await storage.restore_backup(community, server, key)
+    return await storage.current_generation(community, server)
+
+
+_LOCK_WAITERS = [
+    pytest.param(_settled_generation, 2, id="settled_generation"),
+    pytest.param(_second_commit, 3, id="commit_snapshot"),
+    pytest.param(_restore, 3, id="restore_backup"),
+    pytest.param(_hydrate, _COMMITTED, id="open_hydrate_source"),
+    pytest.param(
+        _upload_whose_staging_vanished, SnapshotHandleError, id="pruned_generation"
+    ),
+    pytest.param(
+        lambda st, c, s: st.write_file(c, s, RelPath("f"), b"edit"),
+        None,
+        id="write_file",
+    ),
+    pytest.param(
+        lambda st, c, s: st.delete_file(c, s, RelPath("f")), None, id="delete_file"
+    ),
+    pytest.param(
+        lambda st, c, s: st.delete_dir(c, s, RelPath("d")), None, id="delete_dir"
+    ),
+    pytest.param(
+        lambda st, c, s: st.rename_file(c, s, RelPath("f"), RelPath("f2")),
+        None,
+        id="rename_file",
+    ),
+    pytest.param(
+        lambda st, c, s: st.rename_dir(c, s, RelPath("d"), RelPath("d2")),
+        None,
+        id="rename_dir",
+    ),
+    pytest.param(lambda st, c, s: st.make_dir(c, s, RelPath("n")), None, id="make_dir"),
+    pytest.param(
+        lambda st, c, s: st.retain_file_version(c, s, RelPath("f")),
+        None,
+        id="retain_file_version",
+    ),
+    pytest.param(
+        lambda st, c, s: st.prune_to_final_snapshot(c, s),
+        None,
+        id="prune_to_final_snapshot",
+    ),
+]
+
+
+@pytest.mark.parametrize(("waiter", "expected"), _LOCK_WAITERS)
+async def test_lock_waiter_leaves_the_executor_to_a_publish_fence(
+    tmp_path: Path, waiter: _Waiter, expected: object
 ) -> None:
-    # Issue #3552: a publish holds the server lock on an executor thread while its
-    # fence runs on the loop, and the fence can need the executor itself (the
-    # assignment lookup's DB reconnect resolves its host via loop.getaddrinfo). A
-    # settled read waiting for that lock must not hold the remaining executor
-    # capacity, or neither the publish nor the read ever finishes.
+    # Issues #3552, #3569: a publish holds the server lock on an executor thread
+    # while its fence runs on the loop, and the fence can need the executor itself
+    # (the assignment lookup's DB reconnect resolves its host via
+    # loop.getaddrinfo). A caller waiting for that lock must not hold the remaining
+    # executor capacity, or neither the publish nor the waiter ever finishes.
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=2)
     loop.set_default_executor(executor)
     storage = FsStorage(tmp_path)
     community, server = new_scope()
-    await publish(storage, community, server, {"f": b"v1"})
+    await publish(storage, community, server, _PUBLISHED)
     contended = watch_lock_contention(storage, community, server)
     in_fence, release = asyncio.Event(), asyncio.Event()
     starved: list[bool] = []
@@ -598,22 +700,26 @@ async def test_settled_read_leaves_the_executor_to_a_publish_fence(
         return True
 
     handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream({"f": b"v2"}))
+    await storage.write_snapshot(handle, tar_stream(_COMMITTED))
     commit = asyncio.create_task(
         storage.commit_snapshot(handle, publisher_fence=_fence_needing_the_executor)
     )
+    # The bounds below only keep a hung run finite, so they are generous for a
+    # loaded host's fsyncs. The fence's own bound is what detects the starvation.
     try:
-        await asyncio.wait_for(in_fence.wait(), 10)
-        settled = asyncio.create_task(storage.settled_generation(community, server))
-        await wait_until_contended(settled, contended)
+        await asyncio.wait_for(in_fence.wait(), 60)
+        waiting = asyncio.create_task(waiter(storage, community, server))
+        await wait_until_contended(waiting, contended, timeout=60)
     finally:
         release.set()
 
     try:
-        results = await asyncio.wait_for(
-            asyncio.gather(commit, settled, return_exceptions=True), 20
+        committed, waited = await asyncio.wait_for(
+            asyncio.gather(commit, waiting, return_exceptions=True), 60
         )
     finally:
         executor.shutdown(wait=False)
     assert starved == [], "the fence found no free executor thread"
-    assert list(results) == [2, 2]
+    assert committed == 2
+    outcome = type(waited) if isinstance(waited, BaseException) else waited
+    assert outcome == expected
