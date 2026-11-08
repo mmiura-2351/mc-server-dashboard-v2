@@ -288,6 +288,12 @@ def _release_orphaned_lease(leased: tuple[Path, Callable[[], None]]) -> None:
     release()
 
 
+def _close_orphaned_handle(handle: io.BufferedReader) -> None:
+    """Close a file whose opener was cancelled before it could own it (issue #3584)."""
+
+    handle.close()
+
+
 def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -> None:
     """Close and release a leased file whose opener was cancelled before owning it."""
 
@@ -296,6 +302,21 @@ def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -
         handle.close()
     finally:
         release()
+
+
+def _release_after_read(
+    release: Callable[[], None], reading: asyncio.Future[Any]
+) -> None:
+    """Release a leased read's lease once its job finishes (issue #3577).
+
+    A caller cancelled before the job finished no longer observes the job's fault,
+    so the fault is marked retrieved here (issue #3584); a caller still awaiting
+    receives it through the shield as before.
+    """
+
+    if not reading.cancelled():
+        reading.exception()
+    release()
 
 
 async def _create_spool(
@@ -645,7 +666,11 @@ class FsStorage(Storage):
         return release
 
     async def _read_leased(
-        self, snapshot: Path, fn: Callable[..., _R], *args: Any
+        self,
+        snapshot: Path,
+        fn: Callable[..., _R],
+        *args: Any,
+        reclaim: Callable[[_R], None] | None = None,
     ) -> _R:
         """Run ``fn(*args)`` — a job that reads ``snapshot`` — off the loop.
 
@@ -654,6 +679,8 @@ class FsStorage(Storage):
         unwinds, while the thread is still reading (issue #3577). So the job takes
         a lease of its own, which the job's done-callback releases. The job is
         awaited shielded, so that callback runs only once the thread has finished.
+        A cancelled caller hands what the job returns to ``reclaim``, as
+        :func:`_acquire_off_loop` does (issue #3584).
         """
 
         self._acquire_lease(snapshot)
@@ -663,8 +690,13 @@ class FsStorage(Storage):
         except BaseException:
             release()
             raise
-        reading.add_done_callback(lambda _reading: release())
-        return await asyncio.shield(reading)
+        reading.add_done_callback(functools.partial(_release_after_read, release))
+        try:
+            return await asyncio.shield(reading)
+        except asyncio.CancelledError:
+            if reclaim is not None:
+                reading.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
+            raise
 
     # --- active-staging leases (issue #183) --------------------------------
 
@@ -2980,9 +3012,14 @@ def _open_readable_sync(path: Path, not_found: str) -> io.BufferedReader:
 
 
 async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
-    """:func:`_open_readable_sync` off the event loop, for the async stream helpers."""
+    """:func:`_open_readable_sync` off the event loop, for the async stream helpers.
 
-    return await asyncio.to_thread(_open_readable_sync, path, not_found)
+    A cancelled caller's handle is closed once the open finishes (issue #3584).
+    """
+
+    return await _acquire_off_loop(
+        _close_orphaned_handle, _open_readable_sync, path, not_found
+    )
 
 
 def _list_children(target: Path, not_found: str) -> list[Path]:
@@ -3455,5 +3492,6 @@ class _FsWorkingSetView(WorkingSetView):
                 _open_readable_sync,
                 target,
                 f"file not found: {rel_path.value}",
+                reclaim=_close_orphaned_handle,
             )
         )
