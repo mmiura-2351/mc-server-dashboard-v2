@@ -393,6 +393,15 @@ restart's stop leg whose instance has already reported `STOPPED` or `CRASHED` wh
 the Worker still holds the record is therefore reported at that terminal state, not
 `SERVER_STATE_UNKNOWN` or `SERVER_STATE_STOPPING`.
 
+The failed-stop orphan converger (Section 6) follows the same rule for its own reports
+(#3596). Its liveness probe runs outside that section, and the orphan can exit on its
+own while the probe is out. After a failed probe, the converger re-checks the record
+in the section and drops its `SERVER_STATE_UNKNOWN` if the record is gone or now
+names a different instance, or if the instance has already reached `STOPPED` or
+`CRASHED`. When it retires a stranded record, it queues the `STOPPED` in the same
+section, so a replacement command that claims the freed id queues its events after
+it.
+
 ### 4.2 Steady state
 
 ```
