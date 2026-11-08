@@ -13,7 +13,7 @@ import asyncio
 import gc
 import io
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -50,14 +50,19 @@ class _PausedOpen:
 
     def __call__(self, path: Path, _not_found: str) -> io.BufferedReader:
         self.entered.set()
-        self.resume.wait(timeout=10)
+        # No timeout: a hold that let go by itself would let the open finish before
+        # the cancel it is held for (issue #3600). The fixture's teardown and the
+        # pytest timeout end a hold the test never resumes.
+        self.resume.wait()
         handle = _TrackedReader(path, self.closed)
         self.opened.append(handle)
         return handle
 
 
 @pytest.fixture
-def paused_open() -> Iterator[_PausedOpen]:
+async def paused_open() -> AsyncIterator[_PausedOpen]:
+    # Async, so its teardown runs before the event loop's: the loop's shutdown
+    # waits for the executor thread a hold parks.
     held = _PausedOpen()
     yield held
     held.resume.set()
@@ -135,12 +140,12 @@ class _FailingListing:
 
     def __call__(self, *_args: Any) -> Any:
         self.entered.set()
-        self.resume.wait(timeout=10)
+        self.resume.wait()  # no timeout, as in _PausedOpen (issue #3600)
         raise self.fault
 
 
 @pytest.fixture
-def failing_listing() -> Iterator[_FailingListing]:
+async def failing_listing() -> AsyncIterator[_FailingListing]:  # async, as paused_open
     held = _FailingListing()
     yield held
     held.resume.set()

@@ -161,7 +161,10 @@ async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishe
         if not paused and stat.S_ISFIFO(os.fstat(fd).st_mode):
             paused.append((fd, os.fstat(fd).st_ino))
             entered.set()
-            resume.wait(timeout=10)
+            # No timeout: a hold that let go by itself would let the read finish
+            # while the test still relies on it (issue #3600). The ``finally``
+            # below and the pytest timeout end a hold the test never resumes.
+            resume.wait()
         return real_read(fd, n)
 
     def _close(fd: int) -> None:

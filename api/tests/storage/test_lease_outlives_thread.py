@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,21 +37,29 @@ class _Pause:
     resume: threading.Event = field(default_factory=threading.Event)
 
     def once(self, fn: Callable[..., Any]) -> Callable[..., Any]:
-        """``fn``, holding its first call until ``resume`` is set."""
+        """``fn``, holding its first call until ``resume`` is set.
+
+        The hold has no timeout: one that let go by itself would let the thread
+        finish and release its lease while the test still relies on it, faking a
+        lifetime bug (issue #3600). The fixture's teardown and the pytest timeout
+        end a hold the test never resumes.
+        """
 
         armed = threading.Lock()
 
         def _paused(*args: Any, **kwargs: Any) -> Any:
             if armed.acquire(blocking=False):
                 self.entered.set()
-                self.resume.wait(timeout=10)
+                self.resume.wait()
             return fn(*args, **kwargs)
 
         return _paused
 
 
 @pytest.fixture
-def pause() -> Iterator[_Pause]:
+async def pause() -> AsyncIterator[_Pause]:
+    # Async, so its teardown runs before the event loop's: the loop's shutdown
+    # waits for the executor thread a hold parks.
     held = _Pause()
     yield held
     held.resume.set()
