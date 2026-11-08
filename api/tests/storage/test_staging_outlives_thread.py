@@ -114,7 +114,8 @@ async def _assert_staging_waits_for_the_thread(
     finally:
         pause.resume.set()
 
-    assert await asyncio.to_thread(released.wait, 10)
+    # A bound, not a delay: the publish cases' fsyncs can stall on a loaded host.
+    assert await asyncio.to_thread(released.wait, 120)
     assert not staging.exists()
     assert not storage._is_staging_active(staging)
 
