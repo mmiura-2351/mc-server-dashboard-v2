@@ -16,6 +16,7 @@ wrong:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import gc
 import os
 import stat
@@ -122,6 +123,27 @@ def _names_inode(fd: int, inode: int) -> bool:
         return False
 
 
+@pytest.fixture(params=[None, 4096], ids=["default-pipe", "4KiB-pipe"])
+def pipe_size(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run with the default pipe, and with one smaller than the 10 KiB tar.
+
+    The small pipe fills while the stream's read is paused, so the tar writer
+    blocks and the cancelled stream's wait for it cannot finish on its own.
+    """
+
+    if request.param is None:
+        return
+    real_pipe = os.pipe
+
+    def _pipe() -> tuple[int, int]:
+        read_fd, write_fd = real_pipe()
+        fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, request.param)
+        return read_fd, write_fd
+
+    monkeypatch.setattr(os, "pipe", _pipe)
+
+
+@pytest.mark.usefixtures("pipe_size")
 async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -129,9 +151,10 @@ async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishe
     # the stream closed the pipe's read end before the job entered ``os.read``,
     # another open could reuse the fd number and the job would read an unrelated
     # file (issue #3582). The fd must stay the pipe until the job finishes.
-    entered, resume, closed = threading.Event(), threading.Event(), threading.Event()
+    entered, resume = threading.Event(), threading.Event()
+    joining, closed = threading.Event(), threading.Event()
     paused: list[tuple[int, int]] = []
-    real_read, real_close = os.read, os.close
+    real_read, real_close, real_join = os.read, os.close, threading.Thread.join
 
     def _read(fd: int, n: int) -> bytes:
         if not paused and stat.S_ISFIFO(os.fstat(fd).st_mode):
@@ -145,11 +168,18 @@ async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishe
         if paused and fd == paused[0][0]:
             closed.set()
 
+    def _join(thread: threading.Thread, timeout: float | None = None) -> None:
+        # The stream's cleanup joins its tar writer after settling the read fd.
+        if "_tar_into_fd" in thread.name:
+            joining.set()
+        real_join(thread, timeout)
+
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     await publish(storage, community, server, {"f": b"OLD"})
     monkeypatch.setattr(os, "read", _read)
     monkeypatch.setattr(os, "close", _close)
+    monkeypatch.setattr(threading.Thread, "join", _join)
     task = asyncio.ensure_future(
         storage.open_hydrate_source(community, server).__anext__()
     )
@@ -157,6 +187,10 @@ async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishe
         assert await asyncio.to_thread(entered.wait, 10)
         read_fd, pipe_inode = paused[0]
 
+        # The first cancel runs the cleanup up to the writer join; a second one
+        # stops that wait, which a writer blocked on a full pipe would not end.
+        task.cancel()
+        assert await asyncio.to_thread(joining.wait, 10)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
