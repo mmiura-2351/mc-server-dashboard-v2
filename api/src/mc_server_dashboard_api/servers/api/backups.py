@@ -967,7 +967,8 @@ async def upload_backup(
     The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
     before the whole body is materialized); the use case then validates the archive
     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
-    member is 422 ``invalid_archive``; an over-cap archive is 413.
+    member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
+    member, its name and the reason); an over-cap archive is 413.
 
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A restore republishes the archive's members verbatim as the working
@@ -996,7 +997,14 @@ async def upload_backup(
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except InvalidBackupArchiveError as exc:
-        raise _unprocessable("invalid_archive") from exc
+        # The refusal rides as the RFC 9457 ``detail`` (issue #3586) so the
+        # operator can find the member to fix. Every message is built only from
+        # the upload's own member names and fixed reasons, never a server path.
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_archive",
+            extensions={"detail": str(exc)},
+        ) from exc
     except InvalidFilePathError as exc:
         # A member refused by PATH rather than by archive structure: one that would
         # stand a directory at the root server.properties name on restore (issue

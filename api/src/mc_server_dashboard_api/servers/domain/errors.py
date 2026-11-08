@@ -489,13 +489,17 @@ class BackupStorageUnavailableError(ServerError):
 
 
 class InvalidBackupArchiveError(ServerError):
-    """An uploaded backup archive was not a valid, traversal-safe ``tar.gz`` (#281).
+    """An uploaded backup archive was not a ``tar.gz`` restore can take (#281, #3579).
 
     The upload validates the archive BEFORE storing it: it must open as a gzip tar
-    and every member must be a traversal-safe relative path (no absolute paths, no
-    ``..`` escapes, no devices/symlink/hardlink members). A body that does not open
-    as a tar.gz, or that carries an unsafe member, is rejected here so a hostile
-    archive never lands in the store. The edge maps this to 422.
+    and every member must pass the member rule restore applies
+    (:func:`~mc_server_dashboard_api.archive_member.unrestorable_reason`): a
+    regular file or directory at a relative, canonical name, so no absolute path,
+    no ``..``, no empty or ``.`` segment and no device, symlink or hardlink member.
+    A body that does not open as a tar.gz, or that carries such a member, is
+    rejected here so it never lands in the store. The message names the refusal
+    (the member's name and the reason) and is built only from the upload itself,
+    so the edge returns it as the 422 ``detail`` (issue #3586).
     """
 
 
