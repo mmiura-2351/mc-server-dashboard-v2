@@ -1038,6 +1038,10 @@ def _store_failing_its_restore(
     ``"after_flip_unconfirmed"`` fails every read confirming the pointer. An
     fs-only one adds to the directory fsync: ``"after_flip_unreadable"`` also
     fails the restore's next read of the ``current`` link, inside the restore.
+    Three more fs-only ones fail the replace of ``current`` itself, as a remote
+    filesystem can: ``"replace_applied"`` applies the rename and then raises,
+    ``"replace_applied_unreadable"`` also fails the next read of the link, and
+    ``"replace_unapplied"`` raises without renaming.
     """
 
     faults = Faults()
@@ -1111,8 +1115,23 @@ def _store_failing_its_restore(
                 raise OSError(errno.EIO, "Input/output error")
             real_fsync_dir(path)
 
-        monkeypatch.setattr(fs_adapter, "_fsync_dir", _fsync_dir)
-        if fault == "after_flip_unreadable":
+        real_replace = os.replace
+
+        def _replace(src: Any, dst: Any) -> None:
+            if Path(dst) != link:
+                return real_replace(src, dst)
+            monkeypatch.setattr(os, "replace", real_replace)
+            if fault != "replace_unapplied":
+                real_replace(src, dst)
+            if fault == "replace_applied_unreadable":
+                unreadable.append(True)
+            raise OSError(errno.EIO, "Input/output error")
+
+        if fault.startswith("replace_"):
+            monkeypatch.setattr(os, "replace", _replace)
+        else:
+            monkeypatch.setattr(fs_adapter, "_fsync_dir", _fsync_dir)
+        if fault in ("after_flip_unreadable", "replace_applied_unreadable"):
             assert isinstance(storage, FsStorage)
             real_live_snapshot_name = storage._live_snapshot_name
             real_publish_restore = storage._publish_restore
@@ -1188,6 +1207,90 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
     scope = (StorageCommunityId(community_id), StorageServerId(server_id))
     live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
     assert b"enable-rcon=" in live["server.properties"]
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        ("replace_applied", "publish_incomplete"),
+        ("replace_applied_unreadable", "publish_unknown"),
+    ],
+)
+def test_an_fs_restore_whose_replace_applied_and_raised_finishes_as_published(
+    fault: str, reason: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The replace of ``current`` renamed and still raised, as rename(2) can on
+    # NFS (issue #3564). One read of the link decides: it names the restored
+    # snapshot, so the restore published; or it fails, so whether it published
+    # is unknown. Either way the forced corrupt backup is quarantined, the
+    # properties are re-applied and the force-restore is audited.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        "fs",
+        fault,
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == reason
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert b"enable-rcon=" in live["server.properties"]
+
+
+def test_an_fs_restore_whose_replace_raised_unapplied_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The replace of ``current`` raised without renaming (issue #3564): the read
+    # of the link names the prior snapshot, so nothing was published. The
+    # outage answers as one, the restore is audited as failed, the backup is
+    # left as it was and the prior world stays live.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        "fs",
+        "replace_unapplied",
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "storage_unavailable"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.HEALTHY
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert live == {"world/region/r.0.0.mca": healthy_region_bytes()}
 
 
 def test_an_fs_restore_whose_flip_cannot_be_reread_finishes_as_published(

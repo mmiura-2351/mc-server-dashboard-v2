@@ -279,13 +279,15 @@ class RestorePartiallyPublishedError(StorageError):
 class RestorePublicationUnknownError(StorageError):
     """A restore's flip failed, and whether it published is unknown (issue #3564).
 
-    The object backend's pointer write failed, and every read that could confirm
-    which snapshot the pointer names failed as well. The write may have landed (a
-    lost response), so the restored working set may be live: the caller handles
-    it as a publication rather than a restore that published nothing. Deliberately
-    distinct from :class:`RestorePartiallyPublishedError`, which the read
-    confirmed. ``cause`` is the pointer write's failure and ``report`` the
-    extracted working set's report.
+    The flip raised, and no read could confirm what ``current`` names: on the
+    object backend every pointer re-read failed after a failed pointer write; on
+    fs the link read after a failed replace of ``current`` failed, or named
+    neither the restored nor the prior snapshot. The flip may have landed (a lost
+    response, or a remote filesystem applying a rename it reports failed), so the
+    restored working set may be live: the caller handles it as a publication
+    rather than a restore that published nothing. Deliberately distinct from
+    :class:`RestorePartiallyPublishedError`, which a read confirmed. ``cause`` is
+    the flip's failure and ``report`` the extracted working set's report.
     """
 
     def __init__(self, cause: Exception, report: WorkingSetReport) -> None:

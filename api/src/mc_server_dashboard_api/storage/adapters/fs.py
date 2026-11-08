@@ -70,6 +70,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PrunedStoreError,
     PublisherFencedError,
     RestorePartiallyPublishedError,
+    RestorePublicationUnknownError,
     SnapshotHandleError,
     StaleGenerationError,
     StorageUnavailableError,
@@ -1227,8 +1228,14 @@ class FsStorage(Storage):
 
         The missing-region gate does not run (issue #3446): a restore is an
         operator-chosen rollback to a complete backup, which legitimately holds
-        fewer regions than the world it replaces. A fault after the flip raises
-        :class:`RestorePartiallyPublishedError` carrying ``report``.
+        fewer regions than the world it replaces.
+
+        A failure once the replace of ``current`` has returned raises
+        :class:`RestorePartiallyPublishedError` carrying ``report``. A replace
+        that raised is settled by one read of the link: naming the restored
+        snapshot it published (:class:`RestorePartiallyPublishedError`), naming
+        the prior one it did not (the failure is re-raised), and anything else,
+        the read failing included, raises :class:`RestorePublicationUnknownError`.
         """
 
         await asyncio.to_thread(_fsync_tree, staging)
@@ -1236,6 +1243,8 @@ class FsStorage(Storage):
 
         def _locked() -> Path | None:
             self._bump_marker(server_root, RESTORE_PUBLISHER)
+            prior = self._live_snapshot_name(server_root)
+            attempted: list[str] = []
             flipped: list[bool] = []
             try:
                 with _translating_io_faults():
@@ -1243,14 +1252,26 @@ class FsStorage(Storage):
                         community_id,
                         server_id,
                         staging,
+                        on_attempt=attempted.append,
                         on_flip=lambda: flipped.append(True),
                     )
             except Exception as exc:
-                # The replace of ``current`` returned, so the backup is live
-                # whatever failed after it; no re-read can be wrong about that.
-                if not flipped:
+                if flipped:
+                    # The replace of ``current`` returned: the backup is live
+                    # whatever failed after it.
+                    raise RestorePartiallyPublishedError(exc, report) from exc
+                if not attempted:
                     raise
-                raise RestorePartiallyPublishedError(exc, report) from exc
+                # The replace itself raised, which may still have renamed.
+                try:
+                    live = self._live_snapshot_name(server_root)
+                except Exception:
+                    raise RestorePublicationUnknownError(exc, report) from exc
+                if live == attempted[0]:
+                    raise RestorePartiallyPublishedError(exc, report) from exc
+                if live == prior:
+                    raise
+                raise RestorePublicationUnknownError(exc, report) from exc
 
         old_snapshot = await self._under_server_lock(community_id, server_id, _locked)
         await _reclaim_superseded(old_snapshot)
@@ -1270,6 +1291,7 @@ class FsStorage(Storage):
         server_id: ServerId,
         staging: Path,
         *,
+        on_attempt: Callable[[str], None] | None = None,
         on_flip: Callable[[], None] | None = None,
     ) -> Path | None:
         """The atomic-publish core (Section 4.2), driven on a worker thread.
@@ -1291,9 +1313,12 @@ class FsStorage(Storage):
         is nothing to reclaim (first publish, or the old snapshot is still leased by
         an active hydrate reader — left for the next sweep, Section 4.2 reader safety).
 
-        ``on_flip`` is called once the replace of ``current`` has returned, so a
-        caller knows the flip took effect even when a later step raises (issue
-        #3564): the replace either flips ``current`` or raises without flipping it.
+        ``on_attempt`` is called with the new snapshot's name immediately before
+        the replace of ``current``, and ``on_flip`` once that replace has returned
+        (issue #3564). A replace that returned flipped ``current``, so a later
+        failure leaves it published. One that raised may still have renamed (a
+        remote filesystem such as NFS can apply a rename and report it failed,
+        rename(2) BUGS), so only a read of the link can tell.
         """
 
         server_root = self._server_root(community_id, server_id)
@@ -1320,6 +1345,8 @@ class FsStorage(Storage):
         # relocatable.
         tmp_link = server_root / f".current.{uuid.uuid4().hex}"
         os.symlink(os.path.join("snapshots", snapshot_id.value), tmp_link)
+        if on_attempt is not None:
+            on_attempt(snapshot_id.value)
         os.replace(tmp_link, link)
         if on_flip is not None:
             on_flip()
