@@ -725,8 +725,8 @@ DB cascade.
 
 Backups are downloadable and uploadable: download streams the
 archive in its native `tar.gz` form (no recompression); upload validates the
-archive (it must open as a gzip tar with traversal-safe entries, bounded by the
-shared upload cap) before storing it as a `source = uploaded` row, restorable
+archive (it must open as a gzip tar whose every member passes the restore
+member rule, STORAGE.md Section 3.3, bounded by the shared upload cap) before storing it as a `source = uploaded` row, restorable
 through the normal restore flow. Per-server (`backup:read`) and platform-admin
 statistics endpoints aggregate count / total known bytes / unknown-size count /
 newest+oldest from these rows.

@@ -21,8 +21,10 @@ backends, and the fs health check — reach the same verdict through
 :func:`archive_read_errors_as_unreadable` (issue #3230). The restore and health
 paths of both backends judge each member by :func:`refuse_unrestorable_member`
 (issue #3550), and both backends' snapshot ingest takes only the canonical names
-:func:`is_canonical_name` admits (issue #3574). Every one of those paths first
-reads a member through :func:`without_tar_root_prefix`.
+``is_canonical_name`` admits (issue #3574). Every one of those paths first reads
+a member through ``without_tar_root_prefix``. The member rule itself lives in
+:mod:`mc_server_dashboard_api.archive_member`, so the servers upload gate judges
+an uploaded archive by the same code (issue #3579).
 """
 
 from __future__ import annotations
@@ -32,8 +34,8 @@ import gzip
 import tarfile
 import zlib
 from collections.abc import Iterator
-from pathlib import PurePosixPath
 
+from mc_server_dashboard_api.archive_member import unrestorable_reason
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
 
 # zlib's gzip-wrapper window setting: parse the gzip header and VERIFY the
@@ -184,41 +186,6 @@ def archive_read_errors_as_unreadable() -> Iterator[None]:
         raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc
 
 
-def without_tar_root_prefix(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    """Read ``member`` without the conventional tar root prefix (issue #3574).
-
-    ``tar -C dir -cf - .`` writes the root itself as a ``.`` (``./``) directory
-    entry and every other member under a leading ``./``. The root entry returns
-    ``None``: it is the directory everything restores into, not a member of it.
-    Any other member comes back with exactly one leading ``./`` stripped, so
-    ``./world/level.dat`` is judged — by :func:`refuse_unrestorable_member`,
-    :func:`is_canonical_name` and the reserved-name decision — as
-    ``world/level.dat``. A second ``./`` stays and is refused as non-canonical.
-    """
-
-    if member.isdir() and member.name.removesuffix("/") == ".":
-        return None
-    if member.name.startswith("./"):
-        return member.replace(name=member.name[2:], deep=False)
-    return member
-
-
-def is_canonical_name(name: str, *, is_dir: bool = False) -> bool:
-    """Whether a slash-separated name has no empty or ``.`` segment (issue #3574).
-
-    ``a//b``, ``a/./b`` and ``./a`` name the same place as a canonical spelling, but
-    a store that keeps them verbatim lists an empty or ``.`` directory whose child
-    path is its parent again. One trailing ``/`` on a directory member is allowed:
-    it is how tar writes one. ``..`` is judged separately, as traversal. An
-    archive member is judged after :func:`without_tar_root_prefix`, which strips
-    the one leading ``./`` tar writes.
-    """
-
-    if is_dir:
-        name = name.removesuffix("/")
-    return all(part not in ("", ".") for part in name.split("/"))
-
-
 def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
     """Refuse a backup archive member that no restore may take (issue #3550).
 
@@ -226,10 +193,11 @@ def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
     a member must be a regular file or a directory, at a relative, canonical name
     with no ``..`` component. A hard link, symlink, device, FIFO or other special
     member, an absolute name, a ``..`` — even one that stays inside the tree — and
-    an empty or ``.`` segment (:func:`is_canonical_name`) raise
-    :class:`ArchiveUnreadableError`: the archive reads, but nothing can be
-    restored from it, override or not. ``member`` is the one
-    :func:`without_tar_root_prefix` returned, so a leading ``./`` is already gone.
+    an empty or ``.`` segment raise :class:`ArchiveUnreadableError`: the archive
+    reads, but nothing can be restored from it, override or not. The rule is
+    :func:`~mc_server_dashboard_api.archive_member.unrestorable_reason`, shared
+    with the servers upload gate (issue #3579). ``member`` is the one
+    ``without_tar_root_prefix`` returned, so a leading ``./`` is already gone.
     The platform's own producers emit none of these: the Worker's pack and the fs
     writer name members after real directory entries, and the object backend's
     archive writer leaves out the legacy keys a store can still hold — the
@@ -237,19 +205,8 @@ def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:
     issue #3574 (issue #3574).
     """
 
-    if not (member.isfile() or member.isdir()):
+    reason = unrestorable_reason(member)
+    if reason is not None:
         raise ArchiveUnreadableError(
-            "archive holds a member that cannot be restored: "
-            f"{member.name!r} is not a regular file or directory"
-        )
-    name = PurePosixPath(member.name)
-    if name.is_absolute() or ".." in name.parts:
-        raise ArchiveUnreadableError(
-            "archive holds a member that cannot be restored: "
-            f"{member.name!r} is absolute or has a '..' component"
-        )
-    if not is_canonical_name(member.name, is_dir=member.isdir()):
-        raise ArchiveUnreadableError(
-            "archive holds a member that cannot be restored: "
-            f"{member.name!r} has an empty or '.' segment"
+            f"archive holds a member that cannot be restored: {member.name!r} {reason}"
         )

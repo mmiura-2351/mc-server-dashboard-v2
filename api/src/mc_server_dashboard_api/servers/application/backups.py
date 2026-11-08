@@ -50,6 +50,10 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import IO
 
+from mc_server_dashboard_api.archive_member import (
+    unrestorable_reason,
+    without_tar_root_prefix,
+)
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
     BACKUP_DELETE,
@@ -1435,10 +1439,15 @@ def _validate_backup_archive(
 
     Backups are self-contained ``tar.gz`` archives (STORAGE.md Section 2). The
     archive must open as a gzip tar, carry at most ``max_entries`` members, and
-    every member must be a regular file or directory with a relative, non-escaping
-    name (no absolute paths, no ``..``, no devices / symlink / hardlink members) —
-    the same traversal discipline Storage's extraction enforces, applied here so a
-    hostile archive is refused BEFORE it lands in the store.
+    every member must pass the member rule restore and the health probe apply
+    (:func:`~mc_server_dashboard_api.archive_member.unrestorable_reason`, issue
+    #3579): a regular file or directory at a relative, canonical name, with no
+    absolute path, no ``..``, no empty or ``.`` segment and no link or special
+    member. Each member is read the way restore reads it, without the tar root
+    prefix, so a ``./``-prefixed archive and its ``./`` root entry are accepted.
+    The rule runs here so an archive restore would refuse is refused BEFORE it
+    lands in the store, rather than failing later as unreadable. A ``..`` between
+    backslashes is refused here as well, on top of that rule.
 
     The compressed body is already capped, but a gzip member can expand ~1000x, so
     each file member's body is drained and the cumulative DECOMPRESSED byte count
@@ -1465,17 +1474,26 @@ def _validate_backup_archive(
         with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
             count = 0
             total = 0
-            for member in tar:
+            for read in tar:
                 count += 1
                 if count > max_entries:
                     raise InvalidBackupArchiveError("too many entries")
-                if not (member.isfile() or member.isdir()):
+                # Read and judged exactly as restore reads and judges it.
+                member = without_tar_root_prefix(read)
+                if member is None:
+                    continue
+                reason = unrestorable_reason(member)
+                if reason is not None:
                     raise InvalidBackupArchiveError(
-                        f"unsafe member type: {member.name!r}"
+                        f"unsafe member: {read.name!r} {reason}"
                     )
-                if _is_unsafe_member_name(member.name):
+                # Upload-only, on top of the shared rule: ``\`` is read as a
+                # separator too, so a ``..`` between backslashes (an archive made
+                # on Windows) is refused here. Restore reads ``\`` as an ordinary
+                # name character, which is why this is not part of the shared rule.
+                if ".." in member.name.replace("\\", "/").split("/"):
                     raise InvalidBackupArchiveError(
-                        f"unsafe member path: {member.name!r}"
+                        f"unsafe member: {read.name!r} has a '..' component"
                     )
                 # A directory member materializes AT its own name; a file member
                 # materializes its PARENT on the way (issue #2869).
@@ -1512,12 +1530,3 @@ def _drain_capped(handle: IO[bytes], total: int, max_bytes: int) -> int:
         total += len(chunk)
         if total > max_bytes:
             raise InvalidBackupArchiveError("decompressed size exceeds cap")
-
-
-def _is_unsafe_member_name(name: str) -> bool:
-    """True if a tar member name is absolute or escapes the extraction root."""
-
-    if name.startswith("/"):
-        return True
-    parts = name.replace("\\", "/").split("/")
-    return ".." in parts

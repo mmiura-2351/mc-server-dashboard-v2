@@ -2463,6 +2463,110 @@ def test_upload_while_the_server_lock_is_held_is_409_server_busy() -> None:
     assert resp.json()["reason"] == "server_busy"
 
 
+# --- the upload gate applies the storage member rule (issue #3579) ----------
+#
+# Restore and the health probe judge every member by one rule on both backends
+# (issues #3550, #3574). An archive the upload accepted but that rule refuses
+# would get a 201 and a row, then fail only at restore or sweep as unreadable.
+# So the upload refuses it with the same rule, before anything is stored.
+
+
+def _member(name: str, kind: bytes = tarfile.REGTYPE, linkname: str = "") -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name=name)
+        info.type = kind
+        info.linkname = linkname
+        data = b"x" if kind == tarfile.REGTYPE else b""
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data) if data else None)
+    return buf.getvalue()
+
+
+def _upload_through_the_route(
+    content: bytes,
+) -> tuple[httpx2.Response, FakeBackupArchiveStore, FakeBackupRepository, uuid.UUID]:
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    servers = FakeServerRepository()
+    servers.seed(_stopped_server(community_id, server_id))
+    backups = FakeBackupRepository()
+    store = FakeBackupArchiveStore()
+    upload = UploadBackup(
+        uow=ServersFakeUnitOfWork(servers=servers, backups=backups),
+        backup_store=store,
+        clock=ServersFakeClock(_NOW),
+    )
+    app = _app(member=True, allow=True)
+    cast(FastAPI, app).dependency_overrides[get_upload_backup] = lambda: upload
+    client = _client(app)
+    files = {"file": ("backup.tar.gz", content, "application/gzip")}
+    resp = client.post(_url(community_id, server_id, "/upload"), files=files)
+    return resp, store, backups, server_id
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_member("world//level.dat"), id="empty-segment"),
+        pytest.param(_member("world/./level.dat"), id="interior-dot"),
+        pytest.param(_member("././level.dat"), id="repeated-dot-slash"),
+        pytest.param(_member("world/.", tarfile.DIRTYPE), id="trailing-dot"),
+        pytest.param(_member("world/../escape"), id="dot-dot"),
+        pytest.param(_member("/etc/passwd"), id="absolute"),
+        pytest.param(_member("link", tarfile.SYMTYPE, "level.dat"), id="symlink"),
+        pytest.param(_member("hard", tarfile.LNKTYPE, "level.dat"), id="hardlink"),
+        pytest.param(_member("dev/null", tarfile.CHRTYPE), id="char-device"),
+        pytest.param(_member("dev/sda", tarfile.BLKTYPE), id="block-device"),
+        pytest.param(_member("pipe", tarfile.FIFOTYPE), id="fifo"),
+        pytest.param(_member("world\\..\\escape"), id="backslash-dot-dot"),
+    ],
+)
+def test_upload_of_a_member_restore_refuses_is_422_and_stores_nothing(
+    content: bytes,
+) -> None:
+    resp, store, backups, _ = _upload_through_the_route(content)
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert store.stored == []
+    assert backups.by_id == {}
+
+
+def _archive_of(*names: str) -> bytes:
+    """A gzip tar of ``names``: a directory for a name ending in ``/``."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name in names:
+            info = tarfile.TarInfo(name=name)
+            if name.endswith("/"):
+                info.type = tarfile.DIRTYPE
+                tar.addfile(info)
+            else:
+                info.size = 1
+                tar.addfile(info, io.BytesIO(b"x"))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param(_archive_of("server.properties", "world/"), id="plain"),
+        pytest.param(
+            _archive_of("./server.properties", "./world/", "./world/level.dat"),
+            id="leading-dot-slash",
+        ),
+        pytest.param(_archive_of("./", "./server.properties"), id="root-entry"),
+    ],
+)
+def test_upload_of_a_restorable_archive_is_201_and_stored(content: bytes) -> None:
+    resp, store, backups, server_id = _upload_through_the_route(content)
+
+    assert resp.status_code == 201
+    assert store.stored == [ServerId(server_id)]
+    assert len(backups.by_id) == 1
+
+
 def test_upload_unknown_server_is_404() -> None:
     use_case = _FakeUseCase(error=ServerNotFoundError("x"))
     app = _app(member=True, allow=True, upload=use_case)
