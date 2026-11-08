@@ -17,108 +17,111 @@ import (
 // the older state. Each report must reach the stream before any event newer than
 // what it reports, or not at all.
 
-// hookInstance runs hook the first time its state is read. ResyncStatus reads it
-// inside its snapshot, so a test can start a concurrent step at that point.
-type hookInstance struct {
-	*fakeInstance
-	once sync.Once
-	hook func()
-}
-
-func (i *hookInstance) Status() execution.ServerState {
-	s := i.fakeInstance.Status()
-	i.once.Do(i.hook)
-	return s
-}
-
-const hookID = "srv-hook"
-
-// duringResyncSnapshot registers a bystander instance whose state the next
-// ResyncStatus reads in its snapshot, and runs step there.
-func duringResyncSnapshot(m *Manager, step func()) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.instances[hookID] = &hookInstance{fakeInstance: newFakeInstance(hookID), hook: step}
-}
-
-// lastStateAfter drains the stream until serverID has reported want and the
-// stream has gone quiet, and returns the last state serverID reported: want when
-// every resync report reached the stream before the event that superseded it.
-func lastStateAfter(t *testing.T, m *Manager, serverID, want string) string {
+// lastStateRacingResync runs a resync against step, which ends a command for
+// serverID, in the order most hostile to the resync: at the point where the
+// resync has read serverID's state and has yet to queue the report of it
+// (beforeResyncReport). Where a command can take mu at that point, as one could
+// between the old snapshot's unlock and its sends, step runs to its end there and
+// the resync goes on only once step's want is on the stream. Where mu is held,
+// step runs concurrently and has to wait for the resync. It returns the last state
+// serverID reported: want, unless the resync's report followed step's event.
+func lastStateRacingResync(t *testing.T, m *Manager, serverID, want string, step func()) string {
 	t.Helper()
-	deadline := time.After(5 * time.Second)
 	last, seen := "", false
-	for {
-		quiet := time.After(time.Hour)
-		if seen {
-			quiet = time.After(200 * time.Millisecond)
-		}
+	next := func() {
 		select {
 		case ev := <-m.Events():
-			if ev.ServerID != serverID {
-				continue
+			if ev.ServerID == serverID {
+				last, seen = ev.State, seen || ev.State == want
 			}
-			last = ev.State
-			seen = seen || ev.State == want
-		case <-quiet:
-			return last
-		case <-deadline:
+		case <-time.After(5 * time.Second):
 			t.Fatalf("%s never reported %s; last %q", serverID, want, last)
 		}
 	}
-}
-
-// A stop that evicts the instance while a resync is taking its snapshot. The
-// resync read the instance running, and that report must not follow the stop's
-// stopped.
-func TestResyncReportOfAnInstanceIsNotQueuedAfterItsStop(t *testing.T) {
-	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
-	startHeld(t, m)
-	done := make(chan session.CommandResult, 1)
-	duringResyncSnapshot(m, func() {
-		go func() {
-			done <- m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
-		}()
-	})
+	stepped := make(chan struct{})
+	m.beforeResyncReport = func(id string) {
+		if id != serverID {
+			return
+		}
+		if !m.mu.TryLock() {
+			go func() {
+				defer close(stepped)
+				step()
+			}()
+			return
+		}
+		m.mu.Unlock()
+		step()
+		close(stepped)
+		for !seen {
+			next()
+		}
+	}
 
 	m.ResyncStatus()
 
-	if res := <-done; !res.Success {
+	select {
+	case <-stepped:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the command for %s never ended, or the resync never reported it", serverID)
+	}
+	for !seen {
+		next()
+	}
+	for {
+		select {
+		case ev := <-m.Events():
+			if ev.ServerID == serverID {
+				last = ev.State
+			}
+		default:
+			return last
+		}
+	}
+}
+
+// A stop that evicts the instance at the resync's report of it. The resync read
+// the instance running, and that report must not follow the stop's stopped.
+func TestResyncReportOfAnInstanceIsNotQueuedAfterItsStop(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
+	startHeld(t, m)
+	var res session.CommandResult
+	last := lastStateRacingResync(t, m, s1, "stopped", func() {
+		res = m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
+	})
+
+	if !res.Success {
 		t.Fatalf("stop = %+v, want success", res)
 	}
-	if last := lastStateAfter(t, m, s1, "stopped"); last != "stopped" {
+	if last != "stopped" {
 		t.Fatalf("last %s report = %q, want stopped: the resync's report followed the stop's", s1, last)
 	}
 }
 
-// A retry stop that confirms a failed-stop orphan gone while a resync is taking
-// its snapshot. The resync's unknown must not follow the retry's stopped.
+// A retry stop that confirms a failed-stop orphan gone at the resync's report of
+// it. The resync's unknown must not follow the retry's stopped.
 func TestResyncReportOfAnOrphanIsNotQueuedAfterItsRetryStop(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
 	inst := newFakeInstance(s1)
 	m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
 	m.startPumps(s1, inst)
 	drainStatuses(t, m, 1) // the fake's own running
-	done := make(chan session.CommandResult, 1)
-	duringResyncSnapshot(m, func() {
-		go func() {
-			done <- m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
-		}()
+	var res session.CommandResult
+	last := lastStateRacingResync(t, m, s1, "stopped", func() {
+		res = m.Handle(context.Background(), session.Command{CommandID: "stop", ServerID: s1, Kind: "StopServer"})
 	})
 
-	m.ResyncStatus()
-
-	if res := <-done; !res.Success {
+	if !res.Success {
 		t.Fatalf("retry stop = %+v, want success", res)
 	}
-	if last := lastStateAfter(t, m, s1, "stopped"); last != "stopped" {
+	if last != "stopped" {
 		t.Fatalf("last %s report = %q, want stopped: the resync's unknown followed the retry's stopped", s1, last)
 	}
 }
 
-// A launch that ends while a resync is taking its snapshot. The resync's starting
-// must not follow what the launch's end reports: the corrective stopped of a
-// failed launch (releaseFailedLaunch), or the registered instance's running.
+// A launch that ends at the resync's report of its reservation. The resync's
+// starting must not follow what the launch's end reports: the corrective stopped
+// of a failed launch (releaseFailedLaunch), or the registered instance's running.
 func TestResyncReportOfAReservedLaunchIsNotQueuedAfterItsEnd(t *testing.T) {
 	t.Run("fails", func(t *testing.T) {
 		held := newHeldLaunchDriver(errors.New("test: launch failed"))
@@ -127,14 +130,16 @@ func TestResyncReportOfAReservedLaunchIsNotQueuedAfterItsEnd(t *testing.T) {
 		done := make(chan session.CommandResult, 1)
 		go func() { done <- m.Handle(context.Background(), startCmd()) }()
 		awaitEnter(t, held.entered)
-		duringResyncSnapshot(m, func() { close(held.release) })
+		var res session.CommandResult
+		last := lastStateRacingResync(t, m, s1, "stopped", func() {
+			close(held.release)
+			res = <-done
+		})
 
-		m.ResyncStatus()
-
-		if res := <-done; res.Success {
+		if res.Success {
 			t.Fatalf("start = %+v, want the launch's failure", res)
 		}
-		if last := lastStateAfter(t, m, s1, "stopped"); last != "stopped" {
+		if last != "stopped" {
 			t.Fatalf("last %s report = %q, want stopped: the resync's starting followed the correction", s1, last)
 		}
 	})
@@ -145,14 +150,16 @@ func TestResyncReportOfAReservedLaunchIsNotQueuedAfterItsEnd(t *testing.T) {
 		done := make(chan session.CommandResult, 1)
 		go func() { done <- m.Handle(context.Background(), startCmd()) }()
 		awaitEnter(t, d.entered)
-		duringResyncSnapshot(m, func() { close(d.release) })
+		var res session.CommandResult
+		last := lastStateRacingResync(t, m, s1, "running", func() {
+			close(d.release)
+			res = <-done
+		})
 
-		m.ResyncStatus()
-
-		if res := <-done; !res.Success {
+		if !res.Success {
 			t.Fatalf("start = %+v, want success", res)
 		}
-		if last := lastStateAfter(t, m, s1, "running"); last != "running" {
+		if last != "running" {
 			t.Fatalf("last %s report = %q, want running: the resync's starting followed the instance's running", s1, last)
 		}
 	})

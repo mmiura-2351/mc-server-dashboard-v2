@@ -506,15 +506,22 @@ type Manager struct {
 	// (order is preserved per server). dirtyStatus is the FIFO of servers awaiting
 	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
 	//
-	// Lock order: mu before statusMu, and an instance's own lock (taken by its
-	// Status) after both. ResyncStatus holds mu and statusMu together (issue
+	// Lock order: mu before statusMu. ResyncStatus holds the two together (issue
 	// #3587); nothing takes mu while holding statusMu, and nothing that holds
-	// statusMu blocks: the queueing in queueStatusLocked never waits on the sink.
+	// statusMu blocks: the queueing in queueStatusLocked never waits on the sink,
+	// and an instance's Status, which ResyncStatus reads there, never waits either
+	// (execution.Instance).
 	statusMu      sync.Mutex
 	pendingStatus map[string]session.StatusEvent
 	coalescing    map[string]bool
 	dirtyStatus   []string
 	statusNotify  chan struct{}
+
+	// beforeResyncReport, when non-nil, runs between ResyncStatus's read of an id's
+	// state and the queueing of its report, so a test can try to end a command at
+	// that point (issue #3587). Production leaves it nil. It runs under mu and
+	// statusMu, so it must take neither.
+	beforeResyncReport func(serverID string)
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
@@ -4614,6 +4621,9 @@ func (m *Manager) ResyncStatus() {
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
 	report := func(serverID, state string) {
+		if hook := m.beforeResyncReport; hook != nil {
+			hook(serverID)
+		}
 		m.queueStatusLocked(session.StatusEvent{ServerID: serverID, State: state})
 	}
 	for serverID, inst := range m.instances {
