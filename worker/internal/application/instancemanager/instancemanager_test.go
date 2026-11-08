@@ -342,7 +342,7 @@ func TestStartRefusedWhenWorkingDirAbsent(t *testing.T) {
 	// from a follow-up command's code: a command that fails BEFORE reserve() would
 	// make the inference vacuous.
 	m.mu.Lock()
-	leaked := m.reserved[s1]
+	_, leaked := m.reserved[s1]
 	m.mu.Unlock()
 	if leaked {
 		t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective start would be refused BUSY")
@@ -431,7 +431,7 @@ func TestStartRefusedWhenScratchEmptiedInPlace(t *testing.T) {
 				t.Fatalf("driver started %d times, want 0: the refusal must precede driver.Start", d.startCount())
 			}
 			m.mu.Lock()
-			leaked := m.reserved[s1]
+			_, leaked := m.reserved[s1]
 			m.mu.Unlock()
 			if leaked {
 				t.Fatal("reserved[s1] leaked after the working-set refusal: the corrective start would be refused BUSY")
@@ -485,7 +485,7 @@ func TestRestartRefusedWhenWorkingSetDestroyed(t *testing.T) {
 	// them from a follow-up command.
 	m.mu.Lock()
 	_, tracked := m.instances[s1]
-	leaked := m.reserved[s1]
+	_, leaked := m.reserved[s1]
 	m.mu.Unlock()
 	if tracked {
 		t.Fatal("instances[s1] still tracked after the refused relaunch: the server is down, not running")

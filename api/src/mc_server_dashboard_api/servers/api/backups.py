@@ -96,6 +96,8 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupRestoreIncompleteError,
+    BackupRestorePartiallyPublishedError,
+    BackupRestorePublicationUnknownError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
     BackupUnsettledError,
@@ -553,7 +555,10 @@ async def restore_backup(
     set that IS restored — retrying the restore heals both: ``seed_failed`` when
     the platform-managed ``server.properties`` keys could not be re-applied
     (#2621), ``plugin_reconcile_incomplete`` when the restored plugin directory
-    could not be read, leaving the plugin rows unreconciled (#3221). Any failure
+    could not be read, leaving the plugin rows unreconciled (#3221). The store
+    itself can also fail after it published, answering ``publish_incomplete``, or
+    fail to confirm whether it published, answering ``publish_unknown`` (#3564);
+    both steps still run over that working set. Any failure
     after the publish is audited ``error``, under ``backup:force_restore`` when a
     forced corrupt backup was the one published (#3269).
     """
@@ -675,6 +680,19 @@ async def restore_backup(
             # mapped 503 the caller retries (the reconciliation is idempotent;
             # re-running the restore completes it).
             raise _service_unavailable("plugin_reconcile_incomplete") from exc
+        if isinstance(exc.cause, BackupRestorePublicationUnknownError):
+            # The store's flip failed and no read could confirm it (issue #3564):
+            # the backup may be live. A mapped 503 the caller retries; a re-run of
+            # the restore settles it either way.
+            raise _service_unavailable("publish_unknown") from exc
+        if isinstance(exc.cause, BackupRestorePartiallyPublishedError) and isinstance(
+            exc.cause.cause, BackupStorageUnavailableError
+        ):
+            # The store failed after it had published the backup (issue #3564).
+            # Unlike ``storage_unavailable``, which publishes nothing, the restored
+            # working set is live: a mapped 503 the caller retries, since a
+            # re-run of the restore completes it.
+            raise _service_unavailable("publish_incomplete") from exc
         # Any other failure stays the unmapped 500 it was, now audited.
         raise
     if result.forced_corrupt:
@@ -967,7 +985,8 @@ async def upload_backup(
     The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
     before the whole body is materialized); the use case then validates the archive
     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
-    member is 422 ``invalid_archive``; an over-cap archive is 413.
+    member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
+    member, its name and the reason); an over-cap archive is 413.
 
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A restore republishes the archive's members verbatim as the working
@@ -996,7 +1015,14 @@ async def upload_backup(
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except InvalidBackupArchiveError as exc:
-        raise _unprocessable("invalid_archive") from exc
+        # The refusal rides as the RFC 9457 ``detail`` (issue #3586) so the
+        # operator can find the member to fix. Every message is built only from
+        # the upload's own member names and fixed reasons, never a server path.
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_archive",
+            extensions={"detail": str(exc)},
+        ) from exc
     except InvalidFilePathError as exc:
         # A member refused by PATH rather than by archive structure: one that would
         # stand a directory at the root server.properties name on restore (issue

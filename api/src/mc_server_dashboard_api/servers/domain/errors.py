@@ -489,13 +489,17 @@ class BackupStorageUnavailableError(ServerError):
 
 
 class InvalidBackupArchiveError(ServerError):
-    """An uploaded backup archive was not a valid, traversal-safe ``tar.gz`` (#281).
+    """An uploaded backup archive was not a ``tar.gz`` restore can take (#281, #3579).
 
     The upload validates the archive BEFORE storing it: it must open as a gzip tar
-    and every member must be a traversal-safe relative path (no absolute paths, no
-    ``..`` escapes, no devices/symlink/hardlink members). A body that does not open
-    as a tar.gz, or that carries an unsafe member, is rejected here so a hostile
-    archive never lands in the store. The edge maps this to 422.
+    and every member must pass the member rule restore applies
+    (:func:`~mc_server_dashboard_api.archive_member.unrestorable_reason`): a
+    regular file or directory at a relative, canonical name, so no absolute path,
+    no ``..``, no empty or ``.`` segment and no device, symlink or hardlink member.
+    A body that does not open as a tar.gz, or that carries such a member, is
+    rejected here so it never lands in the store. The message names the refusal
+    (the member's name and the reason) and is built only from the upload itself,
+    so the edge returns it as the 422 ``detail`` (issue #3586).
     """
 
 
@@ -665,6 +669,35 @@ class PluginReconcileIncompleteError(ServerError):
 
     A listed jar whose read fails the same way leaves the reconciliation just as
     partial (issue #3269).
+    """
+
+
+class BackupRestorePartiallyPublishedError(ServerError):
+    """The store published a restored backup, then failed inside the restore (#3564).
+
+    The seam translation of the storage ``RestorePartiallyPublishedError``: the
+    restored working set is live, but the store's restore call did not complete.
+    ``corrupt_count`` is the published backup's corrupt region count (``0`` when
+    healthy), as a successful restore returns it. ``cause`` is the store's failure,
+    already translated (:class:`BackupStorageUnavailableError` for an outage). The
+    restore use case raises it on as :class:`BackupRestoreIncompleteError`.
+    """
+
+    def __init__(
+        self, storage_ref: str, *, cause: Exception, corrupt_count: int
+    ) -> None:
+        super().__init__(storage_ref)
+        self.cause = cause
+        self.corrupt_count = corrupt_count
+
+
+class BackupRestorePublicationUnknownError(BackupRestorePartiallyPublishedError):
+    """The store may have published a restored backup (issue #3564).
+
+    The seam translation of the storage ``RestorePublicationUnknownError``: the
+    store's pointer write failed and no read could confirm whether it landed. A
+    subclass, because the restore use case handles it exactly as a publication;
+    the edge answers it with its own reason, since the backup may not be live.
     """
 
 

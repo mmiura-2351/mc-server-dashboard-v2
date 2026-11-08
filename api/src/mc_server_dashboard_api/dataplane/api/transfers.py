@@ -499,7 +499,18 @@ async def publish_snapshot(
         # callers genuinely outside this upload guard (e.g. an initial
         # publish / restore performed by storage internals, which read
         # ``current`` under the same lock themselves).
-        current = await storage.current_generation(*scope)
+        #
+        # The read is ``settled_generation``, taken under the per-server
+        # lock (issue #3564). Every mutation of the published working set
+        # (a commit's flip and bump, a restore's bump and flip, an at-rest
+        # edit's write and bump, a prune) runs whole under that lock, so this
+        # observation can never land inside one: it waits for a mutation in
+        # progress and sees it complete. Any mutation that completes after
+        # it advances the generation, which the commit's locked re-check
+        # refuses. An unlocked read could see a restore's bump without its
+        # flip, or an edit's write without its bump, and adopt a base that
+        # still matches once that mutation finishes.
+        current = await storage.settled_generation(*scope)
         expected_base: int | None = current
         if base_generation is not None:
             if base_generation < current:

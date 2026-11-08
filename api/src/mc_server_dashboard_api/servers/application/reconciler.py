@@ -228,12 +228,13 @@ not free YET — a command still in flight, or a failed-stop orphan the Worker i
 converging — and that this same start will be accepted once it settles, so there is
 nothing to damp, and counting it arms a window that outlives the busy one: the
 server then stays down for the rest of a backoff earned while the Worker was only
-busy. Two sources reach the reconciler, and the row identifies neither: a session
-interruption during a restart's stop leg (the row is rewritten to ``unknown`` while
-the Worker finishes the stop detached, its status resync does not report an id it
-holds only as a reservation, and on the new session the start meets that
-reservation instead of queueing), and an orphan whose fate the Worker cannot
-determine (reported ``unknown``, probed indefinitely). The retry cadence for both
+busy. Two sources reach the reconciler: a start on a new session after a reconnect
+while a command from the previous session still holds the id's reservation (no
+queue to join, so it meets the reservation; the Worker's resync reports a stop or
+restart leg, issue #3302, so a restart's stop leg is held back as above, but only
+for the budget, and a hydrate's reservation is not reported at all), and an orphan
+whose fate the Worker cannot determine (reported ``unknown``, probed
+indefinitely). The retry cadence for both
 is the tick interval. This is NOT what a start sent mid-restart on the restart's
 own session meets: that one queues in the Worker's per-server lane and times out,
 which is an ordinary failure and backs off — the restart rule above is what keeps
