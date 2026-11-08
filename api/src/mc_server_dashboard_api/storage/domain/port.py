@@ -377,7 +377,9 @@ class WorkingSetStore(abc.ABC):
         committed a state the fence refuses — another Worker assigned — before
         this read sees every publish the fence let through. A publish whose fence
         has not run yet is refused. The skip-hydrate decision reads the
-        generation this way.
+        generation this way, and so does the snapshot upload guard (issue
+        #3564): every mutation of the published working set runs whole under
+        this lock, so the read never observes one half done.
         """
 
     @abc.abstractmethod
@@ -579,6 +581,16 @@ class BackupStore(abc.ABC):
         backends (issue #3237), and on the fs backend a link (issue #3371). An
         archive inflating past the decompressed-size cap raises
         :class:`~.errors.ArchiveTooLargeError`, ``force`` or not.
+
+        The generation is bumped before the flip (issue #3564), so a failure
+        before the flip leaves the prior working set live at the advanced
+        generation. Holders of the old generation then hydrate it again, which
+        displaces and loses a stopped Worker's never-published scratch progress
+        on its next start: the accepted cost. A failure after the flip — the
+        restored working set live — raises
+        :class:`~.errors.RestorePartiallyPublishedError` carrying the report, and
+        one that cannot be confirmed either way
+        :class:`~.errors.RestorePublicationUnknownError`.
         """
 
     @abc.abstractmethod

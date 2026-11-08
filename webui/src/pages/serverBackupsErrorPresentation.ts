@@ -77,8 +77,10 @@ export function backupErrorPresentation(
  * state changed mid-flight, so it names restoring rather than the generic
  * stopped-only operation. A 409 `backup_unreadable` (#2374) means the backup's
  * archive cannot be read back, so no retry or override will restore it. A 503
- * `seed_failed` or `plugin_reconcile_incomplete` (#3269) means the backup WAS
- * published and only a follow-up step failed, so retrying the restore heals it.
+ * `seed_failed` or `plugin_reconcile_incomplete` (#3269), or `publish_incomplete`
+ * (#3564), means the backup WAS published and only a follow-up step failed, so
+ * retrying the restore heals it. A 503 `publish_unknown` (#3564) means the store
+ * could not confirm whether it was published, so it only may have been.
  */
 export function backupRestoreErrorPresentation(
   status: number | undefined,
@@ -90,8 +92,15 @@ export function backupRestoreErrorPresentation(
   if (reason === "backup_unreadable") {
     return "backups.error.unreadable";
   }
-  if (reason === "seed_failed" || reason === "plugin_reconcile_incomplete") {
+  if (
+    reason === "seed_failed" ||
+    reason === "plugin_reconcile_incomplete" ||
+    reason === "publish_incomplete"
+  ) {
     return "backups.error.restoreIncomplete";
+  }
+  if (reason === "publish_unknown") {
+    return "backups.error.restoreOutcomeUnknown";
   }
   return backupErrorPresentation(status, reason);
 }

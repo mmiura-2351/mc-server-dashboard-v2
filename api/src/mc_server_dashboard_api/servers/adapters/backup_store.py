@@ -43,6 +43,8 @@ from mc_server_dashboard_api.servers.domain.backup_store import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
+    BackupRestorePartiallyPublishedError,
+    BackupRestorePublicationUnknownError,
     BackupStorageUnavailableError,
     BackupUnreadableError,
 )
@@ -55,6 +57,8 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
     IntegrityCheckError,
     NotFoundError,
+    RestorePartiallyPublishedError,
+    RestorePublicationUnknownError,
     StorageUnavailableError,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
@@ -153,6 +157,26 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             # decompressed-size cap (issue #3237). The same verdict the sweep's
             # probe reaches, so it crosses the seam as the same error.
             raise BackupUnreadableError(storage_ref) from exc
+        except (
+            RestorePartiallyPublishedError,
+            RestorePublicationUnknownError,
+        ) as exc:
+            # The backup is live, or may be: the store's restore failed after the
+            # flip, or its flip could not be confirmed (issue #3564). Carry the
+            # corrupt count, and the cause translated like any other restore
+            # failure.
+            cause: Exception = exc.cause
+            if isinstance(cause, StorageUnavailableError):
+                cause = BackupStorageUnavailableError(str(server_id.value))
+                cause.__cause__ = exc.cause
+            published = (
+                BackupRestorePublicationUnknownError
+                if isinstance(exc, RestorePublicationUnknownError)
+                else BackupRestorePartiallyPublishedError
+            )
+            raise published(
+                storage_ref, cause=cause, corrupt_count=len(exc.report.corrupt)
+            ) from exc
         except StorageUnavailableError as exc:
             # The object store surfaced a transport/backend failure during the restore
             # (issue #2273): already translated to a storage type at the object-client
