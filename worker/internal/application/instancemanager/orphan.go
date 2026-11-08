@@ -243,13 +243,13 @@ func (m *Manager) retryOrphanStop(serverID string, inst execution.Instance) {
 func (m *Manager) takeOrphanReserve(serverID string, inst execution.Instance) (string, string, takeOutcome) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.reserved[serverID] {
+	if _, held := m.reserved[serverID]; held {
 		return "", "", takeInFlight
 	}
 	entry, ok := m.orphans[serverID]
 	if !ok || entry.inst != inst {
 		return "", "", takeNotFound
 	}
-	m.reserved[serverID] = true
+	m.reserved[serverID] = reservation{leg: legStopping}
 	return entry.driver, entry.mcVersion, takeFound
 }

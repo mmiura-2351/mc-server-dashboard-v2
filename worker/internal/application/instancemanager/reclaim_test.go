@@ -164,7 +164,7 @@ func TestReclaimDeletedScratchesSkipsReservedServer(t *testing.T) {
 	control := seedScratch(t, m, s2)
 
 	// Simulate s1 having an in-flight hydrate by reserving it.
-	ok, _, _ := m.reserve(s1)
+	ok, _, _ := m.reserve(s1, legNone)
 	if !ok {
 		t.Fatal("could not reserve s1 for test setup")
 	}
