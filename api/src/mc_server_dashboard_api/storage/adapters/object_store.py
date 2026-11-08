@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import hashlib
 import io
 import json
@@ -72,8 +73,10 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.fs import (
+    _acquire_off_loop,
     _create_spool,
     _discard_spool,
+    _release_after_read,
     _run_spool_writer,
     _translating_io_faults,
 )
@@ -2659,20 +2662,81 @@ class _RestoreBudget:
             yield chunk
 
 
+def _close_off_loop(handle: tarfile.TarFile | io.BufferedReader) -> None:
+    """Close ``handle`` on an executor worker, from a loop callback (issue #3602).
+
+    For a handle whose user was cancelled, so no one awaits the close: its fault is
+    logged here. Off the loop, since closing a writing tar flushes it.
+    """
+
+    closing = asyncio.get_running_loop().run_in_executor(None, handle.close)
+    closing.add_done_callback(_log_close_fault)
+
+
+def _log_close_fault(closing: asyncio.Future[None]) -> None:
+    fault = None if closing.cancelled() else closing.exception()
+    if fault is not None:
+        _LOG.warning("could not close an abandoned archive or spool: %s", fault)
+
+
+def _close_orphaned_member(opened: tuple[tarfile.TarFile, Any]) -> None:
+    """Close a member's archive whose opener was cancelled before owning it."""
+
+    _close_off_loop(opened[0])
+
+
+class _HandleJobs:
+    """The executor jobs using one handle, so its close follows the last (#3602).
+
+    A cancel during a job's await does not stop the job's thread, and a close
+    submitted then is not ordered after the job: it could close the handle under
+    the job, and a reused fd number would send the job's I/O to an unrelated file.
+    So each job is awaited shielded — a cancelled caller still gets
+    ``CancelledError`` at once, while the job's future stays pending until its
+    thread is done — and a close while that job is pending is chained from its
+    done-callback, as ``_tar_stream`` does (issue #3582).
+    """
+
+    def __init__(self) -> None:
+        self._last: asyncio.Future[Any] | None = None
+
+    async def run[T](self, fn: Callable[..., T], *args: Any) -> T:
+        job: asyncio.Future[T] = asyncio.get_running_loop().run_in_executor(
+            None, fn, *args
+        )
+        self._last = job
+        return await asyncio.shield(job)
+
+    async def close(self, handle: tarfile.TarFile | io.BufferedReader) -> None:
+        last = self._last
+        if last is not None and not last.done():
+            # The job's fault has no caller left to observe it (issue #3584).
+            last.add_done_callback(
+                functools.partial(
+                    _release_after_read, functools.partial(_close_off_loop, handle)
+                )
+            )
+        else:
+            await asyncio.to_thread(handle.close)
+
+
 async def _archive_member_parts(
     spool: Path, name: str, mode: Literal["r:*", "r:gz"]
 ) -> AsyncIterator[bytes]:
     """Stream one archive member's bytes in part-sized chunks (bounded memory)."""
 
-    tar, member_file = await asyncio.to_thread(_open_member, spool, name, mode)
+    tar, member_file = await _acquire_off_loop(
+        _close_orphaned_member, _open_member, spool, name, mode
+    )
+    jobs = _HandleJobs()
     try:
         while True:
-            chunk = await asyncio.to_thread(member_file.read, _PART)
+            chunk = await jobs.run(member_file.read, _PART)
             if not chunk:
                 return
             yield chunk
     finally:
-        await asyncio.to_thread(tar.close)
+        await jobs.close(tar)
 
 
 def _open_member(
@@ -2711,11 +2775,12 @@ async def _archive_file_member_streams(
     """
 
     with archive_read_errors_as_unreadable():
-        tar = await asyncio.to_thread(tarfile.open, str(spool), mode)
+        tar = await _acquire_off_loop(_close_off_loop, tarfile.open, str(spool), mode)
+    jobs = _HandleJobs()
     try:
         while True:
             with archive_read_errors_as_unreadable():
-                read = await asyncio.to_thread(tar.next)
+                read = await jobs.run(tar.next)
             if read is None:
                 return
             # Read without the tar root prefix (issue #3574), then judged before
@@ -2733,9 +2798,9 @@ async def _archive_file_member_streams(
             member_file = tar.extractfile(read)
             if member_file is None:
                 continue
-            yield member.name, _fileobj_parts(member_file)
+            yield member.name, _fileobj_parts(member_file, jobs)
     finally:
-        await asyncio.to_thread(tar.close)
+        await jobs.close(tar)
 
 
 async def _drain_restorable_members(spool: Path, max_bytes: int) -> None:
@@ -2752,12 +2817,15 @@ async def _drain_restorable_members(spool: Path, max_bytes: int) -> None:
             pass
 
 
-async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
-    """Stream a tar member file object in part-sized chunks (bounded memory)."""
+async def _fileobj_parts(member_file: Any, jobs: _HandleJobs) -> AsyncIterator[bytes]:
+    """Stream a tar member file object in part-sized chunks (bounded memory).
+
+    ``jobs`` are its archive's, so the archive's close follows a cancelled read.
+    """
 
     while True:
         with archive_read_errors_as_unreadable():
-            chunk = await asyncio.to_thread(member_file.read, _PART)
+            chunk = await jobs.run(member_file.read, _PART)
         if not chunk:
             return
         yield chunk
@@ -2766,15 +2834,16 @@ async def _fileobj_parts(member_file: Any) -> AsyncIterator[bytes]:
 async def _file_parts(spool: Path) -> AsyncIterator[bytes]:
     """Stream a local spool file in part-sized chunks (bounded memory)."""
 
-    handle = await asyncio.to_thread(open, spool, "rb")
+    handle = await _acquire_off_loop(_close_off_loop, lambda: open(spool, "rb"))
+    jobs = _HandleJobs()
     try:
         while True:
-            chunk = await asyncio.to_thread(handle.read, _PART)
+            chunk = await jobs.run(handle.read, _PART)
             if not chunk:
                 return
             yield chunk
     finally:
-        await asyncio.to_thread(handle.close)
+        await jobs.close(handle)
 
 
 async def _write_backup_targz(
@@ -2790,7 +2859,10 @@ async def _write_backup_targz(
     non-canonical key, with a warning: the member rule refuses its name too.
     """
 
-    tar = await _run_spool_writer(spool, tarfile.open, str(spool), "w:gz")
+    tar = await _run_spool_writer(
+        spool, tarfile.open, str(spool), "w:gz", reclaim=_close_off_loop
+    )
+    jobs = _HandleJobs()
     try:
         for obj in objs:
             name = obj.key[len(snapshot_prefix) :]
@@ -2805,9 +2877,9 @@ async def _write_backup_targz(
             async for chunk in await client.get_object(obj.key):
                 buf.write(chunk)
             buf.seek(0)
-            await asyncio.to_thread(tar.addfile, info, buf)
+            await jobs.run(tar.addfile, info, buf)
     finally:
-        await asyncio.to_thread(tar.close)
+        await jobs.close(tar)
 
 
 class _ObjectWorkingSetView(WorkingSetView):
