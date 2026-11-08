@@ -23,10 +23,11 @@ import stat
 import threading
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
+from mc_server_dashboard_api.storage.adapters import fs
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from tests.storage.helpers import (
     drain,
@@ -201,6 +202,55 @@ async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishe
 
     assert await asyncio.to_thread(closed.wait, 10)
     assert not _names_inode(read_fd, pipe_inode)
+
+
+@pytest.mark.parametrize("failing", ["construct", "start"])
+async def test_a_writer_that_fails_to_start_closes_the_pipe_and_releases_once(
+    failing: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    snapshot = snapshot_dir(tmp_path, community, server)
+    pipes: list[tuple[int, int, int]] = []
+    real_pipe = os.pipe
+
+    def _pipe() -> tuple[int, int]:
+        read_fd, write_fd = real_pipe()
+        pipes.append((read_fd, write_fd, os.fstat(read_fd).st_ino))
+        return read_fd, write_fd
+
+    class _Thread(threading.Thread):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._is_writer = kwargs.get("target") is fs._tar_into_fd
+            if self._is_writer and failing == "construct":
+                raise RuntimeError("injected thread failure")
+            super().__init__(*args, **kwargs)
+
+        def start(self) -> None:
+            if self._is_writer and failing == "start":
+                raise RuntimeError("injected thread failure")
+            super().start()
+
+    releases: list[Path] = []
+    release_lease = storage._release_lease
+
+    def _releasing(path: Path) -> None:
+        releases.append(path)
+        release_lease(path)
+
+    monkeypatch.setattr(storage, "_release_lease", _releasing)
+    monkeypatch.setattr(os, "pipe", _pipe)
+    monkeypatch.setattr(threading, "Thread", _Thread)
+
+    with pytest.raises(RuntimeError, match="injected thread failure"):
+        await drain(storage.open_hydrate_source(community, server))
+
+    [(read_fd, write_fd, pipe_inode)] = pipes
+    assert not _names_inode(read_fd, pipe_inode)
+    assert not _names_inode(write_fd, pipe_inode)
+    assert releases.count(snapshot) == 1
+    assert not storage._is_leased(snapshot)
 
 
 # --- per-file streaming read leases (issue #265) ---------------------------
