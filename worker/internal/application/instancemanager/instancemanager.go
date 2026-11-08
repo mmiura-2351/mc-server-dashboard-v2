@@ -505,6 +505,11 @@ type Manager struct {
 	// pending slot so a fast-path send can never overtake an in-flight dispatch
 	// (order is preserved per server). dirtyStatus is the FIFO of servers awaiting
 	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
+	//
+	// Lock order: mu before statusMu, and an instance's own lock (taken by its
+	// Status) after both. ResyncStatus holds mu and statusMu together (issue
+	// #3587); nothing takes mu while holding statusMu, and nothing that holds
+	// statusMu blocks: the queueing in queueStatusLocked never waits on the sink.
 	statusMu      sync.Mutex
 	pendingStatus map[string]session.StatusEvent
 	coalescing    map[string]bool
@@ -3349,7 +3354,7 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 		start := m.startCmds[serverID]
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
-		m.reserved[serverID] = reservation{leg: legStopping}
+		m.reserved[serverID] = reservation{leg: legStopping, inst: inst}
 		return inst, start.Driver, start.MinecraftVersion, takeFound
 	}
 	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
@@ -3366,7 +3371,7 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 		return nil, "", "", takeInFlight
 	}
 	if entry, ok := m.orphans[serverID]; ok {
-		m.reserved[serverID] = reservation{leg: legStopping}
+		m.reserved[serverID] = reservation{leg: legStopping, inst: entry.inst}
 		return entry.inst, entry.driver, entry.mcVersion, takeFound
 	}
 	return nil, "", "", takeNotFound
@@ -3486,7 +3491,7 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	start := m.startCmds[serverID]
 	delete(m.instances, serverID)
 	delete(m.startCmds, serverID)
-	m.reserved[serverID] = reservation{leg: legStopping}
+	m.reserved[serverID] = reservation{leg: legStopping, inst: inst}
 	return inst, start, takeFound
 }
 
@@ -4330,6 +4335,10 @@ const (
 // reservation is one id's claim by an in-flight command (Manager.reserved).
 type reservation struct {
 	leg reservationLeg
+	// inst is the instance a legStopping reservation is stopping, nil for the
+	// other legs. Its terminal state, once reached, is what ResyncStatus reports
+	// in place of the leg (issue #3587).
+	inst execution.Instance
 	// reported is set when ResyncStatus reported leg for the id. A launch that then
 	// ends without registering an instance owes the API the `stopped` that
 	// replaces it (releaseFailedLaunch).
@@ -4584,21 +4593,34 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool 
 // the report for the next one. From the resync on, the report is an ordinary
 // status event: one still queued when the session drops goes out on the next.
 //
-// Everything is snapshotted under the lock, which is then RELEASED before any
-// emit: sendStatus can coalesce and wake the dispatcher, so it must never run
-// while m.mu is held.
+// Each report is queued in the same critical section, under mu and statusMu,
+// that reads it (issue #3587). The API stamps a report on receipt, so one queued
+// after a newer event for its id would overwrite that event with an older state,
+// which is what the snapshot taken under mu and sent after unlocking did. Under
+// mu, no command can change what is read until the reports are queued, and every
+// event such a change causes is queued after them: the pump forwards a stop's
+// terminal only after the stop has evicted the instance, and releaseFailedLaunch
+// and the orphan converger send theirs only after they have changed the record
+// under mu. Under statusMu, a pump cannot queue an instance's event between the
+// read of that instance's state and the report of it.
+//
+// The one event that leaves the record behind is the instance's own terminal: a
+// stopped orphan, or a stop leg's instance, has it on the stream before the stop
+// or the pump retires the record. Such an id is reported at that terminal
+// instead of `unknown` or `stopping`, which would overwrite it.
 func (m *Manager) ResyncStatus() {
 	m.mu.Lock()
-	type snap struct {
-		serverID string
-		state    string
+	defer m.mu.Unlock()
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	report := func(serverID, state string) {
+		m.queueStatusLocked(session.StatusEvent{ServerID: serverID, State: state})
 	}
-	snaps := make([]snap, 0, len(m.instances)+len(m.orphans)+len(m.reserved)+len(m.bootSwept))
 	for serverID, inst := range m.instances {
-		snaps = append(snaps, snap{serverID: serverID, state: inst.Status().String()})
+		report(serverID, inst.Status().String())
 	}
-	for serverID := range m.orphans {
-		snaps = append(snaps, snap{serverID: serverID, state: orphanUnknownState})
+	for serverID, e := range m.orphans {
+		report(serverID, terminalOr(e.inst, orphanUnknownState))
 	}
 	for serverID, r := range m.reserved {
 		if _, orphan := m.orphans[serverID]; orphan {
@@ -4609,13 +4631,13 @@ func (m *Manager) ResyncStatus() {
 		case legStarting:
 			state = execution.StateStarting.String()
 		case legStopping:
-			state = execution.StateStopping.String()
+			state = terminalOr(r.inst, execution.StateStopping.String())
 		default:
 			continue
 		}
 		r.reported = true
 		m.reserved[serverID] = r
-		snaps = append(snaps, snap{serverID: serverID, state: state})
+		report(serverID, state)
 	}
 	for _, serverID := range m.bootSwept {
 		_, live := m.instances[serverID]
@@ -4624,42 +4646,51 @@ func (m *Manager) ResyncStatus() {
 		if live || orphan || reserved {
 			continue
 		}
-		snaps = append(snaps, snap{serverID: serverID, state: execution.StateStopped.String()})
+		report(serverID, execution.StateStopped.String())
 	}
 	m.bootSwept = nil
-	m.mu.Unlock()
+}
 
-	for _, s := range snaps {
-		m.sendStatus(session.StatusEvent{ServerID: s.serverID, State: s.state})
+// terminalOr returns inst's state when it is terminal (stopped or crashed), and
+// otherwise fallback: what ResyncStatus reports for an id whose instance may
+// already have sent its terminal (issue #3587).
+func terminalOr(inst execution.Instance, fallback string) string {
+	if s := inst.Status(); s == execution.StateStopped || s == execution.StateCrashed {
+		return s.String()
 	}
+	return fallback
 }
 
 // sendStatus forwards a status event with latest-state-wins coalescing under
-// backpressure (issue #96). The fast path is a non-blocking send onto events,
-// which preserves order and every transition while the sink has room. When the
+// backpressure (issue #96); see queueStatusLocked.
+func (m *Manager) sendStatus(ev session.StatusEvent) {
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	m.queueStatusLocked(ev)
+}
+
+// queueStatusLocked queues a status event; the caller holds statusMu. It never
+// blocks. The fast path is a non-blocking send onto events, which preserves
+// order and every transition while the sink has room. When the
 // sink is full, the event is parked in the per-server pending slot (replacing any
 // older pending status for that server) and the dispatcher is woken to deliver it
 // once the sink drains. While a server is being routed through the dispatcher
 // (coalescing), every event for it goes through the slot so a fast-path send can
 // never overtake an in-flight dispatch: per-server ordering is preserved and only
 // superseded intermediate states are skipped.
-func (m *Manager) sendStatus(ev session.StatusEvent) {
-	m.statusMu.Lock()
+func (m *Manager) queueStatusLocked(ev session.StatusEvent) {
 	if m.coalescing[ev.ServerID] {
 		m.pendingStatus[ev.ServerID] = ev
-		m.statusMu.Unlock()
 		return
 	}
 	select {
 	case m.events <- ev:
-		m.statusMu.Unlock()
 		return
 	default:
 	}
 	m.coalescing[ev.ServerID] = true
 	m.pendingStatus[ev.ServerID] = ev
 	m.dirtyStatus = append(m.dirtyStatus, ev.ServerID)
-	m.statusMu.Unlock()
 	select {
 	case m.statusNotify <- struct{}{}:
 	default:

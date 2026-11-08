@@ -1481,6 +1481,50 @@ async def test_launch_that_fails_after_a_starting_resync_is_redispatched(
     assert {wid for _, wid, _ in reconcile_cp.dispatched} == {worker}
 
 
+@pytest.mark.parametrize(
+    ("verb", "desired", "leg", "terminal"),
+    [
+        ("stop", DesiredState.STOPPED, ObservedState.STOPPING, ObservedState.STOPPED),
+        ("start", DesiredState.RUNNING, ObservedState.STARTING, ObservedState.RUNNING),
+    ],
+)
+async def test_command_that_ends_around_the_resync_leaves_the_row_at_its_end(
+    engine: AsyncEngine,
+    verb: str,
+    desired: DesiredState,
+    leg: ObservedState,
+    terminal: ObservedState,
+) -> None:
+    """resync reports the leg -> the command ends -> row at the command's end.
+
+    Issue #3587. Pins the API's unchanged side: it applies reports in arrival
+    order, each stamped on receipt. The Worker queues its resync report before
+    any event that supersedes it, so the command's own report is the last one
+    and the row ends at the true state.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    await _reconnect_mid(
+        engine, clock, server, worker, FakeControlPlane(place_to=worker), verb, leg
+    )
+
+    applied = await _sink(engine, clock).record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=str(worker.value),
+        state=terminal.value,
+    )
+    assert applied is True
+    row = await _load(engine, server.id)
+    assert row is not None
+    assert (row.desired_state, row.observed_state, row.assigned_worker_id) == (
+        desired,
+        terminal,
+        worker,
+    )
+
+
 async def test_restart_stop_leg_reported_on_reconnect_is_held_back_for_the_budget(
     engine: AsyncEngine,
 ) -> None:

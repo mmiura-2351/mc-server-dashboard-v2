@@ -250,6 +250,6 @@ func (m *Manager) takeOrphanReserve(serverID string, inst execution.Instance) (s
 	if !ok || entry.inst != inst {
 		return "", "", takeNotFound
 	}
-	m.reserved[serverID] = reservation{leg: legStopping}
+	m.reserved[serverID] = reservation{leg: legStopping, inst: inst}
 	return entry.driver, entry.mcVersion, takeFound
 }
