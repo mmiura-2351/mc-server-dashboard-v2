@@ -2754,12 +2754,18 @@ def _tar_stream(
         try:
             read_fd, write_fd = os.pipe()
             holder: list[BaseException] = []
-            writer = threading.Thread(
-                target=_tar_into_fd,
-                args=(directory, write_fd, member_hook, holder, exclude, release),
-                daemon=True,
-            )
-            writer.start()
+            try:
+                writer = threading.Thread(
+                    target=_tar_into_fd,
+                    args=(directory, write_fd, member_hook, holder, exclude, release),
+                    daemon=True,
+                )
+                writer.start()
+            except BaseException:
+                # No writer owns ``write_fd`` and no read job uses ``read_fd``.
+                os.close(read_fd)
+                os.close(write_fd)
+                raise
             writing = True
             loop = asyncio.get_running_loop()
             reading: asyncio.Future[bytes] | None = None
