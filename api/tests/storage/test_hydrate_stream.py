@@ -15,13 +15,19 @@ wrong:
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import gc
+import os
+import stat
+import threading
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
+from mc_server_dashboard_api.storage.adapters import fs
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from tests.storage.helpers import (
     drain,
@@ -109,6 +115,142 @@ async def test_aclose_releases_lease_and_sweep_reclaims(tmp_path: Path) -> None:
 
     storage.sweep()
     assert not old_snapshot.exists()
+
+
+def _names_inode(fd: int, inode: int) -> bool:
+    try:
+        return os.fstat(fd).st_ino == inode
+    except OSError:
+        return False
+
+
+@pytest.fixture(params=[None, 4096], ids=["default-pipe", "4KiB-pipe"])
+def pipe_size(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run with the default pipe, and with one smaller than the 10 KiB tar.
+
+    The small pipe fills while the stream's read is paused, so the tar writer
+    blocks and the cancelled stream's wait for it cannot finish on its own.
+    """
+
+    if request.param is None:
+        return
+    real_pipe = os.pipe
+
+    def _pipe() -> tuple[int, int]:
+        read_fd, write_fd = real_pipe()
+        fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, request.param)
+        return read_fd, write_fd
+
+    monkeypatch.setattr(os, "pipe", _pipe)
+
+
+@pytest.mark.usefixtures("pipe_size")
+async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cancel does not stop a read job that is already on its executor thread. If
+    # the stream closed the pipe's read end before the job entered ``os.read``,
+    # another open could reuse the fd number and the job would read an unrelated
+    # file (issue #3582). The fd must stay the pipe until the job finishes.
+    entered, resume = threading.Event(), threading.Event()
+    joining, closed = threading.Event(), threading.Event()
+    paused: list[tuple[int, int]] = []
+    real_read, real_close, real_join = os.read, os.close, threading.Thread.join
+
+    def _read(fd: int, n: int) -> bytes:
+        if not paused and stat.S_ISFIFO(os.fstat(fd).st_mode):
+            paused.append((fd, os.fstat(fd).st_ino))
+            entered.set()
+            resume.wait(timeout=10)
+        return real_read(fd, n)
+
+    def _close(fd: int) -> None:
+        real_close(fd)
+        if paused and fd == paused[0][0]:
+            closed.set()
+
+    def _join(thread: threading.Thread, timeout: float | None = None) -> None:
+        # The stream's cleanup joins its tar writer after settling the read fd.
+        if "_tar_into_fd" in thread.name:
+            joining.set()
+        real_join(thread, timeout)
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    monkeypatch.setattr(os, "read", _read)
+    monkeypatch.setattr(os, "close", _close)
+    monkeypatch.setattr(threading.Thread, "join", _join)
+    task = asyncio.ensure_future(
+        storage.open_hydrate_source(community, server).__anext__()
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        read_fd, pipe_inode = paused[0]
+
+        # The first cancel runs the cleanup up to the writer join; a second one
+        # stops that wait, which a writer blocked on a full pipe would not end.
+        task.cancel()
+        assert await asyncio.to_thread(joining.wait, 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert _names_inode(read_fd, pipe_inode)
+    finally:
+        resume.set()
+
+    assert await asyncio.to_thread(closed.wait, 10)
+    assert not _names_inode(read_fd, pipe_inode)
+
+
+@pytest.mark.parametrize("failing", ["construct", "start"])
+async def test_a_writer_that_fails_to_start_closes_the_pipe_and_releases_once(
+    failing: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    snapshot = snapshot_dir(tmp_path, community, server)
+    pipes: list[tuple[int, int, int]] = []
+    real_pipe = os.pipe
+
+    def _pipe() -> tuple[int, int]:
+        read_fd, write_fd = real_pipe()
+        pipes.append((read_fd, write_fd, os.fstat(read_fd).st_ino))
+        return read_fd, write_fd
+
+    class _Thread(threading.Thread):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._is_writer = kwargs.get("target") is fs._tar_into_fd
+            if self._is_writer and failing == "construct":
+                raise RuntimeError("injected thread failure")
+            super().__init__(*args, **kwargs)
+
+        def start(self) -> None:
+            if self._is_writer and failing == "start":
+                raise RuntimeError("injected thread failure")
+            super().start()
+
+    releases: list[Path] = []
+    release_lease = storage._release_lease
+
+    def _releasing(path: Path) -> None:
+        releases.append(path)
+        release_lease(path)
+
+    monkeypatch.setattr(storage, "_release_lease", _releasing)
+    monkeypatch.setattr(os, "pipe", _pipe)
+    monkeypatch.setattr(threading, "Thread", _Thread)
+
+    with pytest.raises(RuntimeError, match="injected thread failure"):
+        await drain(storage.open_hydrate_source(community, server))
+
+    [(read_fd, write_fd, pipe_inode)] = pipes
+    assert not _names_inode(read_fd, pipe_inode)
+    assert not _names_inode(write_fd, pipe_inode)
+    assert releases.count(snapshot) == 1
+    assert not storage._is_leased(snapshot)
 
 
 # --- per-file streaming read leases (issue #265) ---------------------------
