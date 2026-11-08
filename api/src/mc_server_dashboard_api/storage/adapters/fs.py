@@ -45,7 +45,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 
@@ -286,6 +286,16 @@ def _release_orphaned_lease(leased: tuple[Path, Callable[[], None]]) -> None:
 
     _path, release = leased
     release()
+
+
+def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -> None:
+    """Close and release a leased file whose opener was cancelled before owning it."""
+
+    handle, release = opened
+    try:
+        handle.close()
+    finally:
+        release()
 
 
 async def _create_spool(
@@ -633,6 +643,28 @@ class FsStorage(Storage):
                 self._release_lease(snapshot)
 
         return release
+
+    async def _read_leased(
+        self, snapshot: Path, fn: Callable[..., _R], *args: Any
+    ) -> _R:
+        """Run ``fn(*args)`` — a job that reads ``snapshot`` — off the loop.
+
+        The caller holds a lease on ``snapshot``. A cancel during the await does not
+        stop the worker thread, and the cancelled caller releases its lease as it
+        unwinds, while the thread is still reading (issue #3577). So the job takes
+        a lease of its own, which the job's done-callback releases. The job is
+        awaited shielded, so that callback runs only once the thread has finished.
+        """
+
+        self._acquire_lease(snapshot)
+        release = self._lease_release(snapshot)
+        try:
+            reading = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        except BaseException:
+            release()
+            raise
+        reading.add_done_callback(lambda _reading: release())
+        return await asyncio.shield(reading)
 
     # --- active-staging leases (issue #183) --------------------------------
 
@@ -1448,7 +1480,7 @@ class FsStorage(Storage):
             # (fail-closed, #703). The single region rule set (issue #927) tolerates
             # ``current/``'s legitimate unpadded (live-format) tail — its content was
             # already gated at publish — while still catching realistic tears.
-            report = await asyncio.to_thread(check_working_set, current)
+            report = await self._read_leased(current, check_working_set, current)
             if not report.healthy:
                 raise IntegrityCheckError(report)
             backups = self._server_root(community_id, server_id) / "backups"
@@ -1456,7 +1488,9 @@ class FsStorage(Storage):
             if key is None:
                 key = BackupKey(uuid.uuid4().hex)
             archive = backups / f"{key.value}.tar.gz"
-            await asyncio.to_thread(self._write_backup_archive, current, archive)
+            await self._read_leased(
+                current, self._write_backup_archive, current, archive
+            )
             return key
         finally:
             release()
@@ -1653,7 +1687,7 @@ class FsStorage(Storage):
             _release_orphaned_lease, self._lease_current, community_id, server_id
         )
         try:
-            return await asyncio.to_thread(check_working_set, current)
+            return await self._read_leased(current, check_working_set, current)
         finally:
             release()
 
@@ -1912,16 +1946,21 @@ class FsStorage(Storage):
         # concurrent publish/sweep for the whole duration of a large read -- but
         # not the file itself (delete_file unlinks in place), so locating the
         # file is left to the open rather than pre-checked here (issue #2391).
-        def _open() -> tuple[Path, Callable[[], None]]:
+        # The open runs in the same job as the lease, so a cancelled stream's
+        # still-running open stays leased until it finishes (issue #3577).
+        def _open() -> tuple[io.BufferedReader, Callable[[], None]]:
             current, release = self._lease_current(community_id, server_id)
             try:
                 target = self._safe_read_target(current, rel_path)
+                handle = _open_readable_sync(
+                    target, f"file not found: {rel_path.value}"
+                )
             except BaseException:
                 release()
                 raise
-            return target, release
+            return handle, release
 
-        return _leased_file_stream(_open, not_found=f"file not found: {rel_path.value}")
+        return _leased_file_stream(_open)
 
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -2700,21 +2739,28 @@ def _tar_stream(
 
     A producer-thread failure is captured and **re-raised to the consumer** after
     the writer is joined, so a partial tar surfaces as an error rather than a
-    clean (silently truncated) EOF. The lease is released exactly once when the
-    stream finishes, is closed early, or raises.
+    clean (silently truncated) EOF. The lease is released exactly once, when the
+    stream finishes, is closed early, or raises — and not before the writer has
+    finished reading the snapshot.
     """
 
     async def _gen() -> AsyncIterator[bytes]:
         directory, on_close = await open_source()
+        # The stream and its writer each hold the lease, and the later to finish
+        # releases it: a cancel can stop the stream's wait for the writer while
+        # the writer is still reading the snapshot (issue #3577).
+        release = _released_by_last(on_close, 2)
+        writing = False
         try:
             read_fd, write_fd = os.pipe()
             holder: list[BaseException] = []
             writer = threading.Thread(
                 target=_tar_into_fd,
-                args=(directory, write_fd, member_hook, holder, exclude),
+                args=(directory, write_fd, member_hook, holder, exclude, release),
                 daemon=True,
             )
             writer.start()
+            writing = True
             try:
                 while True:
                     chunk = await asyncio.to_thread(os.read, read_fd, _CHUNK)
@@ -2732,9 +2778,29 @@ def _tar_stream(
             if holder:
                 raise holder[0]
         finally:
-            on_close()
+            if writing:
+                release()
+            else:
+                on_close()
 
     return _gen()
+
+
+def _released_by_last(release: Callable[[], None], holders: int) -> Callable[[], None]:
+    """A callback each of ``holders`` calls once; the last call runs ``release``."""
+
+    remaining = holders
+    lock = threading.Lock()
+
+    def _done() -> None:
+        nonlocal remaining
+        with lock:
+            remaining -= 1
+            last = remaining == 0
+        if last:
+            release()
+
+    return _done
 
 
 def _tar_into_fd(
@@ -2742,11 +2808,13 @@ def _tar_into_fd(
     write_fd: int,
     member_hook: Callable[[Path], None] | None,
     holder: list[BaseException],
-    exclude: frozenset[str] = frozenset(),
+    exclude: frozenset[str],
+    release: Callable[[], None],
 ) -> None:
     """Write a tar of ``directory`` into ``write_fd`` (stream mode), then close it.
 
-    ``exclude`` names top-level children to skip (issue #1942).
+    ``exclude`` names top-level children to skip (issue #1942). ``release`` is
+    called once the writer is done reading ``directory``.
 
     Any failure other than the consumer closing early is recorded in ``holder``
     so the consumer can re-raise it instead of mistaking the closed pipe for a
@@ -2769,6 +2837,8 @@ def _tar_into_fd(
         pass
     except BaseException as exc:  # noqa: BLE001 - surfaced to the consumer below
         holder.append(exc)
+    finally:
+        release()
 
 
 # The ``open`` errnos that all mean "no readable file at this path" -- very nearly
@@ -3059,18 +3129,16 @@ def _file_stream(
 
 
 def _leased_file_stream(
-    open_source: Callable[[], tuple[Path, Callable[[], None]]],
-    *,
-    not_found: str,
+    open_source: Callable[[], tuple[io.BufferedReader, Callable[[], None]]],
 ) -> AsyncIterator[bytes]:
     """Stream one file's bytes in chunks under an active-reader lease (issue #265).
 
     ``open_source`` is called on the first iteration: it resolves the live
-    snapshot, takes the active-reader lease, resolves the target path, and returns
-    it plus the matching lease-release callback. Deferring it to first iteration
-    means a stream opened but never consumed never pins a snapshot (mirroring
-    :func:`_tar_stream`). The lease is released exactly once when the stream
-    finishes, is closed early, or raises.
+    snapshot, takes the active-reader lease, opens the target file, and returns
+    the handle plus the matching lease-release callback. Deferring it to first
+    iteration means a stream opened but never consumed never pins a snapshot
+    (mirroring :func:`_tar_stream`). The lease is released exactly once when the
+    stream finishes, is closed early, or raises.
 
     The open IS the existence check (issue #2391, the shape :func:`_file_stream`
     took in #2341): the lease protects the snapshot DIRECTORY, not the files in
@@ -3078,16 +3146,14 @@ def _leased_file_stream(
     open and makes the stream raise a bare ``FileNotFoundError`` -- which the
     servers-side seam does not translate (it translates :class:`NotFoundError`
     only), so it reaches the edge as a 500. Opening through
-    :func:`_open_readable`, which reports every "names no readable file" errno as
-    ``NotFoundError`` (message ``not_found``), removes the window. The open stays
-    on the first iteration, so a stream that is opened but never consumed holds no
-    descriptor.
+    :func:`_open_readable_sync`, which reports every "names no readable file" errno
+    as ``NotFoundError``, removes the window. The open stays on the first
+    iteration, so a stream that is opened but never consumed holds no descriptor.
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        path, on_close = await _acquire_off_loop(_release_orphaned_lease, open_source)
+        handle, on_close = await _acquire_off_loop(_close_orphaned_read, open_source)
         try:
-            handle = await _open_readable(path, not_found)
             try:
                 while True:
                     chunk = await asyncio.to_thread(handle.read, _CHUNK)
@@ -3280,8 +3346,10 @@ def _extract_member_capped(
     return total
 
 
-def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]:
-    """Stream one file's bytes without taking a lease (caller already holds one).
+def _pinned_file_stream(
+    open_file: Callable[[], Awaitable[io.BufferedReader]],
+) -> AsyncIterator[bytes]:
+    """Stream the bytes of the file ``open_file`` opens (the caller holds a lease).
 
     The open IS the existence check, for the same reason it is in
     :func:`_leased_file_stream` (issue #2391): the view's lease pins the snapshot
@@ -3291,7 +3359,7 @@ def _pinned_file_stream(target: Path, rel_path: RelPath) -> AsyncIterator[bytes]
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle = await _open_readable(target, f"file not found: {rel_path.value}")
+        handle = await open_file()
         try:
             while True:
                 chunk = await asyncio.to_thread(handle.read, _CHUNK)
@@ -3355,7 +3423,9 @@ class _FsWorkingSetView(WorkingSetView):
             if not rel_path.parts:
                 return []
             raise NotFoundError(f"directory not found: {rel_path.value}")
-        return await asyncio.to_thread(self._list_dir_sync, rel_path)
+        return await self._storage._read_leased(
+            self._pinned, self._list_dir_sync, rel_path
+        )
 
     def _list_dir_sync(self, rel_path: RelPath) -> list[DirEntry]:
         assert self._pinned is not None
@@ -3376,6 +3446,14 @@ class _FsWorkingSetView(WorkingSetView):
         # through the read-side resolve so the view refuses a symlink component
         # exactly as the unpinned read paths do (issues #2418, #2432).
         target = self._storage._safe_read_target(self._pinned, rel_path)
-        # The lease is already held by the view; stream the file without an
-        # additional per-file lease.
-        return _pinned_file_stream(target, rel_path)
+        # The view's lease covers the stream; only the open, which reads the
+        # snapshot on a thread, takes one of its own (issue #3577).
+        return _pinned_file_stream(
+            functools.partial(
+                self._storage._read_leased,
+                self._pinned,
+                _open_readable_sync,
+                target,
+                f"file not found: {rel_path.value}",
+            )
+        )
