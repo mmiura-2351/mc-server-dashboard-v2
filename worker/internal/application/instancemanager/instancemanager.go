@@ -422,8 +422,8 @@ type Manager struct {
 	// files and take no reservation.
 	//
 	// Each reservation carries the leg its command is in, which ResyncStatus reports
-	// for an id held only by the reservation (issue #3302).
-	reserved map[string]reservationLeg
+	// for an id held only by the reservation, and whether it has (issue #3302).
+	reserved map[string]reservation
 	// runningSnapshots marks a running id whose snapshot body is still alive (issue
 	// #3511). It refuses a second running SnapshotTrigger for the id with BUSY, and
 	// nothing else: a running snapshot takes no reservation (above), so a stop or a
@@ -535,7 +535,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		instances:          map[string]execution.Instance{},
 		startCmds:          map[string]session.Command{},
 		orphans:            map[string]orphanEntry{},
-		reserved:           map[string]reservationLeg{},
+		reserved:           map[string]reservation{},
 		workingSetLocks:    map[string]*execution.WorkingSetLock{},
 		workingSetLockWait: defaultWorkingSetLockWait,
 		sweepingSlot:       map[string]bool{},
@@ -2737,7 +2737,7 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	// API's phrase is pinned to the same entry (issue #2843).
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	if err := generationMarkerPresent(workingDir); err != nil {
-		m.release(cmd.ServerID)
+		m.releaseFailedLaunch(cmd.ServerID)
 		m.logger.Warn("launch refused: working dir absent",
 			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent", "marker", err)
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -2765,7 +2765,7 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		WorldProgress: m.worldProgress(workingDir),
 	})
 	if err != nil {
-		m.release(cmd.ServerID)
+		m.releaseFailedLaunch(cmd.ServerID)
 		return fail(cmd.CommandID, startErrorCode(err),
 			fmt.Sprintf("instancemanager: start: %v", err))
 	}
@@ -3349,7 +3349,7 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 		start := m.startCmds[serverID]
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)
-		m.reserved[serverID] = legStopping
+		m.reserved[serverID] = reservation{leg: legStopping}
 		return inst, start.Driver, start.MinecraftVersion, takeFound
 	}
 	// Check the reservation BEFORE the orphan branch. A failed-stop orphan retains
@@ -3366,7 +3366,7 @@ func (m *Manager) takeStoppableReserve(serverID string) (execution.Instance, str
 		return nil, "", "", takeInFlight
 	}
 	if entry, ok := m.orphans[serverID]; ok {
-		m.reserved[serverID] = legStopping
+		m.reserved[serverID] = reservation{leg: legStopping}
 		return entry.inst, entry.driver, entry.mcVersion, takeFound
 	}
 	return nil, "", "", takeNotFound
@@ -3486,7 +3486,7 @@ func (m *Manager) takeRunningReserve(serverID string) (execution.Instance, sessi
 	start := m.startCmds[serverID]
 	delete(m.instances, serverID)
 	delete(m.startCmds, serverID)
-	m.reserved[serverID] = legStopping
+	m.reserved[serverID] = reservation{leg: legStopping}
 	return inst, start, takeFound
 }
 
@@ -3545,7 +3545,7 @@ func (m *Manager) handleRestart(ctx context.Context, cmd session.Command) sessio
 	}
 	// The stop is confirmed: the reservation is the relaunch's from here (issue #3302).
 	m.mu.Lock()
-	m.reserved[cmd.ServerID] = legStarting
+	m.reserved[cmd.ServerID] = reservation{leg: legStarting}
 	m.mu.Unlock()
 	// Relaunch with the original StartServer spec under the still-held reservation;
 	// RestartServer carries no driver/jar/version of its own.
@@ -4327,6 +4327,15 @@ const (
 	legStopping
 )
 
+// reservation is one id's claim by an in-flight command (Manager.reserved).
+type reservation struct {
+	leg reservationLeg
+	// reported is set when ResyncStatus reported leg for the id. A launch that then
+	// ends without registering an instance owes the API the `stopped` that
+	// replaces it (releaseFailedLaunch).
+	reported bool
+}
+
 // reserve claims serverID for an in-flight mutating lifecycle command (issue
 // #780), recording leg as what that command is doing (issue #3302). It atomically
 // rejects — under the same mu held for the running/orphan
@@ -4371,7 +4380,7 @@ func (m *Manager) reserve(serverID string, leg reservationLeg) (ok bool, code se
 		// observed=running on this — it keeps the assignment and retries (issue #824).
 		return false, session.CommandErrorBusy, "instancemanager: a lifecycle command is already in flight for this server"
 	}
-	m.reserved[serverID] = leg
+	m.reserved[serverID] = reservation{leg: leg}
 	return true, 0, ""
 }
 
@@ -4429,6 +4438,36 @@ func (m *Manager) release(serverID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.reserved, serverID)
+}
+
+// releaseFailedLaunch releases the reservation of a launch that ended without
+// registering an instance: refused, failed, cancelled or past its deadline. When a
+// resync reported the launch `starting` (issue #3302), it first reports the server
+// `stopped`, which is what it is: no process was left behind. Nothing else would
+// correct that report. The failed launch emits no status of its own, its command
+// result goes to the session the command arrived on, which is the one that dropped,
+// and a restart's own `stopped` from its stop leg went out before the resync. The
+// API row would sit at (running, starting) for good, which the reconciler never
+// selects; at `stopped` it redispatches the start under its usual rules.
+//
+// A launch no resync reported says nothing, as before: the API settles it from the
+// command result, and a status beside that result would overwrite the row's
+// observed state (a `crashed` the operator is restarting, say) in a race with the
+// API's own compensation.
+//
+// The report goes out while the id is still reserved, so a replacement command,
+// which cannot claim the id until the release below, enqueues its events after it.
+// The reservation is first marked leg-less under mu, so a resync that comes later
+// reports nothing for the id instead of `starting` again.
+func (m *Manager) releaseFailedLaunch(serverID string) {
+	m.mu.Lock()
+	reported := m.reserved[serverID].reported
+	m.reserved[serverID] = reservation{leg: legNone}
+	m.mu.Unlock()
+	if reported {
+		m.sendStatus(session.StatusEvent{ServerID: serverID, State: execution.StateStopped.String()})
+	}
+	m.release(serverID)
 }
 
 // restoreRunning reverses a takeRunningReserve: it puts the instance and its
@@ -4530,7 +4569,8 @@ func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool 
 // off under one mu); one that is also an orphan, which an orphan's retry stop
 // holds, is reported `unknown` as above and not at the leg: whether that process
 // is gone is what the Worker cannot say, and the retry being in flight does not
-// change that.
+// change that. A reported `starting` whose launch then ends without an instance is
+// corrected to `stopped` (releaseFailedLaunch).
 //
 // The servers whose containers the boot's orphan sweep removed are reported
 // `stopped` on the first resync and never again (issues #3486, #3514). That
@@ -4560,16 +4600,22 @@ func (m *Manager) ResyncStatus() {
 	for serverID := range m.orphans {
 		snaps = append(snaps, snap{serverID: serverID, state: orphanUnknownState})
 	}
-	for serverID, leg := range m.reserved {
+	for serverID, r := range m.reserved {
 		if _, orphan := m.orphans[serverID]; orphan {
 			continue
 		}
-		switch leg {
+		var state string
+		switch r.leg {
 		case legStarting:
-			snaps = append(snaps, snap{serverID: serverID, state: execution.StateStarting.String()})
+			state = execution.StateStarting.String()
 		case legStopping:
-			snaps = append(snaps, snap{serverID: serverID, state: execution.StateStopping.String()})
+			state = execution.StateStopping.String()
+		default:
+			continue
 		}
+		r.reported = true
+		m.reserved[serverID] = r
+		snaps = append(snaps, snap{serverID: serverID, state: state})
 	}
 	for _, serverID := range m.bootSwept {
 		_, live := m.instances[serverID]

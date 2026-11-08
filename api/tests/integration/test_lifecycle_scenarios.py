@@ -1434,6 +1434,53 @@ async def test_reconnect_resync_of_a_reserved_id_moves_the_row_out_of_unknown(
     )
 
 
+@pytest.mark.parametrize("verb", ["start", "restart"])
+async def test_launch_that_fails_after_a_starting_resync_is_redispatched(
+    engine: AsyncEngine, verb: str
+) -> None:
+    """resync reports starting -> the launch fails -> Worker reports stopped ->
+    the reconciler redispatches the start.
+
+    Issue #3302. ``(running, starting)`` is never selected by the reconciler, so
+    without the Worker's corrective ``stopped`` the row would stay there for
+    good: its failed launch emits nothing else, and the command result went to
+    the session that dropped. For a restart the leg reported is its relaunch,
+    and its stop leg's ``stopped`` went out on the old session.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    stranded = await _reconnect_mid(
+        engine,
+        clock,
+        server,
+        worker,
+        FakeControlPlane(place_to=worker),
+        verb,
+        ObservedState.STARTING,
+    )
+    assert stranded.observed_state is ObservedState.STARTING
+    reconcile_cp = FakeControlPlane(connected={worker: True})
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert reconcile_cp.dispatched == []
+
+    applied = await _sink(engine, clock).record_observed_state(
+        server_id=str(server.id.value), worker_id=str(worker.value), state="stopped"
+    )
+    assert applied is True
+    row = await _load(engine, server.id)
+    assert row is not None
+    assert (row.desired_state, row.observed_state, row.assigned_worker_id) == (
+        DesiredState.RUNNING,
+        ObservedState.STOPPED,
+        worker,
+    )
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert [kind for kind, _, _ in reconcile_cp.dispatched][-1] == "start"
+    assert {wid for _, wid, _ in reconcile_cp.dispatched} == {worker}
+
+
 async def test_restart_stop_leg_reported_on_reconnect_is_held_back_for_the_budget(
     engine: AsyncEngine,
 ) -> None:

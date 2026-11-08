@@ -342,9 +342,20 @@ relaunch, whose instance is not yet registered. Without that report the row kept
 `unknown` the disconnect wrote until the command's terminal report, and a restart's
 stop leg read as `(running, unknown)`, which the reconciler redispatches a start for,
 instead of `(running, stopping)`, which it stands back from for the restart budget
-(CONFIGURATION.md Section 5.6). A reservation that changes no lifecycle state — a
-hydrate, a snapshot of a stopped server, the deleted-server scratch reclaim — is not
-reported. Each server is reported once: a live instance and a reservation never
+(CONFIGURATION.md Section 5.6). A reported command's own events settle the row as
+it goes on: a stop's `STOPPED`, or a launch's `STARTING` and `RUNNING` once its instance
+registers. A launch reported `SERVER_STATE_STARTING` that ends without an instance —
+refused, failed, cancelled or past its deadline — is reported `SERVER_STATE_STOPPED`.
+Nothing else would correct the row: a failed launch emits no status, its
+`CommandResult` went to the session that dropped, and a restart's `STOPPED` from its
+stop leg went out before the resync. The row would otherwise stay at
+`(running, starting)`, which the reconciler never selects. At `stopped` it
+redispatches the start under its usual rules. The report goes out before the
+Worker releases the reservation, so a replacement command's events follow it. A
+launch no resync reported gets no such report, as before: on an unbroken session the
+API settles it from the `CommandResult`. A reservation that changes no lifecycle
+state — a hydrate, a snapshot of a stopped server, the deleted-server scratch
+reclaim — is not reported. Each server is reported once: a live instance and a reservation never
 share an id, and a failed-stop orphan whose retry stop holds the reservation is
 reported `SERVER_STATE_UNKNOWN`, since whether that process is gone is exactly what
 the Worker cannot say. The first such resync

@@ -2,6 +2,7 @@ package instancemanager
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -197,7 +198,7 @@ func TestResyncStatusSkipsABootSweptServerTheWorkerHoldsAgain(t *testing.T) {
 		WithSweptServers([]string{"srv-live", "srv-orphan", "srv-reserved", "srv-gone"})
 	m.instances["srv-live"] = newFakeInstance("srv-live")
 	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
-	m.reserved["srv-reserved"] = legNone
+	m.reserved["srv-reserved"] = reservation{leg: legNone}
 
 	m.ResyncStatus()
 
@@ -329,14 +330,119 @@ func TestResyncStatusReportsARestartRelaunchStarting(t *testing.T) {
 // the process outranks the leg of the stop being retried on it.
 func TestResyncStatusReportsNoLegForAQuietReservationAndKeepsTheOrphanUnknown(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
-	m.reserved["srv-hydrating"] = legNone
+	m.reserved["srv-hydrating"] = reservation{leg: legNone}
 	m.orphans["srv-orphan"] = orphanEntry{inst: newFakeInstance("srv-orphan"), driver: "container"}
-	m.reserved["srv-orphan"] = legStopping
+	m.reserved["srv-orphan"] = reservation{leg: legStopping}
 
 	m.ResyncStatus()
 
 	if states := statesOf(t, m, 1); len(states) != 1 || states["srv-orphan"] != "unknown" {
 		t.Fatalf("resync states = %v, want only srv-orphan unknown", states)
 	}
+	expectNoStatus(t, m)
+}
+
+// heldLaunchDriver holds driver.Start until the test ends it, and then fails it:
+// with err set, once release is closed; with err nil, once the command's context
+// ends, returning that context's error (a cancelled or timed-out launch).
+type heldLaunchDriver struct {
+	entered chan struct{}
+	release chan struct{}
+	err     error
+}
+
+func newHeldLaunchDriver(err error) *heldLaunchDriver {
+	return &heldLaunchDriver{entered: make(chan struct{}, 1), release: make(chan struct{}), err: err}
+}
+
+func (d *heldLaunchDriver) Start(ctx context.Context, _ execution.InstanceSpec) (execution.Instance, error) {
+	d.entered <- struct{}{}
+	if d.err == nil {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	<-d.release
+	return nil, d.err
+}
+
+// A launch whose `starting` a resync reported and that then ends without
+// registering an instance — failed, cancelled or past its deadline — reports the
+// server `stopped` (issue #3302). Nothing else would: the failed launch emits no
+// status of its own, its command result went to the session that dropped, and a
+// restart's `stopped` from its stop leg went out before the resync. The API row
+// would otherwise sit at (running, starting), which the reconciler never selects.
+// The report goes out before the reservation is released, so a replacement start's
+// events follow it.
+func TestResyncReportedLaunchThatEndsWithoutAnInstanceReportsStopped(t *testing.T) {
+	for _, verb := range []string{"StartServer", "RestartServer"} {
+		for _, end := range []string{"fails", "cancelled", "deadline"} {
+			t.Run(verb+"/"+end, func(t *testing.T) {
+				m := newManager(t, &fakeDriver{}, nil)
+				var held *heldLaunchDriver
+				if end == "fails" {
+					held = newHeldLaunchDriver(errors.New("test: launch failed"))
+				} else {
+					held = newHeldLaunchDriver(nil)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				if end == "deadline" {
+					ctx, cancel = context.WithTimeout(context.Background(), 300*time.Millisecond)
+				}
+				defer cancel()
+				cmd := startCmd()
+				if verb == "RestartServer" {
+					startHeld(t, m)
+					cmd = session.Command{CommandID: "restart", ServerID: s1, Kind: "RestartServer"}
+				} else {
+					seedScratch(t, m, s1)
+				}
+				m.drivers["container"] = held
+				done := make(chan session.CommandResult, 1)
+				go func() { done <- m.Handle(ctx, cmd) }()
+				awaitEnter(t, held.entered)
+				if verb == "RestartServer" {
+					drainStatuses(t, m, 1) // the stop leg's own stopped
+				}
+				m.ResyncStatus()
+				if states := statesOf(t, m, 1); states[s1] != "starting" {
+					t.Fatalf("resync states = %v, want %s starting", states, s1)
+				}
+
+				switch end {
+				case "fails":
+					close(held.release)
+				case "cancelled":
+					cancel()
+				}
+				if res := <-done; res.Success {
+					t.Fatalf("%s = %+v, want the launch's failure", verb, res)
+				}
+				m.drivers["container"] = &fakeDriver{}
+				if res := m.Handle(context.Background(), startCmd()); !res.Success {
+					t.Fatalf("replacement start = %+v, want success", res)
+				}
+
+				got := drainStatuses(t, m, 2)
+				if got[0].ServerID != s1 || got[0].State != "stopped" || got[1].State != "running" {
+					t.Fatalf("status events = %+v, want %s stopped and then the replacement's running", got, s1)
+				}
+			})
+		}
+	}
+}
+
+// The corrective report is owed only to a resync that reported the launch: a
+// failed launch nobody reported says nothing, as before, so the API's handling of
+// the command result on an unbroken session meets no extra status (issue #3302).
+func TestUnreportedLaunchThatFailsReportsNothing(t *testing.T) {
+	held := newHeldLaunchDriver(errors.New("test: launch failed"))
+	m := newManager(t, held, nil)
+	seedScratch(t, m, s1)
+	close(held.release)
+
+	if res := m.Handle(context.Background(), startCmd()); res.Success {
+		t.Fatalf("start = %+v, want the launch's failure", res)
+	}
+
 	expectNoStatus(t, m)
 }
