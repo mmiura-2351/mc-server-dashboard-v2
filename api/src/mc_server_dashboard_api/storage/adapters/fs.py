@@ -290,6 +290,12 @@ def _release_orphaned_lease(leased: tuple[Path, Callable[[], None]]) -> None:
     release()
 
 
+def _close_orphaned_handle(handle: io.BufferedReader) -> None:
+    """Close a file whose opener was cancelled before it could own it (issue #3584)."""
+
+    handle.close()
+
+
 def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -> None:
     """Close and release a leased file whose opener was cancelled before owning it."""
 
@@ -298,6 +304,21 @@ def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -
         handle.close()
     finally:
         release()
+
+
+def _release_after_read(
+    release: Callable[[], None], reading: asyncio.Future[Any]
+) -> None:
+    """Release a leased read's lease once its job finishes (issue #3577).
+
+    A caller cancelled before the job finished no longer observes the job's fault,
+    so the fault is marked retrieved here (issue #3584); a caller still awaiting
+    receives it through the shield as before.
+    """
+
+    if not reading.cancelled():
+        reading.exception()
+    release()
 
 
 async def _create_spool(
@@ -647,7 +668,11 @@ class FsStorage(Storage):
         return release
 
     async def _read_leased(
-        self, snapshot: Path, fn: Callable[..., _R], *args: Any
+        self,
+        snapshot: Path,
+        fn: Callable[..., _R],
+        *args: Any,
+        reclaim: Callable[[_R], None] | None = None,
     ) -> _R:
         """Run ``fn(*args)`` — a job that reads ``snapshot`` — off the loop.
 
@@ -656,6 +681,8 @@ class FsStorage(Storage):
         unwinds, while the thread is still reading (issue #3577). So the job takes
         a lease of its own, which the job's done-callback releases. The job is
         awaited shielded, so that callback runs only once the thread has finished.
+        A cancelled caller hands what the job returns to ``reclaim``, as
+        :func:`_acquire_off_loop` does (issue #3584).
         """
 
         self._acquire_lease(snapshot)
@@ -665,8 +692,13 @@ class FsStorage(Storage):
         except BaseException:
             release()
             raise
-        reading.add_done_callback(lambda _reading: release())
-        return await asyncio.shield(reading)
+        reading.add_done_callback(functools.partial(_release_after_read, release))
+        try:
+            return await asyncio.shield(reading)
+        except asyncio.CancelledError:
+            if reclaim is not None:
+                reading.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
+            raise
 
     # --- active-staging leases (issue #183) --------------------------------
 
@@ -2848,24 +2880,41 @@ def _tar_stream(
         try:
             read_fd, write_fd = os.pipe()
             holder: list[BaseException] = []
-            writer = threading.Thread(
-                target=_tar_into_fd,
-                args=(directory, write_fd, member_hook, holder, exclude, release),
-                daemon=True,
-            )
-            writer.start()
+            try:
+                writer = threading.Thread(
+                    target=_tar_into_fd,
+                    args=(directory, write_fd, member_hook, holder, exclude, release),
+                    daemon=True,
+                )
+                writer.start()
+            except BaseException:
+                # No writer owns ``write_fd`` and no read job uses ``read_fd``.
+                os.close(read_fd)
+                os.close(write_fd)
+                raise
             writing = True
+            loop = asyncio.get_running_loop()
+            reading: asyncio.Future[bytes] | None = None
             try:
                 while True:
-                    chunk = await asyncio.to_thread(os.read, read_fd, _CHUNK)
+                    # Shielded, so a cancel leaves ``reading`` pending until its
+                    # thread has finished with ``read_fd``.
+                    reading = loop.run_in_executor(None, os.read, read_fd, _CHUNK)
+                    chunk = await asyncio.shield(reading)
                     if not chunk:
                         break
                     yield chunk
             finally:
                 # Closing the read end unblocks a writer parked on a full pipe (its
                 # next write raises BrokenPipeError, which the writer swallows), so
-                # join never hangs on early consumer close.
-                os.close(read_fd)
+                # join never hangs on early consumer close. A cancel can leave a
+                # read job that has not yet entered ``os.read``; closing under it
+                # would let another open reuse the fd number and the job read that
+                # file instead (issue #3582), so the job's done-callback closes it.
+                if reading is not None and not reading.done():
+                    reading.add_done_callback(lambda _reading: os.close(read_fd))
+                else:
+                    os.close(read_fd)
                 await asyncio.to_thread(writer.join)
             # The writer finished and we drained to EOF: if it failed mid-tar, the
             # EOF we saw was a truncation, so re-raise its error to the consumer.
@@ -3074,9 +3123,14 @@ def _open_readable_sync(path: Path, not_found: str) -> io.BufferedReader:
 
 
 async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
-    """:func:`_open_readable_sync` off the event loop, for the async stream helpers."""
+    """:func:`_open_readable_sync` off the event loop, for the async stream helpers.
 
-    return await asyncio.to_thread(_open_readable_sync, path, not_found)
+    A cancelled caller's handle is closed once the open finishes (issue #3584).
+    """
+
+    return await _acquire_off_loop(
+        _close_orphaned_handle, _open_readable_sync, path, not_found
+    )
 
 
 def _list_children(target: Path, not_found: str) -> list[Path]:
@@ -3549,5 +3603,6 @@ class _FsWorkingSetView(WorkingSetView):
                 _open_readable_sync,
                 target,
                 f"file not found: {rel_path.value}",
+                reclaim=_close_orphaned_handle,
             )
         )
