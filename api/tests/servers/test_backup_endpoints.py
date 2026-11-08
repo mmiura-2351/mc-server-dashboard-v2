@@ -1026,6 +1026,7 @@ def _store_failing_its_restore(
     monkeypatch: pytest.MonkeyPatch,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
+    unremovable: str | None = None,
 ) -> tuple[Storage, str]:
     """A real store over a healthy live world, whose restore of a backup fails.
 
@@ -1041,7 +1042,10 @@ def _store_failing_its_restore(
     Three more fs-only ones fail the replace of ``current`` itself, as a remote
     filesystem can: ``"replace_applied"`` applies the rename and then raises,
     ``"replace_applied_unreadable"`` also fails the next read of the link, and
-    ``"replace_unapplied"`` raises without renaming.
+    ``"replace_unapplied"`` raises without renaming, and ``"none"`` fails
+    nothing. ``unremovable`` (fs only) adds a cleanup fault once ``current`` has
+    changed: the first ``lstat`` of the restore's staging (``"staging"``) or of
+    the snapshot the restore superseded (``"superseded"``) fails with EIO.
     """
 
     faults = Faults()
@@ -1129,8 +1133,25 @@ def _store_failing_its_restore(
 
         if fault.startswith("replace_"):
             monkeypatch.setattr(os, "replace", _replace)
-        else:
+        elif fault != "none":
             monkeypatch.setattr(fs_adapter, "_fsync_dir", _fsync_dir)
+        if unremovable is not None:
+            real_lstat = Path.lstat
+            superseded = server_root / prior_target
+            lstat_failed: list[bool] = []
+
+            def _lstat(path: Path) -> os.stat_result:
+                target = (
+                    "/incoming/restore-" in str(path)
+                    if unremovable == "staging"
+                    else path == superseded
+                )
+                if target and not lstat_failed and os.readlink(link) != prior_target:
+                    lstat_failed.append(True)
+                    raise OSError(errno.EIO, "Input/output error")
+                return real_lstat(path)
+
+            monkeypatch.setattr(Path, "lstat", _lstat)
         if fault in ("after_flip_unreadable", "replace_applied_unreadable"):
             assert isinstance(storage, FsStorage)
             real_live_snapshot_name = storage._live_snapshot_name
@@ -1247,6 +1268,101 @@ def test_an_fs_restore_whose_replace_applied_and_raised_finishes_as_published(
     assert resp.json()["reason"] == reason
     assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
     assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    assert persisted.health is BackupHealth.QUARANTINED
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert b"enable-rcon=" in live["server.properties"]
+
+
+@pytest.mark.parametrize(
+    ("fault", "corrupt", "reason"),
+    [
+        ("after_flip", True, "publish_incomplete"),
+        ("replace_applied", True, "publish_incomplete"),
+        ("replace_applied_unreadable", True, "publish_unknown"),
+        ("after_flip", False, "publish_incomplete"),
+    ],
+)
+def test_an_fs_restore_whose_staging_cannot_be_removed_keeps_its_outcome(
+    fault: str,
+    corrupt: bool,
+    reason: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The fs restore failed after (or while) flipping ``current``, and removing
+    # its staging then failed too (issue #3564): the path probe before the
+    # removal can raise EIO on a failing mount. The cleanup is best-effort, so
+    # the restore's own outcome still crosses the seam: the published (or
+    # possibly published) backup is quarantined when corrupt, the properties
+    # are re-applied, and the audit keeps the restore's identity.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        "fs",
+        fault,
+        corrupt=corrupt,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+        unremovable="staging",
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+        force=corrupt,
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == reason
+    operation = ops.BACKUP_FORCE_RESTORE if corrupt else ops.BACKUP_RESTORE
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    persisted = asyncio.run(backups.get_by_id(backup.id))
+    assert persisted is not None
+    expected = BackupHealth.QUARANTINED if corrupt else BackupHealth.HEALTHY
+    assert persisted.health is expected
+    scope = (StorageCommunityId(community_id), StorageServerId(server_id))
+    live = read_tar(asyncio.run(drain(storage.open_hydrate_source(*scope))))
+    assert b"enable-rcon=" in live["server.properties"]
+
+
+def test_an_fs_restore_whose_superseded_snapshot_cannot_be_removed_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fs restore published, then removing the snapshot it superseded failed
+    # (issue #3564). That reclaim is best-effort, so the restore still succeeds:
+    # 204, the force-restore audited as a success, the backup quarantined and
+    # the properties re-applied. The sweep reclaims the leftover later.
+    community_id, server_id = uuid.uuid4(), uuid.uuid4()
+    storage, storage_ref = _store_failing_its_restore(
+        "fs",
+        "none",
+        corrupt=True,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        community_id=community_id,
+        server_id=server_id,
+        unremovable="superseded",
+    )
+
+    resp, recorder, backups, backup = _force_restore_through_the_route(
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        storage_ref=storage_ref,
+        community_id=community_id,
+        server_id=server_id,
+    )
+
+    assert resp.status_code == 204
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_FORCE_RESTORE]
+    assert recorder.events[0].outcome is Outcome.SUCCESS
     persisted = asyncio.run(backups.get_by_id(backup.id))
     assert persisted is not None
     assert persisted.health is BackupHealth.QUARANTINED

@@ -1645,7 +1645,7 @@ class FsStorage(Storage):
             # still catching realistic tears.
             report = await asyncio.to_thread(check_working_set, staging)
             if not report.healthy and not force:
-                await asyncio.to_thread(_rmtree, staging)
+                await _discard_restore_staging(staging)
                 raise IntegrityCheckError(report)
             # Bump the generation on this authoritative publish (issue #873): a
             # restore replaces ``current/`` just like a snapshot commit, so it MUST
@@ -1657,7 +1657,7 @@ class FsStorage(Storage):
             await self._publish_restore(community_id, server_id, staging, report)
             return report
         except BaseException:
-            await asyncio.to_thread(_rmtree, staging)
+            await _discard_restore_staging(staging)
             raise
         finally:
             self._release_staging(staging)
@@ -2712,6 +2712,25 @@ def _rmtree(path: Path) -> None:
         path.unlink(missing_ok=True)
     elif path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+async def _discard_restore_staging(staging: Path) -> None:
+    """Remove a failed restore's staging, best-effort (issue #3564).
+
+    The error on its way out may be the restore's publication (or a refusal), and
+    the path probe before the removal can itself fail on a failing mount; that
+    fault must never replace it. It is logged, and the sweep reclaims the staging,
+    mirroring the object restore's cleanup.
+    """
+
+    try:
+        await asyncio.to_thread(_rmtree, staging)
+    except Exception:
+        _LOG.warning(
+            "removing a failed restore's staging %s failed; the sweep reclaims it",
+            staging,
+            exc_info=True,
+        )
 
 
 async def _reclaim_superseded(old_snapshot: Path | None) -> None:
