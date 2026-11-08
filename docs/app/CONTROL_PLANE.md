@@ -333,8 +333,32 @@ operator-visible signal for a Worker that will not register is the terminal
 status code.
 
 Once the API has acknowledged a registration, the Worker re-reports what it holds: a
-`StatusChange` for each live instance at its current state, and
-`SERVER_STATE_UNKNOWN` for each failed-stop orphan (Section 6). The first such resync
+`StatusChange` for each live instance at its current state,
+`SERVER_STATE_UNKNOWN` for each failed-stop orphan (Section 6), and, for a server
+held only as the reservation of a command still in flight from the previous session,
+the state of that command's current leg (#3302): `SERVER_STATE_STOPPING` for a stop
+or a restart's stop leg, `SERVER_STATE_STARTING` for a start, or a restart's
+relaunch, whose instance is not yet registered. Without that report the row kept the
+`unknown` the disconnect wrote until the command's terminal report, and a restart's
+stop leg read as `(running, unknown)`, which the reconciler redispatches a start for,
+instead of `(running, stopping)`, which it stands back from for the restart budget
+(CONFIGURATION.md Section 5.6). A reported command's own events settle the row as
+it goes on: a stop's `STOPPED`, or a launch's `STARTING` and `RUNNING` once its instance
+registers. A launch reported `SERVER_STATE_STARTING` that ends without an instance —
+refused, failed, cancelled or past its deadline — is reported `SERVER_STATE_STOPPED`.
+Nothing else would correct the row: a failed launch emits no status, its
+`CommandResult` went to the session that dropped, and a restart's `STOPPED` from its
+stop leg went out before the resync. The row would otherwise stay at
+`(running, starting)`, which the reconciler never selects. At `stopped` it
+redispatches the start under its usual rules. The report goes out before the
+Worker releases the reservation, so a replacement command's events follow it. A
+launch no resync reported gets no such report, as before: on an unbroken session the
+API settles it from the `CommandResult`. A reservation that changes no lifecycle
+state — a hydrate, a snapshot of a stopped server, the deleted-server scratch
+reclaim — is not reported. Each server is reported once: a live instance and a reservation never
+share an id, and a failed-stop orphan whose retry stop holds the reservation is
+reported `SERVER_STATE_UNKNOWN`, since whether that process is gone is exactly what
+the Worker cannot say. The first such resync
 after a Worker **boot** also reports `STOPPED` for each server whose container the
 startup orphan sweep removed — an exited container left by a stop the previous process
 handed to the daemon at shutdown, or a server container still running after the
@@ -346,9 +370,8 @@ its launch container — was stopped and removed without an error, so a sweep th
 fails, which is non-fatal, reports only the servers it finished, never one whose
 container may still be running. A swept server the Worker holds again by the time of
 the resync gets no `STOPPED`: a live instance is reported at its current state and a
-failed-stop orphan as `SERVER_STATE_UNKNOWN`, as above, while an id held only as a
-reservation for an in-flight command gets **no report at all**, since the resync omits
-reserved ids (#3302). The report is made once per boot: a
+failed-stop orphan as `SERVER_STATE_UNKNOWN`, and a reservation for an in-flight
+command at its leg or not at all, as above. The report is made once per boot: a
 session that ends before its `RegisterAck` keeps it for the next session, and a plain
 reconnect without a reboot sends none. It is an ordinary `StatusChange` from the
 assigned Worker: under `desired=stopped` it moves the row to `stopped`, and the final
