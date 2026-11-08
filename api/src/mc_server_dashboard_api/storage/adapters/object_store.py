@@ -59,7 +59,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NoReturn, Protocol
 
 import anyio
 
@@ -88,6 +88,8 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     PrunedStoreError,
     PublisherFencedError,
+    RestorePartiallyPublishedError,
+    RestorePublicationUnknownError,
     SnapshotHandleError,
     StaleGenerationError,
     StorageUnavailableError,
@@ -166,6 +168,10 @@ _MULTIPART_SWEEP_MIN_AGE_S = 3600
 # enough to be irrelevant next to the full read it precedes, and only ever paid on
 # the failure path.
 _REPROBE_BACKOFF_S = 1.0
+# The reads that confirm which snapshot the pointer names after a restore's
+# pointer write failed (issue #3564), and the first pause between them (doubled).
+_FLIP_CONFIRM_ATTEMPTS = 3
+_FLIP_CONFIRM_BACKOFF_S = 0.05
 
 _LOG = logging.getLogger(__name__)
 
@@ -1294,6 +1300,12 @@ class ObjectStorage(Storage):
 
         server_prefix = self._server_prefix(community_id, server_id)
         old_prefix = await self._read_pointer(client, server_prefix)
+        await self._write_pointer(client, server_prefix, new_prefix)
+        return old_prefix
+
+    async def _write_pointer(
+        self, client: S3Client, server_prefix: str, new_prefix: str
+    ) -> None:
         # The single atomic step: overwrite the one pointer object. After it returns
         # the pointer references either the old or the new prefix, never a partial.
         await client.put_object(
@@ -1302,7 +1314,42 @@ class ObjectStorage(Storage):
         )
 
         self._seam.reach(PublishPhase.AFTER_FLIP)
-        return old_prefix
+
+    async def _raise_restore_flip_failure(
+        self,
+        client: S3Client,
+        server_prefix: str,
+        new_prefix: str,
+        failure: Exception,
+        report: WorkingSetReport,
+    ) -> NoReturn:
+        """Raise a restore's failed pointer write as what it did (issue #3564).
+
+        The write may have landed before it failed (a lost response). Re-read the
+        pointer, briefly retrying: naming ``new_prefix`` it published, so raise
+        :class:`RestorePartiallyPublishedError`; naming anything else it did not,
+        so re-raise ``failure``. With no read answering, raise
+        :class:`RestorePublicationUnknownError`.
+        """
+
+        delay = _FLIP_CONFIRM_BACKOFF_S
+        for attempt in range(_FLIP_CONFIRM_ATTEMPTS):
+            try:
+                live = await self._read_pointer(client, server_prefix)
+            except Exception:
+                _LOG.warning(
+                    "confirming a restore's pointer write failed (attempt %d)",
+                    attempt + 1,
+                    exc_info=True,
+                )
+                if attempt + 1 < _FLIP_CONFIRM_ATTEMPTS:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                continue
+            if live == new_prefix:
+                raise RestorePartiallyPublishedError(failure, report) from failure
+            raise failure
+        raise RestorePublicationUnknownError(failure, report) from failure
 
     async def _gc_after_flip(
         self,
@@ -1544,13 +1591,10 @@ class ObjectStorage(Storage):
                     new_prefix = await self._copy_into_snapshot(
                         client, community_id, server_id, incoming, staged
                     )
-                    # Flip + bump under the server lock (issue #899), serializing with
+                    # Bump + flip under the server lock (issue #899), serializing with
                     # a concurrent snapshot commit's generation re-check so the restore
                     # cannot interleave with the commit's pointer flip.
                     async with self._server_lock(community_id, server_id):
-                        old_prefix = await self._flip_pointer(
-                            client, community_id, server_id, new_prefix
-                        )
                         # Bump the generation on this authoritative publish (issue
                         # #873), mirroring the fs adapter: a restore replaces
                         # ``current/`` like a snapshot commit, so it MUST advance the
@@ -1559,16 +1603,40 @@ class ObjectStorage(Storage):
                         # PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER)
                         # makes the publish-time guard refuse an in-flight stale
                         # snapshot from a real Worker (different publisher), closing the
-                        # restore-clobber window (#873).
+                        # restore-clobber window (#873). Bumped BEFORE the flip (issue
+                        # #3564): no Worker holds the restored world, so a flip without
+                        # its bump is that same rollback, while a bump whose flip fails
+                        # only makes holders hydrate the prior world again.
                         server_prefix = self._server_prefix(community_id, server_id)
                         await self._bump_generation(
                             client, server_prefix, RESTORE_PUBLISHER
                         )
+                        old_prefix = await self._read_pointer(client, server_prefix)
+                        try:
+                            await self._write_pointer(client, server_prefix, new_prefix)
+                        except Exception as exc:
+                            # The write may have landed (a lost response). The
+                            # copied snapshot is left in place either way: it may be
+                            # live, and the sweep reclaims it if it is not.
+                            await self._raise_restore_flip_failure(
+                                client, server_prefix, new_prefix, exc, report
+                            )
                     # Reclaim the staging + superseded prefixes after the lock (#920).
                     await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
                     return report
                 except BaseException:
-                    await _delete_prefix(client, incoming)
+                    # Best-effort (issue #3564): the error on its way out may be a
+                    # publication, which a cleanup outage must never replace. The
+                    # sweep reclaims whatever staging is left.
+                    try:
+                        await _delete_prefix(client, incoming)
+                    except Exception:
+                        _LOG.warning(
+                            "removing a failed restore's staging %s failed; the "
+                            "sweep reclaims it",
+                            incoming,
+                            exc_info=True,
+                        )
                     raise
                 finally:
                     # Never fatal (issue #3269): after the flip the restore has

@@ -47,8 +47,11 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ObjectStoreUnavailableError,
     PathTraversalError,
     PrunedStoreError,
+    RestorePartiallyPublishedError,
+    RestorePublicationUnknownError,
     StaleGenerationError,
 )
+from mc_server_dashboard_api.storage.domain.port import RESTORE_PUBLISHER
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
     CommunityId,
@@ -69,6 +72,7 @@ from tests.storage.helpers import (
     mode_invariant_corrupt_region_bytes,
     new_scope,
     read_tar,
+    region_targz,
     stream_of,
     tar_stream,
     tar_with_link_member,
@@ -1652,3 +1656,221 @@ async def test_sweep_reclaims_a_copy_leftover_of_a_pruned_server(
 
     assert _snapshot_keys(store, community, server) == []
     assert _server_prefix(community, server) + "final.tar.gz" in store.objects
+
+
+# --- restore: the generation leads the flip (issue #3564) -------------------
+
+
+async def _faulty_store_with_a_corrupt_backup() -> tuple[
+    ObjectStorage, Faults, CommunityId, ServerId, Any, bytes
+]:
+    """A healthy world worker-a published at generation 1, and a corrupt backup."""
+
+    faults = Faults()
+    storage = ObjectStorage(faulty_s3_factory(FakeS3Store(), faults))
+    community, server = new_scope()
+    await _publish(
+        storage,
+        community,
+        server,
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+        publisher="worker-a",
+    )
+    corrupt = mode_invariant_corrupt_region_bytes()
+    key = await storage.put_backup(
+        community,
+        server,
+        stream_of(region_targz({"world/region/r.0.0.mca": corrupt})),
+    )
+    return storage, faults, community, server, key, corrupt
+
+
+async def _hydrate(
+    storage: ObjectStorage, community: CommunityId, server: ServerId
+) -> tuple[dict[str, bytes], int | None]:
+    source = storage.open_hydrate_source(community, server)
+    files = read_tar(await drain(source))
+    return files, source.generation
+
+
+async def _commit(
+    storage: ObjectStorage,
+    community: CommunityId,
+    server: ServerId,
+    level: bytes,
+    *,
+    expected_base: int,
+) -> int:
+    """worker-a publishes a healthy world tagged by ``level.dat``."""
+
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(
+        handle,
+        tar_stream(
+            {"world/region/r.0.0.mca": healthy_region_bytes(), "level.dat": level}
+        ),
+    )
+    return await storage.commit_snapshot(
+        handle, publisher="worker-a", expected_base=expected_base
+    )
+
+
+async def test_a_restore_whose_generation_write_fails_publishes_nothing() -> None:
+    # The restore writes the generation before it flips the pointer. A store
+    # outage on that write leaves the pointer where it was, so the corrupt
+    # backup is not live and the generation still names the prior world.
+    (
+        storage,
+        faults,
+        community,
+        server,
+        key,
+        _,
+    ) = await _faulty_store_with_a_corrupt_backup()
+    marker = _server_prefix(community, server) + _GENERATION
+    faults.when = lambda op, k: op == "put_object" and k == marker
+
+    with pytest.raises(ObjectStoreUnavailableError):
+        await storage.restore_backup(community, server, key, force=True)
+    faults.clear()
+
+    assert await _hydrate(storage, community, server) == (
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+        1,
+    )
+    assert await storage.current_publisher(community, server) == "worker-a"
+
+
+async def test_a_restore_pointer_write_that_fails_leaves_the_prior_world_ahead() -> (
+    None
+):
+    # The generation already advanced when the flip fails. The prior world is
+    # still live under the new generation: every holder of generation 1 hydrates
+    # it rather than skipping, and the restore sentinel refuses worker-a's
+    # in-flight publish from generation 1.
+    (
+        storage,
+        faults,
+        community,
+        server,
+        key,
+        _,
+    ) = await _faulty_store_with_a_corrupt_backup()
+    pointer = _server_prefix(community, server) + _POINTER
+    faults.when = lambda op, k: op == "put_object" and k == pointer
+
+    with pytest.raises(ObjectStoreUnavailableError):
+        await storage.restore_backup(community, server, key, force=True)
+    faults.clear()
+
+    assert await _hydrate(storage, community, server) == (
+        {"world/region/r.0.0.mca": healthy_region_bytes()},
+        2,
+    )
+    assert await storage.current_publisher(community, server) == RESTORE_PUBLISHER
+    with pytest.raises(StaleGenerationError):
+        await _commit(storage, community, server, b"stale", expected_base=1)
+
+
+async def test_a_restore_pointer_write_whose_response_is_lost_reports_the_publish() -> (
+    None
+):
+    # The store applied the pointer write and the response was lost: the corrupt
+    # backup is live. The restore reports it published, with the report a
+    # successful restore returns, and the generation already names the restored
+    # world. A hydrate serves it at that generation, worker-a's in-flight publish
+    # from the pre-restore world is refused, and a publish based on the restored
+    # world advances past it.
+    (
+        storage,
+        faults,
+        community,
+        server,
+        key,
+        corrupt,
+    ) = await _faulty_store_with_a_corrupt_backup()
+    pointer = _server_prefix(community, server) + _POINTER
+    faults.lose_response = lambda op, k: op == "put_object" and k == pointer
+
+    with pytest.raises(RestorePartiallyPublishedError) as caught:
+        await storage.restore_backup(community, server, key, force=True)
+    faults.clear()
+
+    assert isinstance(caught.value.cause, ObjectStoreUnavailableError)
+    assert len(caught.value.report.corrupt) == 1
+    assert await _hydrate(storage, community, server) == (
+        {"world/region/r.0.0.mca": corrupt},
+        2,
+    )
+    assert await storage.current_publisher(community, server) == RESTORE_PUBLISHER
+    with pytest.raises(StaleGenerationError):
+        await _commit(storage, community, server, b"stale", expected_base=1)
+    assert await _commit(storage, community, server, b"next", expected_base=2) == 3
+    files, generation = await _hydrate(storage, community, server)
+    assert (files["level.dat"], generation) == (b"next", 3)
+
+
+async def test_a_failed_cleanup_after_a_lost_pointer_response_keeps_the_publish() -> (
+    None
+):
+    # The pointer write landed and its response was lost, then removing the
+    # staged objects fails too. The cleanup is best-effort: it never replaces the
+    # confirmed publication, and the staging is left for the sweep.
+    (
+        storage,
+        faults,
+        community,
+        server,
+        key,
+        corrupt,
+    ) = await _faulty_store_with_a_corrupt_backup()
+    pointer = _server_prefix(community, server) + _POINTER
+    faults.lose_response = lambda op, k: op == "put_object" and k == pointer
+    faults.when = lambda op, k: op == "delete_object" and "/incoming/" in k
+
+    with pytest.raises(RestorePartiallyPublishedError) as caught:
+        await storage.restore_backup(community, server, key, force=True)
+    faults.clear()
+
+    assert len(caught.value.report.corrupt) == 1
+    assert await _hydrate(storage, community, server) == (
+        {"world/region/r.0.0.mca": corrupt},
+        2,
+    )
+
+
+async def test_an_unconfirmable_pointer_write_reports_an_unknown_publication() -> None:
+    # The pointer write landed and its response was lost, and every read that
+    # could confirm it fails as well. Whether the backup is live is unknown, so
+    # the restore says so with the report instead of claiming it published
+    # nothing.
+    (
+        storage,
+        faults,
+        community,
+        server,
+        key,
+        corrupt,
+    ) = await _faulty_store_with_a_corrupt_backup()
+    pointer = _server_prefix(community, server) + _POINTER
+    written: list[bool] = []
+
+    def _lose_the_pointer_response(op: str, k: str) -> bool:
+        if op == "put_object" and k == pointer:
+            written.append(True)
+            return True
+        return False
+
+    faults.lose_response = _lose_the_pointer_response
+    faults.when = lambda op, k: bool(written) and k == pointer
+
+    with pytest.raises(RestorePublicationUnknownError) as caught:
+        await storage.restore_backup(community, server, key, force=True)
+    faults.clear()
+
+    assert isinstance(caught.value.cause, ObjectStoreUnavailableError)
+    assert len(caught.value.report.corrupt) == 1
+    assert await _hydrate(storage, community, server) == (
+        {"world/region/r.0.0.mca": corrupt},
+        2,
+    )
