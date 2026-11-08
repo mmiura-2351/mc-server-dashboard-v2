@@ -149,6 +149,11 @@ _UPLOAD_STREAM_CHUNK = 1024 * 1024
 # The working-set path of the file whose platform-managed keys a restore re-applies.
 _PROPERTIES_REL_PATH = "server.properties"
 
+# How many characters of an uploaded member name a refusal echoes (issue #3592): a
+# PAX long name compresses to almost nothing, so an unbounded echo would amplify a
+# tiny upload into a huge 422 body.
+_MAX_ECHOED_NAME_CHARS = 256
+
 
 async def _load(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
@@ -1512,7 +1517,7 @@ def _validate_backup_archive(
                 reason = unrestorable_reason(member)
                 if reason is not None:
                     raise InvalidBackupArchiveError(
-                        f"unsafe member: {read.name!r} {reason}"
+                        f"unsafe member: {_echoed_name(read.name)} {reason}"
                     )
                 # Upload-only, on top of the shared rule: ``\`` is read as a
                 # separator too, so a ``..`` between backslashes (an archive made
@@ -1520,7 +1525,7 @@ def _validate_backup_archive(
                 # name character, which is why this is not part of the shared rule.
                 if ".." in member.name.replace("\\", "/").split("/"):
                     raise InvalidBackupArchiveError(
-                        f"unsafe member: {read.name!r} has a '..' component"
+                        f"unsafe member: {_echoed_name(read.name)} has a '..' component"
                     )
                 # A directory member materializes AT its own name; a file member
                 # materializes its PARENT on the way (issue #2869).
@@ -1538,6 +1543,19 @@ def _validate_backup_archive(
                         total = _drain_capped(handle, total, max_decompressed_bytes)
     except tarfile.TarError as exc:
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
+
+
+def _echoed_name(name: str) -> str:
+    """Render an uploaded member name for a refusal message, bounded (issue #3592).
+
+    A name up to :data:`_MAX_ECHOED_NAME_CHARS` renders as its ``repr``; a longer
+    one as the ``repr`` of its first that-many characters plus a marker naming the
+    original length, so the operator still sees which member it is.
+    """
+
+    if len(name) <= _MAX_ECHOED_NAME_CHARS:
+        return repr(name)
+    return f"{name[:_MAX_ECHOED_NAME_CHARS]!r}…(truncated, {len(name)} chars)"
 
 
 def _drain_capped(handle: IO[bytes], total: int, max_bytes: int) -> int:

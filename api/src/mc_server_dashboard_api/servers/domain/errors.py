@@ -499,7 +499,8 @@ class InvalidBackupArchiveError(ServerError):
     A body that does not open as a tar.gz, or that carries such a member, is
     rejected here so it never lands in the store. The message names the refusal
     (the member's name and the reason) and is built only from the upload itself,
-    so the edge returns it as the 422 ``detail`` (issue #3586).
+    so the edge returns it as the 422 ``detail`` (issue #3586). A long member name
+    is truncated with a marker so the message stays bounded (issue #3592).
     """
 
 
