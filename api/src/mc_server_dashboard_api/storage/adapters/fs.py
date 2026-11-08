@@ -399,13 +399,20 @@ async def _run_spool_writer(spool: Path, fn: Callable[..., _R], *args: Any) -> _
     opens the spool for writing recreates it if the cancelled caller has already
     removed it. So the job is awaited shielded, and a cancelled caller hands it a
     callback that removes the spool again once the job finishes (issue #3553).
+    That caller no longer observes the job's fault, so the callback marks it
+    retrieved (issue #3595); a caller still awaiting receives it as before.
     """
+
+    def _dispose_after_write(finished: asyncio.Future[_R]) -> None:
+        if not finished.cancelled():
+            finished.exception()
+        _start_spool_disposal(spool)
 
     writer = asyncio.get_running_loop().run_in_executor(None, fn, *args)
     try:
         return await asyncio.shield(writer)
     except asyncio.CancelledError:
-        writer.add_done_callback(lambda _writer: _start_spool_disposal(spool))
+        writer.add_done_callback(_dispose_after_write)
         raise
 
 
