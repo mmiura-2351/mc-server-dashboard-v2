@@ -9,9 +9,10 @@ header, and that made an application layer import an HTTP edge module.
 
 It lives here because it is neutral: pure formatting over
 :class:`datetime.datetime`, with no HTTP, config or wiring dependency. That is
-why `rfc3339` is the one root-level module absent from the "no context's domain
-or application imports a root-level module" contract in ``pyproject.toml`` —
-the inward layers may import it, and no other root-level module.
+why `rfc3339` is absent from the "no context's domain or application imports a
+root-level module" contract in ``pyproject.toml``, so the inward layers may
+import it. :mod:`mc_server_dashboard_api.archive_member` is the other module
+left out of that contract, for the same reason (issue #3579).
 """
 
 from __future__ import annotations

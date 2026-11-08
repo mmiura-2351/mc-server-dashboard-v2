@@ -3088,6 +3088,33 @@ def test_upload_of_a_member_restore_refuses_is_422_and_stores_nothing(
     assert backups.by_id == {}
 
 
+@pytest.mark.parametrize(
+    ("content", "detail"),
+    [
+        pytest.param(
+            _member("world//level.dat"),
+            "unsafe member: 'world//level.dat' has an empty or '.' segment",
+            id="name-shape",
+        ),
+        pytest.param(
+            _member("link", tarfile.SYMTYPE, "level.dat"),
+            "unsafe member: 'link' is not a regular file or directory",
+            id="member-type",
+        ),
+    ],
+)
+def test_upload_refusal_detail_names_the_member_and_the_reason(
+    content: bytes, detail: str
+) -> None:
+    # The operator has to find the one member to fix (issue #3586), so the 422
+    # carries the refusal as the problem ``detail``, beside the same reason code.
+    resp, _, _, _ = _upload_through_the_route(content)
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert resp.json()["detail"] == detail
+
+
 def _archive_of(*names: str) -> bytes:
     """A gzip tar of ``names``: a directory for a name ending in ``/``."""
 

@@ -758,7 +758,8 @@ export interface paths {
          *     The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
          *     before the whole body is materialized); the use case then validates the archive
          *     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
-         *     member is 422 ``invalid_archive``; an over-cap archive is 413.
+         *     member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
+         *     member, its name and the reason); an over-cap archive is 413.
          *
          *     **No directory may stand at the root ``server.properties`` path (issue
          *     #2869).** A restore republishes the archive's members verbatim as the working
