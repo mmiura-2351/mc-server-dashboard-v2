@@ -15,7 +15,11 @@ wrong:
 
 from __future__ import annotations
 
+import asyncio
 import gc
+import os
+import stat
+import threading
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import cast
@@ -109,6 +113,60 @@ async def test_aclose_releases_lease_and_sweep_reclaims(tmp_path: Path) -> None:
 
     storage.sweep()
     assert not old_snapshot.exists()
+
+
+def _names_inode(fd: int, inode: int) -> bool:
+    try:
+        return os.fstat(fd).st_ino == inode
+    except OSError:
+        return False
+
+
+async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cancel does not stop a read job that is already on its executor thread. If
+    # the stream closed the pipe's read end before the job entered ``os.read``,
+    # another open could reuse the fd number and the job would read an unrelated
+    # file (issue #3582). The fd must stay the pipe until the job finishes.
+    entered, resume, closed = threading.Event(), threading.Event(), threading.Event()
+    paused: list[tuple[int, int]] = []
+    real_read, real_close = os.read, os.close
+
+    def _read(fd: int, n: int) -> bytes:
+        if not paused and stat.S_ISFIFO(os.fstat(fd).st_mode):
+            paused.append((fd, os.fstat(fd).st_ino))
+            entered.set()
+            resume.wait(timeout=10)
+        return real_read(fd, n)
+
+    def _close(fd: int) -> None:
+        real_close(fd)
+        if paused and fd == paused[0][0]:
+            closed.set()
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    monkeypatch.setattr(os, "read", _read)
+    monkeypatch.setattr(os, "close", _close)
+    task = asyncio.ensure_future(
+        storage.open_hydrate_source(community, server).__anext__()
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        read_fd, pipe_inode = paused[0]
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert _names_inode(read_fd, pipe_inode)
+    finally:
+        resume.set()
+
+    assert await asyncio.to_thread(closed.wait, 10)
+    assert not _names_inode(read_fd, pipe_inode)
 
 
 # --- per-file streaming read leases (issue #265) ---------------------------
