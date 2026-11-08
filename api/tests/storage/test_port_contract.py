@@ -340,11 +340,22 @@ async def test_edit_racing_a_commit_through_the_lock_lands_on_the_postflip_world
         thread_release = threading.Event()
 
         def paused_publish(
-            community_id: CommunityId, server_id: ServerId, staging: Path
+            community_id: CommunityId,
+            server_id: ServerId,
+            staging: Path,
+            *,
+            on_attempt: Callable[[str], None] | None = None,
+            on_flip: Callable[[], None] | None = None,
         ) -> Path | None:
             loop.call_soon_threadsafe(entered.set)
             thread_release.wait()
-            return real_publish(community_id, server_id, staging)
+            return real_publish(
+                community_id,
+                server_id,
+                staging,
+                on_attempt=on_attempt,
+                on_flip=on_flip,
+            )
 
         storage._publish = paused_publish  # type: ignore[method-assign]
 

@@ -672,6 +672,35 @@ class PluginReconcileIncompleteError(ServerError):
     """
 
 
+class BackupRestorePartiallyPublishedError(ServerError):
+    """The store published a restored backup, then failed inside the restore (#3564).
+
+    The seam translation of the storage ``RestorePartiallyPublishedError``: the
+    restored working set is live, but the store's restore call did not complete.
+    ``corrupt_count`` is the published backup's corrupt region count (``0`` when
+    healthy), as a successful restore returns it. ``cause`` is the store's failure,
+    already translated (:class:`BackupStorageUnavailableError` for an outage). The
+    restore use case raises it on as :class:`BackupRestoreIncompleteError`.
+    """
+
+    def __init__(
+        self, storage_ref: str, *, cause: Exception, corrupt_count: int
+    ) -> None:
+        super().__init__(storage_ref)
+        self.cause = cause
+        self.corrupt_count = corrupt_count
+
+
+class BackupRestorePublicationUnknownError(BackupRestorePartiallyPublishedError):
+    """The store may have published a restored backup (issue #3564).
+
+    The seam translation of the storage ``RestorePublicationUnknownError``: the
+    store's pointer write failed and no read could confirm whether it landed. A
+    subclass, because the restore use case handles it exactly as a publication;
+    the edge answers it with its own reason, since the backup may not be live.
+    """
+
+
 class BackupRestoreIncompleteError(ServerError):
     """A restore published its backup, then a step after the publish failed (#3269).
 

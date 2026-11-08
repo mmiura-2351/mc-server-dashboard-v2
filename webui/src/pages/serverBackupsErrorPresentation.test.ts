@@ -85,7 +85,7 @@ describe("backupRestoreErrorPresentation", () => {
   // The backup WAS published and only a follow-up step failed (issue #3269):
   // the bare-503 arm would blame the server host, while the remedy is to retry
   // the restore.
-  it.each(["seed_failed", "plugin_reconcile_incomplete"])(
+  it.each(["seed_failed", "plugin_reconcile_incomplete", "publish_incomplete"])(
     "names the incomplete follow-up step for a 503 %s",
     (reason) => {
       const key = backupRestoreErrorPresentation(503, reason);
@@ -94,6 +94,15 @@ describe("backupRestoreErrorPresentation", () => {
       expect(ja[key]).toMatch(/復元.*もう一度/);
     },
   );
+
+  // The store could not confirm whether the backup went live (issue #3564):
+  // the message must not claim it was restored, only that it may have been.
+  it("names the unconfirmed restore for a 503 publish_unknown", () => {
+    const key = backupRestoreErrorPresentation(503, "publish_unknown");
+    expect(key).toBe("backups.error.restoreOutcomeUnknown");
+    expect(en[key]).toMatch(/may have been restored.*retry the restore/i);
+    expect(ja[key]).toMatch(/復元された可能性.*もう一度/);
+  });
 
   it.each([
     [503, "storage_unavailable", "backups.error.storageUnavailable"],

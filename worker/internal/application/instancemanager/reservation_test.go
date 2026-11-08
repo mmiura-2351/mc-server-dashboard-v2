@@ -441,7 +441,7 @@ func TestRestartNeverLeaksReservation(t *testing.T) {
 
 	// The reserved map must be empty: no leaked reservation.
 	m.mu.Lock()
-	leaked := m.reserved[s1]
+	_, leaked := m.reserved[s1]
 	m.mu.Unlock()
 	if leaked {
 		t.Fatal("reserved[s1] leaked after restart of unknown id (issue #1950)")
@@ -564,7 +564,7 @@ func TestRestartConcurrentStartNeverLeaksReservation(t *testing.T) {
 		// SERVER_NOT_FOUND without calling release(), permanently leaking
 		// reserved[id]=true.
 		m.mu.Lock()
-		leaked := m.reserved[id]
+		_, leaked := m.reserved[id]
 		m.mu.Unlock()
 		if leaked {
 			t.Fatalf("iteration %d: reserved[%s] leaked after concurrent start+restart (issue #1950)", i, id)

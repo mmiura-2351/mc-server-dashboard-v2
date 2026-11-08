@@ -292,6 +292,7 @@ async def _reconciler_tick(
     *,
     grace_seconds: int = 0,
     held_start_grace_seconds: int = 0,
+    restart_timeout_seconds: int = 0,
     store_generation: StoreGenerationReader | None = None,
 ) -> None:
     # Graces default to 0 so a divergence is actionable immediately (the
@@ -313,7 +314,7 @@ async def _reconciler_tick(
         grace_seconds=grace_seconds,
         held_start_grace_seconds=held_start_grace_seconds,
         refused_stop_grace_seconds=0,
-        restart_timeout_seconds=0,
+        restart_timeout_seconds=restart_timeout_seconds,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
     ).tick()
@@ -1341,6 +1342,193 @@ async def test_crash_time_snapshot_that_wins_the_race_moves_to_the_full_grace(
         ("hydrate", worker, server.id),
         ("start", worker, server.id),
     ]
+
+
+# --- Reconnect resync of an id held only as a reservation (issue #3302) ----
+
+# stop_timeout_seconds + command_timeout_seconds at stock values.
+_STOCK_RESTART_BUDGET = 630
+
+
+async def _reconnect_mid(
+    engine: AsyncEngine,
+    clock: _AdvancingClock,
+    server: Server,
+    worker: WorkerId,
+    cp: FakeControlPlane,
+    verb: str,
+    leg: ObservedState,
+) -> Server:
+    """Drop the session mid-``verb``, then land the reconnect resync's ``leg``.
+
+    The ``verb`` dispatch never answers: the Worker carries the command on
+    detached from the dropped stream, holding the id only as a reservation, which
+    its reconnect resync reports at the command's leg. Returns the row the resync
+    left behind.
+    """
+
+    sink = _sink(engine, clock)
+    if verb != "start":
+        await _start_server_use_case(engine, cp, clock)(
+            community_id=server.community_id, server_id=server.id
+        )
+        await sink.record_observed_state(
+            server_id=str(server.id.value), worker_id=str(worker.value), state="running"
+        )
+    dropping = FakeControlPlane(place_to=worker, unavailable_kinds={verb})
+    use_case: StartServer | StopServer | RestartServer
+    if verb == "start":
+        use_case = _start_server_use_case(engine, dropping, clock)
+    elif verb == "stop":
+        use_case = _stop_server_use_case(engine, dropping, clock)
+    else:
+        use_case = _restart_server_use_case(engine, dropping, clock)
+    with pytest.raises(WorkerUnavailableError):
+        await use_case(community_id=server.community_id, server_id=server.id)
+    await sink.mark_worker_servers_unknown(worker_id=str(worker.value))
+    interrupted = await _load(engine, server.id)
+    assert interrupted is not None
+    assert interrupted.observed_state is ObservedState.UNKNOWN
+
+    applied = await sink.record_observed_state(
+        server_id=str(server.id.value), worker_id=str(worker.value), state=leg.value
+    )
+    assert applied is True
+    row = await _load(engine, server.id)
+    assert row is not None
+    return row
+
+
+@pytest.mark.parametrize(
+    ("verb", "desired", "leg"),
+    [
+        ("restart", DesiredState.RUNNING, ObservedState.STOPPING),
+        ("stop", DesiredState.STOPPED, ObservedState.STOPPING),
+        ("start", DesiredState.RUNNING, ObservedState.STARTING),
+    ],
+)
+async def test_reconnect_resync_of_a_reserved_id_moves_the_row_out_of_unknown(
+    engine: AsyncEngine, verb: str, desired: DesiredState, leg: ObservedState
+) -> None:
+    """session drops mid-command (unknown) -> resync reports the leg -> row at it.
+
+    Issue #3302. The Worker holds the id only as a reservation while the command
+    finishes detached; its resync reports ``stopping`` for a stop or a restart's
+    stop leg and ``starting`` for a start not yet launched. The report is an
+    ordinary StatusChange from the assigned Worker, so the row leaves the
+    ``unknown`` the disconnect wrote at once and keeps its intent and assignment.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+
+    row = await _reconnect_mid(
+        engine, clock, server, worker, FakeControlPlane(place_to=worker), verb, leg
+    )
+
+    assert (row.desired_state, row.observed_state, row.assigned_worker_id) == (
+        desired,
+        leg,
+        worker,
+    )
+
+
+@pytest.mark.parametrize("verb", ["start", "restart"])
+async def test_launch_that_fails_after_a_starting_resync_is_redispatched(
+    engine: AsyncEngine, verb: str
+) -> None:
+    """resync reports starting -> the launch fails -> Worker reports stopped ->
+    the reconciler redispatches the start.
+
+    Issue #3302. ``(running, starting)`` is never selected by the reconciler, so
+    without the Worker's corrective ``stopped`` the row would stay there for
+    good: its failed launch emits nothing else, and the command result went to
+    the session that dropped. For a restart the leg reported is its relaunch,
+    and its stop leg's ``stopped`` went out on the old session.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    stranded = await _reconnect_mid(
+        engine,
+        clock,
+        server,
+        worker,
+        FakeControlPlane(place_to=worker),
+        verb,
+        ObservedState.STARTING,
+    )
+    assert stranded.observed_state is ObservedState.STARTING
+    reconcile_cp = FakeControlPlane(connected={worker: True})
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert reconcile_cp.dispatched == []
+
+    applied = await _sink(engine, clock).record_observed_state(
+        server_id=str(server.id.value), worker_id=str(worker.value), state="stopped"
+    )
+    assert applied is True
+    row = await _load(engine, server.id)
+    assert row is not None
+    assert (row.desired_state, row.observed_state, row.assigned_worker_id) == (
+        DesiredState.RUNNING,
+        ObservedState.STOPPED,
+        worker,
+    )
+    await _reconciler_tick(engine, reconcile_cp, clock)
+    assert [kind for kind, _, _ in reconcile_cp.dispatched][-1] == "start"
+    assert {wid for _, wid, _ in reconcile_cp.dispatched} == {worker}
+
+
+async def test_restart_stop_leg_reported_on_reconnect_is_held_back_for_the_budget(
+    engine: AsyncEngine,
+) -> None:
+    """restart's stop leg -> session drops -> resync stopping -> no start until
+    the restart budget lapses.
+
+    Issue #3302 with #3209's stand-back. Left at ``unknown`` the row is
+    re-dispatched a start after the 90 s held grace
+    (``test_current_held_scratch_restarts_command_only_after_the_held_grace``),
+    which the Worker's reservation refuses BUSY each tick. Reported ``stopping``,
+    it reads as the restart's stop leg and waits the budget out.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    store = _StoreGeneration(2)
+    cp = FakeControlPlane(place_to=worker, held={(worker, server.id): 2})
+    row = await _reconnect_mid(
+        engine, clock, server, worker, cp, "restart", ObservedState.STOPPING
+    )
+    assert row.observed_at is not None
+    since = max(row.updated_at, row.observed_at)
+    cp.dispatched.clear()
+
+    for elapsed in (_STOCK_HELD_GRACE, _STOCK_RESTART_BUDGET - 1):
+        clock.set(since + dt.timedelta(seconds=elapsed))
+        await _reconciler_tick(
+            engine,
+            cp,
+            clock,
+            grace_seconds=_STOCK_GRACE,
+            held_start_grace_seconds=_STOCK_HELD_GRACE,
+            restart_timeout_seconds=_STOCK_RESTART_BUDGET,
+            store_generation=store,
+        )
+        assert cp.dispatched == [], elapsed
+    clock.set(since + dt.timedelta(seconds=_STOCK_RESTART_BUDGET))
+    await _reconciler_tick(
+        engine,
+        cp,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        held_start_grace_seconds=_STOCK_HELD_GRACE,
+        restart_timeout_seconds=_STOCK_RESTART_BUDGET,
+        store_generation=store,
+    )
+    assert cp.dispatched == [("start", worker, server.id)]
 
 
 # --- Chain 7: stopped/stopping/assigned wedge recovery (issue #2452) -------
