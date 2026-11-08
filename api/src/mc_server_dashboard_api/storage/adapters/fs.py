@@ -2761,17 +2761,28 @@ def _tar_stream(
             )
             writer.start()
             writing = True
+            loop = asyncio.get_running_loop()
+            reading: asyncio.Future[bytes] | None = None
             try:
                 while True:
-                    chunk = await asyncio.to_thread(os.read, read_fd, _CHUNK)
+                    # Shielded, so a cancel leaves ``reading`` pending until its
+                    # thread has finished with ``read_fd``.
+                    reading = loop.run_in_executor(None, os.read, read_fd, _CHUNK)
+                    chunk = await asyncio.shield(reading)
                     if not chunk:
                         break
                     yield chunk
             finally:
                 # Closing the read end unblocks a writer parked on a full pipe (its
                 # next write raises BrokenPipeError, which the writer swallows), so
-                # join never hangs on early consumer close.
-                os.close(read_fd)
+                # join never hangs on early consumer close. A cancel can leave a
+                # read job that has not yet entered ``os.read``; closing under it
+                # would let another open reuse the fd number and the job read that
+                # file instead (issue #3582), so the job's done-callback closes it.
+                if reading is not None and not reading.done():
+                    reading.add_done_callback(lambda _reading: os.close(read_fd))
+                else:
+                    os.close(read_fd)
                 await asyncio.to_thread(writer.join)
             # The writer finished and we drained to EOF: if it failed mid-tar, the
             # EOF we saw was a truncation, so re-raise its error to the consumer.
