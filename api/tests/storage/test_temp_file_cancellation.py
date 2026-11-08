@@ -215,7 +215,9 @@ async def test_a_temp_file_is_removed_through_repeated_cancellation(
     occupied: list[asyncio.Future[bool]] = []
 
     def _occupy_the_worker() -> None:
-        occupied.append(loop.run_in_executor(executor, worker_free.wait, 10))
+        # No timeout, as in _pause_creation (issue #3600): the ``finally`` below
+        # frees the worker on every path once the operation has started.
+        occupied.append(loop.run_in_executor(executor, worker_free.wait))
 
     async def _stream_then_occupy() -> AsyncIterator[bytes]:
         async for chunk in stream_of(op.payload):
@@ -231,20 +233,22 @@ async def test_a_temp_file_is_removed_through_repeated_cancellation(
     # The operations that take no stream fill their temp file from the store.
     monkeypatch.setattr(object_store, "_write_backup_targz", _write_targz_then_occupy)
     task = asyncio.ensure_future(call(_stream_then_occupy()))
-    await _until(lambda: bool(occupied))
-    [name] = created
-    for _ in range(5):
-        await asyncio.sleep(0)
+    try:
+        await _until(lambda: bool(occupied))
+        [name] = created
+        for _ in range(5):
+            await asyncio.sleep(0)
 
-    task.cancel()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not task.done()  # its removal is queued behind the busy worker
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()  # its removal is queued behind the busy worker
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        worker_free.set()
 
-    worker_free.set()
     await occupied[0]
     await _until(lambda: not os.path.exists(name))
     assert not os.path.exists(name)

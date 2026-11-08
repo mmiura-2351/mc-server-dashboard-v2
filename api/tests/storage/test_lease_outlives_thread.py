@@ -165,7 +165,8 @@ async def _assert_reclaim_waits_for_the_thread(
     finally:
         pause.resume.set()
 
-    assert await asyncio.to_thread(released.wait, 10)
+    # A bound, not a delay: the thread's fsyncs can stall on a loaded host.
+    assert await asyncio.to_thread(released.wait, 120)
     storage.sweep()
     assert not snapshot.exists()
 

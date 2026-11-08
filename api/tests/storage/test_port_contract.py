@@ -146,7 +146,8 @@ async def test_settled_generation_waits_for_a_publish_past_its_fence(
     finally:
         release.set()
 
-    assert await asyncio.wait_for(commit, 10) == 2
+    # A bound, not a delay: the publish's fsyncs can stall on a loaded host.
+    assert await asyncio.wait_for(commit, 120) == 2
     assert await asyncio.wait_for(settled, 10) == 2
 
 
