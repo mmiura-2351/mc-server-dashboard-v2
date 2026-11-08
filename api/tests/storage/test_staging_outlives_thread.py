@@ -15,11 +15,13 @@ the staging is removed and its active-staging lease released.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextlib
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 
@@ -41,21 +43,29 @@ class _Pause:
     resume: threading.Event = field(default_factory=threading.Event)
 
     def once(self, fn: Callable[..., Any]) -> Callable[..., Any]:
-        """``fn``, holding its first call until ``resume`` is set."""
+        """``fn``, holding its first call until ``resume`` is set.
+
+        The hold has no timeout: one that let go by itself would let the thread
+        finish and remove its staging while the test still relies on it, faking a
+        lifetime bug (issue #3600). The fixture's teardown and the pytest timeout
+        end a hold the test never resumes.
+        """
 
         armed = threading.Lock()
 
         def _paused(*args: Any, **kwargs: Any) -> Any:
             if armed.acquire(blocking=False):
                 self.entered.set()
-                self.resume.wait(timeout=10)
+                self.resume.wait()
             return fn(*args, **kwargs)
 
         return _paused
 
 
 @pytest.fixture
-def pause() -> Iterator[_Pause]:
+async def pause() -> AsyncIterator[_Pause]:
+    # Async, so its teardown runs before the event loop's: the loop's shutdown
+    # waits for the executor thread a hold parks.
     held = _Pause()
     yield held
     held.resume.set()
@@ -268,3 +278,88 @@ async def test_an_aborted_transfer_keeps_its_staging_until_its_thread_finishes(
     monkeypatch.undo()
     blob = await drain(storage.open_hydrate_source(community, server))
     assert read_tar(blob) == live
+
+
+_T = TypeVar("_T")
+
+
+class _FinishedAtSubmit(concurrent.futures.ThreadPoolExecutor):
+    """Runs each job as it is submitted, so the job is complete before
+    ``run_in_executor`` returns. The job's done-callback is then only queued when
+    the caller's await resumes, as for a real job that ends that fast."""
+
+    def submit(
+        self, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
+    ) -> concurrent.futures.Future[_T]:
+        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+
+@pytest.fixture
+async def finished_at_submit() -> None:
+    asyncio.get_running_loop().set_default_executor(_FinishedAtSubmit())
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["returns", "raises"])
+@pytest.mark.usefixtures("finished_at_submit")
+async def test_a_job_done_before_its_await_is_settled_before_the_caller_resumes(
+    fails: bool, tmp_path: Path
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = tmp_path / "incoming" / "staging"
+    staging.mkdir(parents=True)
+    storage._register_staging(staging)
+
+    def _job() -> None:
+        if fails:
+            raise RuntimeError("job fault")
+
+    with pytest.raises(RuntimeError) if fails else contextlib.nullcontext():
+        await storage._run_on_staging(staging, _job)
+    await storage._discard_staging(staging, raise_fault=True)
+
+    assert not staging.exists()
+    assert not storage._is_staging_active(staging)
+
+
+def _raise_job_fault(_staging: Path) -> None:
+    raise RuntimeError("region scan fault")
+
+
+# (id, op, whether its region scan raises)
+_FAST_OPS: list[tuple[str, _BackupOp, bool]] = [
+    ("check_backup_health-returns", _check_health, False),
+    ("check_backup_health-raises", _check_health, True),
+    ("restore-raises", _restore, True),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "fails"),
+    [(o, f) for _, o, f in _FAST_OPS],
+    ids=[n for n, _, _ in _FAST_OPS],
+)
+async def test_a_backup_op_whose_jobs_end_at_once_removes_its_staging_before_it_ends(
+    op: _BackupOp,
+    fails: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"a.txt": b"OLD"})
+    key = await storage.create_backup_from_current(community, server)
+    asyncio.get_running_loop().set_default_executor(_FinishedAtSubmit())
+    if fails:
+        monkeypatch.setattr(fs, "check_working_set", _raise_job_fault)
+
+    with pytest.raises(RuntimeError) if fails else contextlib.nullcontext():
+        await op(storage, community, server, key)
+
+    incoming = storage._server_root(community, server) / "incoming"
+    assert not incoming.exists() or not any(incoming.iterdir())
+    assert not storage._active_staging

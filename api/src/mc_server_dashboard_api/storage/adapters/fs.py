@@ -488,7 +488,7 @@ class FsStorage(Storage):
         self._active_staging: set[Path] = set()
         # Threaded jobs still using each staging dir, and the staging dirs whose
         # removal waits for them (issue #3583). Guarded by ``_lease_lock``.
-        self._staging_jobs: dict[Path, int] = {}
+        self._staging_jobs: dict[Path, set[asyncio.Future[Any]]] = {}
         self._staging_removals_due: set[Path] = set()
         self._lease_lock = threading.Lock()
         # Per-server publish/edit serialization (issue #899). Every authoritative
@@ -743,36 +743,42 @@ class FsStorage(Storage):
 
         A cancel during the await does not stop the worker thread, and the cancelled
         caller discards the staging as it unwinds, while the thread is still using
-        it (issue #3583). So the job is counted against the staging until its
-        done-callback runs, and :meth:`_discard_staging` leaves the removal to the
-        last such callback. The job is awaited shielded, so that callback runs only
-        once the thread has finished. A cancelled caller hands what the job returns
-        to ``reclaim``, as :func:`_acquire_off_loop` does.
+        it (issue #3583). So the job is counted against the staging until it is
+        settled, and :meth:`_discard_staging` leaves the removal to the last job
+        settled. A job that has finished by the time the await ends is settled
+        before the caller resumes; the job's done-callback may still only be queued
+        then, as for one that finished before ``run_in_executor`` returned. A job
+        still running is settled by that callback: the job is awaited shielded, so
+        the callback runs only once the thread has finished. A cancelled caller
+        hands what the job returns to ``reclaim``, as :func:`_acquire_off_loop` does.
         """
 
+        job = asyncio.get_running_loop().run_in_executor(None, fn, *args)
         with self._lease_lock:
-            self._staging_jobs[staging] = self._staging_jobs.get(staging, 0) + 1
-        try:
-            job = asyncio.get_running_loop().run_in_executor(None, fn, *args)
-        except BaseException:
-            self._staging_job_done(staging, None)
-            raise
-        job.add_done_callback(functools.partial(self._staging_job_done, staging))
+            self._staging_jobs.setdefault(staging, set()).add(job)
+        job.add_done_callback(functools.partial(self._settle_staging_job, staging))
         try:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
             if reclaim is not None:
                 job.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
             raise
+        finally:
+            if job.done():
+                self._settle_staging_job(staging, job)
 
-    def _staging_job_done(self, staging: Path, job: asyncio.Future[Any] | None) -> None:
-        if job is not None and not job.cancelled():
-            # A cancelled caller no longer observes the job's fault.
-            job.exception()
+    def _settle_staging_job(self, staging: Path, job: asyncio.Future[Any]) -> None:
+        """Stop counting the finished ``job`` against ``staging``; idempotent."""
+
         with self._lease_lock:
-            remaining = self._staging_jobs[staging] - 1
-            if remaining:
-                self._staging_jobs[staging] = remaining
+            jobs = self._staging_jobs.get(staging)
+            if jobs is None or job not in jobs:
+                return
+            jobs.discard(job)
+            if not job.cancelled():
+                # A cancelled caller no longer observes the job's fault.
+                job.exception()
+            if jobs:
                 return
             del self._staging_jobs[staging]
             if staging not in self._staging_removals_due:
