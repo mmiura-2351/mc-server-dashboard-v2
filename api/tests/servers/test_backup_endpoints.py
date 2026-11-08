@@ -3115,6 +3115,41 @@ def test_upload_refusal_detail_names_the_member_and_the_reason(
     assert resp.json()["detail"] == detail
 
 
+_LONG_NAME = "a" * 65_536
+
+
+@pytest.mark.parametrize(
+    ("content", "name", "reason"),
+    [
+        pytest.param(
+            _member(_LONG_NAME, tarfile.SYMTYPE, "level.dat"),
+            _LONG_NAME,
+            "is not a regular file or directory",
+            id="symlink",
+        ),
+        pytest.param(
+            _member(f"world/../{_LONG_NAME}"),
+            f"world/../{_LONG_NAME}",
+            "is absolute or has a '..' component",
+            id="dot-dot",
+        ),
+    ],
+)
+def test_upload_refusal_detail_bounds_a_long_member_name(
+    content: bytes, name: str, reason: str
+) -> None:
+    # A PAX long name compresses to almost nothing, so echoing it in full would
+    # amplify a ~200-byte upload into a 64 KiB problem body (issue #3592).
+    resp, _, _, _ = _upload_through_the_route(content)
+
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert len(detail) < 512
+    assert detail.startswith(f"unsafe member: {name[:256]!r}")
+    assert f"(truncated, {len(name)} chars)" in detail
+    assert detail.endswith(reason)
+
+
 def _archive_of(*names: str) -> bytes:
     """A gzip tar of ``names``: a directory for a name ending in ``/``."""
 
