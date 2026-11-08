@@ -1496,7 +1496,8 @@ func TestProbeAlive(t *testing.T) {
 func TestProbeAliveIgnoresCachedState(t *testing.T) {
 	docker := newFakeDocker()
 	docker.inspectInfo = ContainerInfo{ID: "container-1", Running: true}
-	inst := &instance{docker: docker, containerID: "container-1", state: execution.StateStopped}
+	inst := &instance{docker: docker, containerID: "container-1"}
+	inst.state.Store(int32(execution.StateStopped))
 
 	alive, err := inst.ProbeAlive(context.Background())
 	if err != nil {

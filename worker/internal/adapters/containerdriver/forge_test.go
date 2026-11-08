@@ -544,6 +544,61 @@ func TestForgeContainerStopWinsLatchBeforeLaunch(t *testing.T) {
 	}
 }
 
+// stallStartDocker holds the Docker Start of one container until release closes,
+// as a daemon that stops answering mid-call does: the engine client has no
+// deadline of its own.
+type stallStartDocker struct {
+	*forgeFakeDocker
+	id      string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d *stallStartDocker) Start(ctx context.Context, id string) error {
+	if id == d.id {
+		close(d.entered)
+		<-d.release
+	}
+	return d.forgeFakeDocker.Start(ctx, id)
+}
+
+// Status never waits on the instance lock (issue #3587). The install-to-launch
+// handoff holds that lock across the launch container's Docker Start, and the
+// instance manager reads Status while holding its own locks, so a stalled daemon
+// would otherwise stall the whole manager and its status stream.
+func TestForgeStatusDoesNotWaitOnAStalledLaunchStart(t *testing.T) {
+	dir := t.TempDir()
+	docker := &stallStartDocker{
+		forgeFakeDocker: newForgeFakeDocker(), id: "mcsd-s1",
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	inst, err := forgeDriver(docker).Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	writeArgsfile(t, dir)
+	docker.exit("mcsd-s1-install", 0, nil)
+	select {
+	case <-docker.entered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the launch container was never started")
+	}
+
+	got := make(chan execution.ServerState, 1)
+	go func() { got <- inst.Status() }()
+	select {
+	case s := <-got:
+		if s != execution.StateStarting {
+			t.Errorf("Status = %v, want starting", s)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Status waited on the instance lock held across the launch's Docker Start")
+	}
+	close(docker.release)
+	docker.exit("mcsd-s1", 0, nil)
+	drainClosed(inst.Events())
+}
+
 // A Wait TRANSPORT error on the install container where the container is gone
 // and no argsfile was produced still crashes — the re-plan check (not the stale
 // transport error) is the authority: no install artifacts means the install

@@ -83,14 +83,13 @@ func TestResyncStatusEmptyEmitsNothing(t *testing.T) {
 	}
 }
 
-// ResyncStatus must not hold m.mu while emitting (sendStatus can coalesce and
-// wake the dispatcher). This test proves the lock is released before the emit by
-// having a concurrent goroutine that needs m.mu run while the events sink is
-// blocked: if ResyncStatus held m.mu across the emit, the concurrent lock would
-// deadlock with the unread sink. The sink has capacity 32, so to truly block the
-// emit we fill it first, then assert the concurrent m.mu acquisition still
-// completes.
-func TestResyncStatusDoesNotHoldLockDuringEmit(t *testing.T) {
+// ResyncStatus holds m.mu across its emit (issue #3587), so the emit must never
+// wait on the sink: on a full sink it coalesces and wakes the dispatcher instead.
+// This test has a concurrent goroutine that needs m.mu run while the events sink
+// is full: if the emit waited for the sink to drain, the concurrent lock would
+// deadlock with the unread sink. The sink has capacity 32, so it is filled first,
+// then the concurrent m.mu acquisition must still complete.
+func TestResyncStatusDoesNotBlockOnAFullSink(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	// Fill the events sink (cap 32) so the next emit must block/coalesce rather
 	// than complete instantly.
@@ -106,8 +105,8 @@ func TestResyncStatusDoesNotHoldLockDuringEmit(t *testing.T) {
 	}()
 
 	// A concurrent operation that takes m.mu must not be blocked by the resync's
-	// in-flight emit. If ResyncStatus held m.mu across the (now coalescing) emit,
-	// this would block until the sink drained; it does not, so it returns at once.
+	// emit. If that emit waited on the full sink while ResyncStatus held m.mu,
+	// this would block until the sink drained; it coalesces, so it returns at once.
 	locked := make(chan struct{})
 	go func() {
 		m.mu.Lock()
@@ -119,7 +118,7 @@ func TestResyncStatusDoesNotHoldLockDuringEmit(t *testing.T) {
 	select {
 	case <-locked:
 	case <-time.After(2 * time.Second):
-		t.Fatal("m.mu acquisition blocked: ResyncStatus held the lock across its emit")
+		t.Fatal("m.mu acquisition blocked: ResyncStatus waited on the full sink under the lock")
 	}
 
 	// Drain the sink so the coalesced resync emit completes and the goroutine exits.

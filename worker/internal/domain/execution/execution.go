@@ -284,7 +284,9 @@ type Instance interface {
 	// starts rather than out of it, so a slow flush never shortens the shutdown
 	// grace; the two are additive in the worst case (issue #2622).
 	Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error
-	// Status reports the last observed state.
+	// Status reports the last observed state. It never blocks, not even on a
+	// driver call in flight: the instance manager reads it while holding the locks
+	// its commands and status stream wait on (issue #3587).
 	Status() ServerState
 	// ProbeAlive reports whether the instance's underlying process/container is
 	// currently alive, by direct observation (not cached state): neither Status
