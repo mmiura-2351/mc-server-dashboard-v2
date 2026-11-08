@@ -986,7 +986,8 @@ async def upload_backup(
     before the whole body is materialized); the use case then validates the archive
     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
     member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
-    member, its name and the reason); an over-cap archive is 413.
+    member, its name and the reason; a name over 256 characters is cut to its
+    first 256 and marked ``…(truncated, N chars)``); an over-cap archive is 413.
 
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A restore republishes the archive's members verbatim as the working
