@@ -133,6 +133,10 @@ type fakeDocker struct {
 	// cleanup Remove was issued on a live context rather than the already-cancelled
 	// command context (issue #1715).
 	removeCtxErrs []error
+	// removeStallsLeft models a stalled daemon for the next N Remove calls: each
+	// blocks until its context is cancelled and then returns the context error
+	// (issue #3610).
+	removeStallsLeft int
 
 	exitCode int64
 	exitErr  error
@@ -146,6 +150,10 @@ type fakeDocker struct {
 	// logBody is the multiplexed stream Logs returns; logErr forces a Logs error.
 	logBody io.Reader
 	logErr  error
+	// logsFollowUntilCtxDone makes the Logs stream behave as the Engine's follow
+	// does on a quiet container: a Read blocks until the request context is
+	// cancelled and then fails with its error.
+	logsFollowUntilCtxDone bool
 	// stats is returned by Stats; statsErr forces a Stats error.
 	stats    ContainerStats
 	statsErr error
@@ -167,11 +175,14 @@ func newFakeDocker() *fakeDocker {
 	return &fakeDocker{exited: make(chan struct{})}
 }
 
-func (f *fakeDocker) Logs(_ context.Context, _ string) (io.ReadCloser, error) {
+func (f *fakeDocker) Logs(ctx context.Context, _ string) (io.ReadCloser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.logErr != nil {
 		return nil, f.logErr
+	}
+	if f.logsFollowUntilCtxDone {
+		return io.NopCloser(ctxFollowReader{ctx}), nil
 	}
 	body := f.logBody
 	if body == nil {
@@ -406,6 +417,13 @@ func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
 	f.removeCtxErrs = append(f.removeCtxErrs, ctx.Err())
+	if f.removeStallsLeft > 0 {
+		f.removeStallsLeft--
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return ctx.Err()
+	}
 	if err, ok := f.removeErrFor[id]; ok {
 		return err
 	}
@@ -421,6 +439,15 @@ func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 
 func (f *fakeDocker) List(_ context.Context, _, _ string) ([]Container, error) {
 	return f.listResult, f.listErr
+}
+
+// ctxFollowReader is a log follow with nothing to send: Read blocks until ctx is
+// cancelled, as the Engine client's response body does.
+type ctxFollowReader struct{ ctx context.Context }
+
+func (r ctxFollowReader) Read([]byte) (int, error) {
+	<-r.ctx.Done()
+	return 0, r.ctx.Err()
 }
 
 // exit releases Wait with the given code/error, simulating container exit.
@@ -943,6 +970,85 @@ func TestSuperviseClosesMetricsConnection(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("cached metrics connection was not closed on instance exit")
 	}
+}
+
+// A daemon that stalls on the exited container's removal must not hold the
+// instance open: the removal is bounded, the event and log streams close and the
+// metrics connection is released anyway, and the failure is logged. The container
+// left behind is removed by the next start's wait-for-name-free loop, which then
+// creates the server under the same name (issue #3610).
+func TestSuperviseFinishesWhenTheExitedContainerRemovalStalls(t *testing.T) {
+	docker := newFakeDocker()
+	docker.removeStallsLeft = 1
+	docker.logsFollowUntilCtxDone = true
+	ctrl := &fakeMetricsControl{closedCh: make(chan struct{})}
+	logged := &syncBuffer{}
+	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return ctrl, nil
+	}, Options{
+		WorkerID:             "w1",
+		StopTimeout:          50 * time.Millisecond,
+		GameBindIP:           "0.0.0.0",
+		ReadinessTimeout:     20 * time.Millisecond,
+		ConflictPollInterval: time.Millisecond,
+		ConflictDeadline:     5 * time.Second,
+		Logger:               slog.New(slog.NewTextHandler(logged, nil)),
+	})
+	d.exitRemoveTimeout = 50 * time.Millisecond
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+	if _, err := inst.(execution.StatsSource).Sample(context.Background()); err != nil {
+		t.Fatalf("Sample: %v", err)
+	}
+
+	docker.exit(0, nil)
+	closed := make(chan struct{})
+	go func() {
+		drainClosed(inst.Events())
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("event stream still open while the exited container's removal stalls")
+	}
+	select {
+	case <-ctrl.closedCh:
+	default:
+		t.Fatal("metrics connection not released after the event stream closed")
+	}
+	for range inst.(execution.LogSource).Logs() { //nolint:revive // the log stream must have closed
+	}
+	if got := logged.String(); !strings.Contains(got, "container-1") || !strings.Contains(got, context.DeadlineExceeded.Error()) {
+		t.Fatalf("stalled removal not logged; got %q", got)
+	}
+
+	// The next start of the same server meets the container left behind.
+	docker.mu.Lock()
+	docker.exited = make(chan struct{})
+	docker.conflictsLeft = 1
+	docker.inspectSteps = []inspectStep{
+		{info: ContainerInfo{ID: "container-1", Labels: map[string]string{labelWorkerID: "w1"}}},
+		{err: errNotFound},
+	}
+	docker.mu.Unlock()
+	next, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("restart over the leftover container: %v", err)
+	}
+	drainTo(t, next.Events(), execution.StateRunning)
+	docker.mu.Lock()
+	removed := append([]string(nil), docker.removed...)
+	docker.mu.Unlock()
+	if len(removed) != 2 || removed[1] != "container-1" {
+		t.Fatalf("removed = %v, want the stalled removal then the leftover's removal", removed)
+	}
+	docker.exit(0, nil)
+	drainClosed(next.Events())
 }
 
 func TestParsePlayerCount(t *testing.T) {

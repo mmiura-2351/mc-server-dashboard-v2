@@ -704,7 +704,9 @@ and labels it with this Worker's id (`mcsd.worker.id`), the server id
 the sweep below reads to decode the container's `server.properties` the way that
 version's server does). At startup it sweeps and force-removes every container
 carrying its own worker-id label before launching any server, then removes a
-container after the server exits. The sweep recovers from a crash that left a
+container after the server exits. That removal waits at most 10 s for the daemon;
+a container it leaves behind is removed when the server next starts, or by the
+next boot's sweep. The sweep recovers from a crash that left a
 server's container behind, but because it force-removes *running* containers too,
 a graceful Worker restart while servers are up kills those live servers — this is
 the deliberate stateless-worker posture (the Worker adopts no prior state; the

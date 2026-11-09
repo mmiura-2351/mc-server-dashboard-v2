@@ -268,6 +268,8 @@ type Driver struct {
 	worldProgress func(workingDir string) func() (execution.WorldProgress, error)
 	// imagePullTimeout bounds a lazy base-image pull (issue #904).
 	imagePullTimeout time.Duration
+	// exitRemoveTimeout bounds the removal of an exited container (issue #3610).
+	exitRemoveTimeout time.Duration
 	// logger records the lazy base-image pull at INFO (issue #904).
 	logger *slog.Logger
 	// handOffs tracks the stops in flight on this driver's instances, so a Worker
@@ -325,20 +327,21 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 			after:       time.After,
 			runScan:     func(f func()) { go f() },
 		},
-		flushTimeout:     flushTimeout,
-		gameBindIP:       gameBindIP,
-		network:          opts.Network,
-		scratchDir:       opts.ScratchDir,
-		runAsUID:         runAsUID,
-		runAsGID:         runAsGID,
-		chownAt:          chownAtNoFollow,
-		conflictPoll:     conflictPoll,
-		conflictDeadline: conflictDeadline,
-		readinessTimeout: readinessTimeout,
-		sweepCallMargin:  sweepCallMargin,
-		worldProgress:    opts.WorldProgress,
-		imagePullTimeout: defaultImagePullTimeout,
-		logger:           logger,
+		flushTimeout:      flushTimeout,
+		gameBindIP:        gameBindIP,
+		network:           opts.Network,
+		scratchDir:        opts.ScratchDir,
+		runAsUID:          runAsUID,
+		runAsGID:          runAsGID,
+		chownAt:           chownAtNoFollow,
+		conflictPoll:      conflictPoll,
+		conflictDeadline:  conflictDeadline,
+		readinessTimeout:  readinessTimeout,
+		sweepCallMargin:   sweepCallMargin,
+		worldProgress:     opts.WorldProgress,
+		imagePullTimeout:  defaultImagePullTimeout,
+		exitRemoveTimeout: exitRemoveTimeout,
+		logger:            logger,
 	}
 	d.handOffs = &stopHandOffs{d: d, stops: map[*inflightStop]struct{}{}}
 	return d
@@ -397,23 +400,24 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 
 	inst := &instance{
-		spec:             spec,
-		docker:           d.docker,
-		image:            image,
-		network:          d.network,
-		gameBindIP:       d.gameBindIP,
-		labels:           d.labels(spec.ServerID, spec.MinecraftVersion),
-		createFn:         d.createServerContainer,
-		openControl:      d.openControl,
-		rconHost:         d.RconHost(spec.ServerID),
-		stopRule:         d.stopRule,
-		handOffs:         d.handOffs,
-		flushTimeout:     d.flushTimeout,
-		readinessTimeout: d.readinessTimeout,
-		logger:           d.logger,
-		events:           make(chan execution.StatusEvent, 8),
-		exited:           make(chan struct{}),
-		logPump:          execution.NewLogPump(spec.ServerID, logBufferLines),
+		spec:              spec,
+		docker:            d.docker,
+		image:             image,
+		network:           d.network,
+		gameBindIP:        d.gameBindIP,
+		labels:            d.labels(spec.ServerID, spec.MinecraftVersion),
+		createFn:          d.createServerContainer,
+		openControl:       d.openControl,
+		rconHost:          d.RconHost(spec.ServerID),
+		stopRule:          d.stopRule,
+		handOffs:          d.handOffs,
+		flushTimeout:      d.flushTimeout,
+		readinessTimeout:  d.readinessTimeout,
+		exitRemoveTimeout: d.exitRemoveTimeout,
+		logger:            d.logger,
+		events:            make(chan execution.StatusEvent, 8),
+		exited:            make(chan struct{}),
+		logPump:           execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
 	inst.state.Store(int32(execution.StateStarting))
 	inst.installCtx, inst.endInstall = context.WithCancel(context.Background())
@@ -500,6 +504,13 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 // answers a remove well inside it (the startup Sweep's remove calls carry the
 // same 10s posture, issue #338); the bound only caps a wedged daemon.
 const startCleanupRemoveTimeout = 10 * time.Second
+
+// exitRemoveTimeout bounds supervise's Remove of the exited container. A healthy
+// daemon answers a remove well inside it (the posture of
+// startCleanupRemoveTimeout and the startup Sweep's remove calls); the bound only
+// caps a stalled daemon, which would otherwise hold the instance's event stream
+// open indefinitely (issue #3610).
+const exitRemoveTimeout = 10 * time.Second
 
 // removeCreated is the best-effort cleanup of a created-but-unstarted container
 // whose Start failed. It runs detached from the command context
@@ -1144,6 +1155,9 @@ type instance struct {
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
 	// running (issue #345).
 	readinessTimeout time.Duration
+	// exitRemoveTimeout bounds supervise's removal of the exited container (issue
+	// #3610).
+	exitRemoveTimeout time.Duration
 	// logger records the graceful-stop -> kill escalation at WARN (issue #927), so a
 	// stop that timed out (leaving the world's regions unpadded for the stop-leg
 	// snapshot) is diagnosable. Never nil: Start copies the Driver's logger, which
@@ -2827,7 +2841,16 @@ func (i *instance) supervise() {
 	i.logPump.Close()
 
 	// Remove the exited container so a later start can reuse the deterministic name.
-	_ = i.docker.Remove(context.Background(), id)
+	// The removal is bounded so a stalled daemon cannot hold the event stream and
+	// the instance's resources open (issue #3610). A container it leaves behind is
+	// removed by the next start's wait-for-name-free loop (createContainer) or the
+	// next boot's Sweep.
+	removeCtx, cancel := context.WithTimeout(context.Background(), i.exitRemoveTimeout)
+	if err := i.docker.Remove(removeCtx, id); err != nil {
+		i.logger.Warn("remove exited container failed; the next start of the server or the next boot's sweep removes it",
+			"server_id", i.spec.ServerID, "container_id", id, "error", err)
+	}
+	cancel()
 
 	i.mu.Lock()
 	i.closed = true
