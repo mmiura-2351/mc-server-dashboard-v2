@@ -32,6 +32,9 @@ from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -52,13 +55,16 @@ def _exploding_factory() -> NoReturn:  # pragma: no cover - asserts it never ope
     raise AssertionError("session factory must not open on a parse failure")
 
 
-def _sink() -> ServersLateSnapshotResultSink:
+def _sink(
+    unrecorded_stops: UnrecordedStops | None = None,
+) -> ServersLateSnapshotResultSink:
     factory = cast(async_sessionmaker[AsyncSession], _exploding_factory)
     return ServersLateSnapshotResultSink(
         factory,
         control_plane=FakeControlPlane(),
         clock=FakeClock(_NOW),
         stop_convergence=StopConvergenceGuard(),
+        unrecorded_stops=unrecorded_stops or UnrecordedStops(),
     )
 
 
@@ -142,3 +148,32 @@ async def test_clear_carries_the_worker_message_into_the_release_warning(
         record.levelno == logging.WARNING and detail in record.getMessage()
         for record in caplog.records
     )
+
+
+async def test_a_release_that_fails_to_be_written_is_recorded_for_the_reconciler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Issue #3441: the control plane drops the late snapshot's record before this
+    # sink writes the release, so a failed write would otherwise lose it until the
+    # full reconciler grace. The sink must hand the use case the process-wide record
+    # the reconciler reads, so the failure is recorded where it will be seen.
+    server_id, worker_id = uuid.uuid4(), uuid.uuid4()
+
+    class _DownUnitOfWork(FakeUnitOfWork):
+        async def __aenter__(self) -> FakeUnitOfWork:
+            raise ConnectionRefusedError("database is unreachable")
+
+    monkeypatch.setattr(
+        sink_module, "SqlAlchemyUnitOfWork", lambda _factory, _events: _DownUnitOfWork()
+    )
+    unrecorded = UnrecordedStops()
+
+    with pytest.raises(ConnectionRefusedError):
+        await _sink(unrecorded).clear_held_assignment_on_late_snapshot(
+            server_id=str(server_id),
+            worker_id=str(worker_id),
+            succeeded=True,
+            message=None,
+        )
+
+    assert unrecorded.recorded_at(ServerId(server_id)) == _NOW

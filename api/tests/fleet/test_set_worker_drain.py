@@ -39,6 +39,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -596,6 +599,7 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
         stop_refusals=StopDispatchRefusals(),
+        unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
         held_start_grace_seconds=90,
         refused_stop_grace_seconds=30,
