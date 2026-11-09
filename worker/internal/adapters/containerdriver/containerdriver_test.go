@@ -1016,10 +1016,11 @@ func TestSuperviseFinishesWhenTheExitedContainerRemovalStalls(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("event stream still open while the exited container's removal stalls")
 	}
+	// supervise releases the metrics connection after it closes the event stream.
 	select {
 	case <-ctrl.closedCh:
-	default:
-		t.Fatal("metrics connection not released after the event stream closed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("metrics connection not released while the exited container's removal stalls")
 	}
 	for range inst.(execution.LogSource).Logs() { //nolint:revive // the log stream must have closed
 	}
@@ -1049,6 +1050,30 @@ func TestSuperviseFinishesWhenTheExitedContainerRemovalStalls(t *testing.T) {
 	}
 	docker.exit(0, nil)
 	drainClosed(next.Events())
+}
+
+// A post-exit removal that lost to a restart's conflict loop is not a failure:
+// the container is already gone (DELETE 404) or already being removed (409).
+// Anything else, a timeout included, may leave the container behind (issue
+// #3610).
+func TestRemovedConcurrently(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"gone", statusError{method: "DELETE", path: "/containers/c1", code: 404, message: "No such container: c1"}, true},
+		{"removal in progress", fmt.Errorf("%w: daemon said so", errRemovalInProgress), true},
+		{"server error", statusError{method: "DELETE", path: "/containers/c1", code: 500, message: "boom"}, false},
+		{"timeout", context.DeadlineExceeded, false},
+		{"transport", errors.New("dial unix /var/run/docker.sock: connect: no such file"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := removedConcurrently(tc.err); got != tc.want {
+				t.Fatalf("removedConcurrently(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
 }
 
 func TestParsePlayerCount(t *testing.T) {

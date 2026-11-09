@@ -42,6 +42,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -2846,7 +2847,12 @@ func (i *instance) supervise() {
 	// removed by the next start's wait-for-name-free loop (createContainer) or the
 	// next boot's Sweep.
 	removeCtx, cancel := context.WithTimeout(context.Background(), i.exitRemoveTimeout)
-	if err := i.docker.Remove(removeCtx, id); err != nil {
+	switch err := i.docker.Remove(removeCtx, id); {
+	case err == nil:
+	case removedConcurrently(err):
+		i.logger.Debug("exited container already removed or being removed",
+			"server_id", i.spec.ServerID, "container_id", id, "error", err)
+	default:
 		i.logger.Warn("remove exited container failed; the next start of the server or the next boot's sweep removes it",
 			"server_id", i.spec.ServerID, "container_id", id, "error", err)
 	}
@@ -2863,6 +2869,15 @@ func (i *instance) supervise() {
 	// the metrics pump, so any in-flight sample unblocks and this acquires the lock
 	// without waiting out a full sample.
 	i.closeMetricsControl()
+}
+
+// removedConcurrently reports whether a failed Remove lost to another removal of
+// the same container, such as a restart's wait-for-name-free loop: the daemon
+// answered 404 (already gone) or 409 (removal in progress). Either way the name is
+// freed without this call (issue #3610).
+func removedConcurrently(err error) bool {
+	var status statusError
+	return errors.Is(err, errRemovalInProgress) || (errors.As(err, &status) && status.code == http.StatusNotFound)
 }
 
 // isTransportError reports whether err from a docker call is a transport-level
