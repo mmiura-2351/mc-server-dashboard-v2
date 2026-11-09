@@ -352,6 +352,40 @@ func TestRetiredOrphanReportsTheClassifiedCrashItTookOver(t *testing.T) {
 	assertClassifiedCrash(t, evs[0])
 }
 
+// A failed-stop orphan whose pump has already forwarded its classified crash,
+// with its stream still open, so nothing but the converger retires the record
+// (issue #3616). The retirement must not report a synthesized `stopped` over
+// the crash: the stream ends with the crash, Detail and CrashReason intact.
+func TestRetiredOrphanKeepsTheClassifiedCrashItAlreadyForwarded(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	shrinkOrphanConverger(m)
+	old := newFakeInstance(s1)
+	startPumpsFor(m, s1, old)
+	drainStatuses(t, m, 1) // the fake's own running
+
+	old.end(classifiedCrash)
+	evs := collectUntil(t, m, execution.StateCrashed.String())
+	m.recordOrphan(s1, old, "container", "1.21")
+	waitFor(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return !m.converging[s1]
+	})
+	// The retirement queued its report before it released the record, so it is
+	// on its way to the stream by now.
+	select {
+	case ev := <-m.Events():
+		evs = append(evs, ev)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("the retirement of %s reported nothing", s1)
+	}
+	evs = append(evs, drainS1(m)...)
+
+	assertStates(t, evs, []string{"crashed", "crashed"})
+	assertClassifiedCrash(t, evs[0])
+	assertClassifiedCrash(t, evs[1])
+}
+
 // A crash releases the id itself, and a replacement start can claim it at once.
 // The replacement is run where the crashed instance's id has been released and
 // its `crashed` is not queued yet (beforeCrashReport). Where it can take mu
