@@ -97,10 +97,13 @@ func (i *fakeInstance) Stop(_ context.Context, graceful bool, _ ...func(context.
 }
 
 // end records ev as the instance's terminal and state, as the driver does before
-// it emits one (execution.Instance), then emits it.
+// it emits one (execution.Instance), then emits it. Like the driver it keeps the
+// first terminal: a later one does not replace the event Terminal reports.
 func (i *fakeInstance) end(ev execution.StatusEvent) {
 	i.mu.Lock()
-	i.terminal = &ev
+	if i.terminal == nil {
+		i.terminal = &ev
+	}
 	i.state = ev.State
 	i.alive = false
 	i.mu.Unlock()
@@ -114,6 +117,20 @@ func (i *fakeInstance) Terminal() (execution.StatusEvent, bool) {
 		return execution.StatusEvent{}, false
 	}
 	return *i.terminal, true
+}
+
+// The fake keeps an instance's first terminal, as the driver does: a later end,
+// or a Stop after the instance ended, does not replace it (issue #3616).
+func TestFakeInstanceKeepsItsFirstTerminal(t *testing.T) {
+	i := newFakeInstance(s1)
+	i.end(classifiedCrash)
+	i.end(execution.StatusEvent{ServerID: s1, State: execution.StateStopped})
+	if err := i.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop after the end = %v, want nil", err)
+	}
+	if ev, ok := i.Terminal(); !ok || ev != classifiedCrash {
+		t.Fatalf("Terminal() = %+v, %v; want the first terminal %+v", ev, ok, classifiedCrash)
+	}
 }
 
 func (i *fakeInstance) Status() execution.ServerState {

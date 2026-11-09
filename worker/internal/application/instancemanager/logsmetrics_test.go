@@ -24,6 +24,8 @@ type richInstance struct {
 	mu        sync.Mutex
 	sample    execution.MetricsSample
 	sampleErr error
+	// terminal is what Terminal answers: the `stopped` Stop emits.
+	terminal *execution.StatusEvent
 }
 
 func newRichInstance(id string) *richInstance {
@@ -38,7 +40,12 @@ func newRichInstance(id string) *richInstance {
 }
 
 func (i *richInstance) Stop(_ context.Context, _ bool, _ ...func(context.Context) bool) error {
-	i.events <- execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped}
+	// Recorded before it is emitted, as the driver does (execution.Instance).
+	ev := execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped}
+	i.mu.Lock()
+	i.terminal = &ev
+	i.mu.Unlock()
+	i.events <- ev
 	// Terminal: close the streams so the pumps tear down (drivers do this in
 	// supervise after the process/container exits).
 	close(i.events)
@@ -50,13 +57,36 @@ func (i *richInstance) Status() execution.ServerState        { return execution.
 func (i *richInstance) Events() <-chan execution.StatusEvent { return i.events }
 func (i *richInstance) Logs() <-chan execution.LogEvent      { return i.logs }
 
-// Terminal matches Status: this fake never records a terminal state.
+// Terminal reports the `stopped` Stop emits, once Stop has run.
 func (i *richInstance) Terminal() (execution.StatusEvent, bool) {
-	return execution.StatusEvent{}, false
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.terminal == nil {
+		return execution.StatusEvent{}, false
+	}
+	return *i.terminal, true
 }
 
 // ProbeAlive matches Status: this fake models a live instance.
 func (i *richInstance) ProbeAlive(context.Context) (bool, error) { return true, nil }
+
+// The fake's Terminal reports the `stopped` its Stop emits (issue #3616).
+func TestRichInstanceReportsTheStoppedItsStopEmits(t *testing.T) {
+	i := newRichInstance(s1)
+	if _, ok := i.Terminal(); ok {
+		t.Fatal("Terminal() ok before Stop, want none")
+	}
+	if err := i.Stop(context.Background(), true); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+	var last execution.StatusEvent
+	for ev := range i.events {
+		last = ev
+	}
+	if ev, ok := i.Terminal(); !ok || ev != last {
+		t.Fatalf("Terminal() = %+v, %v; want the emitted %+v", ev, ok, last)
+	}
+}
 
 func (i *richInstance) Sample(context.Context) (execution.MetricsSample, error) {
 	i.mu.Lock()

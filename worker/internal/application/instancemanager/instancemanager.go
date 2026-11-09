@@ -4663,7 +4663,7 @@ func (m *Manager) endForwarding(inst execution.Instance) {
 // the given inst, so it does not clear a record belonging to a different instance
 // (issue #251). It reports whether it removed anything: the pump ignores that (it
 // is retiring a record that may not exist), while the converger, through
-// forgetOrphanLocked, emits the terminal `stopped` only when its call is the one
+// forgetOrphanLocked, emits the terminal report only when its call is the one
 // that actually retired the record (issue #2475).
 func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()

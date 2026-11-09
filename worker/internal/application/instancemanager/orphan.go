@@ -73,7 +73,7 @@ func (m *Manager) recordOrphan(serverID string, inst execution.Instance, driverN
 //     probe interval with the instance confirmed gone, it is the #2468 item-4
 //     stranded record — forgetOrphanIf ran BEFORE attemptStop wrote it, so
 //     nothing will ever clear it — and this retires it directly and reports the
-//     terminal `stopped`.
+//     instance's terminal, or `stopped` when it has none.
 //   - unavailable: report `unknown` for the id (level-triggered: once per
 //     transition into the state) and keep probing. It NEVER gives up. A bounded
 //     give-up would recreate the "Worker gives up" root cause the #2467 owner
@@ -201,15 +201,17 @@ func (m *Manager) reportOrphanUnknown(serverID string, inst execution.Instance) 
 }
 
 // retireStrandedOrphan retires serverID's orphan record if it is still inst and
-// queues the terminal `stopped` in the same critical section (issue #3596). The
+// queues the terminal report in the same critical section (issue #3596). The
 // release of the record is what lets a replacement command claim the id, so a
-// `stopped` sent after unlocking could follow the replacement's own events and
+// report sent after unlocking could follow the replacement's own events and
 // overwrite them. The same holds for whatever inst's own pump still holds: two
 // dead probes do not prove the pump has forwarded the instance's terminal, so
-// inst is superseded here as well and the pump drops it (issue #3597). When the
-// pump still owed the terminal, the report is inst's own terminal, a crash's
-// Detail and CrashReason included, in place of the synthesized `stopped`. It
-// reports whether it retired the record.
+// inst is superseded here as well and the pump drops it (issue #3597). The
+// report is inst's own terminal whenever it has one, a crash's Detail and
+// CrashReason included, and a synthesized `stopped` only when it has none. That
+// holds whether or not the pump still owed the terminal: one already forwarded
+// is reported again, the same payload, rather than overwritten by a `stopped`
+// (issue #3616). It reports whether it retired the record.
 func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -218,15 +220,12 @@ func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance)
 	}
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
-	report := session.StatusEvent{
+	m.supersedeLocked(inst)
+	m.queueOrphanReportLocked(terminalReport(inst, session.StatusEvent{
 		ServerID: serverID,
 		State:    execution.StateStopped.String(),
 		Detail:   "failed-stop orphan confirmed gone",
-	}
-	if m.supersedeLocked(inst) {
-		report = terminalReport(inst, report)
-	}
-	m.queueOrphanReportLocked(report)
+	}))
 	return true
 }
 
