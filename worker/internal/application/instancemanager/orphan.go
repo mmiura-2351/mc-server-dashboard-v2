@@ -139,12 +139,7 @@ func (m *Manager) convergeOrphan(serverID string) {
 			m.logger.Warn("failed-stop orphan: cannot determine whether the process is alive; reporting unknown and still probing",
 				"server_id", serverID, "driver", entry.driver, "error", err)
 			if !reportedUnknown {
-				reportedUnknown = true
-				m.sendStatus(session.StatusEvent{
-					ServerID: serverID,
-					State:    orphanUnknownState,
-					Detail:   "worker cannot confirm the fate of a failed-stop orphan",
-				})
+				reportedUnknown = m.reportOrphanUnknown(serverID, entry.inst)
 			}
 		case alive:
 			sawDead, reportedUnknown = false, false
@@ -152,14 +147,9 @@ func (m *Manager) convergeOrphan(serverID string) {
 		case sawDead:
 			// Confirmed gone across two probes and the record is still here: the
 			// instance's own pump can no longer clear it (issue #2468 item 4).
-			if m.forgetOrphanIf(serverID, entry.inst) {
+			if m.retireStrandedOrphan(serverID, entry.inst) {
 				m.logger.Warn("failed-stop orphan: instance confirmed gone but its record was stranded; retired it",
 					"server_id", serverID, "driver", entry.driver)
-				m.sendStatus(session.StatusEvent{
-					ServerID: serverID,
-					State:    execution.StateStopped.String(),
-					Detail:   "failed-stop orphan confirmed gone",
-				})
 			}
 		default:
 			// First confirmed-dead probe: give the instance's own pump one interval
@@ -169,6 +159,70 @@ func (m *Manager) convergeOrphan(serverID string) {
 
 		delay = min(2*delay, m.orphanProbeMaxInterval)
 	}
+}
+
+// reportOrphanUnknown queues the converger's `unknown` for serverID's orphan inst,
+// unless a newer event has made it stale (issue #3596). The probe that led here
+// ran outside every lock, and in that time the orphan can exit on its own: the
+// pump then forwards its terminal and retires the record, and a replacement
+// command can claim the id. An `unknown` queued after either would overwrite
+// them, because the API stamps a report on receipt.
+//
+// So the record is re-checked under mu and the report is queued under statusMu
+// in the same critical section, as ResyncStatus does (issue #3587). Under mu, no
+// command can retire the record or claim the id until the report is queued.
+// Under statusMu, the pump cannot forward the instance's terminal between the
+// read of its state and the report. The report is dropped when the record is
+// gone or names a different instance, or when the instance is already stopped or
+// crashed: its terminal is on the stream already, or will be, since drivers set
+// the state before they emit it. It reports whether it queued the report.
+func (m *Manager) reportOrphanUnknown(serverID string, inst execution.Instance) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e, ok := m.orphans[serverID]; !ok || e.inst != inst {
+		return false
+	}
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	if s := inst.Status(); s == execution.StateStopped || s == execution.StateCrashed {
+		return false
+	}
+	m.queueOrphanReportLocked(session.StatusEvent{
+		ServerID: serverID,
+		State:    orphanUnknownState,
+		Detail:   "worker cannot confirm the fate of a failed-stop orphan",
+	})
+	return true
+}
+
+// retireStrandedOrphan retires serverID's orphan record if it is still inst and
+// queues the terminal `stopped` in the same critical section (issue #3596). The
+// release of the record is what lets a replacement command claim the id, so a
+// `stopped` sent after unlocking could follow the replacement's own events and
+// overwrite them. It reports whether it retired the record.
+func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.forgetOrphanLocked(serverID, inst) {
+		return false
+	}
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	m.queueOrphanReportLocked(session.StatusEvent{
+		ServerID: serverID,
+		State:    execution.StateStopped.String(),
+		Detail:   "failed-stop orphan confirmed gone",
+	})
+	return true
+}
+
+// queueOrphanReportLocked queues one of the converger's reports; the caller holds
+// mu and statusMu.
+func (m *Manager) queueOrphanReportLocked(ev session.StatusEvent) {
+	if hook := m.beforeOrphanReport; hook != nil {
+		hook(ev.ServerID)
+	}
+	m.queueStatusLocked(ev)
 }
 
 // probeAliveWithTimeout runs one liveness probe bounded by the probe cadence,

@@ -506,11 +506,11 @@ type Manager struct {
 	// (order is preserved per server). dirtyStatus is the FIFO of servers awaiting
 	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
 	//
-	// Lock order: mu before statusMu. ResyncStatus holds the two together (issue
-	// #3587); nothing takes mu while holding statusMu, and nothing that holds
-	// statusMu blocks: the queueing in queueStatusLocked never waits on the sink,
-	// and an instance's Status, which ResyncStatus reads there, never waits either
-	// (execution.Instance).
+	// Lock order: mu before statusMu. ResyncStatus and the orphan converger's
+	// reports hold the two together (issues #3587, #3596); nothing takes mu while
+	// holding statusMu, and nothing that holds statusMu blocks: the queueing in
+	// queueStatusLocked never waits on the sink, and an instance's Status, which
+	// both read there, never waits either (execution.Instance).
 	statusMu      sync.Mutex
 	pendingStatus map[string]session.StatusEvent
 	coalescing    map[string]bool
@@ -522,6 +522,12 @@ type Manager struct {
 	// that point (issue #3587). Production leaves it nil. It runs under mu and
 	// statusMu, so it must take neither.
 	beforeResyncReport func(serverID string)
+
+	// beforeOrphanReport, when non-nil, runs just before the orphan converger
+	// queues a report for an id (issue #3596), so a test can try to end the
+	// orphan's process or start a replacement at that point. Production leaves it
+	// nil. It runs under mu and statusMu, so it must take neither.
+	beforeOrphanReport func(serverID string)
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
@@ -4541,12 +4547,17 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 // forgetOrphanIf removes serverID's failed-stop orphan record only if it is still
 // the given inst, so it does not clear a record belonging to a different instance
 // (issue #251). It reports whether it removed anything: the pump ignores that (it
-// is retiring a record that may not exist), while the converger emits the terminal
-// `stopped` only when this call is the one that actually retired the record
-// (issue #2475).
+// is retiring a record that may not exist), while the converger, through
+// forgetOrphanLocked, emits the terminal `stopped` only when its call is the one
+// that actually retired the record (issue #2475).
 func (m *Manager) forgetOrphanIf(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.forgetOrphanLocked(serverID, inst)
+}
+
+// forgetOrphanLocked is forgetOrphanIf for a caller that holds mu.
+func (m *Manager) forgetOrphanLocked(serverID string, inst execution.Instance) bool {
 	if e, ok := m.orphans[serverID]; ok && e.inst == inst {
 		delete(m.orphans, serverID)
 		// The process is gone, so a save-off left outstanding on it has nobody
