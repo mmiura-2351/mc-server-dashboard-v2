@@ -440,63 +440,83 @@ def _log_close_fault(handle: _Closable, fault: BaseException) -> None:
     _LOG.warning("could not close the abandoned file %s: %s", name, fault)
 
 
-def _close_logging_fault(handle: _Closable, close: Callable[[], None]) -> None:
+def _close_logging_fault(handle: _Closable) -> None:
     try:
-        close()
+        handle.close()
     except Exception as fault:
         _log_close_fault(handle, fault)
-
-
-def _log_finished_close_fault(handle: _Closable, closing: asyncio.Future[None]) -> None:
-    fault = None if closing.cancelled() else closing.exception()
-    if fault is not None:
-        _log_close_fault(handle, fault)
-
-
-def _close_settling(
-    handle: _Closable,
-    close: Callable[[], None],
-    loop: asyncio.AbstractEventLoop,
-    closing: asyncio.Future[None],
-) -> None:
-    """Run ``close`` on this thread, then settle ``closing`` with its outcome."""
-
-    fault: BaseException | None = None
-    try:
-        close()
-    except BaseException as exc:
-        fault = exc
-    try:
-        loop.call_soon_threadsafe(_settle_close, closing, fault)
-    except RuntimeError:  # the loop closed: no one is left to await the close
-        if fault is not None:
-            _log_close_fault(handle, fault)
-
-
-def _settle_close(closing: asyncio.Future[None], fault: BaseException | None) -> None:
-    if fault is None:
-        closing.set_result(None)
-    else:
-        closing.set_exception(fault)
 
 
 def _close_abandoned(handle: _Closable) -> None:
     """Close ``handle`` off the loop, from a loop callback (issues #3602, #3603).
 
     For a handle whose user was cancelled, so no one awaits the close: its fault is
-    logged. Off the loop, since closing a writing file or tar flushes it. The
-    loop's teardown shuts its default executor down while cancelled jobs may still
-    be finishing, and a shut-down executor refuses the close: it then runs on a
-    thread of its own. Either way it runs in the caller's context.
+    logged by the closing thread itself, needing no further loop turn. Off the
+    loop, since closing a writing file or tar flushes it. The loop's teardown shuts
+    its default executor down while cancelled jobs may still be finishing, and a
+    shut-down executor refuses the close: it then runs on a thread of its own.
+    Either way the close and its log run in the caller's context.
     """
 
-    close = functools.partial(contextvars.copy_context().run, handle.close)
+    close = functools.partial(
+        contextvars.copy_context().run, _close_logging_fault, handle
+    )
     try:
-        closing = asyncio.get_running_loop().run_in_executor(None, close)
+        asyncio.get_running_loop().run_in_executor(None, close)
     except RuntimeError:  # "Executor shutdown has been called"
-        threading.Thread(target=_close_logging_fault, args=(handle, close)).start()
-        return
-    closing.add_done_callback(functools.partial(_log_finished_close_fault, handle))
+        threading.Thread(target=close).start()
+
+
+def _no_wake() -> None:
+    pass
+
+
+class _AwaitedClose:
+    """A close run off the loop, its fault reported exactly once (issue #3611).
+
+    While its caller awaits it, the caller raises the fault. Once that caller is
+    cancelled, or its loop has closed, whichever side finds the other gone logs the
+    fault, directly: a settlement handed to a stopped loop may never run. A lock
+    makes the two sides agree on which of them reports.
+    """
+
+    def __init__(self, handle: _Closable) -> None:
+        self._handle = handle
+        self._lock = threading.Lock()
+        self._fault: Exception | None = None
+        self._abandoned = False
+
+    def run(self, wake: Callable[[], object]) -> None:
+        """Close the handle on this thread, then wake the caller, or log its fault."""
+
+        fault = None
+        try:
+            self._handle.close()
+        except Exception as exc:
+            fault = exc
+        with self._lock:
+            self._fault = fault
+            report = self._abandoned
+        if not report:
+            try:
+                wake()
+            except RuntimeError:  # the loop closed: no one is left to raise the fault
+                report = True
+        if report and fault is not None:
+            _log_close_fault(self._handle, fault)
+
+    def abandon(self) -> None:
+        """The caller was cancelled: log a fault already in, or leave it to the run."""
+
+        with self._lock:
+            self._abandoned = True
+            fault = self._fault
+        if fault is not None:
+            _log_close_fault(self._handle, fault)
+
+    def raise_fault(self) -> None:
+        if self._fault is not None:
+            raise self._fault
 
 
 async def _close_off_loop(handle: _Closable) -> None:
@@ -505,23 +525,25 @@ async def _close_off_loop(handle: _Closable) -> None:
     Shielded: a cancel while the close still waits for a worker would otherwise
     drop it, leaving the handle to the GC, so a cancelled caller's close goes on,
     its fault logged. A close the shut-down executor refuses runs on a thread of
-    its own, as :func:`_close_abandoned`'s does, and is awaited the same way.
+    its own, as :func:`_close_abandoned`'s does, and is awaited the same way. The
+    close and any log of its fault run in the caller's context.
     """
 
     loop = asyncio.get_running_loop()
-    close = functools.partial(contextvars.copy_context().run, handle.close)
+    close = _AwaitedClose(handle)
+    context = contextvars.copy_context()
     try:
-        closing = loop.run_in_executor(None, close)
+        woken = loop.run_in_executor(None, context.run, close.run, _no_wake)
     except RuntimeError:  # "Executor shutdown has been called"
-        closing = loop.create_future()
-        threading.Thread(
-            target=_close_settling, args=(handle, close, loop, closing)
-        ).start()
+        woken = loop.create_future()
+        wake = functools.partial(loop.call_soon_threadsafe, woken.set_result, None)
+        threading.Thread(target=context.run, args=(close.run, wake)).start()
     try:
-        await asyncio.shield(closing)
+        await asyncio.shield(woken)
     except asyncio.CancelledError:
-        closing.add_done_callback(functools.partial(_log_finished_close_fault, handle))
+        close.abandon()
         raise
+    close.raise_fault()
 
 
 class _OffLoopFile:
