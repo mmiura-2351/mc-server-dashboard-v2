@@ -380,6 +380,19 @@ snapshot and release of the assignment stay with the stop convergence that settl
 other unexpected stop, which the reconciler restarts after its grace (CONFIGURATION.md
 Section 5.6).
 
+No resync report is queued behind a newer event for the same server (#3587). The API
+stamps each `StatusChange` on receipt, so a report queued after the event that
+superseded it, such as a stop's `STOPPED` that landed between the Worker reading the
+state and sending the report, would set the row back to the older state until the
+reconciler's slow path. The Worker reads each server's state and queues its report in
+one critical section. A command, an instance's status forwarding or the orphan
+converger has to enter that section to change the state or to queue an event for the
+server, so its events follow the report. The one event that comes before the record
+changes is an instance's own terminal state. A failed-stop orphan, a stop or a
+restart's stop leg whose instance has already reported `STOPPED` or `CRASHED` while
+the Worker still holds the record is therefore reported at that terminal state, not
+`SERVER_STATE_UNKNOWN` or `SERVER_STATE_STOPPING`.
+
 ### 4.2 Steady state
 
 ```

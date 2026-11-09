@@ -413,9 +413,9 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		logger:           d.logger,
 		events:           make(chan execution.StatusEvent, 8),
 		exited:           make(chan struct{}),
-		state:            execution.StateStarting,
 		logPump:          execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
+	inst.state.Store(int32(execution.StateStarting))
 	inst.installCtx, inst.endInstall = context.WithCancel(context.Background())
 	inst.emit(execution.StateStarting, "")
 
@@ -1210,8 +1210,11 @@ type instance struct {
 	// close.
 	metricsClosed bool
 
-	mu       sync.Mutex
-	state    execution.ServerState
+	mu sync.Mutex
+	// state is written under mu, where it is read with the fields beside it, and
+	// read without mu by Status, which must never wait: mu is held across Docker
+	// calls such as a Forge launch's Start (issue #3587).
+	state    atomic.Int32
 	stopping bool
 	// stopRequested is a sticky record that a Stop was ever requested. Unlike
 	// stopping (which the survived-kill failure path resets so a retry re-runs the
@@ -1291,10 +1294,10 @@ func (i *instance) awaitReady() {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if i.state != execution.StateStarting {
+	if execution.ServerState(i.state.Load()) != execution.StateStarting {
 		return
 	}
-	i.state = execution.StateRunning
+	i.state.Store(int32(execution.StateRunning))
 	if i.beforeReadyPublish != nil {
 		i.beforeReadyPublish()
 	}
@@ -1806,9 +1809,7 @@ func (i *instance) finish(state execution.ServerState, detail string, reason exe
 }
 
 func (i *instance) Status() execution.ServerState {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.state
+	return execution.ServerState(i.state.Load())
 }
 
 // ProbeAlive reports whether the container is running right now, from a live
@@ -1958,7 +1959,7 @@ func parsePlayerCount(reply string) uint32 {
 // Any terminal state makes Stop a prompt no-op success.
 func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
 	i.mu.Lock()
-	if i.stopping || isTerminal(i.state) {
+	if i.stopping || isTerminal(execution.ServerState(i.state.Load())) {
 		i.mu.Unlock()
 		return nil
 	}
@@ -1974,8 +1975,8 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 	// still starting — Stop is reachable from starting since the readiness gating of
 	// issue #350 holds starting through the MC boot — does not relabel a still-booting
 	// container as running and misreport it to the control plane (issue #352).
-	prior := i.state
-	i.state = execution.StateStopping
+	prior := execution.ServerState(i.state.Load())
+	i.state.Store(int32(execution.StateStopping))
 	// Capture the current container under the same lock that latches stopping, so
 	// the install→launch handoff (which only proceeds when stopping is unset)
 	// cannot race this read: Stop acts on whichever container is current, and a
@@ -2150,7 +2151,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 			return nil
 		}
 		i.stopping = false
-		i.state = prior
+		i.state.Store(int32(prior))
 		i.mu.Unlock()
 		return fmt.Errorf("containerdriver: kill: %w", err)
 	}
@@ -2192,7 +2193,7 @@ func (i *instance) Stop(ctx context.Context, graceful bool, preFallback ...func(
 			return nil
 		}
 		i.stopping = false
-		i.state = prior
+		i.state.Store(int32(prior))
 		i.mu.Unlock()
 		return fmt.Errorf("containerdriver: container survived docker kill after %s", i.stopTimeout)
 	}
@@ -2681,7 +2682,7 @@ func (i *instance) awaitHandedOff(s *inflightStop, requested time.Time, prior ex
 		return nil
 	}
 	i.stopping = false
-	i.state = prior
+	i.state.Store(int32(prior))
 	i.mu.Unlock()
 	return fmt.Errorf("containerdriver: container still running %s after its stop was handed to the daemon", wait)
 }
@@ -2911,7 +2912,7 @@ func (i *instance) exitAfterTransportError(id string) (exited bool, info Contain
 
 func (i *instance) set(s execution.ServerState) {
 	i.mu.Lock()
-	i.state = s
+	i.state.Store(int32(s))
 	i.mu.Unlock()
 }
 
