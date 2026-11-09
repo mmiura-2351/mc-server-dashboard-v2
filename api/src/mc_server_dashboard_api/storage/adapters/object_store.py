@@ -76,6 +76,7 @@ from mc_server_dashboard_api.storage.adapters.fs import (
     _discard_spool,
     _run_spool_writer,
     _translating_io_faults,
+    _writing_off_loop,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
@@ -1711,11 +1712,12 @@ class ObjectStorage(Storage):
         gzip_probe = GzipReadProbe()
         read = 0
         try:
-            with _translating_io_faults(), open(spool, "wb") as out:
-                async for chunk in await client.get_object(backup_key):
-                    read += len(chunk)
-                    gzip_probe.feed(chunk)
-                    await asyncio.to_thread(out.write, chunk)
+            with _translating_io_faults():
+                async with _writing_off_loop(spool) as out:
+                    async for chunk in await client.get_object(backup_key):
+                        read += len(chunk)
+                        gzip_probe.feed(chunk)
+                        await out.write(chunk)
             if read < declared:
                 # A body that simply STOPPED early, with no transport error — some
                 # store/proxy combination can end the response cleanly. This is the
@@ -2555,11 +2557,11 @@ async def _spool_stream(
 
     spool = await _create_spool(prefix, suffix)
     try:
-        with open(spool, "wb") as out:
+        async with _writing_off_loop(spool) as out:
             async for chunk in stream:
                 if hasher is not None:
                     hasher.update(chunk)
-                await asyncio.to_thread(out.write, chunk)
+                await out.write(chunk)
     except BaseException:
         await _discard_spool(spool, raise_fault=False)
         raise
