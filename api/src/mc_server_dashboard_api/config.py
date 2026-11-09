@@ -464,13 +464,17 @@ class ReconcilerSettings(_Section):
     cross-worker duplicate-live-instance race the long grace guards cannot occur on
     a re-dispatch to the same already-connected Worker (its double-start guard
     rejects a second live start). All other paths keep the full ``grace_seconds``.
-    ``refused_stop_grace_seconds`` is the SHORTER grace applied only to a
+    ``refused_stop_grace_seconds`` is the SHORTER grace applied to a
     ``redispatch_stop`` whose previous stop dispatch the Worker REFUSED (issue
     #2478): the only thing the full grace protects on that path is
     ``> stop_timeout_seconds`` (#930, never replay a stop whose first dispatch may
-    still be running), and a returned refusal is the end of that round trip. Every
-    other path — including a stop divergence with no recorded refusal, which may
-    never have been dispatched at all — keeps the full ``grace_seconds``.
+    still be running), and a returned refusal is the end of that round trip. It
+    also applies to either stop-side action (``redispatch_stop`` or
+    ``clear_stale_assignment``) for a stop that finished but whose write failed
+    (issue #3441): that is recorded only while no stop and no final-snapshot upload
+    can be in flight, so the #930 and #847 floors are both met. Every other path —
+    including a stop divergence with neither record, which may never have been
+    dispatched at all — keeps the full ``grace_seconds``.
     ``backoff_base_seconds`` / ``backoff_max_seconds`` bound the per-server
     exponential backoff that prevents a persistently failing server from being
     retried every tick.

@@ -210,6 +210,9 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
+)
 from mc_server_dashboard_api.servers.application.warn_missing_ports import (
     WarnLegacyMissingPorts,
 )
@@ -505,9 +508,12 @@ def _warn_reconciler_grace_floor(settings: Settings) -> None:
     ``BUSY`` is excluded from what counts as a refusal precisely because it is the
     Worker reporting that something else IS in flight for the id. The other two terms
     are untouched: #822 belongs to the hydrating start paths and #847 to
-    ``clear_stale_assignment``, neither of which can take this grace. A stop
-    divergence with no recorded refusal — including every one that survives a
-    restart — keeps the full ``grace_seconds``.
+    ``clear_stale_assignment``, and a refusal lets neither take this grace. A stop
+    that finished but whose write failed (issue #3441) lets ``clear_stale_assignment``
+    take it too, and still meets #847: that record is made only while no final
+    snapshot can be uploading, and dropped before the next one is dispatched. A stop
+    divergence with neither record — including every one that survives a restart —
+    keeps the full ``grace_seconds``.
     """
 
     floor = max(
@@ -795,6 +801,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # the reconciler that reads it, to tell a stop the Worker ANSWERED apart from
         # one that may never have been sent and so may still be in flight.
         app.state.stop_dispatch_refusals = StopDispatchRefusals()
+        # Process-wide record of finished stops whose write failed (issue #3441),
+        # shared the same way and for the same reader: without it the reconciler
+        # cannot tell such a stop from one that may still be in flight.
+        app.state.unrecorded_stops = UnrecordedStops()
         # Shared control-plane command-routing state: the servicer registers
         # sessions and resolves results on it; the GrpcControlPlane adapter
         # dispatches through it. The lifecycle use cases reach it via the adapter.
@@ -878,6 +888,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 clock=ServersSystemClock(),
                 real_time_events=real_time_events,
                 stop_convergence=app.state.stop_convergence,
+                unrecorded_stops=app.state.unrecorded_stops,
             )
         )
         logging.getLogger(__name__).info(
@@ -1064,6 +1075,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         clock=ServersSystemClock(),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
                         stop_refusals=app.state.stop_dispatch_refusals,
+                        unrecorded_stops=app.state.unrecorded_stops,
                         stop_convergence=app.state.stop_convergence,
                     ),
                     restart_server=RestartServer(
@@ -1185,12 +1197,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     clock=ServersSystemClock(),
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
                     stop_refusals=app.state.stop_dispatch_refusals,
+                    unrecorded_stops=app.state.unrecorded_stops,
                     stop_convergence=app.state.stop_convergence,
                 ),
                 control_plane=reconciler_control_plane,
                 store_generation=StorageGenerationReader(storage=storage),
                 clock=ServersSystemClock(),
                 stop_refusals=app.state.stop_dispatch_refusals,
+                unrecorded_stops=app.state.unrecorded_stops,
                 grace_seconds=settings.reconciler.grace_seconds,
                 held_start_grace_seconds=settings.reconciler.held_start_grace_seconds,
                 refused_stop_grace_seconds=(

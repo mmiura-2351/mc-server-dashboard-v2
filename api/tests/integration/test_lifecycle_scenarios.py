@@ -26,9 +26,15 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import cast
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -39,11 +45,16 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
+from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
+)
+from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
+    ServersLateSnapshotResultSink,
 )
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
@@ -61,8 +72,14 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
+)
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -94,6 +111,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
@@ -266,14 +284,21 @@ def _restart_server_use_case(
 
 
 def _stop_server_use_case(
-    engine: AsyncEngine, control_plane: FakeControlPlane, clock: Clock
+    engine: AsyncEngine,
+    control_plane: FakeControlPlane,
+    clock: Clock,
+    *,
+    unrecorded_stops: UnrecordedStops | None = None,
+    session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> StopServer:
     return StopServer(
         uow=ServersUnitOfWork(
-            create_session_factory(engine), InProcessRealTimeEvents()
+            session_factory or create_session_factory(engine),
+            InProcessRealTimeEvents(),
         ),
         control_plane=control_plane,
         clock=clock,
+        unrecorded_stops=unrecorded_stops or UnrecordedStops(),
     )
 
 
@@ -293,7 +318,9 @@ async def _reconciler_tick(
     grace_seconds: int = 0,
     held_start_grace_seconds: int = 0,
     restart_timeout_seconds: int = 0,
+    refused_stop_grace_seconds: int = 0,
     store_generation: StoreGenerationReader | None = None,
+    unrecorded_stops: UnrecordedStops | None = None,
 ) -> None:
     # Graces default to 0 so a divergence is actionable immediately (the
     # _AdvancingClock already moves time forward between each use case, so the
@@ -301,19 +328,23 @@ async def _reconciler_tick(
     # timed scenarios pass the stock graces instead.
     store = store_generation or FakeStoreGenerationReader()
     factory = create_session_factory(engine)
+    unrecorded = unrecorded_stops or UnrecordedStops()
     await RunReconcilerTick(
         uow=ServersUnitOfWork(factory),
         make_start_server=lambda: _start_server_use_case(
             engine, control_plane, clock, store
         ),
-        make_stop_server=lambda: _stop_server_use_case(engine, control_plane, clock),
+        make_stop_server=lambda: _stop_server_use_case(
+            engine, control_plane, clock, unrecorded_stops=unrecorded
+        ),
         control_plane=control_plane,
         store_generation=store,
         clock=clock,
         stop_refusals=StopDispatchRefusals(),
+        unrecorded_stops=unrecorded,
         grace_seconds=grace_seconds,
         held_start_grace_seconds=held_start_grace_seconds,
-        refused_stop_grace_seconds=0,
+        refused_stop_grace_seconds=refused_stop_grace_seconds,
         restart_timeout_seconds=restart_timeout_seconds,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
@@ -1902,3 +1933,203 @@ async def test_dead_failed_stop_orphan_window_ends_in_snapshot_and_release(
     )(community_id=community, server_id=server_id)
     assert restarted.desired_state is DesiredState.RUNNING
     assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+# --- A finished stop whose write fails during a database outage (issue #3441)
+
+# The stock graces: the scenarios below act between them, so they show which one
+# the reconciler took.
+_STOCK_GRACE = 660
+_STOCK_SHORT_STOP_GRACE = 30
+
+
+class _Outage:
+    """A database outage a scenario switches on and off.
+
+    While ``down``, each session the factory opens is bound to a port nothing
+    listens on, so every query fails with the driver's own connection error rather
+    than an exception the test made up.
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self.down = False
+        self._live = create_session_factory(engine)
+        self.unreachable = create_async_engine(
+            "postgresql+asyncpg://mcsd:mcsd@127.0.0.1:9/mcsd_test"
+        )
+        self._unreachable = create_session_factory(self.unreachable)
+
+    def factory(self) -> async_sessionmaker[AsyncSession]:
+        def open_session() -> AsyncSession:
+            return (self._unreachable if self.down else self._live)()
+
+        return cast(async_sessionmaker[AsyncSession], open_session)
+
+
+@pytest.fixture
+async def outage(engine: AsyncEngine) -> AsyncIterator[_Outage]:
+    db = _Outage(engine)
+    try:
+        yield db
+    finally:
+        await db.unreachable.dispose()
+
+
+async def test_confirmed_stop_whose_write_failed_converges_on_the_short_grace(
+    engine: AsyncEngine, outage: _Outage
+) -> None:
+    """start -> stop that the Worker confirms while the database goes down -> the
+    post-stop write fails -> the database recovers -> the reconciler converges the
+    row on the short grace -> start succeeds.
+
+    Without the record of the finished stop the row reads as a stop that may never
+    have been sent, so it waited the full grace, and every start until then answered
+    409 because the row was still assigned (issue #3441).
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    class _DatabaseFailsDuringStop(FakeControlPlane):
+        async def stop(
+            self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+        ) -> CommandOutcome:
+            outcome = await super().stop(
+                worker_id=worker_id, server_id=server_id, force=force
+            )
+            outage.down = True
+            return outcome
+
+    unrecorded = UnrecordedStops()
+    with pytest.raises(OSError):
+        await _stop_server_use_case(
+            engine,
+            _DatabaseFailsDuringStop(place_to=WorkerId(worker)),
+            clock,
+            unrecorded_stops=unrecorded,
+            session_factory=outage.factory(),
+        )(community_id=community, server_id=server_id)
+    outage.down = False
+
+    # The stop intent landed before the outage; nothing after it did.
+    stuck = await _load(engine, server_id)
+    assert stuck is not None
+    assert stuck.desired_state is DesiredState.STOPPED
+    assert stuck.observed_state is ObservedState.RUNNING
+    assert stuck.assigned_worker_id == WorkerId(worker)
+    recorded = unrecorded.recorded_at(server_id)
+    assert recorded is not None
+
+    replay = FakeControlPlane()
+    clock.set(recorded + dt.timedelta(seconds=_STOCK_SHORT_STOP_GRACE + 1))
+    await _reconciler_tick(
+        engine,
+        replay,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+        unrecorded_stops=unrecorded,
+    )
+    assert [kind for kind, _, _ in replay.dispatched] == ["stop", "snapshot"]
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.observed_state is ObservedState.STOPPED
+    assert released.assigned_worker_id is None
+
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.assigned_worker_id == WorkerId(next_worker)
+
+
+async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_grace(
+    engine: AsyncEngine, outage: _Outage
+) -> None:
+    """start -> stop whose final snapshot times out (assignment held) -> the late
+    result arrives while the database is down, so its release fails -> the database
+    recovers -> the reconciler releases on the short grace.
+
+    The control plane drops the snapshot's record before the release is written, so
+    no later result can retry it (issue #3441).
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+
+    class _SnapshotTimesOut(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            raise WorkerUnavailableError(str(worker_id.value), upload_may_be_live=True)
+
+    await _stop_server_use_case(
+        engine, _SnapshotTimesOut(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    held = await _load(engine, server_id)
+    assert held is not None
+    assert held.observed_state is ObservedState.STOPPED
+    assert held.assigned_worker_id == WorkerId(worker)
+
+    # The abandoned snapshot's late result reaches the real control-plane state and
+    # sink while the database is down.
+    unrecorded = UnrecordedStops()
+    state = ControlPlaneState(
+        late_snapshot_sink=ServersLateSnapshotResultSink(
+            outage.factory(),
+            control_plane=FakeControlPlane(),
+            clock=clock,
+            stop_convergence=StopConvergenceGuard(),
+            unrecorded_stops=unrecorded,
+        )
+    )
+    reporter = FleetWorkerId(str(worker))
+    state.register_pending(
+        "final-snapshot", reporter, snapshot_server_id=str(server_id.value)
+    )
+    state.discard_pending("final-snapshot")
+    outage.down = True
+    with pytest.raises(OSError):
+        await state.resolve("final-snapshot", reporter, pb.CommandResult(success=True))
+    outage.down = False
+    assert not state.final_snapshot_outstanding(str(server_id.value))
+    still_held = await _load(engine, server_id)
+    assert still_held is not None
+    assert still_held.assigned_worker_id == WorkerId(worker)
+    recorded = unrecorded.recorded_at(server_id)
+    assert recorded is not None
+
+    releasing = FakeControlPlane()
+    clock.set(recorded + dt.timedelta(seconds=_STOCK_SHORT_STOP_GRACE + 1))
+    await _reconciler_tick(
+        engine,
+        releasing,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+        unrecorded_stops=unrecorded,
+    )
+    assert [kind for kind, _, _ in releasing.dispatched] == ["snapshot"]
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.assigned_worker_id is None

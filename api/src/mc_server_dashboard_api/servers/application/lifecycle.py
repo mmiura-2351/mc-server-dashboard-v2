@@ -88,6 +88,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
@@ -104,6 +106,9 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 )
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
+)
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
     BedrockTunnelSync,
@@ -1275,6 +1280,10 @@ class StopServer:
     # sites that never reach the reconciler need not wire it; an unwired site simply
     # records into a journal nobody reads, and the replay keeps the full grace.
     stop_refusals: StopDispatchRefusals = field(default_factory=StopDispatchRefusals)
+    # Where a finished stop whose write failed is recorded for the reconciler to read
+    # (issue #3441), so its replay waits the short grace rather than the full one.
+    # Defaulted for the same reason as ``stop_refusals``.
+    unrecorded_stops: UnrecordedStops = field(default_factory=UnrecordedStops)
     # The per-server exclusion every snapshot-then-release flow holds (issue #3491,
     # ``stop_convergence.py``). Process-wide in production — every construction
     # site wires the one app-state instance; the private default only serves the
@@ -1291,6 +1300,22 @@ class StopServer:
             return await self._stop(
                 community_id=community_id, server_id=server_id, force=force
             )
+
+    @contextmanager
+    def _recording_unwritten_stop(self, server_id: ServerId) -> Iterator[None]:
+        """Record a finished stop whose write raises, then re-raise (issue #3441).
+
+        Without the record the row, left diverged and assigned, looks like a stop
+        that may never have been sent, and the reconciler waits the full grace. Wrap
+        only a write made while nothing is in flight for the server: the Worker has
+        answered the stop, and no final snapshot of it can still be uploading.
+        """
+
+        try:
+            yield
+        except Exception:
+            self.unrecorded_stops.record(server_id, at=self.clock.now())
+            raise
 
     async def _stop(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool
@@ -1342,6 +1367,7 @@ class StopServer:
             worker_id=worker_id, server_id=server_id
         )
         self.stop_refusals.forget(server_id)
+        self.unrecorded_stops.forget(server_id)
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id, force=force
         )
@@ -1451,15 +1477,18 @@ class StopServer:
         """
 
         observed_at = self.clock.now()
-        async with self.uow:
-            applied = await self.uow.servers.record_observed_state(
-                server_id,
-                observed_state=ObservedState.STOPPED,
-                observed_at=observed_at,
-                unassign=False,
-                expected_worker=worker_id,
-            )
-            await self.uow.commit()
+        # The Worker confirmed the stop and no final snapshot has been dispatched
+        # yet, so nothing is in flight if this write fails.
+        with self._recording_unwritten_stop(server_id):
+            async with self.uow:
+                applied = await self.uow.servers.record_observed_state(
+                    server_id,
+                    observed_state=ObservedState.STOPPED,
+                    observed_at=observed_at,
+                    unassign=False,
+                    expected_worker=worker_id,
+                )
+                await self.uow.commit()
         # Keep the return honest (issue #292): mutate the entity only when the write
         # landed; if the #216 guard dropped it, leave the observed fields as-read.
         if applied:
@@ -1597,33 +1626,36 @@ class StopServer:
         # nothing else: every held triple IS reconcilable, and the arm it lands on
         # re-runs this release.
         observed_at = self.clock.now()
-        async with self.uow:
-            current = await self.uow.servers.get_by_id(server_id)
-            if (
-                current is not None
-                and current.assigned_worker_id == worker_id
-                and current.observed_state is ObservedState.CRASHED
-            ):
-                # Leave the crash standing; the guarded clear below releases the row
-                # without touching ``observed`` at all. Reflect the row we just read
-                # onto the returned entity so the response is honest about a crash
-                # that landed after this stop loaded the server (issue #292).
-                applied = False
-                at_rest_under_us = True
-                server.observed_state = current.observed_state
-                server.observed_at = current.observed_at
-            else:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.STOPPED,
-                    observed_at=observed_at,
-                    # The unassign is DEFERRED to after the snapshot (#847), unlike
-                    # the pre-#2448 arm which cleared in this same write.
-                    unassign=False,
-                    expected_worker=worker_id,
-                )
-                at_rest_under_us = applied
-            await self.uow.commit()
+        # The Worker answered that no instance remains, and no final snapshot has been
+        # dispatched yet, so nothing is in flight if this write fails (issue #3441).
+        with self._recording_unwritten_stop(server_id):
+            async with self.uow:
+                current = await self.uow.servers.get_by_id(server_id)
+                if (
+                    current is not None
+                    and current.assigned_worker_id == worker_id
+                    and current.observed_state is ObservedState.CRASHED
+                ):
+                    # Leave the crash standing; the guarded clear below releases the row
+                    # without touching ``observed`` at all. Reflect the row we just read
+                    # onto the returned entity so the response is honest about a crash
+                    # that landed after this stop loaded the server (issue #292).
+                    applied = False
+                    at_rest_under_us = True
+                    server.observed_state = current.observed_state
+                    server.observed_at = current.observed_at
+                else:
+                    applied = await self.uow.servers.record_observed_state(
+                        server_id,
+                        observed_state=ObservedState.STOPPED,
+                        observed_at=observed_at,
+                        # The unassign is DEFERRED to after the snapshot (#847), unlike
+                        # the pre-#2448 arm which cleared in this same write.
+                        unassign=False,
+                        expected_worker=worker_id,
+                    )
+                    at_rest_under_us = applied
+                await self.uow.commit()
         # Keep the return honest (issue #292): mutate the entity only when the write
         # landed; if the #216 guard or the ownership assertion dropped it, leave the
         # observed fields as-read.
@@ -1662,11 +1694,14 @@ class StopServer:
         than a clobber if the row moved by any other path.
         """
 
-        async with self.uow:
-            cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
-                server_id, worker_id
-            )
-            await self.uow.commit()
+        # The final snapshot has settled, so nothing is in flight if this write fails
+        # (issue #3441).
+        with self._recording_unwritten_stop(server_id):
+            async with self.uow:
+                cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
+                    server_id, worker_id
+                )
+                await self.uow.commit()
         if cleared:
             server.assigned_worker_id = None
 
@@ -1712,6 +1747,9 @@ class StopServer:
         DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
         """
 
+        # A dispatched snapshot may outlive its caller, so a finished stop recorded
+        # before it no longer means nothing is in flight (issue #3441).
+        self.unrecorded_stops.forget(server_id)
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,
@@ -1823,6 +1861,7 @@ class StopServer:
             worker_id = server.assigned_worker_id
 
         self.stop_refusals.forget(server_id)
+        self.unrecorded_stops.forget(server_id)
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id, force=force
         )
@@ -2196,22 +2235,26 @@ class StopServer:
         the operator after a cause nobody observed (issue #2766).
         """
 
-        async with self.uow:
-            server = await self.uow.servers.get_by_id(server_id)
-            if (
-                server is None
-                or server.desired_state is not DesiredState.STOPPED
-                or server.observed_state
-                not in (ObservedState.STOPPED, ObservedState.CRASHED)
-                or server.assigned_worker_id != worker_id
-            ):
-                # The row moved since the snapshot was dispatched (a racing start
-                # re-placed it, or it is no longer a held triple): nothing to do.
-                return
-            cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
-                server_id, worker_id
-            )
-            await self.uow.commit()
+        # The late result says the upload settled, and the control plane has already
+        # dropped the snapshot's record, so no later result retries this release. If
+        # the write fails, record it for the reconciler instead (issue #3441).
+        with self._recording_unwritten_stop(server_id):
+            async with self.uow:
+                server = await self.uow.servers.get_by_id(server_id)
+                if (
+                    server is None
+                    or server.desired_state is not DesiredState.STOPPED
+                    or server.observed_state
+                    not in (ObservedState.STOPPED, ObservedState.CRASHED)
+                    or server.assigned_worker_id != worker_id
+                ):
+                    # The row moved since the snapshot was dispatched (a racing start
+                    # re-placed it, or it is no longer a held triple): nothing to do.
+                    return
+                cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
+                    server_id, worker_id
+                )
+                await self.uow.commit()
         if not cleared:
             return
         if succeeded:
