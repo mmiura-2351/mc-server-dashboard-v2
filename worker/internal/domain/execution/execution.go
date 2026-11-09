@@ -288,6 +288,13 @@ type Instance interface {
 	// driver call in flight: the instance manager reads it while holding the locks
 	// its commands and status stream wait on (issue #3587).
 	Status() ServerState
+	// Terminal reports the terminal event the instance emits on Events, its
+	// StateStopped or StateCrashed with Detail and CrashReason, once it has one;
+	// ok is false while it has none. The event is recorded before Status reports
+	// the terminal state and before the event is sent, so whoever sees a terminal
+	// Status reads the event Events carries. Like Status it never blocks: the
+	// instance manager reads it under the same locks (issue #3597).
+	Terminal() (ev StatusEvent, ok bool)
 	// ProbeAlive reports whether the instance's underlying process/container is
 	// currently alive, by direct observation (not cached state): neither Status
 	// nor Events can answer it, since both Stop failure paths reset the cached

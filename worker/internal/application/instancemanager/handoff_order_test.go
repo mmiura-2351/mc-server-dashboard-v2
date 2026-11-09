@@ -17,19 +17,19 @@ import (
 // is starting or running. Each test delays the old instance's pump on its terminal
 // across the handoff, lets the new leg report, and then lets the old pump go on.
 
-// pumpHold parks the pump of the first instance that forwards a `stopped` on that
-// event until release closes. held closes once it is parked; next closes when the
-// same pump reaches its next event, which proves its forward of the held one is
-// over.
+// pumpHold parks the pump of the first instance that forwards a given state on
+// that event until release closes. held closes once it is parked; next closes
+// when the same pump reaches its next event, which proves its forward of the held
+// one is over.
 type pumpHold struct {
 	held, release, next chan struct{}
 	releaseOnce         func()
 	old                 execution.Instance
 }
 
-// holdFirstStopped installs a pumpHold on m. It must run before any pump starts:
-// the hook is read by the pumps without a lock.
-func holdFirstStopped(t *testing.T, m *Manager) *pumpHold {
+// holdFirst installs a pumpHold on m for the first event in state. It must run
+// before any pump starts: the hook is read by the pumps without a lock.
+func holdFirst(t *testing.T, m *Manager, state execution.ServerState) *pumpHold {
 	t.Helper()
 	h := &pumpHold{held: make(chan struct{}), release: make(chan struct{}), next: make(chan struct{})}
 	var mu sync.Mutex
@@ -37,7 +37,7 @@ func holdFirstStopped(t *testing.T, m *Manager) *pumpHold {
 	m.beforePumpForward = func(inst execution.Instance, ev execution.StatusEvent) {
 		mu.Lock()
 		switch {
-		case h.old == nil && ev.State == execution.StateStopped:
+		case h.old == nil && ev.State == state:
 			h.old = inst
 			mu.Unlock()
 			close(h.held)
@@ -72,10 +72,10 @@ func (h *pumpHold) finish(t *testing.T, events chan execution.StatusEvent) {
 	}
 }
 
-// collectUntil reads s1's states off the stream until want arrives.
-func collectUntil(t *testing.T, m *Manager, want string) []string {
+// collectUntil reads s1's events off the stream until one in state want arrives.
+func collectUntil(t *testing.T, m *Manager, want string) []session.StatusEvent {
 	t.Helper()
-	var states []string
+	var evs []session.StatusEvent
 	deadline := time.After(5 * time.Second)
 	for {
 		select {
@@ -83,27 +83,27 @@ func collectUntil(t *testing.T, m *Manager, want string) []string {
 			if ev.ServerID != s1 {
 				continue
 			}
-			states = append(states, ev.State)
+			evs = append(evs, ev)
 			if ev.State == want {
-				return states
+				return evs
 			}
 		case <-deadline:
-			t.Fatalf("%s never reported %s; got %v", s1, want, states)
+			t.Fatalf("%s never reported %s; got %v", s1, want, evs)
 		}
 	}
 }
 
-// drainS1 reads s1's states already on the stream.
-func drainS1(m *Manager) []string {
-	var states []string
+// drainS1 reads s1's events already on the stream.
+func drainS1(m *Manager) []session.StatusEvent {
+	var evs []session.StatusEvent
 	for {
 		select {
 		case ev := <-m.Events():
 			if ev.ServerID == s1 {
-				states = append(states, ev.State)
+				evs = append(evs, ev)
 			}
 		default:
-			return states
+			return evs
 		}
 	}
 }
@@ -117,14 +117,18 @@ func startPumpsFor(m *Manager, serverID string, inst execution.Instance) {
 	m.startPumps(serverID, inst)
 }
 
-func assertStates(t *testing.T, got, want []string) {
+func assertStates(t *testing.T, evs []session.StatusEvent, want []string) {
 	t.Helper()
+	got := make([]string, len(evs))
+	for i, ev := range evs {
+		got[i] = ev.State
+	}
 	if len(got) != len(want) {
-		t.Fatalf("%s reported %v, want %v: the old instance's stopped is out of order", s1, got, want)
+		t.Fatalf("%s reported %v, want %v", s1, got, want)
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Fatalf("%s reported %v, want %v: the old instance's stopped is out of order", s1, got, want)
+			t.Fatalf("%s reported %v, want %v", s1, got, want)
 		}
 	}
 }
@@ -159,7 +163,7 @@ func (d *relaunchGatedDriver) Start(_ context.Context, spec execution.InstanceSp
 func TestRestartOrdersTheOldInstancesStoppedBeforeTheRelaunch(t *testing.T) {
 	d := &relaunchGatedDriver{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	m := newManager(t, d, nil)
-	h := holdFirstStopped(t, m)
+	h := holdFirst(t, m, execution.StateStopped)
 	startHeld(t, m)
 	old := d.insts[0]
 
@@ -174,11 +178,11 @@ func TestRestartOrdersTheOldInstancesStoppedBeforeTheRelaunch(t *testing.T) {
 	if res := <-done; !res.Success {
 		t.Fatalf("restart = %+v, want success", res)
 	}
-	states := collectUntil(t, m, execution.StateRunning.String())
+	evs := collectUntil(t, m, execution.StateRunning.String())
 	h.finish(t, old.events)
-	states = append(states, drainS1(m)...)
+	evs = append(evs, drainS1(m)...)
 
-	assertStates(t, states, []string{"stopped", "starting", "running"})
+	assertStates(t, evs, []string{"stopped", "starting", "running"})
 }
 
 // (b) A stop that confirms termination and releases the id while the old pump
@@ -192,7 +196,7 @@ func TestReleasedStopOrdersTheOldInstancesStoppedBeforeAReplacement(t *testing.T
 			m := newManager(t, d, nil)
 			shrinkOrphanConverger(m)
 			seedScratch(t, m, s1)
-			h := holdFirstStopped(t, m)
+			h := holdFirst(t, m, execution.StateStopped)
 			var old *fakeInstance
 			if tc == "stop" {
 				startHeld(t, m)
@@ -229,11 +233,11 @@ func TestReleasedStopOrdersTheOldInstancesStoppedBeforeAReplacement(t *testing.T
 			if res := m.Handle(context.Background(), startCmd()); !res.Success {
 				t.Fatalf("replacement start = %+v, want success", res)
 			}
-			states := collectUntil(t, m, execution.StateRunning.String())
+			evs := collectUntil(t, m, execution.StateRunning.String())
 			h.finish(t, old.events)
-			states = append(states, drainS1(m)...)
+			evs = append(evs, drainS1(m)...)
 
-			assertStates(t, states, []string{"stopped", "running"})
+			assertStates(t, evs, []string{"stopped", "running"})
 		})
 	}
 }
@@ -246,7 +250,7 @@ func TestRetiredOrphansLateStoppedDoesNotFollowAReplacement(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil)
 	shrinkOrphanConverger(m)
 	seedScratch(t, m, s1)
-	h := holdFirstStopped(t, m)
+	h := holdFirst(t, m, execution.StateStopped)
 	old := newFakeInstance(s1)
 	startPumpsFor(m, s1, old)
 	drainStatuses(t, m, 1) // the fake's own running
@@ -263,9 +267,178 @@ func TestRetiredOrphansLateStoppedDoesNotFollowAReplacement(t *testing.T) {
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("replacement start = %+v, want success", res)
 	}
-	states := collectUntil(t, m, execution.StateRunning.String())
+	evs := collectUntil(t, m, execution.StateRunning.String())
 	h.finish(t, old.events)
-	states = append(states, drainS1(m)...)
+	evs = append(evs, drainS1(m)...)
 
-	assertStates(t, states, []string{"stopped", "running"})
+	assertStates(t, evs, []string{"stopped", "running"})
+}
+
+// classifiedCrash is a crash the driver could explain, as a Forge install's is.
+var classifiedCrash = execution.StatusEvent{
+	ServerID: s1, State: execution.StateCrashed,
+	Detail:      "forge install failed: the installer ran out of memory at the 512 MiB limit",
+	CrashReason: execution.CrashReasonForgeInstallOutOfMemory,
+}
+
+// assertClassifiedCrash checks that ev is classifiedCrash as reported.
+func assertClassifiedCrash(t *testing.T, ev session.StatusEvent) {
+	t.Helper()
+	want := session.StatusEvent{
+		ServerID: s1, State: execution.StateCrashed.String(),
+		Detail: classifiedCrash.Detail, CrashReason: classifiedCrash.CrashReason.String(),
+	}
+	if ev != want {
+		t.Fatalf("%s reported %+v, want the instance's own crash %+v", s1, ev, want)
+	}
+}
+
+// A stop that takes over an instance that already crashed, while its pump holds
+// the classified crash, reports that crash whole: its Detail and CrashReason are
+// what the API and the UI explain the failure with. A synthesized `crashed` would
+// replace a genuine crash with an unexplained one.
+func TestStopTakeoverReportsTheClassifiedCrashItTookOver(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	h := holdFirst(t, m, execution.StateCrashed)
+	startHeld(t, m)
+	old := d.inst
+
+	old.end(classifiedCrash)
+	awaitEnter(t, h.held)
+	if res := m.Handle(context.Background(), session.Command{CommandID: "c2", ServerID: s1, Kind: "StopServer"}); !res.Success {
+		t.Fatalf("stop = %+v, want success", res)
+	}
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("replacement start = %+v, want success", res)
+	}
+	evs := collectUntil(t, m, execution.StateRunning.String())
+	h.finish(t, old.events)
+	evs = append(evs, drainS1(m)...)
+
+	assertStates(t, evs, []string{"crashed", "running"})
+	assertClassifiedCrash(t, evs[0])
+}
+
+// The same for the orphan converger: a failed-stop orphan that crashes on its own
+// while its pump holds the classified crash is retired with that crash, not with
+// a synthesized `stopped`.
+func TestRetiredOrphanReportsTheClassifiedCrashItTookOver(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	shrinkOrphanConverger(m)
+	seedScratch(t, m, s1)
+	h := holdFirst(t, m, execution.StateCrashed)
+	old := newFakeInstance(s1)
+	startPumpsFor(m, s1, old)
+	drainStatuses(t, m, 1) // the fake's own running
+
+	old.end(classifiedCrash)
+	awaitEnter(t, h.held)
+	m.recordOrphan(s1, old, "container", "1.21")
+	waitFor(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		_, orphan := m.orphans[s1]
+		return !orphan
+	})
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("replacement start = %+v, want success", res)
+	}
+	evs := collectUntil(t, m, execution.StateRunning.String())
+	h.finish(t, old.events)
+	evs = append(evs, drainS1(m)...)
+
+	assertStates(t, evs, []string{"crashed", "running"})
+	assertClassifiedCrash(t, evs[0])
+}
+
+// A crash releases the id itself, and a replacement start can claim it at once.
+// The replacement is run where the crashed instance's id has been released and
+// its `crashed` is not queued yet (beforeCrashReport). Where it can take mu
+// there, it runs to its end and the old pump goes on only once the replacement's
+// running is on the stream. Where mu is held, it runs concurrently and has to
+// wait for the old pump. Either way the old `crashed` must precede the
+// replacement's running.
+func TestCrashedInstancesCrashPrecedesAReplacementsEvents(t *testing.T) {
+	d := &fakeDriver{}
+	m := newManager(t, d, nil)
+	// One reader for the whole stream, so the hook can wait on what it sees.
+	var mu sync.Mutex
+	var evs []session.StatusEvent
+	running := make(chan struct{})
+	quit, collected := make(chan struct{}), make(chan struct{})
+	var seeded bool
+	go func() {
+		defer close(collected)
+		for {
+			select {
+			case ev := <-m.Events():
+				if ev.ServerID != s1 {
+					continue
+				}
+				mu.Lock()
+				if !seeded { // the seeded instance's own running
+					seeded = true
+				} else {
+					evs = append(evs, ev)
+					if ev.State == execution.StateRunning.String() {
+						close(running)
+					}
+				}
+				mu.Unlock()
+			case <-quit:
+				return
+			}
+		}
+	}()
+
+	var res session.CommandResult
+	replaced := make(chan struct{})
+	var once sync.Once
+	m.beforeCrashReport = func(string) {
+		once.Do(func() {
+			replace := func() { res = m.Handle(context.Background(), startCmd()) }
+			if !m.mu.TryLock() {
+				go func() {
+					defer close(replaced)
+					replace()
+				}()
+				return
+			}
+			m.mu.Unlock()
+			replace()
+			close(replaced)
+			<-running
+		})
+	}
+	// next closes when the old pump reaches the event after its crash, which
+	// proves it is done with the crash. Only the old instance reports stopped.
+	next := make(chan struct{})
+	m.beforePumpForward = func(_ execution.Instance, ev execution.StatusEvent) {
+		if ev.State == execution.StateStopped {
+			close(next)
+		}
+	}
+	seedScratch(t, m, s1)
+	if r := m.Handle(context.Background(), startCmd()); !r.Success {
+		t.Fatalf("seed running instance: %+v", r)
+	}
+	d.mu.Lock()
+	old := d.inst
+	d.mu.Unlock()
+
+	old.end(classifiedCrash)
+	awaitEnter(t, replaced)
+	if !res.Success {
+		t.Fatalf("replacement start = %+v, want success", res)
+	}
+	awaitEnter(t, running)
+	old.events <- execution.StatusEvent{ServerID: s1, State: execution.StateStopped}
+	awaitEnter(t, next)
+	close(quit)
+	<-collected
+	evs = append(evs, drainS1(m)...)
+
+	assertStates(t, evs, []string{"crashed", "running"})
+	assertClassifiedCrash(t, evs[0])
 }

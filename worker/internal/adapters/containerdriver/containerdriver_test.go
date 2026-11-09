@@ -1933,6 +1933,27 @@ func TestCrashEmitsCrashed(t *testing.T) {
 	drainTo(t, inst.Events(), execution.StateCrashed)
 }
 
+// The instance's Terminal is the crashed event its stream carries (issue #3597).
+func TestCrashIsTheInstancesTerminal(t *testing.T) {
+	docker := newFakeDocker()
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	drainTo(t, inst.Events(), execution.StateRunning)
+	if ev, ok := inst.Terminal(); ok {
+		t.Fatalf("Terminal of a running instance = %+v, want none", ev)
+	}
+	docker.exit(1, nil)
+
+	want := drainToEvent(t, inst.Events(), execution.StateCrashed)
+	if got, ok := inst.Terminal(); !ok || got != want {
+		t.Fatalf("Terminal = %+v, %v, want the emitted %+v", got, ok, want)
+	}
+}
+
 // The crashed terminal event is emitted exactly once.
 func TestCrashEmitsCrashedOnce(t *testing.T) {
 	docker := newFakeDocker()

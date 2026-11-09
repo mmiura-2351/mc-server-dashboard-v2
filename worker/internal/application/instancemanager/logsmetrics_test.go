@@ -50,6 +50,11 @@ func (i *richInstance) Status() execution.ServerState        { return execution.
 func (i *richInstance) Events() <-chan execution.StatusEvent { return i.events }
 func (i *richInstance) Logs() <-chan execution.LogEvent      { return i.logs }
 
+// Terminal matches Status: this fake never records a terminal state.
+func (i *richInstance) Terminal() (execution.StatusEvent, bool) {
+	return execution.StatusEvent{}, false
+}
+
 // ProbeAlive matches Status: this fake models a live instance.
 func (i *richInstance) ProbeAlive(context.Context) (bool, error) { return true, nil }
 

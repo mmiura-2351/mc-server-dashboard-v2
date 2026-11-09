@@ -507,11 +507,11 @@ type Manager struct {
 	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
 	//
 	// Lock order: mu before statusMu. ResyncStatus, the orphan converger's
-	// reports, a launch's registration and a confirmed stop's handoff hold the two
-	// together (issues #3587, #3596, #3597); nothing takes mu while
-	// holding statusMu, and nothing that holds statusMu blocks: the queueing in
-	// queueStatusLocked never waits on the sink, and an instance's Status, which
-	// both read there, never waits either (execution.Instance).
+	// reports, a launch's registration, a confirmed stop's handoff and a crash's
+	// release hold the two together (issues #3587, #3596, #3597); nothing takes mu
+	// while holding statusMu, and nothing that holds statusMu blocks: the queueing
+	// in queueStatusLocked never waits on the sink, and an instance's Status and
+	// Terminal, which are read there, never wait either (execution.Instance).
 	statusMu      sync.Mutex
 	pendingStatus map[string]session.StatusEvent
 	coalescing    map[string]bool
@@ -546,6 +546,12 @@ type Manager struct {
 	// delay an old instance's pump across a handoff. Production leaves it nil. It
 	// runs with no lock held.
 	beforePumpForward func(inst execution.Instance, ev execution.StatusEvent)
+
+	// beforeCrashReport, when non-nil, runs in a crashed instance's pump between
+	// the release of its id and the queueing of its crash (issue #3597), so a test
+	// can start a replacement at that point. Production leaves it nil. It runs
+	// under mu and statusMu, so it must take neither.
+	beforeCrashReport func(serverID string)
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
@@ -3491,14 +3497,16 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 	// the caller releases it, or a restart moves it to its relaunch, only after
 	// this. inst's pump may not have forwarded the terminal yet, and a late one
 	// would follow the events of the next leg or instance, so the terminal is
-	// queued here in its place and the pump drops its own. The section never
-	// blocks: the queueing does not wait on the sink, nor Status on the driver.
+	// queued here in its place and the pump drops its own. It is inst's own
+	// terminal, a crash's Detail and CrashReason included, and a bare `stopped`
+	// only when inst has none. The section never blocks: the queueing does not
+	// wait on the sink, nor Terminal on the driver.
 	m.mu.Lock()
 	delete(m.orphans, serverID)
 	m.clearPendingSaveOnLocked(serverID)
 	m.statusMu.Lock()
 	if m.supersedeLocked(inst) {
-		m.queueStatusLocked(session.StatusEvent{ServerID: serverID, State: terminalOr(inst, execution.StateStopped.String())})
+		m.queueStatusLocked(terminalReport(inst, session.StatusEvent{ServerID: serverID, State: execution.StateStopped.String()}))
 	}
 	m.statusMu.Unlock()
 	m.mu.Unlock()
@@ -4567,10 +4575,7 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 			if hook := m.beforePumpForward; hook != nil {
 				hook(inst, ev)
 			}
-			if ev.State == execution.StateCrashed {
-				m.forgetIf(serverID, inst)
-			}
-			m.forwardStatus(inst, ev)
+			m.forwardStatus(serverID, inst, ev)
 		case <-m.shutdown.Done():
 			// Close. A status the instance has already queued is DROPPED: nothing
 			// drains the merged stream by then (Close runs after the session runner
@@ -4584,26 +4589,54 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 	}
 }
 
-// forwardStatus queues one of inst's events, mapping the domain state to its wire
-// name, unless inst no longer forwards (issue #3597). The check and the queueing
-// share one statusMu section, which a handoff holds to supersede inst, so the
-// event is either queued before the handoff, and therefore before the events of
-// whatever took the id over, or dropped. A dropped event is never the only report
-// of the instance's end: the handoff queued its terminal when the pump still owed
-// it. A terminal state ends the forwarding, as it ends the instance's stream.
-func (m *Manager) forwardStatus(inst execution.Instance, ev execution.StatusEvent) {
+// forwardStatus queues one of inst's events, unless inst no longer forwards
+// (issue #3597). The check and the queueing share one statusMu section, which a
+// handoff holds to supersede inst, so the event is either queued before the
+// handoff, and therefore before the events of whatever took the id over, or
+// dropped. A dropped event is never the only report of the instance's end: the
+// handoff queued its terminal when the pump still owed it. A terminal state ends
+// the forwarding, as it ends the instance's stream.
+//
+// A crash is itself a handoff: it releases serverID if inst still holds it, and a
+// replacement can claim the id at once. So the release shares the section, under
+// mu as well, and the crash is queued ahead of whatever the replacement reports.
+func (m *Manager) forwardStatus(serverID string, inst execution.Instance, ev execution.StatusEvent) {
+	crashed := ev.State == execution.StateCrashed
+	if crashed {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.forgetIfLocked(serverID, inst)
+	}
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
+	if hook := m.beforeCrashReport; crashed && hook != nil {
+		hook(serverID)
+	}
 	if _, ok := m.forwarding[inst]; !ok {
 		return
 	}
-	if ev.State == execution.StateStopped || ev.State == execution.StateCrashed {
+	if ev.State == execution.StateStopped || crashed {
 		delete(m.forwarding, inst)
 	}
-	m.queueStatusLocked(session.StatusEvent{
+	m.queueStatusLocked(wireStatus(ev))
+}
+
+// wireStatus maps one of an instance's events to its wire form.
+func wireStatus(ev execution.StatusEvent) session.StatusEvent {
+	return session.StatusEvent{
 		ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail,
 		CrashReason: ev.CrashReason.String(),
-	})
+	}
+}
+
+// terminalReport is the report a handoff that superseded inst queues in its
+// pump's place (issue #3597): inst's own terminal event, its Detail and
+// CrashReason included, or fallback when inst has none, because it has not ended.
+func terminalReport(inst execution.Instance, fallback session.StatusEvent) session.StatusEvent {
+	if ev, ok := inst.Terminal(); ok {
+		return wireStatus(ev)
+	}
+	return fallback
 }
 
 // supersedeLocked ends inst's forwarding at a handoff of its id (issue #3597):
@@ -5016,11 +5049,10 @@ func mapLogStream(s execution.LogStream) session.LogStream {
 	return session.LogStreamStdout
 }
 
-// forgetIf removes serverID's instance only if it is still the given inst, so a
-// crash event does not evict a freshly restarted instance.
-func (m *Manager) forgetIf(serverID string, inst execution.Instance) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// forgetIfLocked removes serverID's instance only if it is still the given inst,
+// so a crash event does not evict a freshly restarted instance. The caller holds
+// mu.
+func (m *Manager) forgetIfLocked(serverID string, inst execution.Instance) {
 	if m.instances[serverID] == inst {
 		delete(m.instances, serverID)
 		delete(m.startCmds, serverID)

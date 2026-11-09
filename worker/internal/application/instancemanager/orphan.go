@@ -206,7 +206,9 @@ func (m *Manager) reportOrphanUnknown(serverID string, inst execution.Instance) 
 // `stopped` sent after unlocking could follow the replacement's own events and
 // overwrite them. The same holds for whatever inst's own pump still holds: two
 // dead probes do not prove the pump has forwarded the instance's terminal, so
-// inst is superseded here as well and the pump drops it (issue #3597). It
+// inst is superseded here as well and the pump drops it (issue #3597). When the
+// pump still owed the terminal, the report is inst's own terminal, a crash's
+// Detail and CrashReason included, in place of the synthesized `stopped`. It
 // reports whether it retired the record.
 func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
@@ -216,12 +218,15 @@ func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance)
 	}
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
-	m.supersedeLocked(inst)
-	m.queueOrphanReportLocked(session.StatusEvent{
+	report := session.StatusEvent{
 		ServerID: serverID,
 		State:    execution.StateStopped.String(),
 		Detail:   "failed-stop orphan confirmed gone",
-	})
+	}
+	if m.supersedeLocked(inst) {
+		report = terminalReport(inst, report)
+	}
+	m.queueOrphanReportLocked(report)
 	return true
 }
 

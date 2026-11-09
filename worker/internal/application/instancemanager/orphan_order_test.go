@@ -20,11 +20,7 @@ import (
 // instance sets its terminal state and then emits it, as drivers do. closed also
 // closes the event stream, after which the pump retires the orphan record.
 func exitOnItsOwn(inst *fakeInstance, closed bool) {
-	inst.mu.Lock()
-	inst.state = execution.StateStopped
-	inst.alive = false
-	inst.mu.Unlock()
-	inst.events <- execution.StatusEvent{ServerID: inst.serverID, State: execution.StateStopped}
+	inst.end(execution.StatusEvent{ServerID: inst.serverID, State: execution.StateStopped})
 	if closed {
 		close(inst.events)
 	}
