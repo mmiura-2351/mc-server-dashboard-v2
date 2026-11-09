@@ -45,7 +45,7 @@ func TestConvergersUnknownIsNotQueuedAfterTheOrphansOwnExit(t *testing.T) {
 			shrinkOrphanConverger(m)
 			inst := newGatedProbeInstance(s1)
 			inst.setAlive(false, errors.New("driver: daemon unreachable"))
-			m.startPumps(s1, inst)
+			startPumpsFor(m, s1, inst)
 			drainStatuses(t, m, 1) // the fake's own running
 			m.recordOrphan(s1, inst, "container", "1.21")
 			awaitEnter(t, inst.probeEntered)

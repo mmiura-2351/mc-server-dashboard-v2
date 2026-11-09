@@ -506,8 +506,9 @@ type Manager struct {
 	// (order is preserved per server). dirtyStatus is the FIFO of servers awaiting
 	// dispatch. statusNotify wakes the dispatcher (capacity 1: a coalesced signal).
 	//
-	// Lock order: mu before statusMu. ResyncStatus and the orphan converger's
-	// reports hold the two together (issues #3587, #3596); nothing takes mu while
+	// Lock order: mu before statusMu. ResyncStatus, the orphan converger's
+	// reports, a launch's registration and a confirmed stop's handoff hold the two
+	// together (issues #3587, #3596, #3597); nothing takes mu while
 	// holding statusMu, and nothing that holds statusMu blocks: the queueing in
 	// queueStatusLocked never waits on the sink, and an instance's Status, which
 	// both read there, never waits either (execution.Instance).
@@ -516,6 +517,17 @@ type Manager struct {
 	coalescing    map[string]bool
 	dirtyStatus   []string
 	statusNotify  chan struct{}
+
+	// forwarding holds each instance whose status pump may still forward events
+	// for its id (issue #3597). An instance enters it in the critical section that
+	// registers it, and leaves it when its pump forwards its terminal state or
+	// exits, or when a handoff supersedes it (supersedeLocked): a stop that
+	// confirmed its termination, or the orphan converger's retirement of its record.
+	// The pump forwards an event only while its instance is here, checked under
+	// statusMu when the event is queued, so nothing an old instance's pump still
+	// holds can be queued after the events of the leg or the instance that took
+	// its id over. Guarded by statusMu.
+	forwarding map[execution.Instance]struct{}
 
 	// beforeResyncReport, when non-nil, runs between ResyncStatus's read of an id's
 	// state and the queueing of its report, so a test can try to end a command at
@@ -528,6 +540,12 @@ type Manager struct {
 	// orphan's process or start a replacement at that point. Production leaves it
 	// nil. It runs under mu and statusMu, so it must take neither.
 	beforeOrphanReport func(serverID string)
+
+	// beforePumpForward, when non-nil, runs in an instance's status pump between
+	// its read of an event and the forwarding of it (issue #3597), so a test can
+	// delay an old instance's pump across a handoff. Production leaves it nil. It
+	// runs with no lock held.
+	beforePumpForward func(inst execution.Instance, ev execution.StatusEvent)
 }
 
 // New builds a Manager. drivers maps an advertised driver name to its adapter;
@@ -563,6 +581,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		pendingStatus:      map[string]session.StatusEvent{},
 		coalescing:         map[string]bool{},
 		statusNotify:       make(chan struct{}, 1),
+		forwarding:         map[execution.Instance]struct{}{},
 
 		orphanProbeInterval:    defaultOrphanProbeInterval,
 		orphanProbeMaxInterval: defaultOrphanProbeMaxInterval,
@@ -2791,11 +2810,15 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	// Register the instance, then drop the reservation under the same mu: the
 	// tracked instance now holds the id, so there is no window where neither the
 	// reservation nor the instance claims it (a concurrent duplicate always sees
-	// one or the other, issue #780).
+	// one or the other, issue #780). Its pump's forwarding starts in the same
+	// section, before a stop can take the instance and supersede it (issue #3597).
 	m.mu.Lock()
 	m.instances[cmd.ServerID] = inst
 	m.startCmds[cmd.ServerID] = cmd
 	delete(m.reserved, cmd.ServerID)
+	m.statusMu.Lock()
+	m.forwarding[inst] = struct{}{}
+	m.statusMu.Unlock()
 	m.mu.Unlock()
 	m.startPumps(cmd.ServerID, inst)
 
@@ -2820,6 +2843,7 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 func (m *Manager) startPumps(serverID string, inst execution.Instance) {
 	done := make(chan struct{})
 	if !m.goBackground(func() { m.pump(serverID, inst, done) }) {
+		m.endForwarding(inst)
 		return
 	}
 	if src, ok := inst.(execution.LogSource); ok {
@@ -3463,9 +3487,20 @@ func (m *Manager) attemptStop(ctx context.Context, serverID string, inst executi
 		}
 		return err
 	}
+	// The termination is confirmed, so inst hands the id over here (issue #3597):
+	// the caller releases it, or a restart moves it to its relaunch, only after
+	// this. inst's pump may not have forwarded the terminal yet, and a late one
+	// would follow the events of the next leg or instance, so the terminal is
+	// queued here in its place and the pump drops its own. The section never
+	// blocks: the queueing does not wait on the sink, nor Status on the driver.
 	m.mu.Lock()
 	delete(m.orphans, serverID)
 	m.clearPendingSaveOnLocked(serverID)
+	m.statusMu.Lock()
+	if m.supersedeLocked(inst) {
+		m.queueStatusLocked(session.StatusEvent{ServerID: serverID, State: terminalOr(inst, execution.StateStopped.String())})
+	}
+	m.statusMu.Unlock()
 	m.mu.Unlock()
 	if m.bedrock != nil {
 		m.bedrock.Close(serverID)
@@ -4510,8 +4545,13 @@ func (m *Manager) restoreRunning(serverID string, inst execution.Instance, start
 // or when the manager is closed (issue #2777), because a server that is still
 // running when the Worker goes down never closes it — closing done either way to
 // release the log/metrics pumps for the same instance.
+//
+// It forwards an event only while inst may still report for the id (forwarding):
+// once a handoff supersedes inst, or once it has forwarded its terminal state,
+// what it still reads is dropped (forwardStatus).
 func (m *Manager) pump(serverID string, inst execution.Instance, done chan struct{}) {
 	defer close(done)
+	defer m.endForwarding(inst)
 	events := inst.Events()
 	for {
 		select {
@@ -4524,13 +4564,13 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 				m.forgetOrphanIf(serverID, inst)
 				return
 			}
+			if hook := m.beforePumpForward; hook != nil {
+				hook(inst, ev)
+			}
 			if ev.State == execution.StateCrashed {
 				m.forgetIf(serverID, inst)
 			}
-			m.sendStatus(session.StatusEvent{
-				ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail,
-				CrashReason: ev.CrashReason.String(),
-			})
+			m.forwardStatus(inst, ev)
 		case <-m.shutdown.Done():
 			// Close. A status the instance has already queued is DROPPED: nothing
 			// drains the merged stream by then (Close runs after the session runner
@@ -4542,6 +4582,48 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 			return
 		}
 	}
+}
+
+// forwardStatus queues one of inst's events, mapping the domain state to its wire
+// name, unless inst no longer forwards (issue #3597). The check and the queueing
+// share one statusMu section, which a handoff holds to supersede inst, so the
+// event is either queued before the handoff, and therefore before the events of
+// whatever took the id over, or dropped. A dropped event is never the only report
+// of the instance's end: the handoff queued its terminal when the pump still owed
+// it. A terminal state ends the forwarding, as it ends the instance's stream.
+func (m *Manager) forwardStatus(inst execution.Instance, ev execution.StatusEvent) {
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	if _, ok := m.forwarding[inst]; !ok {
+		return
+	}
+	if ev.State == execution.StateStopped || ev.State == execution.StateCrashed {
+		delete(m.forwarding, inst)
+	}
+	m.queueStatusLocked(session.StatusEvent{
+		ServerID: ev.ServerID, State: ev.State.String(), Detail: ev.Detail,
+		CrashReason: ev.CrashReason.String(),
+	})
+}
+
+// supersedeLocked ends inst's forwarding at a handoff of its id (issue #3597):
+// a stop that confirmed inst's termination, or the orphan converger's retirement
+// of its record. From here the id belongs to whatever comes next, and the events
+// inst's pump still holds are dropped instead of being queued after that. It
+// reports whether the pump had yet to forward inst's terminal, which the caller
+// then owes the API in its place. The caller holds statusMu.
+func (m *Manager) supersedeLocked(inst execution.Instance) bool {
+	_, owed := m.forwarding[inst]
+	delete(m.forwarding, inst)
+	return owed
+}
+
+// endForwarding drops inst from forwarding once its pump is gone, or was never
+// started.
+func (m *Manager) endForwarding(inst execution.Instance) {
+	m.statusMu.Lock()
+	defer m.statusMu.Unlock()
+	delete(m.forwarding, inst)
 }
 
 // forgetOrphanIf removes serverID's failed-stop orphan record only if it is still

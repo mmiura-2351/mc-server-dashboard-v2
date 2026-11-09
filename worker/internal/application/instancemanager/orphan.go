@@ -136,11 +136,16 @@ func (m *Manager) convergeOrphan(serverID string) {
 		switch {
 		case err != nil:
 			sawDead = false
-			m.logger.Warn("failed-stop orphan: cannot determine whether the process is alive; reporting unknown and still probing",
-				"server_id", serverID, "driver", entry.driver, "error", err)
+			// Only a round that queued the `unknown` says it did: one already
+			// reported, or one reportOrphanUnknown dropped as stale, sent nothing.
+			msg := "failed-stop orphan: cannot determine whether the process is alive; still probing"
 			if !reportedUnknown {
 				reportedUnknown = m.reportOrphanUnknown(serverID, entry.inst)
+				if reportedUnknown {
+					msg = "failed-stop orphan: cannot determine whether the process is alive; reported unknown and still probing"
+				}
 			}
+			m.logger.Warn(msg, "server_id", serverID, "driver", entry.driver, "error", err)
 		case alive:
 			sawDead, reportedUnknown = false, false
 			m.retryOrphanStop(serverID, entry.inst)
@@ -199,7 +204,10 @@ func (m *Manager) reportOrphanUnknown(serverID string, inst execution.Instance) 
 // queues the terminal `stopped` in the same critical section (issue #3596). The
 // release of the record is what lets a replacement command claim the id, so a
 // `stopped` sent after unlocking could follow the replacement's own events and
-// overwrite them. It reports whether it retired the record.
+// overwrite them. The same holds for whatever inst's own pump still holds: two
+// dead probes do not prove the pump has forwarded the instance's terminal, so
+// inst is superseded here as well and the pump drops it (issue #3597). It
+// reports whether it retired the record.
 func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -208,6 +216,7 @@ func (m *Manager) retireStrandedOrphan(serverID string, inst execution.Instance)
 	}
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
+	m.supersedeLocked(inst)
 	m.queueOrphanReportLocked(session.StatusEvent{
 		ServerID: serverID,
 		State:    execution.StateStopped.String(),

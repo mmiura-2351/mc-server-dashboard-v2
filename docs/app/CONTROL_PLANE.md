@@ -402,6 +402,23 @@ names a different instance, or if the instance has already reached `STOPPED` or
 section, so a replacement command that claims the freed id queues its events after
 it.
 
+An instance's own status forwarding follows the same rule when its server changes
+hands (#3597). The handoff is a stop that confirmed termination or the retirement of
+a stranded orphan record. The stop can be a plain stop, a restart's stop leg, or a
+retry stop of a failed-stop orphan, by the operator or the converger. After the
+handoff come a restart's relaunch, reported `SERVER_STATE_STARTING` by a resync, or
+a replacement command that claims the freed id. The forwarding of the old instance's
+events runs apart from both, and two dead probes do not prove it has drained. So
+without more, the old instance's late `STOPPED` could follow the new leg's or the
+replacement's events and leave the row at `stopped` over a server that is starting
+or running. The Worker therefore ends the old instance's forwarding in the same
+critical section as the handoff, before the id can pass to anything else. When the old
+instance's `STOPPED` or `CRASHED` is not on the stream yet, the stop queues it there
+in its place, and the retirement queues its own `STOPPED` as before. Whatever the
+old instance's forwarding still holds is then dropped, an intermediate state such
+as `STOPPING` included. The old instance's terminal is reported once and ahead of
+everything that follows the handoff, and the handoff never waits on the forwarding.
+
 ### 4.2 Steady state
 
 ```
