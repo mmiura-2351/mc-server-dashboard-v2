@@ -364,7 +364,7 @@ class _FailingWriter:
 
     def __call__(self, spool: Path) -> None:
         self.entered.set()
-        self.resume.wait(timeout=10)
+        self.resume.wait()  # no timeout, as in _pause_creation (issue #3600)
         try:
             spool.touch()
             raise self.fault
@@ -395,12 +395,14 @@ async def test_a_cancelled_spool_writers_fault_is_not_left_unretrieved(
     spool.touch()
     writer = _FailingWriter()
     task = asyncio.ensure_future(_run_spool_writer(spool, writer, spool))
-    assert await asyncio.to_thread(writer.entered.wait, 10)
+    try:
+        assert await asyncio.to_thread(writer.entered.wait, 10)
 
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    writer.resume.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        writer.resume.set()
 
     assert await asyncio.to_thread(writer.finished.wait, 10)
     await _until(lambda: not spool.exists())

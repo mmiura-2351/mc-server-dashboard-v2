@@ -392,7 +392,12 @@ async def _discard_spool(spool: Path, *, raise_fault: bool) -> None:
         await asyncio.shield(disposal)
 
 
-async def _run_spool_writer(spool: Path, fn: Callable[..., _R], *args: Any) -> _R:
+async def _run_spool_writer(
+    spool: Path,
+    fn: Callable[..., _R],
+    *args: Any,
+    reclaim: Callable[[_R], None] | None = None,
+) -> _R:
     """Run ``fn(*args)`` — a job that opens ``spool`` by path — off the loop.
 
     A cancel during the await does not stop the worker thread, and a job that
@@ -400,13 +405,17 @@ async def _run_spool_writer(spool: Path, fn: Callable[..., _R], *args: Any) -> _
     removed it. So the job is awaited shielded, and a cancelled caller hands it a
     callback that removes the spool again once the job finishes (issue #3553).
     That caller no longer observes the job's fault, so the callback marks it
-    retrieved (issue #3595); a caller still awaiting receives it as before.
+    retrieved (issue #3595); a caller still awaiting receives it as before. A job
+    that returns what it opened passes ``reclaim``, which the callback hands that
+    result to, as :func:`_acquire_off_loop` does (issue #3602).
     """
 
     def _dispose_after_write(finished: asyncio.Future[_R]) -> None:
         if not finished.cancelled():
             finished.exception()
         _start_spool_disposal(spool)
+        if reclaim is not None:
+            _reclaim_orphan(reclaim, finished)
 
     writer = asyncio.get_running_loop().run_in_executor(None, fn, *args)
     try:
@@ -3123,9 +3132,14 @@ def _tar_stream(
                 # join never hangs on early consumer close. A cancel can leave a
                 # read job that has not yet entered ``os.read``; closing under it
                 # would let another open reuse the fd number and the job read that
-                # file instead (issue #3582), so the job's done-callback closes it.
+                # file instead (issue #3582), so the job's done-callback closes it,
+                # and marks the fault no one is left to observe retrieved (#3584).
                 if reading is not None and not reading.done():
-                    reading.add_done_callback(lambda _reading: os.close(read_fd))
+                    reading.add_done_callback(
+                        functools.partial(
+                            _release_after_read, functools.partial(os.close, read_fd)
+                        )
+                    )
                 else:
                     os.close(read_fd)
                 await asyncio.to_thread(writer.join)
