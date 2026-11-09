@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import datetime as dt
 import enum
 import errno
@@ -47,7 +48,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from pathlib import Path
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
     is_canonical_name,
@@ -430,33 +431,97 @@ def _flush_and_fsync(out: io.BufferedWriter) -> None:
     os.fsync(out.fileno())
 
 
-def _close_logging_fault(out: io.BufferedWriter) -> None:
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
+def _log_close_fault(handle: _Closable, fault: BaseException) -> None:
+    name = getattr(handle, "name", handle)
+    _LOG.warning("could not close the abandoned file %s: %s", name, fault)
+
+
+def _close_logging_fault(handle: _Closable, close: Callable[[], None]) -> None:
     try:
-        out.close()
-    except OSError as exc:
-        _LOG.warning("could not close the abandoned file %s: %s", out.name, exc)
+        close()
+    except Exception as fault:
+        _log_close_fault(handle, fault)
 
 
-def _log_close_fault(out: io.BufferedWriter, closing: asyncio.Future[None]) -> None:
+def _log_finished_close_fault(handle: _Closable, closing: asyncio.Future[None]) -> None:
     fault = None if closing.cancelled() else closing.exception()
     if fault is not None:
-        _LOG.warning("could not close the abandoned file %s: %s", out.name, fault)
+        _log_close_fault(handle, fault)
 
 
-def _close_abandoned(out: io.BufferedWriter) -> None:
-    """Close ``out`` on an executor worker, from a loop callback (issue #3603).
+def _close_settling(
+    handle: _Closable,
+    close: Callable[[], None],
+    loop: asyncio.AbstractEventLoop,
+    closing: asyncio.Future[None],
+) -> None:
+    """Run ``close`` on this thread, then settle ``closing`` with its outcome."""
 
-    No one awaits the close, so its fault is logged. The loop's teardown shuts its
-    default executor down while abandoned writes may still be finishing, and a
-    shut-down executor refuses the close: it then runs on a thread of its own.
+    fault: BaseException | None = None
+    try:
+        close()
+    except BaseException as exc:
+        fault = exc
+    try:
+        loop.call_soon_threadsafe(_settle_close, closing, fault)
+    except RuntimeError:  # the loop closed: no one is left to await the close
+        if fault is not None:
+            _log_close_fault(handle, fault)
+
+
+def _settle_close(closing: asyncio.Future[None], fault: BaseException | None) -> None:
+    if fault is None:
+        closing.set_result(None)
+    else:
+        closing.set_exception(fault)
+
+
+def _close_abandoned(handle: _Closable) -> None:
+    """Close ``handle`` off the loop, from a loop callback (issues #3602, #3603).
+
+    For a handle whose user was cancelled, so no one awaits the close: its fault is
+    logged. Off the loop, since closing a writing file or tar flushes it. The
+    loop's teardown shuts its default executor down while cancelled jobs may still
+    be finishing, and a shut-down executor refuses the close: it then runs on a
+    thread of its own. Either way it runs in the caller's context.
     """
 
+    close = functools.partial(contextvars.copy_context().run, handle.close)
     try:
-        closing = asyncio.get_running_loop().run_in_executor(None, out.close)
+        closing = asyncio.get_running_loop().run_in_executor(None, close)
     except RuntimeError:  # "Executor shutdown has been called"
-        threading.Thread(target=_close_logging_fault, args=(out,)).start()
+        threading.Thread(target=_close_logging_fault, args=(handle, close)).start()
         return
-    closing.add_done_callback(functools.partial(_log_close_fault, out))
+    closing.add_done_callback(functools.partial(_log_finished_close_fault, handle))
+
+
+async def _close_off_loop(handle: _Closable) -> None:
+    """Close ``handle`` off the loop and wait for it, raising its fault (#3611).
+
+    Shielded: a cancel while the close still waits for a worker would otherwise
+    drop it, leaving the handle to the GC, so a cancelled caller's close goes on,
+    its fault logged. A close the shut-down executor refuses runs on a thread of
+    its own, as :func:`_close_abandoned`'s does, and is awaited the same way.
+    """
+
+    loop = asyncio.get_running_loop()
+    close = functools.partial(contextvars.copy_context().run, handle.close)
+    try:
+        closing = loop.run_in_executor(None, close)
+    except RuntimeError:  # "Executor shutdown has been called"
+        closing = loop.create_future()
+        threading.Thread(
+            target=_close_settling, args=(handle, close, loop, closing)
+        ).start()
+    try:
+        await asyncio.shield(closing)
+    except asyncio.CancelledError:
+        closing.add_done_callback(functools.partial(_log_finished_close_fault, handle))
+        raise
 
 
 class _OffLoopFile:
@@ -486,14 +551,7 @@ class _OffLoopFile:
         await asyncio.shield(self._last)
 
     async def close(self) -> None:
-        # Shielded too: a cancel while the close still waits for a worker would
-        # otherwise drop it, leaving the file to the GC.
-        closing = asyncio.get_running_loop().run_in_executor(None, self._out.close)
-        try:
-            await asyncio.shield(closing)
-        except asyncio.CancelledError:
-            closing.add_done_callback(functools.partial(_log_close_fault, self._out))
-            raise
+        await _close_off_loop(self._out)
 
     def abandon(self) -> None:
         """Close the file once its last job finishes, without waiting for it.
@@ -3498,7 +3556,7 @@ def _file_stream(
                     remaining -= len(chunk)
                 yield chunk
         finally:
-            await asyncio.to_thread(handle.close)
+            await _close_off_loop(handle)
 
     return _gen()
 
@@ -3536,7 +3594,7 @@ def _leased_file_stream(
                         return
                     yield chunk
             finally:
-                await asyncio.to_thread(handle.close)
+                await _close_off_loop(handle)
         finally:
             on_close()
 
@@ -3742,7 +3800,7 @@ def _pinned_file_stream(
                     return
                 yield chunk
         finally:
-            await asyncio.to_thread(handle.close)
+            await _close_off_loop(handle)
 
     return _gen()
 

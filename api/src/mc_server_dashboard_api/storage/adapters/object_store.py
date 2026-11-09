@@ -45,7 +45,6 @@ the very edge and tests run against an in-memory stub.
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import datetime as dt
 import hashlib
 import io
@@ -74,6 +73,8 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 )
 from mc_server_dashboard_api.storage.adapters.fs import (
     _acquire_off_loop,
+    _close_abandoned,
+    _close_off_loop,
     _create_spool,
     _discard_spool,
     _run_spool_writer,
@@ -2663,42 +2664,6 @@ class _RestoreBudget:
             yield chunk
 
 
-def _close_off_loop(handle: tarfile.TarFile | io.BufferedReader) -> None:
-    """Close ``handle`` on an executor worker, from a loop callback (issue #3602).
-
-    For a handle whose user was cancelled, so no one awaits the close: its fault is
-    logged here. Off the loop, since closing a writing tar flushes it. The loop's
-    teardown shuts its default executor down while cancelled jobs may still be
-    finishing, and a shut-down executor refuses the close: it then runs on a
-    thread of its own instead.
-    """
-
-    try:
-        closing = asyncio.get_running_loop().run_in_executor(None, handle.close)
-    except RuntimeError:  # "Executor shutdown has been called"
-        threading.Thread(
-            target=contextvars.copy_context().run, args=(_close_logging_fault, handle)
-        ).start()
-        return
-    closing.add_done_callback(_log_close_fault)
-
-
-_CLOSE_FAULT = "could not close an abandoned archive or spool: %s"
-
-
-def _log_close_fault(closing: asyncio.Future[None]) -> None:
-    fault = None if closing.cancelled() else closing.exception()
-    if fault is not None:
-        _LOG.warning(_CLOSE_FAULT, fault)
-
-
-def _close_logging_fault(handle: tarfile.TarFile | io.BufferedReader) -> None:
-    try:
-        handle.close()
-    except Exception as fault:
-        _LOG.warning(_CLOSE_FAULT, fault)
-
-
 def _retrieve_fault(job: asyncio.Future[Any]) -> None:
     if not job.cancelled():
         job.exception()
@@ -2707,7 +2672,7 @@ def _retrieve_fault(job: asyncio.Future[Any]) -> None:
 def _close_orphaned_member(opened: tuple[tarfile.TarFile, Any]) -> None:
     """Close a member's archive whose opener was cancelled before owning it."""
 
-    _close_off_loop(opened[0])
+    _close_abandoned(opened[0])
 
 
 class _HandleJobs:
@@ -2752,9 +2717,9 @@ class _HandleJobs:
         self._closed = True
         last = self._last
         if last is not None and not last.done():
-            last.add_done_callback(lambda _job: _close_off_loop(handle))
+            last.add_done_callback(lambda _job: _close_abandoned(handle))
         else:
-            await asyncio.to_thread(handle.close)
+            await _close_off_loop(handle)
 
 
 async def _archive_member_parts(
@@ -2812,7 +2777,7 @@ async def _archive_file_member_streams(
     """
 
     with archive_read_errors_as_unreadable():
-        tar = await _acquire_off_loop(_close_off_loop, tarfile.open, str(spool), mode)
+        tar = await _acquire_off_loop(_close_abandoned, tarfile.open, str(spool), mode)
     jobs = _HandleJobs()
     try:
         while True:
@@ -2871,7 +2836,7 @@ async def _fileobj_parts(member_file: Any, jobs: _HandleJobs) -> AsyncIterator[b
 async def _file_parts(spool: Path) -> AsyncIterator[bytes]:
     """Stream a local spool file in part-sized chunks (bounded memory)."""
 
-    handle = await _acquire_off_loop(_close_off_loop, lambda: open(spool, "rb"))
+    handle = await _acquire_off_loop(_close_abandoned, lambda: open(spool, "rb"))
     jobs = _HandleJobs()
     try:
         while True:
@@ -2897,7 +2862,7 @@ async def _write_backup_targz(
     """
 
     tar = await _run_spool_writer(
-        spool, tarfile.open, str(spool), "w:gz", reclaim=_close_off_loop
+        spool, tarfile.open, str(spool), "w:gz", reclaim=_close_abandoned
     )
     jobs = _HandleJobs()
     try:
