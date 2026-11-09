@@ -476,8 +476,8 @@ class _AwaitedClose:
 
     While its caller awaits it, the caller raises the fault. Once that caller is
     cancelled, or its loop has closed, whichever side finds the other gone logs the
-    fault, directly: a settlement handed to a stopped loop may never run. A lock
-    makes the two sides agree on which of them reports.
+    fault, directly: a settlement handed to a stopped loop may never run. Each side
+    reports only the fault it takes under the lock, so only one of them reports it.
     """
 
     def __init__(self, handle: _Closable) -> None:
@@ -502,21 +502,32 @@ class _AwaitedClose:
                 wake()
             except RuntimeError:  # the loop closed: no one is left to raise the fault
                 report = True
-        if report and fault is not None:
-            _log_close_fault(self._handle, fault)
+        if report:
+            self._log_fault()
 
     def abandon(self) -> None:
         """The caller was cancelled: log a fault already in, or leave it to the run."""
 
         with self._lock:
             self._abandoned = True
-            fault = self._fault
+        self._log_fault()
+
+    def raise_fault(self) -> None:
+        fault = self._take_fault()
+        if fault is not None:
+            raise fault
+
+    def _log_fault(self) -> None:
+        fault = self._take_fault()
         if fault is not None:
             _log_close_fault(self._handle, fault)
 
-    def raise_fault(self) -> None:
-        if self._fault is not None:
-            raise self._fault
+    def _take_fault(self) -> Exception | None:
+        """Claim the fault for reporting: the first to take it reports it."""
+
+        with self._lock:
+            fault, self._fault = self._fault, None
+        return fault
 
 
 async def _close_off_loop(handle: _Closable) -> None:

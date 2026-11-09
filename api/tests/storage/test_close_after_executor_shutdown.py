@@ -136,8 +136,10 @@ class _HeldFailingClose:
         self.entered = threading.Event()
         self.release = threading.Event()
         self.thread: threading.Thread | None = None
+        self.closes = 0
 
     def close(self) -> None:
+        self.closes += 1
         self.thread = threading.current_thread()
         self.entered.set()
         self.release.wait()
@@ -230,6 +232,65 @@ async def test_a_close_fault_in_before_its_caller_is_cancelled_is_logged_once(
 
     with pytest.raises(asyncio.CancelledError):
         await closing
+    assert [line["message"] for line in close_faults] == [
+        f"could not close the abandoned file {handle}: close failed"
+    ]
+
+
+class _HeldWake:
+    """Holds a close's thread at its wake, before the loop checks it is closed."""
+
+    def __init__(self, handle: _HeldFailingClose) -> None:
+        self.handle = handle
+        self.reached = threading.Event()
+        self.resume = threading.Event()
+
+    def install(self, loop: asyncio.AbstractEventLoop) -> None:
+        wake = loop.call_soon_threadsafe
+
+        def _held(*args: Any) -> Any:
+            if threading.current_thread() is self.handle.thread:
+                self.reached.set()
+                self.resume.wait()
+            return wake(*args)
+
+        setattr(loop, "call_soon_threadsafe", _held)
+
+
+async def _cancel_a_close_held_at_its_wake(held: _HeldWake) -> None:
+    loop = asyncio.get_running_loop()
+    await loop.shutdown_default_executor()
+    held.install(loop)
+    closing = asyncio.create_task(fs._close_off_loop(held.handle))
+    async with asyncio.timeout(10):
+        while not held.reached.is_set():
+            await asyncio.sleep(0.01)
+    closing.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await closing
+
+
+def test_a_close_fault_logged_on_cancel_is_not_logged_again_at_a_failed_wake(
+    close_faults: list[dict[str, Any]],
+) -> None:
+    """The close failed and its caller is cancelled before its wake reaches the loop,
+    which then closes: the cancelled caller logs the fault, the failed wake does not.
+    """
+
+    handle = _HeldFailingClose()
+    handle.release.set()
+    held = _HeldWake(handle)
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_cancel_a_close_held_at_its_wake(held))
+        loop.close()
+        held.resume.set()
+        handle.finish()
+    finally:
+        held.resume.set()
+        loop.close()
+
+    assert handle.closes == 1
     assert [line["message"] for line in close_faults] == [
         f"could not close the abandoned file {handle}: close failed"
     ]
