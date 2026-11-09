@@ -1236,6 +1236,10 @@ type instance struct {
 	// holds, so the terminal emit and these post-terminal emits are serialized
 	// (issue #835).
 	terminalLatched bool
+	// terminal is the first terminal event, recorded by terminate before the state
+	// and the emit, and read without mu by Terminal (execution.Instance, issue
+	// #3597).
+	terminal atomic.Pointer[execution.StatusEvent]
 }
 
 // setContainerID records the instance's current container under the lock (the
@@ -1792,10 +1796,7 @@ func (i *instance) finishInstallCrash(reason execution.CrashReason, detail strin
 }
 
 func (i *instance) finish(state execution.ServerState, detail string, reason execution.CrashReason) {
-	i.set(state)
-	i.mu.Lock()
-	i.emitLocked(state, detail, reason)
-	i.mu.Unlock()
+	i.terminate(state, detail, reason)
 	close(i.exited)
 	i.logPump.Close()
 	i.mu.Lock()
@@ -1810,6 +1811,13 @@ func (i *instance) finish(state execution.ServerState, detail string, reason exe
 
 func (i *instance) Status() execution.ServerState {
 	return execution.ServerState(i.state.Load())
+}
+
+func (i *instance) Terminal() (execution.StatusEvent, bool) {
+	if ev := i.terminal.Load(); ev != nil {
+		return *ev, true
+	}
+	return execution.StatusEvent{}, false
 }
 
 // ProbeAlive reports whether the container is running right now, from a live
@@ -2801,15 +2809,13 @@ func (i *instance) supervise() {
 	i.mu.Unlock()
 
 	if stopping {
-		i.set(execution.StateStopped)
-		i.emit(execution.StateStopped, "")
+		i.terminate(execution.StateStopped, "", execution.CrashReasonUnspecified)
 	} else {
 		detail := "container exited unexpectedly"
 		if waitErr != nil {
 			detail = waitErr.Error()
 		}
-		i.set(execution.StateCrashed)
-		i.emit(execution.StateCrashed, detail)
+		i.terminate(execution.StateCrashed, detail, execution.CrashReasonUnspecified)
 	}
 	// Release any in-flight stop wait now the terminal state is set.
 	close(i.exited)
@@ -2910,10 +2916,17 @@ func (i *instance) exitAfterTransportError(id string) (exited bool, info Contain
 	}
 }
 
-func (i *instance) set(s execution.ServerState) {
+// terminate records a terminal state and emits it. The event is recorded first,
+// for Terminal, then the state, for Status, so whoever sees the terminal Status
+// can read the event (execution.Instance, issue #3597). Only the first terminal
+// is recorded, the one that latches the stream.
+func (i *instance) terminate(state execution.ServerState, detail string, reason execution.CrashReason) {
+	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail, CrashReason: reason}
+	i.terminal.CompareAndSwap(nil, &ev)
 	i.mu.Lock()
-	i.state.Store(int32(s))
-	i.mu.Unlock()
+	defer i.mu.Unlock()
+	i.state.Store(int32(state))
+	i.emitLocked(state, detail, reason)
 }
 
 // emit publishes a status event without ever blocking supervision. When the

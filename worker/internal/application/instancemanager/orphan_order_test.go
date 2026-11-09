@@ -20,11 +20,7 @@ import (
 // instance sets its terminal state and then emits it, as drivers do. closed also
 // closes the event stream, after which the pump retires the orphan record.
 func exitOnItsOwn(inst *fakeInstance, closed bool) {
-	inst.mu.Lock()
-	inst.state = execution.StateStopped
-	inst.alive = false
-	inst.mu.Unlock()
-	inst.events <- execution.StatusEvent{ServerID: inst.serverID, State: execution.StateStopped}
+	inst.end(execution.StatusEvent{ServerID: inst.serverID, State: execution.StateStopped})
 	if closed {
 		close(inst.events)
 	}
@@ -45,7 +41,7 @@ func TestConvergersUnknownIsNotQueuedAfterTheOrphansOwnExit(t *testing.T) {
 			shrinkOrphanConverger(m)
 			inst := newGatedProbeInstance(s1)
 			inst.setAlive(false, errors.New("driver: daemon unreachable"))
-			m.startPumps(s1, inst)
+			startPumpsFor(m, s1, inst)
 			drainStatuses(t, m, 1) // the fake's own running
 			m.recordOrphan(s1, inst, "container", "1.21")
 			awaitEnter(t, inst.probeEntered)
