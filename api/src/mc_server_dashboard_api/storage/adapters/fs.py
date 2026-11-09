@@ -3025,9 +3025,14 @@ def _tar_stream(
                 # join never hangs on early consumer close. A cancel can leave a
                 # read job that has not yet entered ``os.read``; closing under it
                 # would let another open reuse the fd number and the job read that
-                # file instead (issue #3582), so the job's done-callback closes it.
+                # file instead (issue #3582), so the job's done-callback closes it,
+                # and marks the fault no one is left to observe retrieved (#3584).
                 if reading is not None and not reading.done():
-                    reading.add_done_callback(lambda _reading: os.close(read_fd))
+                    reading.add_done_callback(
+                        functools.partial(
+                            _release_after_read, functools.partial(os.close, read_fd)
+                        )
+                    )
                 else:
                     os.close(read_fd)
                 await asyncio.to_thread(writer.join)

@@ -29,6 +29,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     _archive_file_member_streams,
     _archive_member_parts,
     _file_parts,
+    _HandleJobs,
     _write_backup_targz,
 )
 from tests.storage.helpers import tar_bytes
@@ -47,6 +48,8 @@ class _Held:
     entered: threading.Event = field(default_factory=threading.Event)
     resume: threading.Event = field(default_factory=threading.Event)
     closed: threading.Event = field(default_factory=threading.Event)
+    # What the held call raises once resumed, if anything.
+    fault: BaseException | None = None
     # Held here so only an explicit close, never collection, can close them.
     handles: list[Any] = field(default_factory=list)
 
@@ -54,6 +57,8 @@ class _Held:
         def _paused(*args: Any, **kwargs: Any) -> Any:
             self.entered.set()
             self.resume.wait()
+            if self.fault is not None:
+                raise self.fault
             return fn(*args, **kwargs)
 
         return _paused
@@ -235,3 +240,138 @@ async def test_a_cancelled_job_keeps_its_handle_open_until_the_job_finishes(
 
     assert await asyncio.to_thread(held.closed.wait, 10)
     assert [handle.closed for handle in held.handles] == [True]
+
+
+async def _until_set(event: threading.Event) -> None:
+    """Wait for ``event`` from the loop: its default executor may be shut down."""
+
+    async with asyncio.timeout(10):
+        while not event.is_set():
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.parametrize("job", ["open", "read"])
+async def test_a_cancelled_handle_is_closed_while_the_executor_shuts_down(
+    job: str, held: _Held, spool: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The loop's teardown shuts its default executor down while cancelled jobs
+    # finish, so the close they defer can no longer be submitted to it.
+    _patch_spool_open(monkeypatch, held, job)
+    loop = asyncio.get_running_loop()
+
+    await _cancel_while_held(_file_first_part, spool, held)
+    shutdown = asyncio.ensure_future(loop.shutdown_default_executor())
+    try:
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="shutdown"):
+            loop.run_in_executor(None, int)
+    finally:
+        held.resume.set()
+    await shutdown
+
+    await _until_set(held.closed)
+    assert [handle.closed for handle in held.handles] == [True]
+
+
+@pytest.fixture
+async def loop_errors() -> AsyncIterator[list[dict[str, Any]]]:
+    """What the running loop reports to its exception handler."""
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    reported: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    yield reported
+    loop.set_exception_handler(previous)
+
+
+async def test_a_cancelled_member_reads_fault_is_retrieved_before_its_archive_closes(
+    held: _Held,
+    spool: Path,
+    loop_errors: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A member stream can unwind well before its archive's walk is closed (the
+    # multipart uploader awaits its abort in between). A read that fails in that
+    # interval has finished by the time the archive closes, and its fault has no
+    # caller left to observe it.
+    held.fault = OSError("cancelled member read failed")
+    _patch_tarfile(monkeypatch, held, "member_read")
+    loop = asyncio.get_running_loop()
+    held_jobs: list[asyncio.Future[Any]] = []
+    submit = loop.run_in_executor
+
+    def _submit(executor: Any, fn: Callable[..., Any], *args: Any) -> Any:
+        job = submit(executor, fn, *args)
+        if getattr(fn, "__name__", None) == "_paused":
+            held_jobs.append(job)
+        return job
+
+    monkeypatch.setattr(loop, "run_in_executor", _submit)
+    streams = _archive_file_member_streams(spool, "r|gz")
+    assert isinstance(streams, AsyncGenerator)
+    try:
+        _name, parts = await streams.__anext__()
+
+        async def _read() -> object:
+            return await parts.__anext__()
+
+        reading = asyncio.ensure_future(_read())
+        try:
+            assert await asyncio.to_thread(held.entered.wait, 10)
+            reading.cancel()
+            await asyncio.wait({reading})
+            assert reading.cancelled()
+        finally:
+            held.resume.set()
+        await asyncio.wait(held_jobs)
+        await asyncio.sleep(0)
+    finally:
+        await streams.aclose()
+
+    assert [handle.closed for handle in held.handles] == [True]
+    del reading
+    held_jobs.clear()
+    gc.collect()
+    assert loop_errors == []
+
+
+class _Handle:
+    def __init__(self) -> None:
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+async def test_handle_jobs_close_their_handle_once() -> None:
+    jobs, handle = _HandleJobs(), _Handle()
+
+    await jobs.close(handle)  # type: ignore[arg-type]
+    await jobs.close(handle)  # type: ignore[arg-type]
+
+    assert handle.closes == 1
+
+
+async def test_handle_jobs_refuse_a_job_once_closed() -> None:
+    jobs = _HandleJobs()
+    await jobs.close(_Handle())  # type: ignore[arg-type]
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await jobs.run(int)
+
+
+async def test_handle_jobs_refuse_a_job_while_an_earlier_one_runs(held: _Held) -> None:
+    # A handle's jobs run one at a time: a close follows the last job only.
+    jobs = _HandleJobs()
+    first = asyncio.ensure_future(jobs.run(held.pausing(int)))
+    try:
+        assert await asyncio.to_thread(held.entered.wait, 10)
+        first.cancel()
+        await asyncio.wait({first})
+        assert first.cancelled()
+
+        with pytest.raises(RuntimeError, match="earlier job"):
+            await jobs.run(int)
+    finally:
+        held.resume.set()

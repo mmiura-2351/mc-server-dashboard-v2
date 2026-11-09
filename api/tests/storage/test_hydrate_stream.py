@@ -207,6 +207,57 @@ async def test_cancel_keeps_the_pipe_read_fd_open_until_the_pending_read_finishe
     assert not _names_inode(read_fd, pipe_inode)
 
 
+async def test_a_pipe_read_that_fails_after_its_cancel_leaves_no_unretrieved_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cancelled stream no longer observes its pending read job, so a fault the
+    # job raises afterwards must be retrieved where the job's fd is closed.
+    entered, resume, closed = threading.Event(), threading.Event(), threading.Event()
+    paused: list[int] = []
+    real_read, real_close = os.read, os.close
+
+    def _read(fd: int, n: int) -> bytes:
+        if not paused and stat.S_ISFIFO(os.fstat(fd).st_mode):
+            paused.append(fd)
+            entered.set()
+            resume.wait()  # no timeout (issue #3600), released by the finally below
+            raise OSError("late pipe read failure")
+        return real_read(fd, n)
+
+    def _close(fd: int) -> None:
+        real_close(fd)
+        if paused and fd == paused[0]:
+            closed.set()
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"f": b"OLD"})
+    loop = asyncio.get_running_loop()
+    reported: list[dict[str, Any]] = []
+    monkeypatch.setattr(os, "read", _read)
+    monkeypatch.setattr(os, "close", _close)
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        task = asyncio.ensure_future(
+            storage.open_hydrate_source(community, server).__anext__()
+        )
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            task.cancel()
+            await asyncio.wait({task})
+            assert task.cancelled()
+        finally:
+            resume.set()
+
+        assert await asyncio.to_thread(closed.wait, 10)
+        del task
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    assert reported == []
+
+
 @pytest.mark.parametrize("failing", ["construct", "start"])
 async def test_a_writer_that_fails_to_start_closes_the_pipe_and_releases_once(
     failing: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

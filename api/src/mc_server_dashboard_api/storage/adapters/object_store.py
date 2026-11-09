@@ -45,8 +45,8 @@ the very edge and tests run against an in-memory stub.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
-import functools
 import hashlib
 import io
 import json
@@ -76,7 +76,6 @@ from mc_server_dashboard_api.storage.adapters.fs import (
     _acquire_off_loop,
     _create_spool,
     _discard_spool,
-    _release_after_read,
     _run_spool_writer,
     _translating_io_faults,
 )
@@ -2666,17 +2665,41 @@ def _close_off_loop(handle: tarfile.TarFile | io.BufferedReader) -> None:
     """Close ``handle`` on an executor worker, from a loop callback (issue #3602).
 
     For a handle whose user was cancelled, so no one awaits the close: its fault is
-    logged here. Off the loop, since closing a writing tar flushes it.
+    logged here. Off the loop, since closing a writing tar flushes it. The loop's
+    teardown shuts its default executor down while cancelled jobs may still be
+    finishing, and a shut-down executor refuses the close: it then runs on a
+    thread of its own instead.
     """
 
-    closing = asyncio.get_running_loop().run_in_executor(None, handle.close)
+    try:
+        closing = asyncio.get_running_loop().run_in_executor(None, handle.close)
+    except RuntimeError:  # "Executor shutdown has been called"
+        threading.Thread(
+            target=contextvars.copy_context().run, args=(_close_logging_fault, handle)
+        ).start()
+        return
     closing.add_done_callback(_log_close_fault)
+
+
+_CLOSE_FAULT = "could not close an abandoned archive or spool: %s"
 
 
 def _log_close_fault(closing: asyncio.Future[None]) -> None:
     fault = None if closing.cancelled() else closing.exception()
     if fault is not None:
-        _LOG.warning("could not close an abandoned archive or spool: %s", fault)
+        _LOG.warning(_CLOSE_FAULT, fault)
+
+
+def _close_logging_fault(handle: tarfile.TarFile | io.BufferedReader) -> None:
+    try:
+        handle.close()
+    except Exception as fault:
+        _LOG.warning(_CLOSE_FAULT, fault)
+
+
+def _retrieve_fault(job: asyncio.Future[Any]) -> None:
+    if not job.cancelled():
+        job.exception()
 
 
 def _close_orphaned_member(opened: tuple[tarfile.TarFile, Any]) -> None:
@@ -2694,28 +2717,40 @@ class _HandleJobs:
     So each job is awaited shielded — a cancelled caller still gets
     ``CancelledError`` at once, while the job's future stays pending until its
     thread is done — and a close while that job is pending is chained from its
-    done-callback, as ``_tar_stream`` does (issue #3582).
+    done-callback, as ``_tar_stream`` does (issue #3582). That cancelled caller no
+    longer observes the job's fault, so it is marked retrieved once the job
+    finishes, whenever the close comes (issue #3584).
+
+    The jobs run one at a time, as a handle's operations must: a job started while
+    an earlier one is still running, or after the close, is refused.
     """
 
     def __init__(self) -> None:
         self._last: asyncio.Future[Any] | None = None
+        self._closed = False
 
     async def run[T](self, fn: Callable[..., T], *args: Any) -> T:
+        if self._closed:
+            raise RuntimeError("the handle's jobs are closed")
+        if self._last is not None and not self._last.done():
+            raise RuntimeError("an earlier job on the handle is still running")
         job: asyncio.Future[T] = asyncio.get_running_loop().run_in_executor(
             None, fn, *args
         )
         self._last = job
-        return await asyncio.shield(job)
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            job.add_done_callback(_retrieve_fault)
+            raise
 
     async def close(self, handle: tarfile.TarFile | io.BufferedReader) -> None:
+        if self._closed:
+            return
+        self._closed = True
         last = self._last
         if last is not None and not last.done():
-            # The job's fault has no caller left to observe it (issue #3584).
-            last.add_done_callback(
-                functools.partial(
-                    _release_after_read, functools.partial(_close_off_loop, handle)
-                )
-            )
+            last.add_done_callback(lambda _job: _close_off_loop(handle))
         else:
             await asyncio.to_thread(handle.close)
 
