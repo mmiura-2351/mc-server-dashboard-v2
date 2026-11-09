@@ -399,14 +399,26 @@ async def _run_spool_writer(spool: Path, fn: Callable[..., _R], *args: Any) -> _
     opens the spool for writing recreates it if the cancelled caller has already
     removed it. So the job is awaited shielded, and a cancelled caller hands it a
     callback that removes the spool again once the job finishes (issue #3553).
+    That caller no longer observes the job's fault, so the callback marks it
+    retrieved (issue #3595); a caller still awaiting receives it as before.
     """
+
+    def _dispose_after_write(finished: asyncio.Future[_R]) -> None:
+        if not finished.cancelled():
+            finished.exception()
+        _start_spool_disposal(spool)
 
     writer = asyncio.get_running_loop().run_in_executor(None, fn, *args)
     try:
         return await asyncio.shield(writer)
     except asyncio.CancelledError:
-        writer.add_done_callback(lambda _writer: _start_spool_disposal(spool))
+        writer.add_done_callback(_dispose_after_write)
         raise
+
+
+# Staging removals left to the end of the last thread using the staging (issue
+# #3583): the strong reference keeps each alive to the end.
+_STAGING_REMOVALS: set[asyncio.Task[None]] = set()
 
 
 def _io_fault_translating_stream(inner: ByteStream) -> AsyncIterator[bytes]:
@@ -481,6 +493,10 @@ class FsStorage(Storage):
         # in-process handle by definition, so a fresh process's sweep still reclaims
         # it. Guarded by ``_lease_lock`` alongside the reader leases.
         self._active_staging: set[Path] = set()
+        # Threaded jobs still using each staging dir, and the staging dirs whose
+        # removal waits for them (issue #3583). Guarded by ``_lease_lock``.
+        self._staging_jobs: dict[Path, set[asyncio.Future[Any]]] = {}
+        self._staging_removals_due: set[Path] = set()
         self._lease_lock = threading.Lock()
         # Per-server publish/edit serialization (issue #899). Every authoritative
         # mutation of ``current/`` and its generation marker — a snapshot commit, a
@@ -519,6 +535,7 @@ class FsStorage(Storage):
         work: Callable[[], _R],
         *,
         reclaim: Callable[[_R], None] | None = None,
+        staging: Path | None = None,
     ) -> _R:
         """Run ``work`` on a worker thread under the server lock; return its result.
 
@@ -532,6 +549,9 @@ class FsStorage(Storage):
         ``reclaim`` is for a ``work`` that acquires something: a caller cancelled
         while ``work`` runs never receives its result, so ``reclaim`` is handed it
         once ``work`` finishes (issue #3571).
+
+        ``staging`` is for a ``work`` that uses that staging dir: each attempt runs
+        as a job on it (:meth:`_run_on_staging`, issue #3583).
         """
 
         def _reclaim_unless_held(outcome: _R | _LockHeld) -> None:
@@ -539,8 +559,13 @@ class FsStorage(Storage):
                 reclaim(outcome)
 
         delay = _LOCK_POLL_INITIAL_SECONDS
+        outcome: _R | _LockHeld
         while True:
-            if reclaim is None:
+            if staging is not None:
+                outcome = await self._run_on_staging(
+                    staging, self._run_if_unlocked, community_id, server_id, work
+                )
+            elif reclaim is None:
                 outcome = await asyncio.to_thread(
                     self._run_if_unlocked, community_id, server_id, work
                 )
@@ -713,6 +738,100 @@ class FsStorage(Storage):
     def _is_staging_active(self, staging: Path) -> bool:
         with self._lease_lock:
             return staging in self._active_staging
+
+    async def _run_on_staging(
+        self,
+        staging: Path,
+        fn: Callable[..., _R],
+        *args: Any,
+        reclaim: Callable[[_R], None] | None = None,
+    ) -> _R:
+        """Run ``fn(*args)`` — a job that uses ``staging`` — off the loop.
+
+        A cancel during the await does not stop the worker thread, and the cancelled
+        caller discards the staging as it unwinds, while the thread is still using
+        it (issue #3583). So the job is counted against the staging until it is
+        settled, and :meth:`_discard_staging` leaves the removal to the last job
+        settled. A job that has finished by the time the await ends is settled
+        before the caller resumes; the job's done-callback may still only be queued
+        then, as for one that finished before ``run_in_executor`` returned. A job
+        still running is settled by that callback: the job is awaited shielded, so
+        the callback runs only once the thread has finished. A cancelled caller
+        hands what the job returns to ``reclaim``, as :func:`_acquire_off_loop` does.
+        """
+
+        job = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        with self._lease_lock:
+            self._staging_jobs.setdefault(staging, set()).add(job)
+        job.add_done_callback(functools.partial(self._settle_staging_job, staging))
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            if reclaim is not None:
+                job.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
+            raise
+        finally:
+            if job.done():
+                self._settle_staging_job(staging, job)
+
+    def _settle_staging_job(self, staging: Path, job: asyncio.Future[Any]) -> None:
+        """Stop counting the finished ``job`` against ``staging``; idempotent."""
+
+        with self._lease_lock:
+            jobs = self._staging_jobs.get(staging)
+            if jobs is None or job not in jobs:
+                return
+            jobs.discard(job)
+            if not job.cancelled():
+                # A cancelled caller no longer observes the job's fault.
+                job.exception()
+            if jobs:
+                return
+            del self._staging_jobs[staging]
+            if staging not in self._staging_removals_due:
+                return
+            self._staging_removals_due.discard(staging)
+        removal = asyncio.get_running_loop().create_task(
+            self._remove_staging(staging, raise_fault=False)
+        )
+        _STAGING_REMOVALS.add(removal)
+        removal.add_done_callback(_STAGING_REMOVALS.discard)
+
+    async def _discard_staging(self, staging: Path, *, raise_fault: bool) -> None:
+        """Remove ``staging`` and release its lease once no thread uses it (#3583).
+
+        While a job started by :meth:`_run_on_staging` still runs, the removal is
+        left to the end of the last one and this returns at once; a fault there is
+        logged and the sweep reclaims the staging. Otherwise the removal runs now.
+        """
+
+        with self._lease_lock:
+            if staging in self._staging_jobs:
+                self._staging_removals_due.add(staging)
+                return
+        await self._remove_staging(staging, raise_fault=raise_fault)
+
+    async def _remove_staging(self, staging: Path, *, raise_fault: bool) -> None:
+        """Remove ``staging``, then release its lease.
+
+        A fault is raised with ``raise_fault``. Without it the caller already has
+        an outcome a cleanup fault must never replace, such as a restore's
+        publication (issue #3564): the fault is logged, and the sweep reclaims the
+        staging, mirroring the object restore's cleanup.
+        """
+
+        try:
+            await asyncio.to_thread(_rmtree, staging)
+        except Exception:
+            if raise_fault:
+                raise
+            _LOG.warning(
+                "removing the staging %s failed; the sweep reclaims it",
+                staging,
+                exc_info=True,
+            )
+        finally:
+            self._release_staging(staging)
 
     # --- the resolve rule: containment + symlink refusal (Section 6) --------
 
@@ -984,7 +1103,15 @@ class FsStorage(Storage):
         # the same with far simpler code, and the bytes land on the same disk the
         # extraction targets anyway.
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-            spool = await _create_spool(".snapshot.", ".tar", staging)
+            with _translating_io_faults():
+                spool = await self._run_on_staging(
+                    staging,
+                    _make_spool,
+                    ".snapshot.",
+                    ".tar",
+                    staging,
+                    reclaim=_unlink_orphaned_spool,
+                )
         try:
             # The write and the extraction reopen the spool by path, which a
             # concurrent delete's prune can have removed with the rest of
@@ -993,7 +1120,7 @@ class FsStorage(Storage):
                 with open(spool, "wb") as out:
                     async for chunk in stream:
                         await asyncio.to_thread(out.write, chunk)
-                await asyncio.to_thread(_extract_tar_into, spool, staging)
+                await self._run_on_staging(staging, _extract_tar_into, spool, staging)
         except BaseException:
             await _discard_spool(spool, raise_fault=False)
             raise
@@ -1031,7 +1158,7 @@ class FsStorage(Storage):
         # match and aborts the staging area on a mismatch, so commit is only reached
         # for a transfer proven complete.
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-            has_entries = await asyncio.to_thread(_dir_has_entries, staging)
+            has_entries = await self._run_on_staging(staging, _dir_has_entries, staging)
         if not has_entries:
             # The prune empties the staging before it removes the directory, so an
             # empty staging can be that delete caught midway (issue #3481).
@@ -1046,7 +1173,7 @@ class FsStorage(Storage):
         # non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a
         # tear, on any source — the byte-precise check still catches realistic tears.
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-            report = await asyncio.to_thread(check_working_set, staging)
+            report = await self._run_on_staging(staging, check_working_set, staging)
         if not report.healthy:
             await asyncio.to_thread(_rmtree, staging)
             self._release_staging(staging)
@@ -1195,7 +1322,7 @@ class FsStorage(Storage):
         # Make the staged tree's file data durable BEFORE acquiring the lock and
         # flipping current (issue #1943). Runs pre-lock per the #920 discipline —
         # staging is complete and leased, so no concurrent writer can mutate it.
-        await asyncio.to_thread(_fsync_tree, staging)
+        await self._run_on_staging(staging, _fsync_tree, staging)
 
         server_root = self._server_root(community_id, server_id)
 
@@ -1237,7 +1364,7 @@ class FsStorage(Storage):
             return generation, old_snapshot
 
         generation, old_snapshot = await self._under_server_lock(
-            community_id, server_id, _locked
+            community_id, server_id, _locked, staging=staging
         )
         await _reclaim_superseded(old_snapshot)
         return generation
@@ -1270,7 +1397,7 @@ class FsStorage(Storage):
         the read failing included, raises :class:`RestorePublicationUnknownError`.
         """
 
-        await asyncio.to_thread(_fsync_tree, staging)
+        await self._run_on_staging(staging, _fsync_tree, staging)
         server_root = self._server_root(community_id, server_id)
 
         def _locked() -> Path | None:
@@ -1305,7 +1432,9 @@ class FsStorage(Storage):
                     raise
                 raise RestorePublicationUnknownError(exc, report) from exc
 
-        old_snapshot = await self._under_server_lock(community_id, server_id, _locked)
+        old_snapshot = await self._under_server_lock(
+            community_id, server_id, _locked, staging=staging
+        )
         await _reclaim_superseded(old_snapshot)
 
     async def abort_snapshot(self, handle: SnapshotHandle) -> None:
@@ -1313,8 +1442,7 @@ class FsStorage(Storage):
         staging = self._staging_dir(
             fs_handle.community_id, fs_handle.server_id, fs_handle.transfer_id
         )
-        await asyncio.to_thread(_rmtree, staging)
-        self._release_staging(staging)
+        await self._discard_staging(staging, raise_fault=True)
         fs_handle.consumed = True
 
     def _publish(
@@ -1656,8 +1784,8 @@ class FsStorage(Storage):
         # the same active-staging lease for the life of the operation (issue #183).
         self._register_staging(staging)
         try:
-            dropped = await asyncio.to_thread(
-                _extract_tar_gz_into, archive, staging, self._max_restore_bytes
+            dropped = await self._run_on_staging(
+                staging, _extract_tar_gz_into, archive, staging, self._max_restore_bytes
             )
             _warn_dropped_reserved_members(dropped, key)
             # Restore-direction integrity gate (issue #743): walk the extracted
@@ -1675,9 +1803,8 @@ class FsStorage(Storage):
             # legitimate live-format (unpadded) set — its content was gated when that
             # snapshot published — so the restore gate tolerates the unpadded tail while
             # still catching realistic tears.
-            report = await asyncio.to_thread(check_working_set, staging)
+            report = await self._run_on_staging(staging, check_working_set, staging)
             if not report.healthy and not force:
-                await _discard_restore_staging(staging)
                 raise IntegrityCheckError(report)
             # Bump the generation on this authoritative publish (issue #873): a
             # restore replaces ``current/`` just like a snapshot commit, so it MUST
@@ -1687,12 +1814,11 @@ class FsStorage(Storage):
             # the publish-time guard refuse an in-flight stale snapshot from a real
             # Worker (different publisher), closing the restore-clobber window (#873).
             await self._publish_restore(community_id, server_id, staging, report)
-            return report
         except BaseException:
-            await _discard_restore_staging(staging)
+            await self._discard_staging(staging, raise_fault=False)
             raise
-        finally:
-            self._release_staging(staging)
+        self._release_staging(staging)
+        return report
 
     @_translate_io_faults
     async def check_backup_health(
@@ -1719,8 +1845,8 @@ class FsStorage(Storage):
         # concurrent orphan-staging sweep would _rmtree it mid-extract (issue #183).
         self._register_staging(staging)
         try:
-            await asyncio.to_thread(
-                _extract_tar_gz_into, archive, staging, self._max_restore_bytes
+            await self._run_on_staging(
+                staging, _extract_tar_gz_into, archive, staging, self._max_restore_bytes
             )
             # The single region rule set (issue #927): a backup created from an
             # unpadded ``current/`` is itself live-format, so the fsck tolerates the
@@ -1729,10 +1855,9 @@ class FsStorage(Storage):
             # rescued to HEALTHY on the next sweep (the verdict is loadable content);
             # realistic torn shapes (location entry at/past EOF, truncation severing a
             # referenced chunk) stay caught by the byte-precise check.
-            return await asyncio.to_thread(check_working_set, staging)
+            return await self._run_on_staging(staging, check_working_set, staging)
         finally:
-            await asyncio.to_thread(_rmtree, staging)
-            self._release_staging(staging)
+            await self._discard_staging(staging, raise_fault=True)
 
     async def current_generation(
         self, community_id: CommunityId, server_id: ServerId
@@ -2744,25 +2869,6 @@ def _rmtree(path: Path) -> None:
         path.unlink(missing_ok=True)
     elif path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
-
-
-async def _discard_restore_staging(staging: Path) -> None:
-    """Remove a failed restore's staging, best-effort (issue #3564).
-
-    The error on its way out may be the restore's publication (or a refusal), and
-    the path probe before the removal can itself fail on a failing mount; that
-    fault must never replace it. It is logged, and the sweep reclaims the staging,
-    mirroring the object restore's cleanup.
-    """
-
-    try:
-        await asyncio.to_thread(_rmtree, staging)
-    except Exception:
-        _LOG.warning(
-            "removing a failed restore's staging %s failed; the sweep reclaims it",
-            staging,
-            exc_info=True,
-        )
 
 
 async def _reclaim_superseded(old_snapshot: Path | None) -> None:

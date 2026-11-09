@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import gc
 import gzip
 import os
 import tarfile
@@ -25,6 +26,7 @@ from typing import Any
 import pytest
 
 from mc_server_dashboard_api.storage.adapters import object_store
+from mc_server_dashboard_api.storage.adapters.fs import _run_spool_writer
 from mc_server_dashboard_api.storage.adapters.object_store import _spool_stream
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -338,3 +340,71 @@ async def test_a_spool_removal_fault_keeps_the_pending_stream_error(
         monkeypatch.undo()
         for name in created:
             Path(name).unlink(missing_ok=True)
+
+
+@dataclass
+class _FailingWriter:
+    """A spool writer that recreates the spool, then raises once ``resume`` is set."""
+
+    entered: threading.Event = field(default_factory=threading.Event)
+    resume: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+    fault: RuntimeError = field(default_factory=lambda: RuntimeError("late writer"))
+
+    def __call__(self, spool: Path) -> None:
+        self.entered.set()
+        self.resume.wait(timeout=10)
+        try:
+            spool.touch()
+            raise self.fault
+        finally:
+            self.finished.set()
+
+
+@pytest.fixture
+async def loop_errors() -> AsyncIterator[list[dict[str, Any]]]:
+    """What the running loop reports to its exception handler."""
+
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    reported: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    yield reported
+    loop.set_exception_handler(previous)
+
+
+async def test_a_cancelled_spool_writers_fault_is_not_left_unretrieved(
+    loop_errors: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    """Cancelled while the writer runs, which then fails: the fault has no caller
+    left to observe it, so it is not reported as never retrieved (issue #3595),
+    and the spool the writer recreated is still removed."""
+
+    spool = tmp_path / "spool.tar.gz"
+    spool.touch()
+    writer = _FailingWriter()
+    task = asyncio.ensure_future(_run_spool_writer(spool, writer, spool))
+    assert await asyncio.to_thread(writer.entered.wait, 10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    writer.resume.set()
+
+    assert await asyncio.to_thread(writer.finished.wait, 10)
+    await _until(lambda: not spool.exists())
+    assert not spool.exists()
+    gc.collect()
+    assert loop_errors == []
+
+
+async def test_an_awaiting_spool_writers_caller_receives_its_fault(
+    tmp_path: Path,
+) -> None:
+    spool = tmp_path / "spool.tar.gz"
+    writer = _FailingWriter()
+    writer.resume.set()
+
+    with pytest.raises(RuntimeError) as raised:
+        await _run_spool_writer(spool, writer, spool)
+    assert raised.value is writer.fault
