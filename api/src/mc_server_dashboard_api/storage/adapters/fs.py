@@ -425,6 +425,115 @@ async def _run_spool_writer(
         raise
 
 
+def _flush_and_fsync(out: io.BufferedWriter) -> None:
+    out.flush()
+    os.fsync(out.fileno())
+
+
+def _close_logging_fault(out: io.BufferedWriter) -> None:
+    try:
+        out.close()
+    except OSError as exc:
+        _LOG.warning("could not close the abandoned file %s: %s", out.name, exc)
+
+
+def _log_close_fault(out: io.BufferedWriter, closing: asyncio.Future[None]) -> None:
+    fault = None if closing.cancelled() else closing.exception()
+    if fault is not None:
+        _LOG.warning("could not close the abandoned file %s: %s", out.name, fault)
+
+
+def _close_abandoned(out: io.BufferedWriter) -> None:
+    """Close ``out`` on an executor worker, from a loop callback (issue #3603).
+
+    No one awaits the close, so its fault is logged. The loop's teardown shuts its
+    default executor down while abandoned writes may still be finishing, and a
+    shut-down executor refuses the close: it then runs on a thread of its own.
+    """
+
+    try:
+        closing = asyncio.get_running_loop().run_in_executor(None, out.close)
+    except RuntimeError:  # "Executor shutdown has been called"
+        threading.Thread(target=_close_logging_fault, args=(out,)).start()
+        return
+    closing.add_done_callback(functools.partial(_log_close_fault, out))
+
+
+class _OffLoopFile:
+    """A file written by executor jobs and closed after the last (issue #3603).
+
+    A cancel during a job's await does not stop the job's thread, which holds the
+    buffered writer's lock while it writes. Closing the file on the loop then, as a
+    ``with`` exit does, waits for that lock and flushes, blocking the whole loop.
+    So each job is awaited shielded, and the close runs on an executor worker: see
+    :func:`_writing_off_loop`.
+    """
+
+    def __init__(self, out: io.BufferedWriter) -> None:
+        self._out = out
+        self._last: asyncio.Future[Any] | None = None
+
+    async def write(self, data: bytes) -> None:
+        await self._run(self._out.write, data)
+
+    async def sync(self) -> None:
+        """Flush the file and fsync it."""
+
+        await self._run(_flush_and_fsync, self._out)
+
+    async def _run(self, fn: Callable[..., object], *args: Any) -> None:
+        self._last = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        await asyncio.shield(self._last)
+
+    async def close(self) -> None:
+        # Shielded too: a cancel while the close still waits for a worker would
+        # otherwise drop it, leaving the file to the GC.
+        closing = asyncio.get_running_loop().run_in_executor(None, self._out.close)
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            closing.add_done_callback(functools.partial(_log_close_fault, self._out))
+            raise
+
+    def abandon(self) -> None:
+        """Close the file once its last job finishes, without waiting for it.
+
+        That job's caller was cancelled and no longer observes its fault, so the
+        fault is marked retrieved first (issue #3584).
+        """
+
+        if self._last is None:
+            _close_abandoned(self._out)
+            return
+        self._last.add_done_callback(
+            functools.partial(
+                _release_after_read, functools.partial(_close_abandoned, self._out)
+            )
+        )
+
+
+@contextlib.asynccontextmanager
+async def _writing_off_loop(path: Path) -> AsyncIterator[_OffLoopFile]:
+    """Open ``path`` for writing, its writes and close running off the loop.
+
+    The file is opened on the loop: it is new, and no job uses it yet. A cancelled
+    caller abandons it (:meth:`_OffLoopFile.abandon`), so ``CancelledError``
+    propagates at once. Any other exit awaits the close, as the ``with`` exit did:
+    the file is closed before the caller goes on, and a fault closing it is raised.
+    """
+
+    out = _OffLoopFile(open(path, "wb"))
+    try:
+        yield out
+    except asyncio.CancelledError:
+        out.abandon()
+        raise
+    except BaseException:
+        await out.close()
+        raise
+    await out.close()
+
+
 # Staging removals left to the end of the last thread using the staging (issue
 # #3583): the strong reference keeps each alive to the end.
 _STAGING_REMOVALS: set[asyncio.Task[None]] = set()
@@ -1126,9 +1235,9 @@ class FsStorage(Storage):
             # concurrent delete's prune can have removed with the rest of
             # ``incoming/`` (issue #3481).
             async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-                with open(spool, "wb") as out:
+                async with _writing_off_loop(spool) as out:
                     async for chunk in stream:
-                        await asyncio.to_thread(out.write, chunk)
+                        await out.write(chunk)
                 await self._run_on_staging(staging, _extract_tar_into, spool, staging)
         except BaseException:
             await _discard_spool(spool, raise_fault=False)
@@ -1621,12 +1730,11 @@ class FsStorage(Storage):
         # rename to <sha256>.jar. Identical bytes land on the same name (idempotent).
         tmp = await _create_spool(".jar.", ".tmp", jars)
         try:
-            with open(tmp, "wb") as out:
+            async with _writing_off_loop(tmp) as out:
                 async for chunk in stream:
                     hasher.update(chunk)
-                    await asyncio.to_thread(out.write, chunk)
-                await asyncio.to_thread(out.flush)
-                await asyncio.to_thread(os.fsync, out.fileno())
+                    await out.write(chunk)
+                await out.sync()
             key = JarKey(hasher.hexdigest())
             await asyncio.to_thread(os.replace, tmp, self._jar_path(key))
         except BaseException:
@@ -2094,11 +2202,10 @@ class FsStorage(Storage):
             key = BackupKey(uuid.uuid4().hex)
         tmp = await _create_spool(".backup.", ".tmp", backups)
         try:
-            with open(tmp, "wb") as out:
+            async with _writing_off_loop(tmp) as out:
                 async for chunk in stream:
-                    await asyncio.to_thread(out.write, chunk)
-                await asyncio.to_thread(out.flush)
-                await asyncio.to_thread(os.fsync, out.fileno())
+                    await out.write(chunk)
+                await out.sync()
             await asyncio.to_thread(
                 os.replace, tmp, self._backup_path(community_id, server_id, key)
             )
