@@ -104,7 +104,7 @@ func TestResyncReportOfAnOrphanIsNotQueuedAfterItsRetryStop(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
 	inst := newFakeInstance(s1)
 	m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
-	m.startPumps(s1, inst)
+	startPumpsFor(m, s1, inst)
 	drainStatuses(t, m, 1) // the fake's own running
 	var res session.CommandResult
 	last := lastStateRacingResync(t, m, s1, "stopped", func() {
@@ -211,7 +211,7 @@ func TestResyncAfterAStopsTerminalReportsTheTerminal(t *testing.T) {
 				kind = "StopServer"
 				inst, _ := d.Start(context.Background(), execution.InstanceSpec{ServerID: s1})
 				m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
-				m.startPumps(s1, inst)
+				startPumpsFor(m, s1, inst)
 				drainStatuses(t, m, 1) // the fake's own running
 			} else {
 				startHeld(t, m)

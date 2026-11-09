@@ -402,6 +402,29 @@ names a different instance, or if the instance has already reached `STOPPED` or
 section, so a replacement command that claims the freed id queues its events after
 it.
 
+An instance's own status forwarding follows the same rule when its server changes
+hands (#3597). The handoff is a crash, a stop that confirmed termination or the
+retirement of a stranded orphan record. The stop can be a plain stop, a restart's stop leg, or a
+retry stop of a failed-stop orphan, by the operator or the converger. After the
+handoff come a restart's relaunch, reported `SERVER_STATE_STARTING` by a resync, or
+a replacement command that claims the freed id. The forwarding of the old instance's
+events runs apart from both, and two dead probes do not prove it has drained. So
+without more, the old instance's late `STOPPED` could follow the new leg's or the
+replacement's events and leave the row at `stopped` over a server that is starting
+or running. The Worker therefore ends the old instance's forwarding in the same
+critical section as the handoff, before the id can pass to anything else. A crash
+releases the id in the section that queues the `CRASHED`. When the old instance's
+`STOPPED` or `CRASHED` is not on the stream yet, the stop or the retirement queues it
+there in its place. It is the instance's own terminal, which the driver records
+before it reports the state, so a crash keeps its `detail` and `crash_reason`, the
+OOM and Java guidance and the Forge install log a client shows. Only an instance
+with no terminal yet is reported as a bare `STOPPED`, and the retirement queues its
+own `STOPPED` as before when the instance's terminal is already on the stream.
+Whatever the old instance's forwarding still holds is then dropped, an intermediate
+state such as `STOPPING` included. The old instance's terminal is reported once and
+ahead of everything that follows the handoff, and the handoff never waits on the
+forwarding.
+
 ### 4.2 Steady state
 
 ```

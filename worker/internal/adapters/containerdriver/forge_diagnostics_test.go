@@ -53,6 +53,11 @@ func TestForgeInstallOOMKilledReportsOutOfMemoryWithoutRetry(t *testing.T) {
 	if !strings.Contains(ev.Detail, "out of memory") || !strings.Contains(ev.Detail, "512 MiB") {
 		t.Fatalf("crash detail = %q, want it to name the out-of-memory failure and the 512 MiB limit", ev.Detail)
 	}
+	// The classified crash is the instance's Terminal, so a stop that takes the
+	// crashed instance over reports it whole (issue #3597).
+	if got, ok := inst.Terminal(); !ok || got != ev {
+		t.Fatalf("Terminal = %+v, %v, want the classified %+v", got, ok, ev)
+	}
 	if got := docker.names(); len(got) != 1 {
 		t.Fatalf("created containers = %v, want the one install attempt (no retry, no launch)", got)
 	}

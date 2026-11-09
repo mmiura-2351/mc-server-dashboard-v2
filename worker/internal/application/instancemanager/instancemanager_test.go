@@ -63,6 +63,8 @@ type fakeInstance struct {
 	// seq, when set, records a "stop" marker on Stop so a test can assert the
 	// terminate ordered against the RCON recorder (the #1007 flush-before-stop).
 	seq *[]string
+	// terminal is what Terminal answers, recorded with the terminal state.
+	terminal *execution.StatusEvent
 }
 
 func newFakeInstance(id string) *fakeInstance {
@@ -78,16 +80,40 @@ func newFakeInstance(id string) *fakeInstance {
 
 func (i *fakeInstance) Stop(_ context.Context, graceful bool, _ ...func(context.Context) bool) error {
 	i.mu.Lock()
+	// Mirror the driver: an instance that already ended stops as a no-op success.
+	if i.terminal != nil {
+		i.mu.Unlock()
+		return nil
+	}
 	i.stopped = true
 	i.graceful = graceful
-	i.state = execution.StateStopped
 	i.alive = false
 	if i.seq != nil {
 		*i.seq = append(*i.seq, "stop")
 	}
 	i.mu.Unlock()
-	i.events <- execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped}
+	i.end(execution.StatusEvent{ServerID: i.serverID, State: execution.StateStopped})
 	return nil
+}
+
+// end records ev as the instance's terminal and state, as the driver does before
+// it emits one (execution.Instance), then emits it.
+func (i *fakeInstance) end(ev execution.StatusEvent) {
+	i.mu.Lock()
+	i.terminal = &ev
+	i.state = ev.State
+	i.alive = false
+	i.mu.Unlock()
+	i.events <- ev
+}
+
+func (i *fakeInstance) Terminal() (execution.StatusEvent, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.terminal == nil {
+		return execution.StatusEvent{}, false
+	}
+	return *i.terminal, true
 }
 
 func (i *fakeInstance) Status() execution.ServerState {
