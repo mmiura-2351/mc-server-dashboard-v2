@@ -283,3 +283,35 @@ async def test_a_close_queued_behind_a_busy_worker_survives_a_cancel(
     await occupied[0]
     await _until(lambda: out.closed)
     assert out.closed
+
+
+async def test_an_abandoned_file_is_closed_while_the_executor_shuts_down(
+    hold: _Hold, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelled while its write is held, and the loop shuts its executor down
+    before the write ends: the executor refuses the close, which still runs."""
+
+    loop = asyncio.get_running_loop()
+    # Two workers: the held write takes one, ``hold.entered.wait`` the other.
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+    _hold_writes(monkeypatch, hold, ".spool.")
+
+    async def _write() -> None:
+        async with fs._writing_off_loop(tmp_path / ".spool.tmp") as out:
+            await out.write(_PAYLOAD)
+
+    task = asyncio.ensure_future(_write())
+    try:
+        assert await asyncio.to_thread(hold.entered.wait, 10)
+        [(_spool, out)] = hold.files
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        shutdown = asyncio.ensure_future(loop.shutdown_default_executor())
+        await asyncio.sleep(0)  # the executor refuses new jobs from here on
+    finally:
+        hold.release.set()
+
+    await shutdown
+    await _until(lambda: out.closed)
+    assert out.closed

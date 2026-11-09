@@ -178,10 +178,7 @@ class _FailingWrites:
     def write(self, _data: bytes) -> int:
         raise OSError(errno.EIO, "injected write fault")
 
-    def __enter__(self) -> _FailingWrites:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
+    def close(self) -> None:
         self._handle.close()
 
 
@@ -193,8 +190,9 @@ def _inject_eio(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
 
         monkeypatch.setattr(tempfile, "mkstemp", _failing_mkstemp)
     elif stage == "write":
+        # The probe opens its spool through the fs helper (issue #3603).
         monkeypatch.setattr(
-            object_store,
+            fs,
             "open",
             lambda *a, **k: _FailingWrites(open(*a, **k)),  # noqa: SIM115
             raising=False,
