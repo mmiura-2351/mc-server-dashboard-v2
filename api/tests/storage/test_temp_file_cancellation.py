@@ -131,7 +131,10 @@ def _pause_creation(monkeypatch: pytest.MonkeyPatch, prefix: str) -> _PausedCrea
         if kwargs.get("prefix") == prefix:
             paused.created.append((fd, name))
             paused.allocated.set()
-            paused.release.wait(timeout=10)
+            # No timeout: a hold that let go by itself would let the thread finish
+            # before the cancel it is held for (issue #3600). The caller's
+            # ``finally`` and the pytest timeout end a hold it never releases.
+            paused.release.wait()
         return fd, name
 
     monkeypatch.setattr(tempfile, "mkstemp", _mkstemp)
@@ -178,12 +181,14 @@ async def test_a_temp_file_made_after_its_caller_was_cancelled_is_removed(
     call = await op.arrange(harness, community, server)
     paused = _pause_creation(monkeypatch, op.prefix)
     task = asyncio.ensure_future(call(stream_of(op.payload)))
-    assert await asyncio.to_thread(paused.allocated.wait, 10)
+    try:
+        assert await asyncio.to_thread(paused.allocated.wait, 10)
 
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    paused.release.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        paused.release.set()
 
     [(fd, name)] = paused.created
     await _until(lambda: not os.path.exists(name) and not _fd_still_open(fd, name))
@@ -210,7 +215,9 @@ async def test_a_temp_file_is_removed_through_repeated_cancellation(
     occupied: list[asyncio.Future[bool]] = []
 
     def _occupy_the_worker() -> None:
-        occupied.append(loop.run_in_executor(executor, worker_free.wait, 10))
+        # No timeout, as in _pause_creation (issue #3600): the ``finally`` below
+        # frees the worker on every path once the operation has started.
+        occupied.append(loop.run_in_executor(executor, worker_free.wait))
 
     async def _stream_then_occupy() -> AsyncIterator[bytes]:
         async for chunk in stream_of(op.payload):
@@ -226,20 +233,22 @@ async def test_a_temp_file_is_removed_through_repeated_cancellation(
     # The operations that take no stream fill their temp file from the store.
     monkeypatch.setattr(object_store, "_write_backup_targz", _write_targz_then_occupy)
     task = asyncio.ensure_future(call(_stream_then_occupy()))
-    await _until(lambda: bool(occupied))
-    [name] = created
-    for _ in range(5):
-        await asyncio.sleep(0)
+    try:
+        await _until(lambda: bool(occupied))
+        [name] = created
+        for _ in range(5):
+            await asyncio.sleep(0)
 
-    task.cancel()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not task.done()  # its removal is queued behind the busy worker
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+        task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()  # its removal is queued behind the busy worker
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        worker_free.set()
 
-    worker_free.set()
     await occupied[0]
     await _until(lambda: not os.path.exists(name))
     assert not os.path.exists(name)
@@ -284,7 +293,7 @@ async def test_a_spool_a_late_writer_recreates_is_removed(
         if mode != "w:gz" or str(name) not in created:
             return _REAL_TARFILE_OPEN(name, mode, *args, **kwargs)
         reached.set()
-        release.wait(timeout=10)
+        release.wait()  # no timeout, as in _pause_creation (issue #3600)
         try:
             return _REAL_TARFILE_OPEN(name, mode, *args, **kwargs)
         finally:
@@ -292,17 +301,19 @@ async def test_a_spool_a_late_writer_recreates_is_removed(
 
     monkeypatch.setattr(tarfile, "open", _open)
     task = asyncio.ensure_future(call(stream_of(op.payload)))
-    assert await asyncio.to_thread(reached.wait, 10)
-    [name] = created
+    try:
+        assert await asyncio.to_thread(reached.wait, 10)
+        [name] = created
 
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    await _until(lambda: not os.path.exists(name))
-    assert not os.path.exists(name)  # the cancelled caller removed it first
-    if executor_gone:
-        executor.shutdown(wait=False)
-    release.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await _until(lambda: not os.path.exists(name))
+        assert not os.path.exists(name)  # the cancelled caller removed it first
+        if executor_gone:
+            executor.shutdown(wait=False)
+    finally:
+        release.set()
 
     assert finished.wait(10)
     await _until(lambda: not os.path.exists(name))

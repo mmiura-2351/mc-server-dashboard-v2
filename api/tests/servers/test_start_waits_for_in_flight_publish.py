@@ -149,7 +149,8 @@ class _HeldPublish:
             await wait_until_contended(start, self.contended)
         finally:
             self.release.set()
-        return await asyncio.wait_for(self.commit, 10)
+        # A bound, not a delay: the publish's fsyncs can stall on a loaded host.
+        return await asyncio.wait_for(self.commit, 120)
 
 
 async def _release_a_with_its_publish_past_the_fence(

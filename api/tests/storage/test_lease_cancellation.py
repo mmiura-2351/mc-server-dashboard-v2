@@ -107,7 +107,10 @@ def _pause_after_lease(storage: FsStorage, monkeypatch: pytest.MonkeyPatch) -> _
     ) -> tuple[Path, Callable[[], None]]:
         leased = lease_current(community, server)
         pause.leased.set()
-        pause.release.wait(timeout=10)
+        # No timeout: a hold that let go by itself would let the thread finish
+        # before the cancel it is held for (issue #3600). The caller's
+        # ``finally`` and the pytest timeout end a hold it never releases.
+        pause.release.wait()
         return leased
 
     monkeypatch.setattr(storage, "_lease_current", _leasing)
@@ -132,13 +135,15 @@ async def test_a_lease_taken_after_its_reader_was_cancelled_is_released(
     await publish(storage, community, server, {"a.txt": b"OLD"})
     pause = _pause_after_lease(storage, monkeypatch)
     task = asyncio.ensure_future(read(storage, community, server))
-    assert await asyncio.to_thread(pause.leased.wait, 10)
-    [snapshot] = storage._leases
+    try:
+        assert await asyncio.to_thread(pause.leased.wait, 10)
+        [snapshot] = storage._leases
 
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    pause.release.set()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        pause.release.set()
 
     await _until(lambda: not storage._is_leased(snapshot))
     assert not storage._is_leased(snapshot)
