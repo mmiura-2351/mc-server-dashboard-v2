@@ -41,6 +41,9 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -225,6 +228,7 @@ async def test_reconciler_skips_a_row_an_operator_stop_is_converging() -> None:
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
         stop_refusals=refusals,
+        unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
         held_start_grace_seconds=10,
         refused_stop_grace_seconds=5,
@@ -518,6 +522,7 @@ async def test_a_lost_final_snapshot_result_still_converges() -> None:
         store_generation=FakeStoreGenerationReader(),
         clock=FakeClock(_NOW),
         stop_refusals=StopDispatchRefusals(),
+        unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
         held_start_grace_seconds=10,
         refused_stop_grace_seconds=5,
@@ -545,6 +550,7 @@ def _ticker(repo: FakeServerRepository, worker: _Worker) -> RunReconcilerTick:
         store_generation=FakeStoreGenerationReader(),
         clock=FakeClock(_NOW),
         stop_refusals=StopDispatchRefusals(),
+        unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
         held_start_grace_seconds=10,
         refused_stop_grace_seconds=5,

@@ -128,6 +128,19 @@ the full grace was chosen for and keeps it: the command may never have been sent
 and the row alone cannot tell those from a refusal — see
 ``stop_dispatch_refusals.py``.
 
+The same short grace also covers a stop that FINISHED but whose write failed (issue
+#3441), for either stop-side action. The Worker confirmed the stop, or a late result
+reported that the abandoned final snapshot settled, but the API's write after it
+failed (canonically a database outage). The row is left diverged and assigned, and
+looks just like a stop that may never have been sent. ``unrecorded_stops.py``
+records the failure only while nothing is in flight: the stop's round trip has ended
+(#930), and no final snapshot can still be uploading (#847). Both stop-side floors
+are therefore met, so ``redispatch_stop`` and ``clear_stale_assignment`` both take
+``refused_stop_grace_seconds``. The owed action is the one the table above selects.
+The record is dropped before every stop or final-snapshot dispatch, and it is
+superseded like a refusal. It is not persisted, so after an API restart the full
+grace applies again.
+
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
 actually rest on: the re-dispatch goes to the SAME connected
@@ -278,6 +291,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -374,6 +390,7 @@ class RunReconcilerTick:
     store_generation: StoreGenerationReader
     clock: Clock
     stop_refusals: StopDispatchRefusals
+    unrecorded_stops: UnrecordedStops
     grace_seconds: int
     held_start_grace_seconds: int
     refused_stop_grace_seconds: int
@@ -499,6 +516,16 @@ class RunReconcilerTick:
         # ``clear_stale_assignment``. Neither reaches here.
         if action == "redispatch_stop" and self._previous_stop_refused(server):
             return _GraceDecision(self.refused_stop_grace_seconds)
+        # A stop the Worker confirmed whose write after it failed, with nothing
+        # learned about the row since (issue #3441). The record is made only while
+        # nothing is in flight: the stop's round trip ended (#930) and no final
+        # snapshot can still be uploading (#847). Both stop-side floors are met, so
+        # either stop-side action takes the same short grace as a refused stop.
+        if action in (
+            "redispatch_stop",
+            "clear_stale_assignment",
+        ) and self._stop_finished_unrecorded(server):
+            return _GraceDecision(self.refused_stop_grace_seconds)
         # Otherwise select the grace per action and held state (issue #999). A
         # ``redispatch_start`` whose assigned Worker is connected (already true here —
         # ``_action_for`` only returns it for a connected Worker) AND already holds a
@@ -560,6 +587,14 @@ class RunReconcilerTick:
         # stop — never a later event the refusal predates.
         refused_at = self.stop_refusals.refused_at(server.id)
         return refused_at is not None and refused_at >= self._since(server)
+
+    def _stop_finished_unrecorded(self, server: Server) -> bool:
+        # True when a stop finished but its write failed, and that is still the most
+        # recent thing known about the row (issue #3441). Superseded, and tied, the
+        # same way as a refusal: the record is made after the intent commit it
+        # follows, on the same clock.
+        recorded_at = self.unrecorded_stops.recorded_at(server.id)
+        return recorded_at is not None and recorded_at >= self._since(server)
 
     def _since(self, server: Server) -> dt.datetime:
         # The instant the divergence is measured from: the most recent of

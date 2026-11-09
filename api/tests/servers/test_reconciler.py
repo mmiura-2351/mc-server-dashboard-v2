@@ -43,6 +43,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
+)
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
@@ -151,8 +154,10 @@ def _reconciler(
     store_generation: int = 0,
     store_reader: StoreGenerationReader | None = None,
     stop_refusals: StopDispatchRefusals | None = None,
+    unrecorded_stops: UnrecordedStops | None = None,
 ) -> RunReconcilerTick:
     stop_refusals = stop_refusals or StopDispatchRefusals()
+    unrecorded_stops = unrecorded_stops or UnrecordedStops()
     # One shared reader across both seams so a test can pin what happens when the
     # generation the grace decision reads and the one redispatch_start reads are the
     # same underlying counter (issue #2482); the default fixed-value reader makes the
@@ -171,12 +176,17 @@ def _reconciler(
             file_store=FakeFileStore(seed_eula=True),
         ),
         make_stop_server=lambda: StopServer(
-            uow=uow, control_plane=cp, clock=clock, stop_refusals=stop_refusals
+            uow=uow,
+            control_plane=cp,
+            clock=clock,
+            stop_refusals=stop_refusals,
+            unrecorded_stops=unrecorded_stops,
         ),
         control_plane=cp,
         store_generation=store_reader,
         clock=clock,
         stop_refusals=stop_refusals,
+        unrecorded_stops=unrecorded_stops,
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
@@ -988,6 +998,263 @@ async def test_timed_out_replay_drops_the_earlier_verdict() -> None:
     assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
     await reconciler.tick()
     assert [k for k, _, _ in cp.dispatched] == ["stop"]
+
+
+# --- short grace for a finished stop whose write failed (issue #3441) -------
+
+
+class _OutageServerRepository(FakeServerRepository):
+    """Raise on the named repository calls, as a database outage would.
+
+    The fake applies a write before its commit and has no rollback, so failing the
+    commit would leave the write in place. Failing the call itself leaves the row as
+    a failed transaction leaves it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.down: set[str] = set()
+
+    def _fail_if_down(self, name: str) -> None:
+        if name in self.down:
+            raise ConnectionRefusedError("database is unreachable")
+
+    async def get_by_id(self, server_id: ServerId) -> Server | None:
+        self._fail_if_down("get_by_id")
+        return await super().get_by_id(server_id)
+
+    async def record_observed_state(
+        self,
+        server_id: ServerId,
+        observed_state: ObservedState,
+        observed_at: dt.datetime,
+        *,
+        unassign: bool = False,
+        expected_worker: WorkerId | None = None,
+    ) -> bool:
+        self._fail_if_down("record_observed_state")
+        return await super().record_observed_state(
+            server_id,
+            observed_state,
+            observed_at,
+            unassign=unassign,
+            expected_worker=expected_worker,
+        )
+
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        self._fail_if_down("clear_assignment_after_final_snapshot")
+        return await super().clear_assignment_after_final_snapshot(server_id, worker_id)
+
+
+@pytest.mark.parametrize(
+    ("stop_status", "failing_write", "observed_after", "owed_dispatches"),
+    [
+        # The observed=stopped write fails: the row still reads running, so the owed
+        # action is redispatch_stop, which the Worker answers and the release follows.
+        (
+            CommandStatus.OK,
+            "record_observed_state",
+            ObservedState.RUNNING,
+            ["stop", "snapshot"],
+        ),
+        # The release after the final snapshot fails: the row reads (stopped,
+        # stopped, assigned), so the owed action is clear_stale_assignment.
+        (
+            CommandStatus.OK,
+            "clear_assignment_after_final_snapshot",
+            ObservedState.STOPPED,
+            ["snapshot"],
+        ),
+        # The Worker answers that no instance remains (issue #2448), and the same
+        # observed=stopped write fails on that release path.
+        (
+            CommandStatus.SERVER_NOT_FOUND,
+            "record_observed_state",
+            ObservedState.RUNNING,
+            ["stop", "snapshot"],
+        ),
+    ],
+)
+async def test_confirmed_stop_whose_write_failed_converges_on_the_short_grace(
+    stop_status: CommandStatus,
+    failing_write: str,
+    observed_after: ObservedState,
+    owed_dispatches: list[str],
+) -> None:
+    # The Worker confirmed the stop, but the API's write after it failed (a database
+    # outage, issue #3441). Nothing is in flight: the stop's round trip ended (#930)
+    # and no final snapshot can still be uploading (#847). So the reconciler runs the
+    # owed action on the short grace instead of the full one.
+    repo = _OutageServerRepository()
+    uow = FakeUnitOfWork(servers=repo)
+    long_running = _NOW - dt.timedelta(seconds=3600)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=long_running,
+        updated_at=long_running,
+    )
+    repo.seed(server)
+    unrecorded = UnrecordedStops()
+    clock = FakeClock(_NOW)
+    repo.down = {failing_write}
+    with pytest.raises(ConnectionRefusedError):
+        await StopServer(
+            uow=uow,
+            control_plane=FakeControlPlane(
+                outcomes={"stop": CommandOutcome(status=stop_status)}
+            ),
+            clock=clock,
+            unrecorded_stops=unrecorded,
+        )(community_id=server.community_id, server_id=server.id)
+    repo.down = set()
+    stored = repo.by_id[server.id]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is observed_after
+    assert stored.assigned_worker_id == _WORKER
+
+    cp = FakeControlPlane()
+    clock.set(_NOW + dt.timedelta(seconds=_REFUSED_GRACE + 1))
+    await _reconciler(uow, cp, clock, unrecorded_stops=unrecorded).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == owed_dispatches
+    assert repo.by_id[server.id].assigned_worker_id is None
+
+
+async def test_failed_late_snapshot_release_converges_on_the_short_grace() -> None:
+    # The late result of an abandoned final snapshot means its upload settled, but
+    # the release it carries failed to be written (issue #3441). The control plane
+    # has already dropped the snapshot's record, so no later result can retry it.
+    # The reconciler's stale-stop arm runs on the short grace instead.
+    repo = _OutageServerRepository()
+    uow = FakeUnitOfWork(servers=repo)
+    held_since = _NOW - dt.timedelta(seconds=1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=held_since,
+        updated_at=held_since,
+    )
+    repo.seed(server)
+    unrecorded = UnrecordedStops()
+    clock = FakeClock(_NOW)
+    repo.down = {"get_by_id"}
+    with pytest.raises(ConnectionRefusedError):
+        await StopServer(
+            uow=uow,
+            control_plane=FakeControlPlane(),
+            clock=clock,
+            unrecorded_stops=unrecorded,
+        ).clear_assignment_after_late_snapshot(
+            server_id=server.id, worker_id=_WORKER, succeeded=True, message=None
+        )
+    repo.down = set()
+    assert repo.by_id[server.id].assigned_worker_id == _WORKER
+
+    cp = FakeControlPlane()
+    clock.set(_NOW + dt.timedelta(seconds=_REFUSED_GRACE + 1))
+    assert (clock.now() - held_since) < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, unrecorded_stops=unrecorded).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert repo.by_id[server.id].assigned_worker_id is None
+
+
+def _unrecorded(server: Server, at: dt.datetime) -> UnrecordedStops:
+    unrecorded = UnrecordedStops()
+    unrecorded.record(server.id, at=at)
+    return unrecorded
+
+
+async def test_unrecorded_stop_older_than_the_last_report_waits_the_full_grace() -> (
+    None
+):
+    # As with a refusal, the record counts only while it is the most recent thing
+    # known about the row. A Worker report or intent commit after it supersedes it.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    stale = aged - dt.timedelta(seconds=1)
+    await _reconciler(
+        uow, cp, FakeClock(_NOW), unrecorded_stops=_unrecorded(server, stale)
+    ).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+async def test_unrecorded_stop_does_not_shorten_a_start_redispatch() -> None:
+    # The record is about a stop. A running-intent divergence keeps the full grace.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    await _reconciler(
+        uow, cp, FakeClock(_NOW), unrecorded_stops=_unrecorded(server, aged)
+    ).tick()
+    assert cp.dispatched == []
+
+
+class _SnapshotTimesOut(FakeControlPlane):
+    """A final snapshot whose dispatch times out while the upload may still run."""
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        raise WorkerUnavailableError(str(worker_id.value), upload_may_be_live=True)
+
+
+async def test_timed_out_final_snapshot_drops_the_unrecorded_stop() -> None:
+    # The record is forgotten before every final-snapshot dispatch. One that times
+    # out may still be uploading, so releasing on the short grace would break the
+    # #847 floor. The next tick waits the full grace instead.
+    uow = FakeUnitOfWork()
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    uow.servers.seed(server)
+    cp = _SnapshotTimesOut()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=_unrecorded(server, aged))
+
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+
+    # Past the backoff window (base 30 s) and still within the full grace.
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
 async def test_server_placed_after_registration_gets_the_short_held_grace() -> None:
@@ -1822,6 +2089,7 @@ def _concurrent_reconciler(
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
         stop_refusals=StopDispatchRefusals(),
+        unrecorded_stops=UnrecordedStops(),
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
@@ -1940,6 +2208,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         store_generation=FakeStoreGenerationReader(),
         clock=clock,
         stop_refusals=StopDispatchRefusals(),
+        unrecorded_stops=UnrecordedStops(),
         grace_seconds=_GRACE,
         held_start_grace_seconds=_HELD_GRACE,
         refused_stop_grace_seconds=_REFUSED_GRACE,
