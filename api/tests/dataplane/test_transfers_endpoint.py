@@ -1143,7 +1143,9 @@ def test_upload_refused_when_delete_prune_empties_staging_before_rmdir(
             # Only the prune's own rmdir of this upload's staging is held.
             if threading.current_thread() is prune and Path(path).name == staging_name:
                 paused.set()
-                resume.wait(120)
+                # No timeout (issue #3606): the ``finally`` in _dir_has_entries
+                # resumes it on every path once the prune has started.
+                resume.wait()
             real_rmdir(path, dir_fd=dir_fd)
 
         def _dir_has_entries(path: Path) -> bool:

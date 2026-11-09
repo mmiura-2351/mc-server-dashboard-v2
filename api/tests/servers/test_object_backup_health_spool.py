@@ -144,7 +144,10 @@ async def test_a_check_cancelled_while_the_spool_is_created_leaves_nothing(
         fd, name = _REAL_MKSTEMP(*args, **kwargs)
         created.append((fd, name))
         allocated.set()
-        release.wait(timeout=10)
+        # No timeout: a hold that let go by itself would let the thread finish
+        # before the cancel it is held for (issue #3606). The ``finally`` below
+        # and the pytest timeout end a hold it never releases.
+        release.wait()
         return fd, name
 
     monkeypatch.setattr(tempfile, "mkstemp", _paused)
@@ -155,12 +158,14 @@ async def test_a_check_cancelled_while_the_spool_is_created_leaves_nothing(
             BackupKey(backup.storage_ref),
         )
     )
-    assert await asyncio.to_thread(allocated.wait, 10)
+    try:
+        assert await asyncio.to_thread(allocated.wait, 10)
 
-    check.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await check
-    release.set()
+        check.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await check
+    finally:
+        release.set()
 
     [(fd, name)] = created
     for _ in range(200):
@@ -178,10 +183,7 @@ class _FailingWrites:
     def write(self, _data: bytes) -> int:
         raise OSError(errno.EIO, "injected write fault")
 
-    def __enter__(self) -> _FailingWrites:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
+    def close(self) -> None:
         self._handle.close()
 
 
@@ -193,8 +195,9 @@ def _inject_eio(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
 
         monkeypatch.setattr(tempfile, "mkstemp", _failing_mkstemp)
     elif stage == "write":
+        # The probe opens its spool through the fs helper (issue #3603).
         monkeypatch.setattr(
-            object_store,
+            fs,
             "open",
             lambda *a, **k: _FailingWrites(open(*a, **k)),  # noqa: SIM115
             raising=False,
@@ -272,17 +275,20 @@ async def test_a_spool_is_removed_through_repeated_cancellation(
     await probing.wait()
     [(_fd, name)] = created
     worker_free = threading.Event()
-    occupied = loop.run_in_executor(executor, worker_free.wait, 10)
+    # No timeout, as in the spool-creation hold above: the ``finally`` below
+    # frees the worker on every path.
+    occupied = loop.run_in_executor(executor, worker_free.wait)
+    try:
+        check.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not check.done()  # its removal is queued behind the busy worker
+        check.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await check
+    finally:
+        worker_free.set()
 
-    check.cancel()
-    for _ in range(5):
-        await asyncio.sleep(0)
-    assert not check.done()  # its removal is queued behind the busy worker
-    check.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await check
-
-    worker_free.set()
     await occupied
     for _ in range(200):
         if not os.path.exists(name):
@@ -409,16 +415,23 @@ def test_a_spool_removal_cancelled_at_loop_shutdown_still_removes_it(
             )
         )
         await probing.wait()
-        loop.run_in_executor(executor, worker_free.wait, 10)
-        check.cancel()
-        for _ in range(5):
-            await asyncio.sleep(0)
-        check.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await check
-        assert fs._SPOOL_DISPOSALS  # the removal is still queued
-        # Returned pending, so the runner's shutdown cancels it.
-        return asyncio.ensure_future(_free_the_worker_once_shutdown_cancels())
+        # No timeout, as in the spool-creation hold above. On success the
+        # returned task frees the worker at shutdown; on a failure the
+        # ``except`` frees it, so the runner's executor shutdown never waits on it.
+        loop.run_in_executor(executor, worker_free.wait)
+        try:
+            check.cancel()
+            for _ in range(5):
+                await asyncio.sleep(0)
+            check.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await check
+            assert fs._SPOOL_DISPOSALS  # the removal is still queued
+            # Returned pending, so the runner's shutdown cancels it.
+            return asyncio.ensure_future(_free_the_worker_once_shutdown_cancels())
+        except BaseException:
+            worker_free.set()
+            raise
 
     probing = asyncio.Event()
     asyncio.run(_main())
