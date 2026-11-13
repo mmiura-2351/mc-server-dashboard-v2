@@ -55,14 +55,10 @@ def _fs_file_stream(path: Path, _opened: list[IO[Any]]) -> Any:
 
 
 def _fs_leased_file_stream(path: Path, opened: list[IO[Any]]) -> Any:
-    return fs._leased_file_stream(lambda: (_opening(path, opened), lambda: None))
+    async def _open_source() -> tuple[io.BufferedReader, Callable[[], None]]:
+        return _opening(path, opened), lambda: None
 
-
-def _fs_pinned_file_stream(path: Path, opened: list[IO[Any]]) -> Any:
-    async def _open_file() -> io.BufferedReader:
-        return _opening(path, opened)
-
-    return fs._pinned_file_stream(_open_file)
+    return fs._leased_file_stream(_open_source)
 
 
 def _object_file_parts(path: Path, _opened: list[IO[Any]]) -> Any:
@@ -72,7 +68,6 @@ def _object_file_parts(path: Path, _opened: list[IO[Any]]) -> Any:
 _STREAMS: dict[str, tuple[ModuleType, Callable[[Path, list[IO[Any]]], Any]]] = {
     "fs-file_stream": (fs, _fs_file_stream),
     "fs-leased_file_stream": (fs, _fs_leased_file_stream),
-    "fs-pinned_file_stream": (fs, _fs_pinned_file_stream),
     "object-file_parts": (object_store, _object_file_parts),
 }
 

@@ -2377,7 +2377,9 @@ class FsStorage(Storage):
                 raise
             return handle, release
 
-        return _leased_file_stream(_open)
+        return _leased_file_stream(
+            functools.partial(_acquire_off_loop, _close_orphaned_read, _open)
+        )
 
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -3595,16 +3597,17 @@ def _file_stream(
 
 
 def _leased_file_stream(
-    open_source: Callable[[], tuple[io.BufferedReader, Callable[[], None]]],
+    open_source: Callable[[], Awaitable[tuple[io.BufferedReader, Callable[[], None]]]],
 ) -> AsyncIterator[bytes]:
     """Stream one file's bytes in chunks under an active-reader lease (issue #265).
 
-    ``open_source`` is called on the first iteration: it resolves the live
-    snapshot, takes the active-reader lease, opens the target file, and returns
-    the handle plus the matching lease-release callback. Deferring it to first
-    iteration means a stream opened but never consumed never pins a snapshot
-    (mirroring :func:`_tar_stream`). The lease is released exactly once when the
-    stream finishes, is closed early, or raises.
+    ``open_source`` is awaited on the first iteration: it takes the active-reader
+    lease, opens the target file, and returns the handle plus the matching
+    lease-release callback. Deferring it to first iteration means a stream opened
+    but never consumed never pins a snapshot (mirroring :func:`_tar_stream`). The
+    lease is released exactly once, once the handle's close has finished: when the
+    stream finishes, is closed early, or raises. A caller cancelled during the
+    close leaves the close running, and the lease with it (issue #3618).
 
     The open IS the existence check (issue #2391, the shape :func:`_file_stream`
     took in #2341): the lease protects the snapshot DIRECTORY, not the files in
@@ -3618,20 +3621,36 @@ def _leased_file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle, on_close = await _acquire_off_loop(_close_orphaned_read, open_source)
+        handle, on_close = await open_source()
         try:
-            try:
-                while True:
-                    chunk = await asyncio.to_thread(handle.read, _CHUNK)
-                    if not chunk:
-                        return
-                    yield chunk
-            finally:
-                await _close_off_loop(handle)
+            while True:
+                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                if not chunk:
+                    return
+                yield chunk
         finally:
-            on_close()
+            await _close_off_loop(_ClosedThenReleased(handle, on_close))
 
     return _gen()
+
+
+class _ClosedThenReleased:
+    """``handle``, whose close releases its lease once done (issue #3618).
+
+    The release runs on the closing thread, so a close its cancelled caller left
+    running still holds the lease until it finishes.
+    """
+
+    def __init__(self, handle: io.BufferedReader, release: Callable[[], None]) -> None:
+        self._handle = handle
+        self._release = release
+        self.name = handle.name
+
+    def close(self) -> None:
+        try:
+            self._handle.close()
+        finally:
+            self._release()
 
 
 def _plain_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
@@ -3812,32 +3831,6 @@ def _extract_member_capped(
     return total
 
 
-def _pinned_file_stream(
-    open_file: Callable[[], Awaitable[io.BufferedReader]],
-) -> AsyncIterator[bytes]:
-    """Stream the bytes of the file ``open_file`` opens (the caller holds a lease).
-
-    The open IS the existence check, for the same reason it is in
-    :func:`_leased_file_stream` (issue #2391): the view's lease pins the snapshot
-    DIRECTORY, and ``delete_file`` unlinks a file inside that very directory, so a
-    pre-check here would leave the same window and the same bare
-    ``FileNotFoundError`` escaping the servers seam as a 500.
-    """
-
-    async def _gen() -> AsyncIterator[bytes]:
-        handle = await open_file()
-        try:
-            while True:
-                chunk = await asyncio.to_thread(handle.read, _CHUNK)
-                if not chunk:
-                    return
-                yield chunk
-        finally:
-            await _close_off_loop(handle)
-
-    return _gen()
-
-
 class _FsWorkingSetView(WorkingSetView):
     """Pinned read-only view of a working set for the fs adapter (issue #1966).
 
@@ -3912,15 +3905,33 @@ class _FsWorkingSetView(WorkingSetView):
         # through the read-side resolve so the view refuses a symlink component
         # exactly as the unpinned read paths do (issues #2418, #2432).
         target = self._storage._safe_read_target(self._pinned, rel_path)
-        # The view's lease covers the stream; only the open, which reads the
-        # snapshot on a thread, takes one of its own (issue #3577).
-        return _pinned_file_stream(
-            functools.partial(
-                self._storage._read_leased,
-                self._pinned,
+        return _leased_file_stream(
+            functools.partial(self._open_leased, self._pinned, target, rel_path.value)
+        )
+
+    async def _open_leased(
+        self, pinned: Path, target: Path, rel: str
+    ) -> tuple[io.BufferedReader, Callable[[], None]]:
+        """Open ``target`` under a lease of the stream's own on ``pinned``.
+
+        The stream's lease, not the view's, covers it to the end of its close: a
+        consumer cancelled during the close exits the view, releasing the view's
+        lease, while the close still runs (issue #3618). It is taken on the loop
+        while the view's lease still pins ``pinned``. The open, which reads the
+        snapshot on a thread, takes one of its own (issue #3577).
+        """
+
+        self._storage._acquire_lease(pinned)
+        release = self._storage._lease_release(pinned)
+        try:
+            handle = await self._storage._read_leased(
+                pinned,
                 _open_readable_sync,
                 target,
-                f"file not found: {rel_path.value}",
+                f"file not found: {rel}",
                 reclaim=_close_orphaned_handle,
             )
-        )
+        except BaseException:
+            release()
+            raise
+        return handle, release

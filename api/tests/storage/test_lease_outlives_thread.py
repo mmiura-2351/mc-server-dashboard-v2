@@ -4,8 +4,9 @@ Several fs reads run lease-protected work on a thread. Cancelling the caller doe
 not stop that thread, so a caller that releases the lease as it unwinds lets a
 publish or sweep reclaim the snapshot while the thread is still reading it.
 
-Each case pauses the thread inside its read, cancels the caller, then attempts a
-reclaim: the snapshot must survive while the thread is paused. Once the thread is
+Each case pauses the thread inside its read, or inside the file close that ends
+it (#3618), cancels the caller, then attempts a reclaim: the snapshot must
+survive while the thread is paused. Once the thread is
 let go, the lease is released and the reclaim proceeds.
 """
 
@@ -106,6 +107,24 @@ def _in_open(storage: FsStorage, pause: _Pause, mp: pytest.MonkeyPatch) -> None:
     mp.setattr(fs, "_open_readable_sync", pause.once(fs._open_readable_sync))
 
 
+class _CloseHeld:
+    """A real file whose close is held by ``pause`` (issue #3618)."""
+
+    def __init__(self, handle: Any, pause: _Pause) -> None:
+        self.name = handle.name
+        self.read = handle.read
+        self.close = pause.once(handle.close)
+
+
+def _in_close(storage: FsStorage, pause: _Pause, mp: pytest.MonkeyPatch) -> None:
+    open_readable = fs._open_readable_sync
+
+    def _opening(path: Path, not_found: str) -> _CloseHeld:
+        return _CloseHeld(open_readable(path, not_found), pause)
+
+    mp.setattr(fs, "_open_readable_sync", _opening)
+
+
 async def _check_health(
     storage: FsStorage, community: CommunityId, server: ServerId
 ) -> object:
@@ -140,6 +159,20 @@ async def _file_chunk(
     ).__anext__()
 
 
+async def _view_file_drained(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    async with storage.open_working_set_view(community, server) as view:
+        return [chunk async for chunk in view.open_file_stream(RelPath("a.txt"))]
+
+
+async def _file_drained(
+    storage: FsStorage, community: CommunityId, server: ServerId
+) -> object:
+    stream = storage.open_file_stream(community, server, RelPath("a.txt"))
+    return [chunk async for chunk in stream]
+
+
 _THREADED_READS: list[tuple[str, _Read, _Arm]] = [
     ("check_current_health", _check_health, _in_region_scan),
     ("create_backup_from_current-scan", _create_backup, _in_region_scan),
@@ -147,6 +180,8 @@ _THREADED_READS: list[tuple[str, _Read, _Arm]] = [
     ("working_set_view-list_dir", _view_list_dir, _in_listing),
     ("working_set_view-open_file_stream", _view_file_chunk, _in_open),
     ("open_file_stream", _file_chunk, _in_open),
+    ("working_set_view-open_file_stream-close", _view_file_drained, _in_close),
+    ("open_file_stream-close", _file_drained, _in_close),
 ]
 
 
@@ -225,3 +260,73 @@ async def test_a_hydrate_stream_keeps_its_lease_until_its_tar_writer_finishes(
     await _assert_reclaim_waits_for_the_thread(
         storage, community, server, snapshot, pause, released
     )
+
+
+class _CountedRelease:
+    """A lease release that counts its calls, from any thread."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.called = threading.Event()
+
+    def __call__(self) -> None:
+        self.calls += 1
+        self.called.set()
+
+
+async def test_a_file_stream_cancelled_in_its_close_releases_once_it_finishes(
+    pause: _Pause, tmp_path: Path
+) -> None:
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"OLD")
+    release = _CountedRelease()
+
+    async def _open() -> tuple[Any, Callable[[], None]]:
+        return _CloseHeld(open(path, "rb"), pause), release
+
+    async def _drain() -> list[bytes]:
+        return [chunk async for chunk in fs._leased_file_stream(_open)]
+
+    task = asyncio.ensure_future(_drain())
+    assert await asyncio.to_thread(pause.entered.wait, 10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert release.calls == 0
+
+    pause.resume.set()
+    # A bound, not a delay: the close's thread can stall on a loaded host.
+    assert await asyncio.to_thread(release.called.wait, 120)
+    assert release.calls == 1
+
+
+class _FailingRead:
+    def __init__(self, path: Path) -> None:
+        self._handle = open(path, "rb")
+        self.name = self._handle.name
+        self.close = self._handle.close
+
+    def read(self, _size: int) -> bytes:
+        raise OSError("read failed")
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["drained", "read-fault"])
+async def test_a_finished_file_stream_releases_its_lease_once(
+    fails: bool, tmp_path: Path
+) -> None:
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"OLD")
+    release = _CountedRelease()
+
+    async def _open() -> tuple[Any, Callable[[], None]]:
+        return (_FailingRead(path) if fails else open(path, "rb")), release
+
+    stream = fs._leased_file_stream(_open)
+    if fails:
+        with pytest.raises(OSError, match="read failed"):
+            await anext(stream)
+    else:
+        assert [chunk async for chunk in stream] == [b"OLD"]
+
+    assert release.calls == 1
