@@ -4630,8 +4630,9 @@ func wireStatus(ev execution.StatusEvent) session.StatusEvent {
 }
 
 // terminalReport is the report a handoff that superseded inst queues in its
-// pump's place (issue #3597): inst's own terminal event, its Detail and
-// CrashReason included, or fallback when inst has none, because it has not ended.
+// pump's place (issue #3597), and the one ResyncStatus makes for inst (issue
+// #3621): inst's own terminal event, its Detail and CrashReason included, or
+// fallback when inst has none, because it has not ended.
 func terminalReport(inst execution.Instance, fallback session.StatusEvent) session.StatusEvent {
 	if ev, ok := inst.Terminal(); ok {
 		return wireStatus(ev)
@@ -4741,39 +4742,48 @@ func (m *Manager) forgetOrphanLocked(serverID string, inst execution.Instance) b
 // stopped orphan, or a stop leg's instance, has it on the stream before the stop
 // or the pump retires the record. Such an id is reported at that terminal
 // instead of `unknown` or `stopping`, which would overwrite it.
+//
+// An instance that has ended, whichever map holds it, is reported with its own
+// terminal event, a crash's Detail and CrashReason included (terminalReport,
+// issue #3621), never a bare state. A reconnected API would otherwise receive a
+// crash nobody can explain, and on a full sink the report coalesces into the
+// server's pending slot, over the classified crash the pump may have parked there.
 func (m *Manager) ResyncStatus() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
-	report := func(serverID, state string) {
+	report := func(ev session.StatusEvent) {
 		if hook := m.beforeResyncReport; hook != nil {
-			hook(serverID)
+			hook(ev.ServerID)
 		}
-		m.queueStatusLocked(session.StatusEvent{ServerID: serverID, State: state})
+		m.queueStatusLocked(ev)
+	}
+	at := func(serverID, state string) session.StatusEvent {
+		return session.StatusEvent{ServerID: serverID, State: state}
 	}
 	for serverID, inst := range m.instances {
-		report(serverID, inst.Status().String())
+		report(terminalReport(inst, at(serverID, inst.Status().String())))
 	}
 	for serverID, e := range m.orphans {
-		report(serverID, terminalOr(e.inst, orphanUnknownState))
+		report(terminalReport(e.inst, at(serverID, orphanUnknownState)))
 	}
 	for serverID, r := range m.reserved {
 		if _, orphan := m.orphans[serverID]; orphan {
 			continue
 		}
-		var state string
+		var ev session.StatusEvent
 		switch r.leg {
 		case legStarting:
-			state = execution.StateStarting.String()
+			ev = at(serverID, execution.StateStarting.String())
 		case legStopping:
-			state = terminalOr(r.inst, execution.StateStopping.String())
+			ev = terminalReport(r.inst, at(serverID, execution.StateStopping.String()))
 		default:
 			continue
 		}
 		r.reported = true
 		m.reserved[serverID] = r
-		report(serverID, state)
+		report(ev)
 	}
 	for _, serverID := range m.bootSwept {
 		_, live := m.instances[serverID]
@@ -4782,19 +4792,9 @@ func (m *Manager) ResyncStatus() {
 		if live || orphan || reserved {
 			continue
 		}
-		report(serverID, execution.StateStopped.String())
+		report(at(serverID, execution.StateStopped.String()))
 	}
 	m.bootSwept = nil
-}
-
-// terminalOr returns inst's state when it is terminal (stopped or crashed), and
-// otherwise fallback: what ResyncStatus reports for an id whose instance may
-// already have sent its terminal (issue #3587).
-func terminalOr(inst execution.Instance, fallback string) string {
-	if s := inst.Status(); s == execution.StateStopped || s == execution.StateCrashed {
-		return s.String()
-	}
-	return fallback
 }
 
 // sendStatus forwards a status event with latest-state-wins coalescing under
