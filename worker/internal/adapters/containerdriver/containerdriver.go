@@ -269,8 +269,12 @@ type Driver struct {
 	worldProgress func(workingDir string) func() (execution.WorldProgress, error)
 	// imagePullTimeout bounds a lazy base-image pull (issue #904).
 	imagePullTimeout time.Duration
-	// exitRemoveTimeout bounds the removal of an exited container (issue #3610).
+	// exitRemoveTimeout bounds the removal of a container an instance is done
+	// with (issues #3610, #3622).
 	exitRemoveTimeout time.Duration
+	// installStartTimeout bounds superviseInstall's docker start of a retry
+	// installer or the post-install launch (issue #3622).
+	installStartTimeout time.Duration
 	// logger records the lazy base-image pull at INFO (issue #904).
 	logger *slog.Logger
 	// handOffs tracks the stops in flight on this driver's instances, so a Worker
@@ -328,21 +332,22 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 			after:       time.After,
 			runScan:     func(f func()) { go f() },
 		},
-		flushTimeout:      flushTimeout,
-		gameBindIP:        gameBindIP,
-		network:           opts.Network,
-		scratchDir:        opts.ScratchDir,
-		runAsUID:          runAsUID,
-		runAsGID:          runAsGID,
-		chownAt:           chownAtNoFollow,
-		conflictPoll:      conflictPoll,
-		conflictDeadline:  conflictDeadline,
-		readinessTimeout:  readinessTimeout,
-		sweepCallMargin:   sweepCallMargin,
-		worldProgress:     opts.WorldProgress,
-		imagePullTimeout:  defaultImagePullTimeout,
-		exitRemoveTimeout: exitRemoveTimeout,
-		logger:            logger,
+		flushTimeout:        flushTimeout,
+		gameBindIP:          gameBindIP,
+		network:             opts.Network,
+		scratchDir:          opts.ScratchDir,
+		runAsUID:            runAsUID,
+		runAsGID:            runAsGID,
+		chownAt:             chownAtNoFollow,
+		conflictPoll:        conflictPoll,
+		conflictDeadline:    conflictDeadline,
+		readinessTimeout:    readinessTimeout,
+		sweepCallMargin:     sweepCallMargin,
+		worldProgress:       opts.WorldProgress,
+		imagePullTimeout:    defaultImagePullTimeout,
+		exitRemoveTimeout:   exitRemoveTimeout,
+		installStartTimeout: installStartTimeout,
+		logger:              logger,
 	}
 	d.handOffs = &stopHandOffs{d: d, stops: map[*inflightStop]struct{}{}}
 	return d
@@ -401,24 +406,25 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 
 	inst := &instance{
-		spec:              spec,
-		docker:            d.docker,
-		image:             image,
-		network:           d.network,
-		gameBindIP:        d.gameBindIP,
-		labels:            d.labels(spec.ServerID, spec.MinecraftVersion),
-		createFn:          d.createServerContainer,
-		openControl:       d.openControl,
-		rconHost:          d.RconHost(spec.ServerID),
-		stopRule:          d.stopRule,
-		handOffs:          d.handOffs,
-		flushTimeout:      d.flushTimeout,
-		readinessTimeout:  d.readinessTimeout,
-		exitRemoveTimeout: d.exitRemoveTimeout,
-		logger:            d.logger,
-		events:            make(chan execution.StatusEvent, 8),
-		exited:            make(chan struct{}),
-		logPump:           execution.NewLogPump(spec.ServerID, logBufferLines),
+		spec:                spec,
+		docker:              d.docker,
+		image:               image,
+		network:             d.network,
+		gameBindIP:          d.gameBindIP,
+		labels:              d.labels(spec.ServerID, spec.MinecraftVersion),
+		createFn:            d.createServerContainer,
+		openControl:         d.openControl,
+		rconHost:            d.RconHost(spec.ServerID),
+		stopRule:            d.stopRule,
+		handOffs:            d.handOffs,
+		flushTimeout:        d.flushTimeout,
+		readinessTimeout:    d.readinessTimeout,
+		exitRemoveTimeout:   d.exitRemoveTimeout,
+		installStartTimeout: d.installStartTimeout,
+		logger:              d.logger,
+		events:              make(chan execution.StatusEvent, 8),
+		exited:              make(chan struct{}),
+		logPump:             execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
 	inst.state.Store(int32(execution.StateStarting))
 	inst.installCtx, inst.endInstall = context.WithCancel(context.Background())
@@ -506,12 +512,23 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 // same 10s posture, issue #338); the bound only caps a wedged daemon.
 const startCleanupRemoveTimeout = 10 * time.Second
 
-// exitRemoveTimeout bounds supervise's Remove of the exited container. A healthy
-// daemon answers a remove well inside it (the posture of
+// exitRemoveTimeout bounds each Remove of a container an instance is done with:
+// the exited server container (supervise), and the install supervisor's exited
+// installer or created-but-unstarted retry/launch container (superviseInstall). A
+// healthy daemon answers a remove well inside it (the posture of
 // startCleanupRemoveTimeout and the startup Sweep's remove calls); the bound only
-// caps a stalled daemon, which would otherwise hold the instance's event stream
-// open indefinitely (issue #3610).
+// caps a stalled daemon, which would otherwise hold the instance's terminal, its
+// event stream and any Stop waiting on it open indefinitely (issues #3610,
+// #3622).
 const exitRemoveTimeout = 10 * time.Second
+
+// installStartTimeout bounds superviseInstall's docker start of a retry installer
+// or the post-install launch container. Each runs under the instance lock (issues
+// #306, #1987), which Stop takes first, so a stalled start would otherwise block
+// every Stop of the instance indefinitely (issue #3622). A healthy daemon starts a
+// container well inside it, and a Stop that waits it out still fits the API's
+// stop budget, which a failed stop leaves 50 s of (defaultStopCap).
+const installStartTimeout = 10 * time.Second
 
 // removeCreated is the best-effort cleanup of a created-but-unstarted container
 // whose Start failed. It runs detached from the command context
@@ -766,7 +783,9 @@ func (d *Driver) pullImage(ctx context.Context, image string) error {
 // inspect-404, #233 remove-already-in-progress), so on a 409 name conflict the
 // driver runs a bounded wait-for-name-free loop instead of a single special case
 // (issue #233): it polls (every conflictPoll, until conflictDeadline, honoring
-// ctx) for the name to free.
+// ctx) for the name to free. Each Inspect, Remove and Create in the loop runs under
+// the loop deadline as well, so a stalled daemon call cannot outlast it (issue
+// #3622).
 //
 // Each iteration inspects the conflicting name:
 //   - 404: the name is free, so retry the create. Success returns; a fresh 409
@@ -790,26 +809,30 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 	}
 	conflict := err
 
-	timer := time.NewTimer(d.conflictDeadline)
-	defer timer.Stop()
+	loopCtx, cancel := context.WithTimeout(ctx, d.conflictDeadline)
+	defer cancel()
 
 	lastReason := "name still in use"
 	for {
-		info, inspectErr := d.docker.Inspect(ctx, create.Name)
+		info, inspectErr := d.docker.Inspect(loopCtx, create.Name)
 		switch {
 		case errors.Is(inspectErr, errNotFound):
 			// The name is free; retry the create. This calls Create directly, not
 			// createPullingOnMiss: reaching this loop at all means the first create
 			// got past image resolution to the name-conflict check, so the base image
 			// is already on the host and a pull-on-miss wrapper would never fire.
-			id, createErr := d.docker.Create(ctx, create)
-			if createErr == nil {
+			id, createErr := d.docker.Create(loopCtx, create)
+			switch {
+			case createErr == nil:
 				return id, nil
-			}
-			if !errors.Is(createErr, errNameConflict) {
+			case errors.Is(createErr, errNameConflict):
+				lastReason = "create still conflicts after the name freed"
+			case ctx.Err() == nil && loopCtx.Err() != nil:
+				// The loop deadline cut the create short: report the timeout below.
+				lastReason = fmt.Sprintf("create failed: %v", createErr)
+			default:
 				return "", createErr
 			}
-			lastReason = "create still conflicts after the name freed"
 		case inspectErr != nil:
 			lastReason = fmt.Sprintf("inspect failed: %v", inspectErr)
 		case info.Labels[labelWorkerID] != d.workerID:
@@ -817,7 +840,7 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 		case info.Running:
 			return "", fmt.Errorf("declined conflict resolution: conflicting container is running: %w", conflict)
 		default:
-			if removeErr := d.docker.Remove(ctx, info.ID); removeErr != nil && !errors.Is(removeErr, errRemovalInProgress) {
+			if removeErr := d.docker.Remove(loopCtx, info.ID); removeErr != nil && !errors.Is(removeErr, errRemovalInProgress) {
 				lastReason = fmt.Sprintf("remove failed: %v", removeErr)
 			}
 		}
@@ -826,11 +849,11 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 		// ctx cancellation.
 		poll := time.NewTimer(d.conflictPoll)
 		select {
-		case <-ctx.Done():
+		case <-loopCtx.Done():
 			poll.Stop()
-			return "", fmt.Errorf("conflict resolution cancelled (%s): %w", lastReason, ctx.Err())
-		case <-timer.C:
-			poll.Stop()
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("conflict resolution cancelled (%s): %w", lastReason, ctx.Err())
+			}
 			return "", fmt.Errorf("conflict resolution timed out (%s): %w", lastReason, conflict)
 		case <-poll.C:
 		}
@@ -1156,9 +1179,12 @@ type instance struct {
 	// readinessTimeout bounds the hold-on-starting wait before falling back to
 	// running (issue #345).
 	readinessTimeout time.Duration
-	// exitRemoveTimeout bounds supervise's removal of the exited container (issue
-	// #3610).
+	// exitRemoveTimeout bounds the removal of a container the instance is done
+	// with (removeContainer, issues #3610 and #3622).
 	exitRemoveTimeout time.Duration
+	// installStartTimeout bounds superviseInstall's docker start of a retry
+	// installer or the post-install launch (issue #3622).
+	installStartTimeout time.Duration
 	// logger records the graceful-stop -> kill escalation at WARN (issue #927), so a
 	// stop that timed out (leaving the world's regions unpadded for the stop-leg
 	// snapshot) is diagnosable. Never nil: Start copies the Driver's logger, which
@@ -1333,7 +1359,10 @@ func (i *instance) awaitReady() {
 // decided (in every terminal branch, and after the launch is published): keeping
 // it as the current container until then gives a concurrent Stop a valid target
 // through the install-exit→launch handoff window (issue #306). Its distinct name
-// (mcsd-<id>-install) means the launch create never contends with it.
+// (mcsd-<id>-install) means the launch create never contends with it. Each
+// removal, and each docker start under the lock, is bounded (removeContainer,
+// startInstallPhase), so a stalled daemon cannot hold back the terminal, the
+// event stream or a Stop (issue #3622).
 //
 // Retry-publish invariant (issue #1987): the retry container is created outside
 // the lock, then {stop re-check, docker.Start, containerID publish,
@@ -1392,7 +1421,7 @@ func (i *instance) superviseInstall(installID string) {
 		i.mu.Unlock()
 
 		if stopping {
-			_ = i.docker.Remove(context.Background(), installID)
+			i.removeContainer(installID)
 			i.finishTerminal(execution.StateStopped, "")
 			return
 		}
@@ -1416,7 +1445,7 @@ func (i *instance) superviseInstall(installID string) {
 			oomKilled = i.oomKilled(installID)
 		}
 		reason, detail, explained := i.explainInstallFailure(scan, oomKilled)
-		_ = i.docker.Remove(context.Background(), installID)
+		i.removeContainer(installID)
 		if explained {
 			i.finishInstallCrash(reason, detail)
 			return
@@ -1480,13 +1509,13 @@ func (i *instance) superviseInstall(installID string) {
 		i.mu.Lock()
 		if i.stopRequested {
 			i.mu.Unlock()
-			_ = i.docker.Remove(context.Background(), newID)
+			i.removeContainer(newID)
 			i.finishTerminal(execution.StateStopped, "")
 			return
 		}
-		if err := i.docker.Start(context.Background(), newID); err != nil {
+		if err := i.startInstallPhase(newID); err != nil {
 			i.mu.Unlock()
-			_ = i.docker.Remove(context.Background(), newID)
+			i.removeContainer(newID)
 			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())
 			return
 		}
@@ -1503,7 +1532,7 @@ func (i *instance) superviseInstall(installID string) {
 	stopping := i.stopRequested
 	i.mu.Unlock()
 	if stopping {
-		_ = i.docker.Remove(context.Background(), installID)
+		i.removeContainer(installID)
 		i.finishTerminal(execution.StateStopped, "")
 		return
 	}
@@ -1511,7 +1540,7 @@ func (i *instance) superviseInstall(installID string) {
 	paths := containerPathResolver(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID))
 	plan, err := execution.BuildLaunchPlan(i.spec, paths)
 	if err != nil {
-		_ = i.docker.Remove(context.Background(), installID)
+		i.removeContainer(installID)
 		i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge re-plan after install failed: "+err.Error())
 		return
 	}
@@ -1520,7 +1549,7 @@ func (i *instance) superviseInstall(installID string) {
 		// produce forge-<version>.jar instead of unix_args.txt).
 		rel, found, legacyErr := execution.ResolveLegacyForgeJar(paths)
 		if legacyErr != nil || !found {
-			_ = i.docker.Remove(context.Background(), installID)
+			i.removeContainer(installID)
 			detail := "forge install produced no args file"
 			if legacyErr != nil {
 				detail = "forge legacy jar resolve failed: " + legacyErr.Error()
@@ -1541,7 +1570,7 @@ func (i *instance) superviseInstall(installID string) {
 	// The created launch container is not started yet.
 	id, err := i.createLaunchContainer(plan.LaunchArgs)
 	if err != nil {
-		_ = i.docker.Remove(context.Background(), installID)
+		i.removeContainer(installID)
 		if i.stopWasRequested() {
 			// The Stop that cancelled the create is what ended it.
 			i.finishTerminal(execution.StateStopped, "")
@@ -1571,15 +1600,15 @@ func (i *instance) superviseInstall(installID string) {
 		// created and the install container, then report stopped. Stop's wait is
 		// released by finishTerminal closing i.exited (issue #306).
 		i.mu.Unlock()
-		_ = i.docker.Remove(context.Background(), id)
-		_ = i.docker.Remove(context.Background(), installID)
+		i.removeContainer(id)
+		i.removeContainer(installID)
 		i.finishTerminal(execution.StateStopped, "")
 		return
 	}
-	if err := i.docker.Start(context.Background(), id); err != nil {
+	if err := i.startInstallPhase(id); err != nil {
 		i.mu.Unlock()
-		_ = i.docker.Remove(context.Background(), id)
-		_ = i.docker.Remove(context.Background(), installID)
+		i.removeContainer(id)
+		i.removeContainer(installID)
 		i.finishTerminal(execution.StateCrashed, "forge launch after install failed: "+err.Error())
 		return
 	}
@@ -1587,7 +1616,7 @@ func (i *instance) superviseInstall(installID string) {
 	i.mu.Unlock()
 
 	// The launch is now the current container; reap the exited install container.
-	_ = i.docker.Remove(context.Background(), installID)
+	i.removeContainer(installID)
 
 	i.beginLaunchTail(id)
 }
@@ -2843,20 +2872,8 @@ func (i *instance) supervise() {
 
 	// Remove the exited container so a later start can reuse the deterministic name.
 	// The removal is bounded so a stalled daemon cannot hold the event stream and
-	// the instance's resources open (issue #3610). A container it leaves behind is
-	// removed by the next start's wait-for-name-free loop (createContainer) or the
-	// next boot's Sweep.
-	removeCtx, cancel := context.WithTimeout(context.Background(), i.exitRemoveTimeout)
-	switch err := i.docker.Remove(removeCtx, id); {
-	case err == nil:
-	case removedConcurrently(err):
-		i.logger.Debug("exited container already removed or being removed",
-			"server_id", i.spec.ServerID, "container_id", id, "error", err)
-	default:
-		i.logger.Warn("remove exited container failed; the next start of the server or the next boot's sweep removes it",
-			"server_id", i.spec.ServerID, "container_id", id, "error", err)
-	}
-	cancel()
+	// the instance's resources open (issue #3610).
+	i.removeContainer(id)
 
 	i.mu.Lock()
 	i.closed = true
@@ -2869,6 +2886,40 @@ func (i *instance) supervise() {
 	// the metrics pump, so any in-flight sample unblocks and this acquires the lock
 	// without waiting out a full sample.
 	i.closeMetricsControl()
+}
+
+// removeContainer removes a container the instance is done with under
+// exitRemoveTimeout, detached from any caller, so a stalled daemon cannot hold
+// back what follows the removal: the terminal, the event stream and a Stop waiting
+// on them, or the hand-over to the launch (issues #3610, #3622). A removal that
+// lost to another removal of the same container is logged at DEBUG; any other
+// failure, a timeout included, at WARN. A container left behind is removed by the
+// next create under its name (createContainer's wait-for-name-free loop) or by the
+// next boot's Sweep.
+func (i *instance) removeContainer(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), i.exitRemoveTimeout)
+	defer cancel()
+	switch err := i.docker.Remove(ctx, id); {
+	case err == nil:
+	case removedConcurrently(err):
+		i.logger.Debug("container already removed or being removed",
+			"server_id", i.spec.ServerID, "container_id", id, "error", err)
+	default:
+		i.logger.Warn("remove container failed; the next create under its name or the next boot's sweep removes it",
+			"server_id", i.spec.ServerID, "container_id", id, "error", err)
+	}
+}
+
+// startInstallPhase is superviseInstall's docker start of a retry installer or
+// the post-install launch, bounded by installStartTimeout: it runs under the
+// instance lock, so a stalled daemon would otherwise block every Stop (issue
+// #3622). A start the bound cuts short fails like any other, and the caller
+// removes the container, which the force-remove also stops should the daemon
+// have started it after all.
+func (i *instance) startInstallPhase(id string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), i.installStartTimeout)
+	defer cancel()
+	return i.docker.Start(ctx, id)
 }
 
 // removedConcurrently reports whether a failed Remove lost to another removal of

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,6 +55,11 @@ type forgeFakeDocker struct {
 	// so the post-Kill waitExitDone times out and triggers the survived-kill
 	// path.
 	killNoExitIDs map[string]bool
+	// removeStallIDs and startStallIDs model a stalled daemon: a Remove or Start
+	// of a named container blocks until its context is cancelled and then returns
+	// the context error (issue #3622).
+	removeStallIDs map[string]bool
+	startStallIDs  map[string]bool
 }
 
 func newForgeFakeDocker() *forgeFakeDocker {
@@ -82,10 +88,15 @@ func (f *forgeFakeDocker) Create(_ context.Context, spec CreateSpec) (string, er
 
 func (f *forgeFakeDocker) ImagePull(_ context.Context, _ string) error { return nil }
 
-func (f *forgeFakeDocker) Start(_ context.Context, id string) error {
+func (f *forgeFakeDocker) Start(ctx context.Context, id string) error {
 	f.mu.Lock()
 	f.started = append(f.started, id)
+	stall := f.startStallIDs[id]
 	f.mu.Unlock()
+	if stall {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -137,10 +148,15 @@ func (f *forgeFakeDocker) Wait(_ context.Context, id string) (int64, error) {
 	return f.codes[id], f.errs[id]
 }
 
-func (f *forgeFakeDocker) Remove(_ context.Context, id string) error {
+func (f *forgeFakeDocker) Remove(ctx context.Context, id string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
+	stall := f.removeStallIDs[id]
+	f.mu.Unlock()
+	if stall {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -1187,6 +1203,136 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 	// a false nil from a stale exitObserved left by attempt 0).
 	if err := inst.Stop(context.Background(), false); err == nil {
 		t.Fatal("expected Stop to fail when the retry container survives docker kill; got nil (stale exitObserved?)")
+	}
+}
+
+// stalledCallForgeDriver is forgeDriver with the install supervisor's Docker-call
+// bounds shrunk, logging to logged, for the stalled-daemon tests (issue #3622).
+// The stop's wait for the exit is lengthened far past the removal bound, so a Stop
+// waiting out a stalled removal never reads it as a container that survived.
+func stalledCallForgeDriver(docker dockerAPI, logged *syncBuffer) *Driver {
+	d := forgeDriver(docker)
+	d.logger = slog.New(slog.NewTextHandler(logged, nil))
+	d.exitRemoveTimeout = 10 * time.Millisecond
+	d.stopTimeout = 30 * time.Second
+	return d
+}
+
+// awaitStreamClosed reads ch until it closes and returns the last event, failing
+// if it stays open: a stalled Docker call must not hold the instance open.
+func awaitStreamClosed(t *testing.T, ch <-chan execution.StatusEvent) execution.StatusEvent {
+	t.Helper()
+	deadline := time.After(30 * time.Second)
+	var last execution.StatusEvent
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return last
+			}
+			last = ev
+		case <-deadline:
+			t.Fatalf("event stream still open while a Docker call stalls (last event %v)", last.State)
+		}
+	}
+}
+
+// A failed install whose container removal stalls still finishes: the removal is
+// bounded, the crash is the instance's Terminal, the event stream closes, and the
+// failed removal is logged (issue #3622).
+func TestForgeInstallCrashFinishesWhenTheInstallRemovalStalls(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.oomKilled = map[string]bool{forgeInstallID: true}
+	docker.removeStallIDs = map[string]bool{forgeInstallID: true}
+	logged := &syncBuffer{}
+	inst, err := stalledCallForgeDriver(docker, logged).Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	docker.exit(forgeInstallID, 137, nil)
+
+	last := awaitStreamClosed(t, inst.Events())
+	if last.State != execution.StateCrashed || last.CrashReason != execution.CrashReasonForgeInstallOutOfMemory {
+		t.Fatalf("last event = %+v, want the out-of-memory install crash", last)
+	}
+	if got, ok := inst.Terminal(); !ok || got != last {
+		t.Fatalf("Terminal = %+v, %v, want %+v", got, ok, last)
+	}
+	if got := logged.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, forgeInstallID) ||
+		!strings.Contains(got, context.DeadlineExceeded.Error()) {
+		t.Fatalf("stalled removal not logged at WARN; got %q", got)
+	}
+}
+
+// A Stop during the install is released even when the stopped install
+// container's removal stalls: the removal is bounded and the instance reports
+// stopped (issue #3622).
+func TestForgeStopDuringInstallReturnsWhenTheInstallRemovalStalls(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.removeStallIDs = map[string]bool{forgeInstallID: true}
+	inst, err := stalledCallForgeDriver(docker, &syncBuffer{}).Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- inst.Stop(context.Background(), false) }()
+	last := awaitStreamClosed(t, inst.Events())
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop still waiting while the install container's removal stalls")
+	}
+	if last.State != execution.StateStopped {
+		t.Fatalf("last event = %+v, want stopped", last)
+	}
+}
+
+// A successful install whose container removal stalls still hands over to the
+// launch: the removal is bounded and the server reaches running (issue #3622).
+func TestForgeLaunchReachesRunningWhenTheInstallRemovalStalls(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.removeStallIDs = map[string]bool{forgeInstallID: true}
+	inst, err := stalledCallForgeDriver(docker, &syncBuffer{}).Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	writeArgsfile(t, dir)
+	docker.exit(forgeInstallID, 0, nil)
+
+	drainTo(t, inst.Events(), execution.StateRunning)
+	docker.exit("mcsd-s1", 0, nil)
+	awaitStreamClosed(t, inst.Events())
+}
+
+// A post-install launch whose docker start stalls fails within its bound instead
+// of holding the instance lock forever: the instance crashes, both containers are
+// removed, and the event stream closes (issue #3622).
+func TestForgeLaunchStartStallCrashesTheInstance(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.startStallIDs = map[string]bool{"mcsd-s1": true}
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.installStartTimeout = 10 * time.Millisecond
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	writeArgsfile(t, dir)
+	docker.exit(forgeInstallID, 0, nil)
+
+	last := awaitStreamClosed(t, inst.Events())
+	if last.State != execution.StateCrashed || !strings.Contains(last.Detail, context.DeadlineExceeded.Error()) {
+		t.Fatalf("last event = %+v, want a crash naming the stalled start", last)
+	}
+	if !docker.wasRemoved("mcsd-s1") || !docker.wasRemoved(forgeInstallID) {
+		t.Fatalf("removed = %v, want the unstarted launch and the install container", docker.removed)
 	}
 }
 
