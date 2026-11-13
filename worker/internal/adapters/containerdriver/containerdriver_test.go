@@ -3633,13 +3633,14 @@ func TestConflictLoopStalledCallHonorsCallerCancel(t *testing.T) {
 func TestCreateStalledCallReturnsWithinItsBound(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
+		want    string
 		arrange func(*fakeDocker, *Driver)
 	}{
-		{"initial", func(_ *fakeDocker, d *Driver) {
+		{"initial", "container create timed out", func(_ *fakeDocker, d *Driver) {
 			d.initialCreateTimeout = 20 * time.Millisecond
 			d.postPullCreateTimeout = time.Hour
 		}},
-		{"post-pull", func(f *fakeDocker, d *Driver) {
+		{"post-pull", "container create after the image pull timed out", func(f *fakeDocker, d *Driver) {
 			f.createImageMissesLeft = 1
 			f.onImagePull = func(ctx context.Context) error {
 				select {
@@ -3649,7 +3650,7 @@ func TestCreateStalledCallReturnsWithinItsBound(t *testing.T) {
 					return ctx.Err()
 				}
 			}
-			d.initialCreateTimeout = 20 * time.Millisecond
+			d.initialCreateTimeout = time.Hour
 			d.postPullCreateTimeout = 20 * time.Millisecond
 		}},
 	} {
@@ -3666,8 +3667,8 @@ func TestCreateStalledCallReturnsWithinItsBound(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "timed out") {
-					t.Fatalf("err = %v, want the create's own timeout", err)
+				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatalf("a stalled %s create still blocks the start past its bound", tc.name)
