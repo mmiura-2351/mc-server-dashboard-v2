@@ -1208,12 +1208,13 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 
 // stalledCallForgeDriver is forgeDriver with the install supervisor's Docker-call
 // bounds shrunk, logging to logged, for the stalled-daemon tests (issue #3622).
-// The removal bound stays well under the 50 ms StopTimeout, so a Stop waiting
-// out a stalled removal is not escalated.
+// The stop's wait for the exit is lengthened far past the removal bound, so a Stop
+// waiting out a stalled removal never reads it as a container that survived.
 func stalledCallForgeDriver(docker dockerAPI, logged *syncBuffer) *Driver {
 	d := forgeDriver(docker)
 	d.logger = slog.New(slog.NewTextHandler(logged, nil))
 	d.exitRemoveTimeout = 10 * time.Millisecond
+	d.stopTimeout = 30 * time.Second
 	return d
 }
 

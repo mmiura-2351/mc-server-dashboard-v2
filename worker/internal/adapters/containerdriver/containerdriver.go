@@ -2905,7 +2905,7 @@ func (i *instance) removeContainer(id string) {
 		i.logger.Debug("container already removed or being removed",
 			"server_id", i.spec.ServerID, "container_id", id, "error", err)
 	default:
-		i.logger.Warn("remove container failed; the next start of the server or the next boot's sweep removes it",
+		i.logger.Warn("remove container failed; the next create under its name or the next boot's sweep removes it",
 			"server_id", i.spec.ServerID, "container_id", id, "error", err)
 	}
 }

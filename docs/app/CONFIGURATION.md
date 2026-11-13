@@ -706,7 +706,8 @@ version's server does). At startup it sweeps and force-removes every container
 carrying its own worker-id label before launching any server, then removes a
 container after the server exits, and a Forge install container once the install
 is over. Each removal waits at most 10 s for the daemon; a container it leaves
-behind is removed when the server next starts, or by the next boot's sweep. The sweep recovers from a crash that left a
+behind is removed when the server next creates a container under the same name,
+or by the next boot's sweep. The sweep recovers from a crash that left a
 server's container behind, but because it force-removes *running* containers too,
 a graceful Worker restart while servers are up kills those live servers — this is
 the deliberate stateless-worker posture (the Worker adopts no prior state; the
