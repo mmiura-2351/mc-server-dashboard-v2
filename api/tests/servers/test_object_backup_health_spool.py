@@ -168,7 +168,9 @@ async def test_a_check_cancelled_while_the_spool_is_created_leaves_nothing(
         release.set()
 
     [(fd, name)] = created
-    for _ in range(200):
+    # About 120 s: a bound, not a delay. The removal can stall on a loaded host
+    # (issue #3624), and the assertions below are what checks it.
+    for _ in range(12_000):
         if not os.path.exists(name) and not _fd_points_at(fd, name):
             break
         await asyncio.sleep(0.01)
@@ -290,7 +292,7 @@ async def test_a_spool_is_removed_through_repeated_cancellation(
         worker_free.set()
 
     await occupied
-    for _ in range(200):
+    for _ in range(12_000):  # about 120 s, a bound as above
         if not os.path.exists(name):
             break
         await asyncio.sleep(0.01)

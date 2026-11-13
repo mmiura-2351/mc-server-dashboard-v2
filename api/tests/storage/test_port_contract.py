@@ -138,7 +138,9 @@ async def test_settled_generation_waits_for_a_publish_past_its_fence(
         harness.storage.commit_snapshot(handle, publisher_fence=_held_fence)
     )
     try:
-        await asyncio.wait_for(passed.wait(), 10)
+        # A bound, not a delay: the commit fsyncs its staged tree before the
+        # fence, and fsyncs can stall on a loaded host (issue #3624).
+        await asyncio.wait_for(passed.wait(), 120)
         settled = asyncio.create_task(
             harness.storage.settled_generation(community, server)
         )
