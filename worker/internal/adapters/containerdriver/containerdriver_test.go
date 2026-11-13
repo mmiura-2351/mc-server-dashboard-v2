@@ -40,6 +40,10 @@ type fakeDocker struct {
 	createCalls   int
 	// onCreate, when set, runs at the start of every Create call.
 	onCreate func()
+	// createBlocksUntilCtxDone models a stalled daemon for Create once the
+	// scripted conflicts are spent: the call blocks until its context is
+	// cancelled and then returns the context error (issue #3622).
+	createBlocksUntilCtxDone bool
 	// createImageMissesLeft makes the next N Create calls fail with the daemon's
 	// "No such image" prose before a success, modelling a host that lacks the base
 	// image until the driver pulls it (issue #904). imagePulls records the images
@@ -197,7 +201,7 @@ func (f *fakeDocker) Stats(_ context.Context, _ string) (ContainerStats, error) 
 	return f.stats, f.statsErr
 }
 
-func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) {
+func (f *fakeDocker) Create(ctx context.Context, spec CreateSpec) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCalls++
@@ -215,6 +219,12 @@ func (f *fakeDocker) Create(_ context.Context, spec CreateSpec) (string, error) 
 	if f.conflictsLeft > 0 {
 		f.conflictsLeft--
 		return "", errNameConflict
+	}
+	if f.createBlocksUntilCtxDone {
+		f.mu.Unlock()
+		<-ctx.Done()
+		f.mu.Lock()
+		return "", ctx.Err()
 	}
 	f.createSpec = spec
 	return "container-1", nil
@@ -3526,6 +3536,68 @@ func TestStartConflictLoopDeadlineFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "remove boom") {
 		t.Fatalf("err = %v, want the last decline reason in the message", err)
+	}
+}
+
+// A daemon call that stalls inside the wait-for-name-free loop cannot outlast the
+// loop's ConflictDeadline, even under a caller context with no deadline: each
+// Inspect, Remove and Create runs under the loop deadline, and one cut short by it
+// fails as the timeout it is (issue #3622).
+func TestConflictLoopStalledCallReturnsWithinDeadline(t *testing.T) {
+	own := ContainerInfo{ID: "stale-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: false}
+	for _, tc := range []struct {
+		name    string
+		arrange func(*fakeDocker)
+	}{
+		{"inspect", func(f *fakeDocker) { f.inspectBlocksUntilCtxDone = true }},
+		{"remove", func(f *fakeDocker) { f.inspectInfo = own; f.removeStallsLeft = 1000 }},
+		{"create", func(f *fakeDocker) { f.inspectErr = errNotFound; f.createBlocksUntilCtxDone = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.conflictsLeft = 1
+			tc.arrange(docker)
+			d := newTestDriver(docker, nil, errors.New("no rcon")) // ConflictDeadline 100 ms
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := d.createContainer(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if !errors.Is(err, errNameConflict) || !strings.Contains(err.Error(), "conflict resolution timed out") {
+					t.Fatalf("err = %v, want the loop's timeout wrapping the original name conflict", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("conflict loop still blocked on a stalled %s past its 100 ms ConflictDeadline", tc.name)
+			}
+		})
+	}
+}
+
+// The caller's own cancellation during a stalled loop call still reports a
+// cancellation, not the loop's timeout (issue #3622).
+func TestConflictLoopStalledCallHonorsCallerCancel(t *testing.T) {
+	docker := newFakeDocker()
+	docker.conflictsLeft = 1
+	docker.inspectBlocksUntilCtxDone = true
+	d := New(docker, images(), nil, Options{WorkerID: "w1", ConflictPollInterval: time.Millisecond, ConflictDeadline: time.Hour})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.createContainer(ctx, CreateSpec{Name: "mcsd-s1", Image: "img"})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "conflict resolution cancelled") {
+			t.Fatalf("err = %v, want the caller's cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("conflict loop ignored the caller's cancellation")
 	}
 }
 
