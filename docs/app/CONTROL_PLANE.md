@@ -393,6 +393,13 @@ restart's stop leg whose instance has already reported `STOPPED` or `CRASHED` wh
 the Worker still holds the record is therefore reported at that terminal state, not
 `SERVER_STATE_UNKNOWN` or `SERVER_STATE_STOPPING`.
 
+Any instance that has ended is reported with its own terminal event, never a bare
+state (#3621). This covers a live instance whose `CRASHED` is not forwarded yet as
+well as the cases above, and a crash keeps its `detail` and `crash_reason`. Otherwise
+the reconnected API would get a crash it cannot explain. On a full stream the report
+would also take the place of a classified crash still waiting to be sent for that
+server, since a waiting event is replaced by the newer one.
+
 The failed-stop orphan converger (Section 6) follows the same rule for its own reports
 (#3596). Its liveness probe runs outside that section, and the orphan can exit on its
 own while the probe is out. After a failed probe, the converger re-checks the record
