@@ -2074,11 +2074,11 @@ class StopServer:
         else:
             # Record a failed release of a stopped or crashed row (issue #3619): the
             # process is gone, and no final snapshot can still be uploading. Step B's
-            # own snapshot settled (a timeout raised above), the claim was refused
-            # while any other was outstanding, and a disconnected Worker's uploads
-            # died with its session. The stopping leg above and the unknown leg here
-            # record nothing: their stop was interrupted, not finished, and the
-            # Worker may still be driving it.
+            # own snapshot settled (a timeout raised above), the claim is granted
+            # only while no other final snapshot is outstanding, and a disconnected
+            # Worker's uploads died with its session. The stopping leg above and the
+            # unknown leg here record nothing: their stop was interrupted, not
+            # finished, and the Worker may still be driving it.
             with (
                 self._recording_unwritten_stop(server_id)
                 if wedged_at is not ObservedState.UNKNOWN

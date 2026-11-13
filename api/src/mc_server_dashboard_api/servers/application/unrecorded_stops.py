@@ -3,11 +3,11 @@
 When the Worker confirms a stop, the API writes the result in steps: observed
 ``stopped``, the final snapshot, then the release of the held assignment. A late
 result for an abandoned final snapshot is written the same way, and so is the
-reconciler's release of a row the Worker reported ``stopped`` or ``crashed`` (issue
-#3619). If one of these writes fails (canonically a database outage), the row stays
-diverged and still assigned, and nothing on it says the stop finished. It is then
-identical to a stop that may never have been dispatched, so the reconciler waits
-the full ``grace_seconds`` (660 s) before it converges the row.
+stale-assignment release of a row the Worker reported ``stopped`` or ``crashed``
+(issue #3619). If one of these writes fails (canonically a database outage), the
+row stays diverged and still assigned, and nothing on it says the stop finished. It
+is then identical to a stop that may never have been dispatched, so the reconciler
+waits the full ``grace_seconds`` (660 s) before it converges the row.
 
 Two floors make up that grace on the stop side, and this record satisfies both:
 
@@ -67,7 +67,8 @@ class UnrecordedStops:
         """Record that a finished stop of ``server_id`` failed to be written at ``at``.
 
         Callers record only when nothing is in flight for the server: the Worker
-        answered the stop, and no final snapshot of it can still be uploading.
+        answered the stop or reported the process gone, and no final snapshot of it
+        can still be uploading.
         """
 
         self._recorded_at[server_id] = at

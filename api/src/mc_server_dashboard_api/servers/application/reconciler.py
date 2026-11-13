@@ -130,7 +130,7 @@ and the row alone cannot tell those from a refusal — see
 
 The same short grace also covers a stop that FINISHED but whose write failed (issue
 #3441), for either stop-side action. The Worker confirmed the stop, a late result
-reported that the abandoned final snapshot settled, or this reconciler's own release
+reported that the abandoned final snapshot settled, or the stale-assignment release
 of a row the Worker reported stopped or crashed ran (issue #3619), but the API's
 write after it failed (canonically a database outage). The row is left diverged and
 assigned, and looks just like a stop that may never have been sent.

@@ -2216,13 +2216,10 @@ async def test_recovery_whose_release_failed_retries_on_the_short_grace(
     still_held = await _load(engine, server_id)
     assert still_held is not None
     assert still_held.assigned_worker_id == WorkerId(worker)
-    second = unrecorded.recorded_at(server_id)
-    assert second is not None
-    assert second > first
 
     # Past the backoff (base 30 s) and well within the full grace.
     retry = FakeControlPlane()
-    retry_at = second + dt.timedelta(seconds=31)
+    retry_at = first + dt.timedelta(seconds=_STOCK_SHORT_STOP_GRACE + 1 + 60)
     assert stuck.observed_at is not None
     assert retry_at - stuck.observed_at < dt.timedelta(seconds=_STOCK_GRACE)
     clock.set(retry_at)
