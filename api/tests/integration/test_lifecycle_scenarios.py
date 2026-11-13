@@ -321,6 +321,7 @@ async def _reconciler_tick(
     refused_stop_grace_seconds: int = 0,
     store_generation: StoreGenerationReader | None = None,
     unrecorded_stops: UnrecordedStops | None = None,
+    stop_session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
     # Graces default to 0 so a divergence is actionable immediately (the
     # _AdvancingClock already moves time forward between each use case, so the
@@ -335,7 +336,11 @@ async def _reconciler_tick(
             engine, control_plane, clock, store
         ),
         make_stop_server=lambda: _stop_server_use_case(
-            engine, control_plane, clock, unrecorded_stops=unrecorded
+            engine,
+            control_plane,
+            clock,
+            unrecorded_stops=unrecorded,
+            session_factory=stop_session_factory,
         ),
         control_plane=control_plane,
         store_generation=store,
@@ -2133,3 +2138,106 @@ async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_g
     released = await _load(engine, server_id)
     assert released is not None
     assert released.assigned_worker_id is None
+
+
+async def test_recovery_whose_release_failed_retries_on_the_short_grace(
+    engine: AsyncEngine, outage: _Outage
+) -> None:
+    """start -> stop whose release fails as the database goes down -> the database
+    recovers -> a short-grace recovery re-drives the final snapshot, and its own
+    release fails as the database goes down again -> the database recovers -> the
+    next recovery runs on the short grace -> start succeeds.
+
+    The recovery's snapshot dispatch forgets the record, so without recording its
+    own failed release the next recovery waited the full grace (issue #3619).
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    await _sink(engine, clock).record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+
+    class _DatabaseFailsDuringSnapshot(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            outcome = await super().snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
+            )
+            outage.down = True
+            return outcome
+
+    unrecorded = UnrecordedStops()
+    with pytest.raises(OSError):
+        await _stop_server_use_case(
+            engine,
+            _DatabaseFailsDuringSnapshot(place_to=WorkerId(worker)),
+            clock,
+            unrecorded_stops=unrecorded,
+            session_factory=outage.factory(),
+        )(community_id=community, server_id=server_id)
+    outage.down = False
+    stuck = await _load(engine, server_id)
+    assert stuck is not None
+    assert stuck.observed_state is ObservedState.STOPPED
+    assert stuck.assigned_worker_id == WorkerId(worker)
+    first = unrecorded.recorded_at(server_id)
+    assert first is not None
+
+    # The recovery takes the short grace, and its release fails the same way.
+    recovery = _DatabaseFailsDuringSnapshot()
+    clock.set(first + dt.timedelta(seconds=_STOCK_SHORT_STOP_GRACE + 1))
+    await _reconciler_tick(
+        engine,
+        recovery,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+        unrecorded_stops=unrecorded,
+        stop_session_factory=outage.factory(),
+    )
+    outage.down = False
+    assert [kind for kind, _, _ in recovery.dispatched] == ["snapshot"]
+    still_held = await _load(engine, server_id)
+    assert still_held is not None
+    assert still_held.assigned_worker_id == WorkerId(worker)
+
+    # Past the backoff (base 30 s) and well within the full grace.
+    retry = FakeControlPlane()
+    retry_at = first + dt.timedelta(seconds=_STOCK_SHORT_STOP_GRACE + 1 + 60)
+    assert stuck.observed_at is not None
+    assert retry_at - stuck.observed_at < dt.timedelta(seconds=_STOCK_GRACE)
+    clock.set(retry_at)
+    await _reconciler_tick(
+        engine,
+        retry,
+        clock,
+        grace_seconds=_STOCK_GRACE,
+        refused_stop_grace_seconds=_STOCK_SHORT_STOP_GRACE,
+        unrecorded_stops=unrecorded,
+    )
+    assert [kind for kind, _, _ in retry.dispatched] == ["snapshot"]
+    released = await _load(engine, server_id)
+    assert released is not None
+    assert released.assigned_worker_id is None
+
+    next_worker = uuid.uuid4()
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(next_worker)), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.assigned_worker_id == WorkerId(next_worker)

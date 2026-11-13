@@ -129,13 +129,15 @@ and the row alone cannot tell those from a refusal — see
 ``stop_dispatch_refusals.py``.
 
 The same short grace also covers a stop that FINISHED but whose write failed (issue
-#3441), for either stop-side action. The Worker confirmed the stop, or a late result
-reported that the abandoned final snapshot settled, but the API's write after it
-failed (canonically a database outage). The row is left diverged and assigned, and
-looks just like a stop that may never have been sent. ``unrecorded_stops.py``
-records the failure only while nothing is in flight: the stop's round trip has ended
-(#930), and no final snapshot can still be uploading (#847). Both stop-side floors
-are therefore met, so ``redispatch_stop`` and ``clear_stale_assignment`` both take
+#3441), for either stop-side action. The Worker confirmed the stop, a late result
+reported that the abandoned final snapshot settled, or the stale-assignment release
+of a row the Worker reported stopped or crashed ran (issue #3619), but the API's
+write after it failed (canonically a database outage). The row is left diverged and
+assigned, and looks just like a stop that may never have been sent.
+``unrecorded_stops.py`` records the failure only while nothing is in flight: the
+stop's round trip has ended or the process was reported gone (#930), and no final
+snapshot can still be uploading (#847). Both stop-side floors are therefore met, so
+``redispatch_stop`` and ``clear_stale_assignment`` both take
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
 The record is dropped before every stop or final-snapshot dispatch, and it is
 superseded like a refusal. It is not persisted, so after an API restart the full
@@ -516,11 +518,12 @@ class RunReconcilerTick:
         # ``clear_stale_assignment``. Neither reaches here.
         if action == "redispatch_stop" and self._previous_stop_refused(server):
             return _GraceDecision(self.refused_stop_grace_seconds)
-        # A stop the Worker confirmed whose write after it failed, with nothing
-        # learned about the row since (issue #3441). The record is made only while
-        # nothing is in flight: the stop's round trip ended (#930) and no final
-        # snapshot can still be uploading (#847). Both stop-side floors are met, so
-        # either stop-side action takes the same short grace as a refused stop.
+        # A finished stop whose write after it failed, with nothing learned about
+        # the row since (issues #3441, #3619). The record is made only while nothing
+        # is in flight: the stop's round trip ended or the process was reported gone
+        # (#930), and no final snapshot can still be uploading (#847). Both
+        # stop-side floors are met, so either stop-side action takes the same short
+        # grace as a refused stop.
         if action in (
             "redispatch_stop",
             "clear_stale_assignment",
