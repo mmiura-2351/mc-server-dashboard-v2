@@ -118,9 +118,11 @@ def _pause_after_lease(storage: FsStorage, monkeypatch: pytest.MonkeyPatch) -> _
 
 
 async def _until(predicate: Callable[[], bool]) -> None:
-    for _ in range(200):
-        if predicate():
-            return
+    # A bound, not a delay: the released thread's I/O can stall on a loaded host
+    # (issue #3624). Each caller asserts the predicate right after.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 120
+    while not predicate() and loop.time() < deadline:
         await asyncio.sleep(0.01)
 
 
