@@ -89,7 +89,7 @@ import asyncio
 import datetime as dt
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
@@ -1308,7 +1308,8 @@ class StopServer:
         Without the record the row, left diverged and assigned, looks like a stop
         that may never have been sent, and the reconciler waits the full grace. Wrap
         only a write made while nothing is in flight for the server: the Worker has
-        answered the stop, and no final snapshot of it can still be uploading.
+        answered the stop or reported the process gone, and no final snapshot of it
+        can still be uploading.
         """
 
         try:
@@ -2071,11 +2072,25 @@ class StopServer:
                 server.observed_state = ObservedState.UNKNOWN
                 server.observed_at = observed_at
         else:
-            async with self.uow:
-                cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
-                    server_id, worker_id
-                )
-                await self.uow.commit()
+            # Record a failed release of a stopped or crashed row (issue #3619): the
+            # process is gone, and no final snapshot can still be uploading. Step B's
+            # own snapshot settled (a timeout raised above), the claim is granted
+            # only while no other final snapshot is outstanding, and a disconnected
+            # Worker's uploads died with its session. The stopping leg above and the
+            # unknown leg here record nothing: their stop was interrupted, not
+            # finished, and the Worker may still be driving it.
+            with (
+                self._recording_unwritten_stop(server_id)
+                if wedged_at is not ObservedState.UNKNOWN
+                else nullcontext()
+            ):
+                async with self.uow:
+                    cleared = (
+                        await self.uow.servers.clear_assignment_after_final_snapshot(
+                            server_id, worker_id
+                        )
+                    )
+                    await self.uow.commit()
         if cleared:
             server.assigned_worker_id = None
             if wedged_at is ObservedState.UNKNOWN:
