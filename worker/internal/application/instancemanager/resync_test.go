@@ -445,3 +445,70 @@ func TestUnreportedLaunchThatFailsReportsNothing(t *testing.T) {
 
 	expectNoStatus(t, m)
 }
+
+// A resync reports an instance that has ended at its own terminal, a classified
+// crash's Detail and CrashReason included (issue #3621), wherever the Worker
+// still holds it: a live instance whose pump has yet to forward the crash, a
+// failed-stop orphan, or a stop leg's instance. A bare `crashed` would reach a
+// reconnected API, whose row sits at `unknown`, as a crash nobody can explain.
+func TestResyncReportsAnEndedInstancesClassifiedCrashWhole(t *testing.T) {
+	for _, held := range []string{"instance", "orphan", "stop leg"} {
+		t.Run(held, func(t *testing.T) {
+			m := newManager(t, &fakeDriver{}, nil)
+			inst := newFakeInstance(s1)
+			inst.end(classifiedCrash)
+			switch held {
+			case "instance":
+				m.instances[s1] = inst
+			case "orphan":
+				m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
+			case "stop leg":
+				m.reserved[s1] = reservation{leg: legStopping, inst: inst}
+			}
+
+			m.ResyncStatus()
+
+			assertClassifiedCrash(t, drainStatuses(t, m, 1)[0])
+			expectNoStatus(t, m)
+		})
+	}
+}
+
+// On a full sink, a resync report coalesces into the server's pending slot, over
+// whatever is waiting there (issue #3621). When that is the classified crash the
+// pump forwarded, the report replaces it with the same crash, not a bare
+// `crashed`: the event that reaches the API keeps its Detail and CrashReason.
+func TestResyncOnAFullSinkKeepsAPendingClassifiedCrashWhole(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, nil)
+	inst := newFakeInstance(s1)
+	m.orphans[s1] = orphanEntry{inst: inst, driver: "container"}
+	startPumpsFor(m, s1, inst)
+	drainStatuses(t, m, 1) // the fake's own running
+	filler := fillSink(t, m)
+	// Park the dispatcher on another server's send, so s1's crash stays in its
+	// slot until the sink drains.
+	m.sendStatus(session.StatusEvent{ServerID: "blocker", State: "running"})
+	inst.end(classifiedCrash)
+	waitFor(t, func() bool {
+		m.statusMu.Lock()
+		defer m.statusMu.Unlock()
+		return m.pendingStatus[s1].State == execution.StateCrashed.String()
+	})
+
+	m.ResyncStatus()
+
+	for range filler {
+		<-m.Events()
+	}
+	var got []session.StatusEvent
+	for _, ev := range drainStatuses(t, m, 2) {
+		if ev.ServerID == s1 {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("%s reported %+v, want the one coalesced crash", s1, got)
+	}
+	assertClassifiedCrash(t, got[0])
+	expectNoStatus(t, m)
+}
