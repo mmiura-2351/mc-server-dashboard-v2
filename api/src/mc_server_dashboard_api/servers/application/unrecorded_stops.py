@@ -2,20 +2,24 @@
 
 When the Worker confirms a stop, the API writes the result in steps: observed
 ``stopped``, the final snapshot, then the release of the held assignment. A late
-result for an abandoned final snapshot is written the same way. If one of these
-writes fails (canonically a database outage), the row stays diverged and still
-assigned, and nothing on it says the stop finished. It is then identical to a stop
-that may never have been dispatched, so the reconciler waits the full
-``grace_seconds`` (660 s) before it converges the row.
+result for an abandoned final snapshot is written the same way, and so is the
+reconciler's release of a row the Worker reported ``stopped`` or ``crashed`` (issue
+#3619). If one of these writes fails (canonically a database outage), the row stays
+diverged and still assigned, and nothing on it says the stop finished. It is then
+identical to a stop that may never have been dispatched, so the reconciler waits
+the full ``grace_seconds`` (660 s) before it converges the row.
 
 Two floors make up that grace on the stop side, and this record satisfies both:
 
 * #930, ``> stop_timeout_seconds``: never re-send a stop whose first dispatch may
-  still be running. Here the Worker answered the stop, so that round trip is over.
+  still be running. Here the Worker answered the stop, so that round trip is over,
+  or reported the process gone, so the row owes no stop until a newer report, which
+  supersedes the record.
 * #847, ``> snapshot_timeout_seconds``: never release an assignment while a final
   snapshot may still be uploading. The record is made only when no upload can be
   live: before this flow dispatched its final snapshot, after a final snapshot
-  that settled, or on the late result of an abandoned one.
+  that settled, on the late result of an abandoned one, or with none dispatched
+  once the Worker's session has ended.
 
 So the reconciler can take the short ``refused_stop_grace_seconds`` for either
 stop-side action (``redispatch_stop`` or ``clear_stale_assignment``), as it does for

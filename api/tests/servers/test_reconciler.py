@@ -1170,6 +1170,75 @@ def _unrecorded(server: Server, at: dt.datetime) -> UnrecordedStops:
     return unrecorded
 
 
+async def test_recovery_whose_release_failed_retries_on_the_short_grace() -> None:
+    # A short-grace recovery dispatches the final snapshot, which forgets the record,
+    # and the snapshot settles. The release after it then fails (issue #3619).
+    # Nothing is in flight, so the recovery records the finished stop again, and the
+    # next tick past the backoff retries on the short grace, not the full one.
+    repo = _OutageServerRepository()
+    uow = FakeUnitOfWork(servers=repo)
+    aged = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=aged,
+        updated_at=aged,
+    )
+    repo.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=_unrecorded(server, aged))
+
+    repo.down = {"clear_assignment_after_final_snapshot"}
+    await reconciler.tick()
+    repo.down = set()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert repo.by_id[server.id].assigned_worker_id == _WORKER
+
+    # Past the backoff window (base 30 s) and still within the full grace.
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    assert (clock.now() - aged) < dt.timedelta(seconds=_GRACE)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
+    assert repo.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize(
+    ("observed", "failing_write", "recorded"),
+    [
+        # The process is gone and the Worker's session ended, so no upload survives
+        # it and no snapshot was dispatched: nothing is in flight.
+        (ObservedState.STOPPED, "clear_assignment_after_final_snapshot", True),
+        (ObservedState.CRASHED, "clear_assignment_after_final_snapshot", True),
+        # The stop was interrupted, not finished, and the Worker may still be
+        # driving it, so these legs keep the full grace.
+        (ObservedState.UNKNOWN, "clear_assignment_after_final_snapshot", False),
+        (ObservedState.STOPPING, "record_observed_state", False),
+    ],
+)
+async def test_disconnected_recovery_records_a_failed_release_only_when_finished(
+    observed: ObservedState, failing_write: str, recorded: bool
+) -> None:
+    # The recovery's release against a disconnected Worker fails (issue #3619).
+    repo = _OutageServerRepository()
+    uow = FakeUnitOfWork(servers=repo)
+    server = _server(desired=DesiredState.STOPPED, observed=observed, worker=_WORKER)
+    repo.seed(server)
+    unrecorded = UnrecordedStops()
+    cp = FakeControlPlane(connected={_WORKER: False})
+    repo.down = {failing_write}
+    with pytest.raises(ConnectionRefusedError):
+        await StopServer(
+            uow=uow,
+            control_plane=cp,
+            clock=FakeClock(_NOW),
+            unrecorded_stops=unrecorded,
+        ).clear_stale_assignment(community_id=server.community_id, server_id=server.id)
+    assert cp.dispatched == []
+    assert (unrecorded.recorded_at(server.id) == _NOW) is recorded
+
+
 async def test_unrecorded_stop_older_than_the_last_report_waits_the_full_grace() -> (
     None
 ):
