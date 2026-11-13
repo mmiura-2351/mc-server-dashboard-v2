@@ -193,7 +193,9 @@ async def test_a_cancelled_backup_op_keeps_its_staging_until_its_thread_finishes
     released = _watch_release(storage, monkeypatch)
     arm(storage, pause, monkeypatch)
     task = asyncio.ensure_future(op(storage, community, server, key))
-    assert await asyncio.to_thread(pause.entered.wait, 10)
+    # A bound, not a delay: the later pauses wait behind the op's fsyncs, which
+    # can stall on a loaded host (issue #3624).
+    assert await asyncio.to_thread(pause.entered.wait, 120)
     staging = _only_staging(storage, community, server)
 
     await _cancel_promptly(task)
@@ -270,7 +272,7 @@ async def test_an_aborted_transfer_keeps_its_staging_until_its_thread_finishes(
             raise
 
     task = asyncio.ensure_future(_as_the_snapshot_endpoint())
-    assert await asyncio.to_thread(pause.entered.wait, 10)
+    assert await asyncio.to_thread(pause.entered.wait, 120)  # a bound, as above
 
     await _cancel_promptly(task)
 

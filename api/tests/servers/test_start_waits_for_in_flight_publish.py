@@ -196,7 +196,9 @@ async def _release_a_with_its_publish_past_the_fence(
             publisher_fence=_held_past_fence,
         )
     )
-    await asyncio.wait_for(passed.wait(), 10)
+    # A bound, not a delay: the commit fsyncs its staged tree before the fence,
+    # and fsyncs can stall on a loaded host (issue #3624).
+    await asyncio.wait_for(passed.wait(), 120)
     return held
 
 

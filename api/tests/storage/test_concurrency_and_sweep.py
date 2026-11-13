@@ -714,8 +714,10 @@ async def test_lock_waiter_leaves_the_executor_to_a_publish_fence(
         release.set()
 
     try:
+        # 120 s, as other completion bounds after a release: both the commit and
+        # the waiter still have their fsyncs to run (issue #3624).
         committed, waited = await asyncio.wait_for(
-            asyncio.gather(commit, waiting, return_exceptions=True), 60
+            asyncio.gather(commit, waiting, return_exceptions=True), 120
         )
     finally:
         executor.shutdown(wait=False)

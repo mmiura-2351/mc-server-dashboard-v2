@@ -163,9 +163,11 @@ def _fd_still_open(fd: int, name: str) -> bool:
 
 
 async def _until(predicate: Callable[[], bool]) -> None:
-    for _ in range(200):
-        if predicate():
-            return
+    # A bound, not a delay: a removal can wait behind a queued fsync on a loaded
+    # host (issue #3624). Each caller asserts the predicate right after.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 120
+    while not predicate() and loop.time() < deadline:
         await asyncio.sleep(0.01)
 
 
