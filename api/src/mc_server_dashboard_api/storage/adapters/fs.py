@@ -466,8 +466,10 @@ def _close_abandoned(handle: _Closable) -> None:
     logged by the closing thread itself, needing no further loop turn. Off the
     loop, since closing a writing file or tar flushes it. The loop's teardown shuts
     its default executor down while cancelled jobs may still be finishing, and a
-    shut-down executor refuses the close: it then runs on a thread of its own.
-    Either way the close and its log run in the caller's context.
+    shut-down executor refuses the close: it then runs on a thread of its own. If
+    that thread cannot start either, the close runs here, on the loop: the last
+    resort, as :func:`_close_off_loop`'s (issue #3656). Either way the close and
+    its log run in the caller's context.
     """
 
     close = functools.partial(
@@ -476,7 +478,10 @@ def _close_abandoned(handle: _Closable) -> None:
     try:
         asyncio.get_running_loop().run_in_executor(None, close)
     except RuntimeError:  # "Executor shutdown has been called"
-        threading.Thread(target=close).start()
+        try:
+            threading.Thread(target=close).start()
+        except RuntimeError:  # "can't start new thread"
+            _close_logging_fault(handle)  # already in the caller's context
 
 
 def _no_wake() -> None:
@@ -657,11 +662,14 @@ def _reclaim_late_spool(
     """Close a spool opened after its writer was cancelled, then remove it again.
 
     The cancelled writer's caller removes the spool as it unwinds, possibly before
-    the open recreates it (issue #3553), so the spool is removed once more.
+    the open recreates it (issue #3553), so the spool is removed once more, even if
+    the close cannot be dispatched.
     """
 
-    _close_abandoned(_ClosedThenReleased(handle, release))
-    _start_spool_disposal(path)
+    try:
+        _close_abandoned(_ClosedThenReleased(handle, release))
+    finally:
+        _start_spool_disposal(path)
 
 
 @contextlib.asynccontextmanager

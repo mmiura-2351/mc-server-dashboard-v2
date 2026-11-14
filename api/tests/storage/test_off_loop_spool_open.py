@@ -190,11 +190,18 @@ _SITES = [
 ]
 
 
+# The bound of each wait on the held open's thread or on a cleanup: a close or
+# removal can wait behind a queued fsync on a loaded host (issue #3624). A test
+# runs several in turn, so its timeout is their sum plus 30 s of headroom (the
+# suite-wide 120 s would fire first, hiding the assertion that explains a failure).
+_BOUND = 120
+
+
 async def _until(predicate: Callable[[], bool]) -> None:
     # A bound, not a delay: a close or removal can wait behind a queued fsync on a
     # loaded host (issue #3624). Each caller asserts the predicate right after.
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + 120
+    deadline = loop.time() + _BOUND
     while not predicate() and loop.time() < deadline:
         await asyncio.sleep(0.01)
 
@@ -209,6 +216,7 @@ def _settled(hold: _HeldOpen, spool: Path, check: _Check) -> bool:
     return True
 
 
+@pytest.mark.timeout(3 * _BOUND + 10 + 30)
 @pytest.mark.parametrize("site", _SITES, ids=lambda site: f"{site.backend}-{site.name}")
 async def test_a_cancelled_open_neither_blocks_the_loop_nor_leaves_its_spool(
     site: _Site, hold: _HeldOpen, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -221,7 +229,7 @@ async def test_a_cancelled_open_neither_blocks_the_loop_nor_leaves_its_spool(
     task = asyncio.ensure_future(op())
     try:
         # A bound, not a delay: the spool's creation can stall on a loaded host.
-        assert await asyncio.to_thread(hold.entered.wait, 120)
+        assert await asyncio.to_thread(hold.entered.wait, _BOUND)
         assert not hold.on_loop, "the spool was opened on the event loop"
         [spool] = hold.spools
 
@@ -235,7 +243,7 @@ async def test_a_cancelled_open_neither_blocks_the_loop_nor_leaves_its_spool(
     finally:
         hold.release.set()
 
-    assert await asyncio.to_thread(hold.finished.wait, 120)
+    assert await asyncio.to_thread(hold.finished.wait, _BOUND)
     assert hold.recreated  # the late open recreated the removed spool
     [out] = hold.opened
     await _until(lambda: _settled(hold, spool, once_settled))
@@ -244,6 +252,7 @@ async def test_a_cancelled_open_neither_blocks_the_loop_nor_leaves_its_spool(
     once_settled()
 
 
+@pytest.mark.timeout(3 * _BOUND + 10 + 30)
 async def test_a_cancelled_open_that_fails_still_hands_back_its_staging(
     hold: _HeldOpen, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -258,7 +267,7 @@ async def test_a_cancelled_open_that_fails_still_hands_back_its_staging(
 
     task = asyncio.ensure_future(op())
     try:
-        assert await asyncio.to_thread(hold.entered.wait, 120)  # a bound, as above
+        assert await asyncio.to_thread(hold.entered.wait, _BOUND)  # a bound, as above
         assert not hold.on_loop, "the spool was opened on the event loop"
         task.cancel()
         await asyncio.wait({task}, timeout=10)
@@ -267,9 +276,109 @@ async def test_a_cancelled_open_that_fails_still_hands_back_its_staging(
     finally:
         hold.release.set()
 
-    assert await asyncio.to_thread(hold.finished.wait, 120)
+    assert await asyncio.to_thread(hold.finished.wait, _BOUND)
     assert hold.opened == []
     [spool] = hold.spools
     await _until(lambda: _settled(hold, spool, once_settled))
     assert not spool.exists()
     once_settled()
+
+
+def _no_thread_starts(_thread: threading.Thread) -> None:
+    raise RuntimeError("can't start new thread")
+
+
+def _count_released(staging: object) -> _Check:
+    """Check that the late open's count on ``staging``'s storage, if any, is gone."""
+
+    if not isinstance(staging, fs.FsStorage):
+        return _nothing
+
+    def _check() -> None:
+        assert staging._staging_jobs == {}
+        assert not staging._active_staging
+
+    return _check
+
+
+@pytest.mark.timeout(2 * _BOUND + 10 + 30)
+@pytest.mark.parametrize(
+    "site",
+    [site for site in _SITES if site.name in ("write_snapshot", "put_jar")],
+    ids=lambda site: f"{site.backend}-{site.name}",
+)
+async def test_a_late_open_whose_close_cannot_be_dispatched_is_still_reclaimed(
+    site: _Site, hold: _HeldOpen, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The late open returns once the executor has shut down and no thread can
+    start (PR #3663 review B1): its handle is still closed and its count released,
+    and the spool it recreated is removed."""
+
+    harness = build_harness(site.backend, tmp_path)
+    community, server = new_scope()
+    op, while_held, _ = await site.arrange(harness, community, server)
+    _hold_open(monkeypatch, hold, site.prefix)
+    loop = asyncio.get_running_loop()
+    # The storage whose staging the open is counted against, if any.
+    staging = harness.storage if site.name == "write_snapshot" else None
+    released = _count_released(staging)
+
+    task = asyncio.ensure_future(op())
+    try:
+        assert await asyncio.to_thread(hold.entered.wait, _BOUND)  # a bound, as above
+        [spool] = hold.spools
+        task.cancel()
+        await asyncio.wait({task}, timeout=10)
+        assert task.cancelled()
+        assert not spool.exists()
+        await asyncio.to_thread(while_held)
+
+        # The shutdown refuses new jobs at once, then waits for the held open.
+        shutdown = asyncio.ensure_future(loop.shutdown_default_executor())
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="shutdown"):
+            loop.run_in_executor(None, _nothing)
+        with monkeypatch.context() as mp:
+            mp.setattr(threading.Thread, "start", _no_thread_starts)
+            hold.release.set()
+            await _until(hold.finished.is_set)  # no worker left to wait on it
+            assert hold.finished.is_set()
+            await _until(lambda: _settled(hold, spool, released))
+    finally:
+        hold.release.set()
+
+    await shutdown
+    assert hold.recreated
+    [out] = hold.opened
+    assert out.closed
+    assert not spool.exists()
+    released()
+    if isinstance(staging, fs.FsStorage):
+        # With no executor the staging's own removal fails and is logged, its
+        # lease released: the sweep reclaims what it left.
+        staging.sweep()
+        incoming = staging._server_root(community, server) / "incoming"
+        assert list(incoming.iterdir()) == []
+
+
+@pytest.mark.timeout(_BOUND + 30)
+async def test_a_late_spool_is_removed_even_if_its_close_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The removal does not hang on the close: it is scheduled whatever the close
+    dispatch does (PR #3663 review B1)."""
+
+    spool = tmp_path / ".spool.tmp"
+    out = builtins.open(spool, "wb")
+
+    def _raising(_handle: object) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(fs, "_close_abandoned", _raising)
+    try:
+        with pytest.raises(RuntimeError):
+            fs._reclaim_late_spool(spool, _nothing, out)
+        await _until(lambda: not spool.exists())
+    finally:
+        out.close()
+    assert not spool.exists()

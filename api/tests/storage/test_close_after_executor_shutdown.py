@@ -384,3 +384,31 @@ async def test_a_leased_stream_whose_close_cannot_start_closes_then_releases_inl
         await stream.aclose()  # type: ignore[attr-defined]
 
     assert events == ["close", "release"]
+
+
+class _CountedFailingClose:
+    def __init__(self) -> None:
+        self.closes = 0
+
+    def close(self) -> None:
+        self.closes += 1
+        raise OSError("close failed")
+
+
+async def test_an_abandoned_close_that_cannot_start_closes_inline_logging_its_fault(
+    close_faults: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No worker and no thread will take an abandoned close (issue #3656): it runs
+    inline, once, its fault logged and never raised out of the loop callback."""
+
+    handle = _CountedFailingClose()
+    await asyncio.get_running_loop().shutdown_default_executor()
+
+    with monkeypatch.context() as mp:
+        mp.setattr(threading.Thread, "start", _no_thread_starts)
+        fs._close_abandoned(handle)
+
+    assert handle.closes == 1
+    assert [line["message"] for line in close_faults] == [
+        f"could not close the abandoned file {handle}: close failed"
+    ]
