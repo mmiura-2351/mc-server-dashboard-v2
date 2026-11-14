@@ -253,9 +253,12 @@ indefinitely). The retry cadence for both
 is the tick interval. This is NOT what a start sent mid-restart on the restart's
 own session meets: that one queues in the Worker's per-server lane and times out,
 which is an ordinary failure and backs off — the restart rule above is what keeps
-the reconciler from sending it. Scoped to the start actions: a stop refused
-``BUSY`` keeps its backoff, its cadence being the Worker converger's (see the
-refused-stop grace above).
+the reconciler from sending it. The Worker does not run it later either: it
+answers ``EXPIRED`` once the lane frees, past the command's budget (issue #3305).
+An ``EXPIRED`` start or hydrate that arrives while the dispatch still waits is
+treated like ``BUSY``: not applied, and accepted on a later tick. Scoped to the
+start actions: a stop refused ``BUSY`` keeps its backoff, its cadence being the
+Worker converger's (see the refused-stop grace above).
 
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
@@ -297,7 +300,10 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandStatus,
+    ControlPlane,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
@@ -647,16 +653,22 @@ class RunReconcilerTick:
             if (
                 action in ("place_and_start", "redispatch_start")
                 and isinstance(exc, CommandDispatchError)
-                and exc.reason == WORKER_BUSY_REASON
+                and (
+                    exc.reason == WORKER_BUSY_REASON
+                    or exc.status is CommandStatus.EXPIRED
+                )
             ):
                 # The Worker refused the start BUSY: the id is not free yet and this
                 # same start will be accepted once it settles. Nothing failed, so the
                 # backoff entry is left untouched — neither counted nor cleared — and
-                # the next tick retries (issue #3209).
+                # the next tick retries (issue #3209). An EXPIRED start (or hydrate)
+                # is the same case: it waited behind the server's lane past its
+                # budget and was not applied, and the next one is accepted once the
+                # lane frees (issue #3305).
                 _LOG.info(
-                    "reconcile action %s refused busy for server %s; "
-                    "retrying next tick",
+                    "reconcile action %s refused %s for server %s; retrying next tick",
                     action,
+                    "expired" if exc.status is CommandStatus.EXPIRED else "busy",
                     server.id.value,
                 )
                 return

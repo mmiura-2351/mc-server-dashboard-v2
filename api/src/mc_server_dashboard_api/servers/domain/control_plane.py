@@ -99,6 +99,10 @@ class CommandStatus(enum.Enum):
     # Worker to read (issue #3347), so a start, a restart's relaunch, a console
     # command or a running snapshot could not use it.
     SERVER_PROPERTIES_UNREADABLE = "server_properties_unreadable"
+    # The command waited on the Worker past its expiry budget and was not applied
+    # (issue #3305): definitively not applied, unlike a timeout, which may have
+    # been.
+    EXPIRED = "expired"
 
 
 class FileAccessReason(enum.Enum):

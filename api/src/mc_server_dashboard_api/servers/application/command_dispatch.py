@@ -50,6 +50,12 @@ _LOG = logging.getLogger(__name__)
 # restart's relaunch, the RCON credentials for a console command, or quiesce a
 # running snapshot (a manual backup). The user restores a regular file; which
 # refusal it was, and where, stays in the log with the rest of the message.
+#
+# ``command_expired`` (issue #3305): the command waited on the Worker past its
+# budget -- behind an earlier command for the same server, or for a slot of the
+# Worker-wide concurrency cap -- and was answered EXPIRED without being run. That
+# is a definite "not applied", the opposite of the catch-all ``command_failed``'s
+# "may have been", so clients say the command did not run and can be retried.
 WORKER_BUSY_REASON = "worker_busy"
 _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.PORT_CONFLICT: "port_conflict",
@@ -57,6 +63,7 @@ _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.BUSY: WORKER_BUSY_REASON,
     CommandStatus.COMMAND_DROPPED: "command_dropped",
     CommandStatus.SERVER_PROPERTIES_UNREADABLE: "server_properties_unreadable",
+    CommandStatus.EXPIRED: "command_expired",
 }
 
 # The Worker refused the command because it holds a failed-stop orphan for the
@@ -100,5 +107,7 @@ def dispatch_failure(
         detail,
     )
     return CommandDispatchError(
-        detail, reason=reason or _SANITIZED_REASONS.get(outcome.status)
+        detail,
+        reason=reason or _SANITIZED_REASONS.get(outcome.status),
+        status=outcome.status,
     )

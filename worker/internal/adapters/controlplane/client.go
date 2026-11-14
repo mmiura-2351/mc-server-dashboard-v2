@@ -485,6 +485,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED
 	case session.CommandErrorServerPropertiesUnreadable:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE
+	case session.CommandErrorExpired:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_EXPIRED
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}
@@ -568,6 +570,8 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 		CommandID: cmd.GetCommandId(),
 		ServerID:  cmd.GetServerId(),
 		Kind:      commandKind(cmd),
+		// An unset expires_after reads as zero: the command never expires.
+		ExpiresAfter: cmd.GetExpiresAfter().AsDuration(),
 	}
 	switch c := cmd.GetCommand().(type) {
 	case *controlplanev1.ApiCommand_Start:
