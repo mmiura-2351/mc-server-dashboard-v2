@@ -16,7 +16,7 @@ makes the failure-injection seams (used by the crash-safety tests) trivial.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -90,7 +90,7 @@ class FakeS3Client:
 
     async def get_object(
         self, key: str, byte_range: tuple[int, int] | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         if key not in self._store.objects:
             raise NotFoundError(f"object not found: {key}")
         data = self._store.objects[key]
@@ -102,7 +102,7 @@ class FakeS3Client:
         queued = self._store.read_aborts.get(key)
         abort_at = queued.pop(0) if queued else None
 
-        async def _gen() -> AsyncIterator[bytes]:
+        async def _gen() -> AsyncGenerator[bytes, None]:
             if abort_at is not None:
                 # Deliver up to the injected offset, then tear the body down the way
                 # the real client does on a mid-stream connection abort (#2371).
