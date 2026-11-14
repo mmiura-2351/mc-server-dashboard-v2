@@ -16,7 +16,7 @@ adapter's per-operation ``client_factory()`` usage.
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from typing import Any
 
@@ -130,7 +130,7 @@ class _Aioboto3S3Client:
 
     async def get_object(
         self, key: str, byte_range: tuple[int, int] | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         # An inclusive (first, last) pair is exactly the S3 ``Range`` spelling
         # (issue #2372), so a resumed download fetches only its tail.
         extra = (
@@ -427,7 +427,7 @@ def _is_unsupported(exc: ClientError) -> bool:
     return code in ("NotImplemented", "MethodNotAllowed", "501", "405")
 
 
-async def _iter_body(body: Any) -> AsyncIterator[bytes]:
+async def _iter_body(body: Any) -> AsyncGenerator[bytes, None]:
     # aiobotocore's StreamingBody exposes an async ``read(n)``; read bounded chunks
     # so a large object never lands in memory whole.
     #

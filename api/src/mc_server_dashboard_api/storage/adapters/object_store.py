@@ -54,8 +54,8 @@ import tarfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -229,8 +229,10 @@ class S3Client(Protocol):
 
     async def get_object(
         self, key: str, byte_range: tuple[int, int] | None = None
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         """Stream an object's body in chunks. Raises :class:`NotFoundError`.
+
+        Closing the generator closes the response body (issue #3655).
 
         ``byte_range`` is an inclusive ``(first, last)`` pair sent as the S3
         ``Range`` parameter, so only those bytes cross the network (issue #2372).
@@ -764,12 +766,15 @@ class ObjectStorage(Storage):
         source: HydrateSource,
         exclude: frozenset[str] = frozenset(),
     ) -> AsyncIterator[bytes]:
-        async with self._client_factory() as client:
-            server_prefix = self._server_prefix(community_id, server_id)
-            snapshot_prefix = await self._lease_live_snapshot(
-                client, community_id, server_id
-            )
-            try:
+        # The lease is released after the tar, its bodies and the client are
+        # closed, so nothing this stream opened outlives it (issue #3655).
+        snapshot_prefix: str | None = None
+        try:
+            async with self._client_factory() as client:
+                server_prefix = self._server_prefix(community_id, server_id)
+                snapshot_prefix = await self._lease_live_snapshot(
+                    client, community_id, server_id
+                )
                 # Read the generation under the server lock (issue #1954): the lease
                 # is already verified above (pointer still matches), and the lock
                 # prevents a concurrent publish from bumping the marker between
@@ -814,11 +819,13 @@ class ObjectStorage(Storage):
                         for m in members
                         if m.key[len(snapshot_prefix) :].split("/", 1)[0] not in exclude
                     ]
-                async for chunk in _tar_stream_from_objects(
-                    client, snapshot_prefix, members
-                ):
-                    yield chunk
-            finally:
+                async with aclosing(
+                    _tar_stream_from_objects(client, snapshot_prefix, members)
+                ) as tar:
+                    async for chunk in tar:
+                        yield chunk
+        finally:
+            if snapshot_prefix is not None:
                 self._release_lease(snapshot_prefix)
 
     async def begin_snapshot(
@@ -1933,17 +1940,22 @@ class ObjectStorage(Storage):
         sub: str,
         rel_path: RelPath,
     ) -> AsyncIterator[bytes]:
-        async with shielded_exit(self._client_factory()) as client:
-            snapshot_prefix = await self._lease_live_snapshot(
-                client, community_id, server_id
-            )
-            try:
+        # The lease is released after the body and the client are closed, so
+        # nothing this stream opened outlives it (issue #3655).
+        snapshot_prefix: str | None = None
+        try:
+            async with shielded_exit(self._client_factory()) as client:
+                snapshot_prefix = await self._lease_live_snapshot(
+                    client, community_id, server_id
+                )
                 key = snapshot_prefix + sub
                 if await client.head_object(key) is None:
                     raise NotFoundError(f"file not found: {rel_path.value}")
-                async for chunk in await client.get_object(key):
-                    yield chunk
-            finally:
+                async with aclosing(await client.get_object(key)) as body:
+                    async for chunk in body:
+                        yield chunk
+        finally:
+            if snapshot_prefix is not None:
                 self._release_lease(snapshot_prefix)
 
     async def list_dir(
@@ -2583,7 +2595,7 @@ async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) ->
 
 async def _tar_stream_from_objects(
     client: S3Client, snapshot_prefix: str, members: list[S3Object]
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
     """Yield a tar of the snapshot objects, streaming each body chunk-by-chunk.
 
     A custom streaming writer (header + padded body per member, then the two-block
@@ -2598,9 +2610,11 @@ async def _tar_stream_from_objects(
         info.size = obj.size
         yield info.tobuf(format=tarfile.GNU_FORMAT)
         written = 0
-        async for chunk in await client.get_object(obj.key):
-            written += len(chunk)
-            yield chunk
+        # Closed on every exit, so an early close never leaves it open (#3655).
+        async with aclosing(await client.get_object(obj.key)) as body:
+            async for chunk in body:
+                written += len(chunk)
+                yield chunk
         remainder = written % blocksize
         if remainder:
             yield b"\0" * (blocksize - remainder)
@@ -2962,5 +2976,7 @@ class _ObjectWorkingSetView(WorkingSetView):
             key = self._snapshot_prefix + sub
             if await client.head_object(key) is None:
                 raise NotFoundError(f"file not found: {rel_path.value}")
-            async for chunk in await client.get_object(key):
-                yield chunk
+            # Closed before the view's lease can go on its exit (issue #3655).
+            async with aclosing(await client.get_object(key)) as body:
+                async for chunk in body:
+                    yield chunk
