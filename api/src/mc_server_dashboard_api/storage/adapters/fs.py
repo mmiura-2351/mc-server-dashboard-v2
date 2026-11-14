@@ -307,6 +307,18 @@ def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -
         release()
 
 
+def _open_releasing_on_fault(
+    release: Callable[[], None], path: Path, not_found: str
+) -> tuple[io.BufferedReader, Callable[[], None]]:
+    """Open ``path`` for a stream whose lease ``release`` releases, or release it."""
+
+    try:
+        return _open_readable_sync(path, not_found), release
+    except BaseException:
+        release()
+        raise
+
+
 def _release_after_read(
     release: Callable[[], None], reading: asyncio.Future[Any]
 ) -> None:
@@ -536,8 +548,10 @@ async def _close_off_loop(handle: _Closable) -> None:
     Shielded: a cancel while the close still waits for a worker would otherwise
     drop it, leaving the handle to the GC, so a cancelled caller's close goes on,
     its fault logged. A close the shut-down executor refuses runs on a thread of
-    its own, as :func:`_close_abandoned`'s does, and is awaited the same way. The
-    close and any log of its fault run in the caller's context.
+    its own, as :func:`_close_abandoned`'s does, and is awaited the same way. If
+    that thread cannot start either, the close runs here, on the loop: the last
+    resort, so the handle is still closed, and what its close does still runs
+    (issue #3618). The close and any log of its fault run in the caller's context.
     """
 
     loop = asyncio.get_running_loop()
@@ -548,7 +562,12 @@ async def _close_off_loop(handle: _Closable) -> None:
     except RuntimeError:  # "Executor shutdown has been called"
         woken = loop.create_future()
         wake = functools.partial(loop.call_soon_threadsafe, woken.set_result, None)
-        threading.Thread(target=context.run, args=(close.run, wake)).start()
+        try:
+            threading.Thread(target=context.run, args=(close.run, wake)).start()
+        except RuntimeError:  # "can't start new thread"
+            close.run(_no_wake)
+            close.raise_fault()
+            return
     try:
         await asyncio.shield(woken)
     except asyncio.CancelledError:
@@ -902,11 +921,7 @@ class FsStorage(Storage):
         return release
 
     async def _read_leased(
-        self,
-        snapshot: Path,
-        fn: Callable[..., _R],
-        *args: Any,
-        reclaim: Callable[[_R], None] | None = None,
+        self, snapshot: Path, fn: Callable[..., _R], *args: Any
     ) -> _R:
         """Run ``fn(*args)`` — a job that reads ``snapshot`` — off the loop.
 
@@ -915,8 +930,6 @@ class FsStorage(Storage):
         unwinds, while the thread is still reading (issue #3577). So the job takes
         a lease of its own, which the job's done-callback releases. The job is
         awaited shielded, so that callback runs only once the thread has finished.
-        A cancelled caller hands what the job returns to ``reclaim``, as
-        :func:`_acquire_off_loop` does (issue #3584).
         """
 
         self._acquire_lease(snapshot)
@@ -927,12 +940,7 @@ class FsStorage(Storage):
             release()
             raise
         reading.add_done_callback(functools.partial(_release_after_read, release))
-        try:
-            return await asyncio.shield(reading)
-        except asyncio.CancelledError:
-            if reclaim is not None:
-                reading.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
-            raise
+        return await asyncio.shield(reading)
 
     # --- active-staging leases (issue #183) --------------------------------
 
@@ -2377,7 +2385,9 @@ class FsStorage(Storage):
                 raise
             return handle, release
 
-        return _leased_file_stream(_open)
+        return _leased_file_stream(
+            functools.partial(_acquire_off_loop, _close_orphaned_read, _open)
+        )
 
     async def list_dir(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
@@ -3595,16 +3605,17 @@ def _file_stream(
 
 
 def _leased_file_stream(
-    open_source: Callable[[], tuple[io.BufferedReader, Callable[[], None]]],
+    open_source: Callable[[], Awaitable[tuple[io.BufferedReader, Callable[[], None]]]],
 ) -> AsyncIterator[bytes]:
     """Stream one file's bytes in chunks under an active-reader lease (issue #265).
 
-    ``open_source`` is called on the first iteration: it resolves the live
-    snapshot, takes the active-reader lease, opens the target file, and returns
-    the handle plus the matching lease-release callback. Deferring it to first
-    iteration means a stream opened but never consumed never pins a snapshot
-    (mirroring :func:`_tar_stream`). The lease is released exactly once when the
-    stream finishes, is closed early, or raises.
+    ``open_source`` is awaited on the first iteration: it takes the active-reader
+    lease, opens the target file, and returns the handle plus the matching
+    lease-release callback. Deferring it to first iteration means a stream opened
+    but never consumed never pins a snapshot (mirroring :func:`_tar_stream`). The
+    lease is released exactly once, once the handle's close has finished: when the
+    stream finishes, is closed early, or raises. A caller cancelled during the
+    close leaves the close running, and the lease with it (issue #3618).
 
     The open IS the existence check (issue #2391, the shape :func:`_file_stream`
     took in #2341): the lease protects the snapshot DIRECTORY, not the files in
@@ -3618,20 +3629,36 @@ def _leased_file_stream(
     """
 
     async def _gen() -> AsyncIterator[bytes]:
-        handle, on_close = await _acquire_off_loop(_close_orphaned_read, open_source)
+        handle, on_close = await open_source()
         try:
-            try:
-                while True:
-                    chunk = await asyncio.to_thread(handle.read, _CHUNK)
-                    if not chunk:
-                        return
-                    yield chunk
-            finally:
-                await _close_off_loop(handle)
+            while True:
+                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                if not chunk:
+                    return
+                yield chunk
         finally:
-            on_close()
+            await _close_off_loop(_ClosedThenReleased(handle, on_close))
 
     return _gen()
+
+
+class _ClosedThenReleased:
+    """``handle``, whose close releases its lease once done (issue #3618).
+
+    The release runs on the closing thread, so a close its cancelled caller left
+    running still holds the lease until it finishes.
+    """
+
+    def __init__(self, handle: io.BufferedReader, release: Callable[[], None]) -> None:
+        self._handle = handle
+        self._release = release
+        self.name = handle.name
+
+    def close(self) -> None:
+        try:
+            self._handle.close()
+        finally:
+            self._release()
 
 
 def _plain_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
@@ -3812,32 +3839,6 @@ def _extract_member_capped(
     return total
 
 
-def _pinned_file_stream(
-    open_file: Callable[[], Awaitable[io.BufferedReader]],
-) -> AsyncIterator[bytes]:
-    """Stream the bytes of the file ``open_file`` opens (the caller holds a lease).
-
-    The open IS the existence check, for the same reason it is in
-    :func:`_leased_file_stream` (issue #2391): the view's lease pins the snapshot
-    DIRECTORY, and ``delete_file`` unlinks a file inside that very directory, so a
-    pre-check here would leave the same window and the same bare
-    ``FileNotFoundError`` escaping the servers seam as a 500.
-    """
-
-    async def _gen() -> AsyncIterator[bytes]:
-        handle = await open_file()
-        try:
-            while True:
-                chunk = await asyncio.to_thread(handle.read, _CHUNK)
-                if not chunk:
-                    return
-                yield chunk
-        finally:
-            await _close_off_loop(handle)
-
-    return _gen()
-
-
 class _FsWorkingSetView(WorkingSetView):
     """Pinned read-only view of a working set for the fs adapter (issue #1966).
 
@@ -3912,15 +3913,36 @@ class _FsWorkingSetView(WorkingSetView):
         # through the read-side resolve so the view refuses a symlink component
         # exactly as the unpinned read paths do (issues #2418, #2432).
         target = self._storage._safe_read_target(self._pinned, rel_path)
-        # The view's lease covers the stream; only the open, which reads the
-        # snapshot on a thread, takes one of its own (issue #3577).
-        return _pinned_file_stream(
-            functools.partial(
-                self._storage._read_leased,
-                self._pinned,
-                _open_readable_sync,
-                target,
-                f"file not found: {rel_path.value}",
-                reclaim=_close_orphaned_handle,
-            )
+        return _leased_file_stream(
+            functools.partial(self._open_leased, self._pinned, target, rel_path.value)
         )
+
+    async def _open_leased(
+        self, pinned: Path, target: Path, rel: str
+    ) -> tuple[io.BufferedReader, Callable[[], None]]:
+        """Open ``target`` under a lease of the stream's own on ``pinned``.
+
+        The stream's lease, not the view's, covers it to the end of its close: a
+        consumer cancelled during the close exits the view, releasing the view's
+        lease, while the close still runs (issue #3618). It is taken on the loop
+        while the view's lease still pins ``pinned``, and covers the open on its
+        thread too (issue #3577). A caller cancelled during the open hands the lease
+        to the open, as :meth:`FsStorage.open_file_stream`'s does: a late handle is
+        closed before the lease is released, and an open that fails releases it.
+        """
+
+        self._storage._acquire_lease(pinned)
+        release = self._storage._lease_release(pinned)
+        try:
+            return await _acquire_off_loop(
+                _close_orphaned_read,
+                _open_releasing_on_fault,
+                release,
+                target,
+                f"file not found: {rel}",
+            )
+        except asyncio.CancelledError:
+            raise  # the still-running open owns the lease
+        except BaseException:
+            release()  # the open was refused, or already released it as it failed
+            raise
