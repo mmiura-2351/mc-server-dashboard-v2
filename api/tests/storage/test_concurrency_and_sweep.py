@@ -383,49 +383,54 @@ async def test_retain_file_version_survives_concurrent_publish_reclaim(
     snapshot between is_file() and _capture_version (issue #1953).
 
     Coordination: retain signals it has entered the critical section (past
-    is_file), then waits for the concurrent publish to attempt completion.
-    With the lock the publish is blocked and the wait times out — the snapshot
-    is still intact. Without the lock (pre-fix), the publish completes and
-    rmtrees the snapshot, so the stat/hash in _matches_newest_version would
-    raise FileNotFoundError."""
+    is_file) and holds there. The publish starts only once retain has provably
+    arrived, and retain is released only once the publish has found the server
+    lock held, so the race is exercised on every run (issue #3638). Without the
+    lock (pre-fix), the publish finishes without waiting for it and rmtrees the
+    source the held retain is about to stat/hash."""
 
-    import asyncio
     import threading
-
-    from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     await publish(storage, community, server, {"f": b"OLD"})
+    contended = watch_lock_contention(storage, community, server)
 
     retain_entered = threading.Event()
-    publish_done = threading.Event()
+    resume = threading.Event()
 
     original_matches = FsStorage._matches_newest_version
 
-    def _wait_for_publish(self: FsStorage, versions: object, source: object) -> bool:
-        # Signal that retain is past is_file() and about to stat/hash source.
+    def _hold_in_critical_section(
+        self: FsStorage, versions: object, source: object
+    ) -> bool:
+        # Retain is past is_file() and about to stat/hash source. No timeout:
+        # the test releases the hold on every path (#3600).
         retain_entered.set()
-        # Wait for the concurrent publish to complete. With the lock: publish
-        # is blocked by the same lock, so this times out and source is intact.
-        # Without the lock (pre-fix): publish completes and rmtrees the source
-        # dir, so the original_matches call would crash on source.stat().
-        publish_done.wait(timeout=1.0)
+        resume.wait()
         return original_matches(self, versions, source)  # type: ignore[arg-type]
 
-    storage._matches_newest_version = _wait_for_publish.__get__(storage, FsStorage)  # type: ignore[method-assign]
-
-    async def _concurrent_publish() -> None:
-        await asyncio.to_thread(retain_entered.wait, 5.0)
-        await publish(storage, community, server, {"f": b"NEW"})
-        publish_done.set()
-
-    # Both run concurrently. The lock serializes them: retain finishes first
-    # (publish is blocked on the same lock), then publish proceeds.
-    await asyncio.gather(
-        storage.retain_file_version(community, server, RelPath("f")),
-        _concurrent_publish(),
+    storage._matches_newest_version = _hold_in_critical_section.__get__(  # type: ignore[method-assign]
+        storage, FsStorage
     )
+
+    retain = asyncio.create_task(
+        storage.retain_file_version(community, server, RelPath("f"))
+    )
+    try:
+        # A late retain fails here; the publish must not start before it arrives.
+        assert await asyncio.to_thread(retain_entered.wait, 10), (
+            "retain never reached its critical section"
+        )
+        publishing = asyncio.create_task(
+            publish(storage, community, server, {"f": b"NEW"})
+        )
+        # 120 s: the publish stages and writes its snapshot (real I/O) first.
+        await wait_until_contended(publishing, contended, timeout=120)
+    finally:
+        resume.set()
+    await retain
+    await publishing
 
 
 async def test_backup_pack_survives_concurrent_publish_reclaim(
