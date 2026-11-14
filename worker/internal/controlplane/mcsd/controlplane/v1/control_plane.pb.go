@@ -325,6 +325,13 @@ const (
 	// Distinct from INTERNAL so the user is told to restore a regular file; the
 	// message names the refusal but never carries the file's content.
 	CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE CommandErrorCode = 11
+	// The command's expires_after budget ran out before the Worker started
+	// executing it (issue #3305). The Worker did not apply it: the command was
+	// still waiting in the server's lane or for a concurrency-cap slot, and the
+	// API had already stopped waiting for it. Distinct from BUSY, which refuses
+	// a command that arrives while another one holds the id. An EXPIRED command
+	// was refused only because it waited too long.
+	CommandErrorCode_COMMAND_ERROR_CODE_EXPIRED CommandErrorCode = 12
 )
 
 // Enum value maps for CommandErrorCode.
@@ -342,6 +349,7 @@ var (
 		9:  "COMMAND_ERROR_CODE_BUSY",
 		10: "COMMAND_ERROR_CODE_COMMAND_DROPPED",
 		11: "COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE",
+		12: "COMMAND_ERROR_CODE_EXPIRED",
 	}
 	CommandErrorCode_value = map[string]int32{
 		"COMMAND_ERROR_CODE_UNSPECIFIED":                  0,
@@ -356,6 +364,7 @@ var (
 		"COMMAND_ERROR_CODE_BUSY":                         9,
 		"COMMAND_ERROR_CODE_COMMAND_DROPPED":              10,
 		"COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE": 11,
+		"COMMAND_ERROR_CODE_EXPIRED":                      12,
 	}
 )
 
@@ -1189,7 +1198,19 @@ type ApiCommand struct {
 	//	*ApiCommand_TunnelDial
 	//	*ApiCommand_OpenBedrockTunnel
 	//	*ApiCommand_CloseBedrockTunnel
-	Command       isApiCommand_Command `protobuf_oneof:"command"`
+	Command isApiCommand_Command `protobuf_oneof:"command"`
+	// expires_after is how long the Worker may hold this command before it
+	// starts executing it, measured from when the Worker received it, so the two
+	// hosts' clocks never meet (issue #3305). A command can wait in the server's
+	// lane behind an earlier command for the same server, or for a slot of the
+	// Worker-wide concurrency cap. If it is still waiting when this budget runs
+	// out, the API has stopped waiting for it, so the Worker answers
+	// COMMAND_ERROR_CODE_EXPIRED without executing it. A command that has already
+	// started is never interrupted. Unset or zero means the command never
+	// expires. The API stamps the dispatch's remaining budget minus a margin when
+	// it sends the command, and leaves the field unset on a fire-and-forget
+	// command, which nothing waits for (CONTROL_PLANE.md Sections 4.2 and 5).
+	ExpiresAfter  *durationpb.Duration `protobuf:"bytes,15,opt,name=expires_after,json=expiresAfter,proto3" json:"expires_after,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1349,6 +1370,13 @@ func (x *ApiCommand) GetCloseBedrockTunnel() *CloseBedrockTunnel {
 		if x, ok := x.Command.(*ApiCommand_CloseBedrockTunnel); ok {
 			return x.CloseBedrockTunnel
 		}
+	}
+	return nil
+}
+
+func (x *ApiCommand) GetExpiresAfter() *durationpb.Duration {
+	if x != nil {
+		return x.ExpiresAfter
 	}
 	return nil
 }
@@ -2943,7 +2971,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\vRegisterAck\x12H\n" +
 	"\x12heartbeat_interval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12F\n" +
 	"\x11transfer_deadline\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10transferDeadline\x125\n" +
-	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIdsJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\bacceptedR\x10rejection_reason\"\x9a\a\n" +
+	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIdsJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\bacceptedR\x10rejection_reason\"\xda\a\n" +
 	"\n" +
 	"ApiCommand\x12\x1d\n" +
 	"\n" +
@@ -2963,7 +2991,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\vtunnel_dial\x18\f \x01(\v2 .mcsd.controlplane.v1.TunnelDialH\x00R\n" +
 	"tunnelDial\x12Y\n" +
 	"\x13open_bedrock_tunnel\x18\r \x01(\v2'.mcsd.controlplane.v1.OpenBedrockTunnelH\x00R\x11openBedrockTunnel\x12\\\n" +
-	"\x14close_bedrock_tunnel\x18\x0e \x01(\v2(.mcsd.controlplane.v1.CloseBedrockTunnelH\x00R\x12closeBedrockTunnelB\t\n" +
+	"\x14close_bedrock_tunnel\x18\x0e \x01(\v2(.mcsd.controlplane.v1.CloseBedrockTunnelH\x00R\x12closeBedrockTunnel\x12>\n" +
+	"\rexpires_after\x18\x0f \x01(\v2\x19.google.protobuf.DurationR\fexpiresAfterB\t\n" +
 	"\acommand\"\xae\x02\n" +
 	"\vStartServer\x12A\n" +
 	"\x06driver\x18\x01 \x01(\x0e2).mcsd.controlplane.v1.ExecutionDriverKindR\x06driver\x12\x1f\n" +
@@ -3069,7 +3098,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"!FILE_ACCESS_REASON_IS_A_DIRECTORY\x10\x01\x12&\n" +
 	"\"FILE_ACCESS_REASON_NOT_A_DIRECTORY\x10\x02\x12&\n" +
 	"\"FILE_ACCESS_REASON_SYMLINK_REFUSED\x10\x03\x12(\n" +
-	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\xea\x03\n" +
+	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\x8a\x04\n" +
 	"\x10CommandErrorCode\x12\"\n" +
 	"\x1eCOMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12'\n" +
 	"#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n" +
@@ -3083,7 +3112,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x17COMMAND_ERROR_CODE_BUSY\x10\t\x12&\n" +
 	"\"COMMAND_ERROR_CODE_COMMAND_DROPPED\x10\n" +
 	"\x123\n" +
-	"/COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE\x10\v*\xb2\x01\n" +
+	"/COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE\x10\v\x12\x1e\n" +
+	"\x1aCOMMAND_ERROR_CODE_EXPIRED\x10\f*\xb2\x01\n" +
 	"\vCrashReason\x12\x1c\n" +
 	"\x18CRASH_REASON_UNSPECIFIED\x10\x00\x12%\n" +
 	"!CRASH_REASON_FORGE_INSTALL_FAILED\x10\x01\x12,\n" +
@@ -3187,28 +3217,29 @@ var file_mcsd_controlplane_v1_control_plane_proto_depIdxs = []int32{
 	25, // 22: mcsd.controlplane.v1.ApiCommand.tunnel_dial:type_name -> mcsd.controlplane.v1.TunnelDial
 	26, // 23: mcsd.controlplane.v1.ApiCommand.open_bedrock_tunnel:type_name -> mcsd.controlplane.v1.OpenBedrockTunnel
 	27, // 24: mcsd.controlplane.v1.ApiCommand.close_bedrock_tunnel:type_name -> mcsd.controlplane.v1.CloseBedrockTunnel
-	0,  // 25: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
-	1,  // 26: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
-	31, // 27: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
-	29, // 28: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
-	30, // 29: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
-	2,  // 30: mcsd.controlplane.v1.FileEntry.kind:type_name -> mcsd.controlplane.v1.FileEntryKind
-	4,  // 31: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
-	3,  // 32: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
-	33, // 33: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
-	34, // 34: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
-	35, // 35: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
-	36, // 36: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
-	6,  // 37: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
-	5,  // 38: mcsd.controlplane.v1.StatusChange.crash_reason:type_name -> mcsd.controlplane.v1.CrashReason
-	7,  // 39: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
-	8,  // 40: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
-	9,  // 41: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
-	41, // [41:42] is the sub-list for method output_type
-	40, // [40:41] is the sub-list for method input_type
-	40, // [40:40] is the sub-list for extension type_name
-	40, // [40:40] is the sub-list for extension extendee
-	0,  // [0:40] is the sub-list for field type_name
+	38, // 25: mcsd.controlplane.v1.ApiCommand.expires_after:type_name -> google.protobuf.Duration
+	0,  // 26: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
+	1,  // 27: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
+	31, // 28: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
+	29, // 29: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
+	30, // 30: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
+	2,  // 31: mcsd.controlplane.v1.FileEntry.kind:type_name -> mcsd.controlplane.v1.FileEntryKind
+	4,  // 32: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
+	3,  // 33: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
+	33, // 34: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
+	34, // 35: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
+	35, // 36: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
+	36, // 37: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
+	6,  // 38: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
+	5,  // 39: mcsd.controlplane.v1.StatusChange.crash_reason:type_name -> mcsd.controlplane.v1.CrashReason
+	7,  // 40: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
+	8,  // 41: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
+	9,  // 42: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
+	42, // [42:43] is the sub-list for method output_type
+	41, // [41:42] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_mcsd_controlplane_v1_control_plane_proto_init() }

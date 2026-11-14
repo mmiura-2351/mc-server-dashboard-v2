@@ -239,6 +239,14 @@ class _CommandErrorCodeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Comm
     Distinct from INTERNAL so the user is told to restore a regular file; the
     message names the refusal but never carries the file's content.
     """
+    COMMAND_ERROR_CODE_EXPIRED: _CommandErrorCode.ValueType  # 12
+    """The command's expires_after budget ran out before the Worker started
+    executing it (issue #3305). The Worker did not apply it: the command was
+    still waiting in the server's lane or for a concurrency-cap slot, and the
+    API had already stopped waiting for it. Distinct from BUSY, which refuses
+    a command that arrives while another one holds the id. An EXPIRED command
+    was refused only because it waited too long.
+    """
 
 class CommandErrorCode(_CommandErrorCode, metaclass=_CommandErrorCodeEnumTypeWrapper):
     """CommandErrorCode classifies a command failure."""
@@ -294,6 +302,14 @@ ServerCommand and a running SnapshotTrigger's quiesce open RCON with its
 password, and a TunnelDial resolves its game port, so each fails on it.
 Distinct from INTERNAL so the user is told to restore a regular file; the
 message names the refusal but never carries the file's content.
+"""
+COMMAND_ERROR_CODE_EXPIRED: CommandErrorCode.ValueType  # 12
+"""The command's expires_after budget ran out before the Worker started
+executing it (issue #3305). The Worker did not apply it: the command was
+still waiting in the server's lane or for a concurrency-cap slot, and the
+API had already stopped waiting for it. Distinct from BUSY, which refuses
+a command that arrives while another one holds the id. An EXPIRED command
+was refused only because it waited too long.
 """
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 
@@ -767,6 +783,7 @@ class ApiCommand(_message.Message):
     TUNNEL_DIAL_FIELD_NUMBER: _builtins.int
     OPEN_BEDROCK_TUNNEL_FIELD_NUMBER: _builtins.int
     CLOSE_BEDROCK_TUNNEL_FIELD_NUMBER: _builtins.int
+    EXPIRES_AFTER_FIELD_NUMBER: _builtins.int
     command_id: _builtins.str
     """command_id correlates this command with its CommandResult
     (REQUIREMENTS.md NFR-OBS-1).
@@ -834,6 +851,21 @@ class ApiCommand(_message.Message):
         relay tunnel, dispatched when the server stops (issue #1544).
         """
 
+    @_builtins.property
+    def expires_after(self) -> _duration_pb2.Duration:
+        """expires_after is how long the Worker may hold this command before it
+        starts executing it, measured from when the Worker received it, so the two
+        hosts' clocks never meet (issue #3305). A command can wait in the server's
+        lane behind an earlier command for the same server, or for a slot of the
+        Worker-wide concurrency cap. If it is still waiting when this budget runs
+        out, the API has stopped waiting for it, so the Worker answers
+        COMMAND_ERROR_CODE_EXPIRED without executing it. A command that has already
+        started is never interrupted. Unset or zero means the command never
+        expires. The API stamps the dispatch's remaining budget minus a margin when
+        it sends the command, and leaves the field unset on a fire-and-forget
+        command, which nothing waits for (CONTROL_PLANE.md Sections 4.2 and 5).
+        """
+
     def __init__(
         self,
         *,
@@ -851,10 +883,11 @@ class ApiCommand(_message.Message):
         tunnel_dial: Global___TunnelDial | None = ...,
         open_bedrock_tunnel: Global___OpenBedrockTunnel | None = ...,
         close_bedrock_tunnel: Global___CloseBedrockTunnel | None = ...,
+        expires_after: _duration_pb2.Duration | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "edit_file", b"edit_file", "expires_after", b"expires_after", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "expires_after", b"expires_after", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files", "tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel"]  # noqa: Y015
     _WhichOneofArgType_command: _TypeAlias = _typing.Literal["command", b"command"]  # noqa: Y015
