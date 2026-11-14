@@ -28,7 +28,6 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
-    _EXPIRY_MARGIN_SECONDS,
     ControlPlaneState,
     GrpcControlPlane,
     StaleSessionError,
@@ -37,6 +36,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    EXPIRY_MARGIN_SECONDS,
     CloseBedrockTunnelCommand,
     Command,
     CommandResultCode,
@@ -913,7 +913,7 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
     sink = _RecordingLateSnapshotSink()
     # Just past the expiry margin, so both snapshots are sent before they time
     # out: a budget inside the margin is dropped unsent (issue #3305).
-    timeout = _EXPIRY_MARGIN_SECONDS + 0.2
+    timeout = EXPIRY_MARGIN_SECONDS + 0.2
     harness = _Harness(command_timeout=timeout)
     harness.state = ControlPlaneState(late_snapshot_sink=sink)
     harness.control_plane = GrpcControlPlane(
@@ -1515,7 +1515,7 @@ async def test_a_sent_command_carries_its_dispatch_budget_minus_the_margin(
 
     assert msg.api_command.HasField("expires_after")
     expires_after = msg.api_command.expires_after.ToTimedelta().total_seconds()
-    assert 0 < expires_after <= 20.0 - _EXPIRY_MARGIN_SECONDS
+    assert 0 < expires_after <= 20.0 - EXPIRY_MARGIN_SECONDS
     await call.done_writing()
 
 
@@ -1532,7 +1532,7 @@ async def test_the_stamp_is_the_budget_left_when_the_command_is_sent() -> None:
 
     assert state.stamp_expiry(msg)
     expires_after = msg.api_command.expires_after.ToTimedelta().total_seconds()
-    assert 0 < expires_after <= 20.0 - _EXPIRY_MARGIN_SECONDS - 0.3
+    assert 0 < expires_after <= 20.0 - EXPIRY_MARGIN_SECONDS - 0.3
 
 
 def _stamp_at_frozen_loop_time(
@@ -1541,7 +1541,7 @@ def _stamp_at_frozen_loop_time(
     """Register ``msg`` with ``budget`` and stamp it, the loop clock held at 100.0.
 
     A frozen clock makes the remainder exact up to float error: it is
-    ``budget - _EXPIRY_MARGIN_SECONDS``, with no time passing in between.
+    ``budget - EXPIRY_MARGIN_SECONDS``, with no time passing in between.
     """
 
     loop = asyncio.get_running_loop()
@@ -1594,7 +1594,7 @@ async def test_a_command_with_no_budget_left_is_dropped_unsent(
             worker_id=worker,
             server_id=_SERVER,
             command=ServerCommandCommand(line="too late"),
-            timeout_override=_EXPIRY_MARGIN_SECONDS / 2,
+            timeout_override=EXPIRY_MARGIN_SECONDS / 2,
         )
 
     async def worker_read_and_answer() -> str:
@@ -1625,7 +1625,7 @@ async def test_a_final_snapshot_is_never_stamped_and_runs_late() -> None:
     # the hold as before. A periodic snapshot keeps its stamp.
     sink = _RecordingLateSnapshotSink()
     # Past the margin, so the stamp a non-exempt snapshot would get is non-zero.
-    timeout = _EXPIRY_MARGIN_SECONDS + 0.2
+    timeout = EXPIRY_MARGIN_SECONDS + 0.2
     harness = _Harness(command_timeout=timeout)
     harness.state = ControlPlaneState(late_snapshot_sink=sink)
     harness.control_plane = GrpcControlPlane(

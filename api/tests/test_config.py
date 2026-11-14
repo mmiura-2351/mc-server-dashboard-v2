@@ -341,29 +341,37 @@ _SCALAR_INVALID_CASES = [
         "heartbeat_timeout_seconds",
         id="heartbeat-timeout-zero",
     ),
+    # A budget at the 1 s expiry margin leaves nothing to send a command with
+    # (issue #3305).
     pytest.param(
         "control",
-        "command_timeout_seconds = 0",
+        "command_timeout_seconds = 1",
         "command_timeout_seconds",
-        id="command-timeout-zero",
+        id="command-timeout-at-expiry-margin",
     ),
+    # A budget at the 1 s expiry margin leaves nothing to send a command with
+    # (issue #3305).
     pytest.param(
         "control",
-        "hydrate_timeout_seconds = 0",
+        "hydrate_timeout_seconds = 1",
         "hydrate_timeout_seconds",
-        id="hydrate-timeout-zero",
+        id="hydrate-timeout-at-expiry-margin",
     ),
+    # A budget at the 1 s expiry margin leaves nothing to send a command with
+    # (issue #3305).
     pytest.param(
         "control",
-        "snapshot_timeout_seconds = 0",
+        "snapshot_timeout_seconds = 1",
         "snapshot_timeout_seconds",
-        id="snapshot-timeout-zero",
+        id="snapshot-timeout-at-expiry-margin",
     ),
+    # A budget at the 1 s expiry margin leaves nothing to send a command with
+    # (issue #3305).
     pytest.param(
         "control",
-        "stop_timeout_seconds = 0",
+        "stop_timeout_seconds = 1",
         "stop_timeout_seconds",
-        id="stop-timeout-zero",
+        id="stop-timeout-at-expiry-margin",
     ),
     pytest.param("log", 'level = "trace"', "level", id="unknown-log-level"),
     pytest.param("log", 'format = "yaml"', "format", id="unknown-log-format"),
@@ -659,6 +667,16 @@ def test_scalar_setting_rejects_invalid_boundary(
         load_settings(config_file=config_file)
 
 
+def test_a_command_timeout_at_the_expiry_margin_names_the_margin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The operator is told why 1 is refused, not only that it is (issue #3305).
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
+    config_file = _write_toml(tmp_path, "[control]\ncommand_timeout_seconds = 1\n")
+    with pytest.raises(ValidationError, match="expiry margin"):
+        load_settings(config_file=config_file)
+
+
 _SCALAR_VALID_CASES = [
     pytest.param("server", "http_port = 0", "http_port", 0, id="ephemeral-http-port"),
     pytest.param("server", "grpc_port = 0", "grpc_port", 0, id="ephemeral-grpc-port"),
@@ -727,6 +745,34 @@ _SCALAR_VALID_CASES = [
         "tick_seconds",
         300,
         id="schedule-tick-at-grace",
+    ),
+    pytest.param(
+        "control",
+        "command_timeout_seconds = 2",
+        "command_timeout_seconds",
+        2,
+        id="command-timeout-past-expiry-margin",
+    ),
+    pytest.param(
+        "control",
+        "hydrate_timeout_seconds = 2",
+        "hydrate_timeout_seconds",
+        2,
+        id="hydrate-timeout-past-expiry-margin",
+    ),
+    pytest.param(
+        "control",
+        "snapshot_timeout_seconds = 2",
+        "snapshot_timeout_seconds",
+        2,
+        id="snapshot-timeout-past-expiry-margin",
+    ),
+    pytest.param(
+        "control",
+        "stop_timeout_seconds = 2",
+        "stop_timeout_seconds",
+        2,
+        id="stop-timeout-past-expiry-margin",
     ),
     pytest.param(
         "ports",

@@ -30,6 +30,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    EXPIRY_MARGIN_SECONDS,
     CloseBedrockTunnelCommand,
     Command,
     CommandResult,
@@ -69,12 +70,6 @@ _LOG = logging.getLogger(__name__)
 # ReadFile result at exactly the cap fits. The Worker holds the same number; both
 # are pinned to proto/contract/control_plane_limits.json by a test on each side.
 MAX_MESSAGE_BYTES = 4 * 1024 * 1024 + 64 * 1024
-
-# How much sooner than the API's own deadline a sent command expires on the Worker
-# (issue #3305). The Worker answers EXPIRED in place of a command still waiting to
-# start when its expires_after runs out; the margin lets that answer arrive while
-# the API still waits, and absorbs the stream's transit time.
-_EXPIRY_MARGIN_SECONDS = 1.0
 
 
 def _widest_expiry(budget: float) -> Duration:
@@ -492,7 +487,7 @@ class ControlPlaneState:
 
         The Session generator calls this for a dequeued command that
         :meth:`discard_if_stale` kept. The stamp is the budget the caller has left
-        minus :data:`_EXPIRY_MARGIN_SECONDS`, so the Worker answers EXPIRED rather
+        minus :data:`EXPIRY_MARGIN_SECONDS`, so the Worker answers EXPIRED rather
         than run a command it reaches only after the API has stopped waiting
         (issue #3305). A command whose remaining budget is no more than the margin
         could not be answered in time, so it is dropped unsent like a stale one,
@@ -514,7 +509,7 @@ class ControlPlaneState:
         # A Duration of zero is "no expiry" to the Worker, so a remainder too small
         # to encode as a positive Duration is dropped like any other too-late one.
         expires_after_ns = math.floor(
-            (entry[2] - loop_time - _EXPIRY_MARGIN_SECONDS) * 1_000_000_000
+            (entry[2] - loop_time - EXPIRY_MARGIN_SECONDS) * 1_000_000_000
         )
         if expires_after_ns <= 0:
             del self._pending[command_id]
