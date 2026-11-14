@@ -147,10 +147,11 @@ func TestQuickCommandExpiredInTheLaneIsNotExecuted(t *testing.T) {
 	assertNotHandled(t, handler, "console")
 }
 
-// A command parked on a saturated Worker-wide cap, behind other servers' long
-// work, expires the same way. The check runs after the slot is acquired: before
-// it the command had not waited long enough, so a check placed only there would
-// let it run.
+// Commands parked on a saturated Worker-wide cap, behind other servers' long
+// work, expire the same way. The check runs after the slot is acquired: before it
+// the commands had not waited long enough, so a check placed only there would let
+// them run. As many commands expire as the cap has slots, so a slot an expired
+// command kept would leave none for the command after them.
 func TestCommandExpiredOnTheSaturatedCapIsNotExecuted(t *testing.T) {
 	handler := newGateHandler("HydrateTrigger")
 	transport, clock, stop := startExpiryRunner(t, handler, discardLogger())
@@ -161,15 +162,21 @@ func TestCommandExpiredOnTheSaturatedCapIsNotExecuted(t *testing.T) {
 		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
 	}
 	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
-	transport.commands <- Command{CommandID: "start", ServerID: "s1", Kind: "StartServer", ExpiresAfter: 20 * time.Second}
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("start-%d", i)
+		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "StartServer", ExpiresAfter: 20 * time.Second}
+	}
 	awaitReceived(t, transport)
 
 	advance(clock, 30*time.Second)
 	close(handler.release)
 
-	assertExpired(t, waitForResult(t, transport, "start"))
-	assertNotHandled(t, handler, "start")
-	// The expired command gave its slot back: a later command still gets one.
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("start-%d", i)
+		assertExpired(t, waitForResult(t, transport, id))
+		assertNotHandled(t, handler, id)
+	}
+	// Every expired command gave its slot back: a later command still gets one.
 	transport.commands <- Command{CommandID: "after", ServerID: "s2", Kind: "StartServer"}
 	if res := waitForResult(t, transport, "after"); !res.Success {
 		t.Fatalf("result = %+v, want the later command to run", res)
