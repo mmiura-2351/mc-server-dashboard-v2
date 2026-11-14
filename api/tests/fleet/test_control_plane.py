@@ -36,6 +36,9 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
 from mc_server_dashboard_api.fleet.adapters.grpc_server import WorkerSessionServicer
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    EXPIRY_MARGIN_SECONDS,
+    CloseBedrockTunnelCommand,
+    Command,
     CommandResultCode,
     CommandTimedOutError,
     EditFileCommand,
@@ -43,6 +46,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     FileEntryKind,
     LaunchMode,
     ListFilesCommand,
+    OpenBedrockTunnelCommand,
     ReadFileCommand,
     ServerCommandCommand,
     SnapshotCommand,
@@ -309,6 +313,8 @@ async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> No
             pb.COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE,
             CommandResultCode.SERVER_PROPERTIES_UNREADABLE,
         ),
+        # The command outwaited its budget before it started (issue #3305).
+        (pb.COMMAND_ERROR_CODE_EXPIRED, CommandResultCode.EXPIRED),
     ],
 )
 async def test_dispatch_failure_maps_typed_code(
@@ -905,10 +911,13 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
     #   3. The periodic's late TRANSFER_FAILED arrives — it must clear NOTHING (only
     #      the final snapshot is tracked); the final's own late result clears.
     sink = _RecordingLateSnapshotSink()
-    harness = _Harness(command_timeout=0.2)
+    # Just past the expiry margin, so both snapshots are sent before they time
+    # out: a budget inside the margin is dropped unsent (issue #3305).
+    timeout = EXPIRY_MARGIN_SECONDS + 0.2
+    harness = _Harness(command_timeout=timeout)
     harness.state = ControlPlaneState(late_snapshot_sink=sink)
     harness.control_plane = GrpcControlPlane(
-        harness.state, clock=harness.clock, timeout_seconds=0.2
+        harness.state, clock=harness.clock, timeout_seconds=timeout
     )
     try:
         stub = await harness.start()
@@ -1461,3 +1470,276 @@ async def test_reconnect_retires_the_superseded_sessions_commands() -> None:
     # The new session's own final snapshot keeps counting.
     state.register_pending("new", owner, snapshot_server_id=_SERVER)
     assert state.final_snapshot_outstanding(_SERVER)
+
+
+# ---------------------------------------------------------------------------
+# Command expiry (issue #3305)
+# ---------------------------------------------------------------------------
+
+
+def _queued_command(command_id: str) -> pb.ApiMessage:
+    return pb.ApiMessage(
+        correlation_id=command_id,
+        api_command=pb.ApiCommand(
+            command_id=command_id,
+            server_id=_SERVER,
+            restart=pb.RestartServer(),
+        ),
+    )
+
+
+async def test_a_sent_command_carries_its_dispatch_budget_minus_the_margin(
+    harness: _Harness,
+) -> None:
+    # The Worker answers EXPIRED instead of running a command still waiting when
+    # this runs out, so it must end before the API stops waiting for the result.
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    dispatch = asyncio.ensure_future(
+        harness.control_plane.dispatch(
+            worker_id=WorkerId(_WORKER),
+            server_id=_SERVER,
+            command=ServerCommandCommand(line="list"),
+            timeout_override=20.0,
+        )
+    )
+
+    msg = await call.read()
+    await call.write(
+        pb.WorkerMessage(
+            correlation_id=msg.api_command.command_id,
+            command_result=pb.CommandResult(success=True),
+        )
+    )
+    await dispatch
+
+    assert msg.api_command.HasField("expires_after")
+    expires_after = msg.api_command.expires_after.ToTimedelta().total_seconds()
+    assert 0 < expires_after <= 20.0 - EXPIRY_MARGIN_SECONDS
+    await call.done_writing()
+
+
+async def test_the_stamp_is_the_budget_left_when_the_command_is_sent() -> None:
+    # A command can sit in the outbound queue (a stalled Worker reader, #1697), and
+    # that wait comes out of its budget: the Worker gets what is LEFT of it.
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+    state.open_session(owner, 1)
+    state.register_pending("cmd-1", owner, budget=20.0)
+    msg = _queued_command("cmd-1")
+
+    await asyncio.sleep(0.3)
+
+    assert state.stamp_expiry(msg)
+    expires_after = msg.api_command.expires_after.ToTimedelta().total_seconds()
+    assert 0 < expires_after <= 20.0 - EXPIRY_MARGIN_SECONDS - 0.3
+
+
+def _stamp_at_frozen_loop_time(
+    state: ControlPlaneState, msg: pb.ApiMessage, budget: float
+) -> bool:
+    """Register ``msg`` with ``budget`` and stamp it, the loop clock held at 100.0.
+
+    A frozen clock makes the remainder exact up to float error: it is
+    ``budget - EXPIRY_MARGIN_SECONDS``, with no time passing in between.
+    """
+
+    loop = asyncio.get_running_loop()
+    loop.time = lambda: 100.0  # type: ignore[method-assign]
+    try:
+        state.register_pending(msg.correlation_id, WorkerId(_WORKER), budget=budget)
+        return state.stamp_expiry(msg)
+    finally:
+        del loop.time
+
+
+async def test_a_sub_microsecond_remainder_is_stamped_not_the_no_expiry_zero() -> None:
+    # A Duration of zero means "never expires" to the Worker, so a remainder that
+    # is positive must reach it as a positive Duration. Rounded to microseconds,
+    # this one (about 400 ns) encoded as that zero (issue #3305).
+    state = ControlPlaneState()
+    state.open_session(WorkerId(_WORKER), 1)
+    msg = _queued_command("cmd-1")
+
+    assert _stamp_at_frozen_loop_time(state, msg, 1.0000004)
+
+    expires_after = msg.api_command.expires_after
+    assert expires_after.seconds == 0
+    assert 0 < expires_after.nanos <= 400
+
+
+async def test_a_sub_nanosecond_remainder_is_dropped_unsent() -> None:
+    # Positive, but less than the 1 ns the Duration can carry: it would encode as
+    # the no-expiry zero, so the command is dropped as stale with its entry.
+    state = ControlPlaneState()
+    state.open_session(WorkerId(_WORKER), 1)
+    msg = _queued_command("cmd-1")
+
+    assert not _stamp_at_frozen_loop_time(state, msg, 1.0000000004)
+
+    assert state.discard_if_stale("cmd-1")
+
+
+async def test_a_command_with_no_budget_left_is_dropped_unsent(
+    harness: _Harness,
+) -> None:
+    # A budget at or below the margin would expire on the Worker before it could
+    # answer in time, so the command is dropped as stale instead of being sent.
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    worker = WorkerId(_WORKER)
+
+    with pytest.raises(CommandTimedOutError):
+        await harness.control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=ServerCommandCommand(line="too late"),
+            timeout_override=EXPIRY_MARGIN_SECONDS / 2,
+        )
+
+    async def worker_read_and_answer() -> str:
+        msg = await call.read()
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        line: str = msg.api_command.server_command.line
+        return line
+
+    echo = asyncio.ensure_future(worker_read_and_answer())
+    await harness.control_plane.dispatch(
+        worker_id=worker, server_id=_SERVER, command=ServerCommandCommand(line="live")
+    )
+    assert await echo == "live"
+    await call.done_writing()
+
+
+async def test_a_final_snapshot_is_never_stamped_and_runs_late() -> None:
+    # A final snapshot is the stop's last capture of the world, and nothing
+    # retries it once it settles (lifecycle.py ``_final_snapshot``): an EXPIRED one
+    # would release the hold with the progression since the last periodic snapshot
+    # lost. So it carries no expiry and still runs after its caller gave up (a
+    # long wait for a slot of the Worker-wide cap), and its late result releases
+    # the hold as before. A periodic snapshot keeps its stamp.
+    sink = _RecordingLateSnapshotSink()
+    # Past the margin, so the stamp a non-exempt snapshot would get is non-zero.
+    timeout = EXPIRY_MARGIN_SECONDS + 0.2
+    harness = _Harness(command_timeout=timeout)
+    harness.state = ControlPlaneState(late_snapshot_sink=sink)
+    harness.control_plane = GrpcControlPlane(
+        harness.state, clock=harness.clock, timeout_seconds=timeout
+    )
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        worker = WorkerId(_WORKER)
+        snapshot = SnapshotCommand(transfer_url="u", transfer_token="t")
+
+        periodic = asyncio.ensure_future(
+            harness.control_plane.dispatch(
+                worker_id=worker, server_id=_SERVER, command=snapshot
+            )
+        )
+        periodic_msg = await call.read()
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=periodic_msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        await periodic
+        assert periodic_msg.api_command.HasField("expires_after")
+
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=worker,
+                server_id=_SERVER,
+                command=snapshot,
+                snapshot_is_final=True,
+            )
+        final_msg = await call.read()
+        assert not final_msg.api_command.HasField("expires_after")
+
+        # The capture completes after the caller timed out: the hold is released.
+        await harness.state.resolve(
+            final_msg.api_command.command_id, worker, pb.CommandResult(success=True)
+        )
+        assert sink.calls == [(_SERVER, worker.value, True, None)]
+        assert not harness.state.final_snapshot_outstanding(_SERVER)
+        await call.done_writing()
+    finally:
+        await harness.stop()
+
+
+async def test_a_fire_and_forget_command_carries_no_expiry(
+    harness: _Harness,
+) -> None:
+    # Nothing waits for a fire-and-forget result, so there is no budget to stamp: a
+    # TunnelDial, an OpenBedrockTunnel or a CloseBedrockTunnel never expires.
+    stub = await harness.start()
+    call = await _registered_call(harness, stub)
+    commands: list[Command] = [
+        TunnelDialCommand(endpoint="relay:1", token="t", tls_ca_pem=""),
+        OpenBedrockTunnelCommand(
+            relay_endpoint="relay:2", bedrock_port=19132, token="t", tls_ca_pem=""
+        ),
+        CloseBedrockTunnelCommand(),
+    ]
+
+    sent = []
+    for command in commands:
+        await harness.control_plane.dispatch_fire_and_forget(
+            worker_id=WorkerId(_WORKER), server_id=_SERVER, command=command
+        )
+        msg = await call.read()
+        sent.append(msg.api_command.WhichOneof("command"))
+        assert not msg.api_command.HasField("expires_after")
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+
+    assert sent == ["tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel"]
+    await call.done_writing()
+
+
+async def test_a_late_result_never_resolves_a_later_dispatch() -> None:
+    # Pin: every dispatch has its own command id, so a timed-out start's late
+    # answer cannot be credited to the next start for the same server.
+    state = ControlPlaneState()
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=0.05)
+    command = StartServerCommand(
+        driver=DriverKind.CONTAINER, jar_relpath="server.jar", minecraft_version="1.21"
+    )
+    with pytest.raises(CommandTimedOutError):
+        await control_plane.dispatch(
+            worker_id=worker, server_id=_SERVER, command=command
+        )
+    first = queue.get_nowait()
+
+    second = asyncio.ensure_future(
+        control_plane.dispatch(
+            worker_id=worker, server_id=_SERVER, command=command, timeout_override=5.0
+        )
+    )
+    await asyncio.sleep(0)
+    later = queue.get_nowait()
+    await state.resolve(first.correlation_id, worker, pb.CommandResult(success=True))
+    await asyncio.sleep(0)
+    assert not second.done()
+
+    await state.resolve(
+        later.correlation_id,
+        worker,
+        pb.CommandResult(
+            success=False,
+            error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_INVALID_STATE),
+        ),
+    )
+    assert (await second).code is CommandResultCode.INVALID_STATE

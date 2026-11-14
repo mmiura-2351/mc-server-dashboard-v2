@@ -228,6 +228,21 @@ keeps writing, but a server killed after the idle window or at the cap is left
 with a partial save (issue #3436). The stop answers `200` as usual; only the
 host log says the flush was skipped.
 
+**A command the host did not get to.** The host runs one server's commands one
+at a time, and its long-running ones share a few slots with other servers'
+work, so a command can wait there (`CONTROL_PLANE.md` Section 5, "Expiry"). A
+command still waiting when the API's own deadline is about to pass is answered
+without being run. A start, a stop, a restart, a console command and a backup
+of a running server then fail with `409` `command_expired` instead of
+`command_failed`: nothing was applied, so retrying is safe. The lifecycle toast
+and the Console line say the host was busy and ask the user to try again; the
+Console line does not say the console connection failed, since it was never
+opened. A failed start is set back to stopped as for any refused start, and a
+stop keeps its intent, so the system replays it on its own as well. The Files
+tab keeps its generic failure message, and a backup keeps the Backups tab's
+generic one. A stop's final snapshot never fails this way: it runs however long
+it waits.
+
 **Storage outages on the working-set routes.** When the store holding a
 server's working set cannot serve the request, the routes whose failure is safe
 to retry answer **503 `storage_unavailable`** — retry the same request
@@ -1033,6 +1048,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `server_properties_unreadable` says the server's `server.properties` is not a
   regular file or is too large and must be restored (Section 2, "A refused
   `server.properties`");
+  `command_expired` says the host was busy with other work and did not get to
+  the action in time, so it was not applied and the operator tries again
+  (Section 2, "A command the host did not get to"). It is the same message on
+  every verb: nothing was applied, so the stop and restart messages below,
+  which describe something left pending, would be wrong;
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
   the server's state — a failed start is compensated back, but a failed stop or

@@ -236,6 +236,20 @@ message ApiCommand {
     // relay tunnel, dispatched when the server stops (issue #1544).
     CloseBedrockTunnel close_bedrock_tunnel = 14;
   }
+
+  // expires_after is how long the Worker may hold this command before it
+  // starts executing it, measured from when the Worker received it, so the two
+  // hosts' clocks never meet (issue #3305). A command can wait in the server's
+  // lane behind an earlier command for the same server, or for a slot of the
+  // Worker-wide concurrency cap. If it is still waiting when this budget runs
+  // out, the API has stopped waiting for it, so the Worker answers
+  // COMMAND_ERROR_CODE_EXPIRED without executing it. A command that has already
+  // started is never interrupted. Unset or zero means the command never
+  // expires. The API stamps the dispatch's remaining budget minus a margin when
+  // it sends the command. It leaves the field unset on a fire-and-forget
+  // command, which nothing waits for, and on a stop's final snapshot, which
+  // must run however late (CONTROL_PLANE.md Sections 4.2 and 5).
+  google.protobuf.Duration expires_after = 15;
 }
 
 // StartServer launches a server on the Worker. Hydrate (FR-DATA-4) precedes the
@@ -616,6 +630,13 @@ enum CommandErrorCode {
   // Distinct from INTERNAL so the user is told to restore a regular file; the
   // message names the refusal but never carries the file's content.
   COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE = 11;
+  // The command's expires_after budget ran out before the Worker started
+  // executing it (issue #3305). The Worker did not apply it: the command was
+  // still waiting in the server's lane or for a concurrency-cap slot, and the
+  // API had already stopped waiting for it. Distinct from BUSY, which refuses
+  // a command that arrives while another one holds the id. An EXPIRED command
+  // was refused only because it waited too long.
+  COMMAND_ERROR_CODE_EXPIRED = 12;
 }
 
 // ---------------------------------------------------------------------------

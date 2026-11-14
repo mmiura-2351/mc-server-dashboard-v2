@@ -211,6 +211,10 @@ async def _until(predicate: Callable[[], bool]) -> None:
         await asyncio.sleep(0.01)
 
 
+# Waits in turn: under 45 s of short bounds (10 + 10 + the 5 s watchdog + 1 + the
+# 1000-step ``_until``) and the 120 s staging-removal bound below, plus 30 s of
+# headroom, so that bound's assertion reports a failure before the timeout does.
+@pytest.mark.timeout(45 + 120 + 30)
 @pytest.mark.parametrize("site", _SITES, ids=lambda site: f"{site.backend}-{site.name}")
 async def test_a_cancelled_write_closes_its_file_off_the_loop(
     site: _Site, hold: _Hold, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -243,6 +247,11 @@ async def test_a_cancelled_write_closes_its_file_off_the_loop(
     await _until(lambda: out.closed and not spool.exists())
     assert out.closed
     assert not spool.exists()
+    # The staging is removed only after the file's close (issue #3653). A bound,
+    # not a delay: the removal can wait behind a queued fsync on a loaded host.
+    deadline = asyncio.get_running_loop().time() + 120
+    while await leftovers() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
     assert await leftovers() == []
 
 

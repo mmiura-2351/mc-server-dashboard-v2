@@ -10,8 +10,10 @@
  * reasons `worker_busy` / `server_busy` (issue #2400), the unclassified
  * dispatch failure `command_failed` (issue #2420), `failed_stop_orphan` —
  * a Worker that could not confirm an earlier stop, so the server's process is
- * probably still running (issue #2466) — and `server_properties_unreadable`,
- * a `server.properties` the Worker refuses to read (issue #3347).
+ * probably still running (issue #2466) — `server_properties_unreadable`,
+ * a `server.properties` the Worker refuses to read (issue #3347) — and
+ * `command_expired`, a command the busy Worker did not get to in time (issue
+ * #3305).
  *
  * Three reasons keep the state-changed treatment: `invalid_transition`,
  * `transition_conflict` and `server_not_running` each mean the server really
@@ -107,6 +109,16 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // server.properties at all, and the Files tab refuses to recreate the
 // platform-managed keys (rcon.password among them) a backup restore re-applies.
 //
+// `command_expired` is a command that waited on the Worker past its budget —
+// behind an earlier command for the server, or for a slot of the Worker-wide
+// concurrency cap — and was answered without being run (issue #3305). It is
+// deliberately NOT verb-specific and not `command_failed`'s message: on every
+// verb nothing was applied, so there is no state to go and check, and nothing is
+// pending that the *Pending messages could promise. A start is compensated back
+// to stopped and a restart left the server as it was. A stop leaves its intent
+// committed, but the server is still running and the stop button replays the
+// stop (StopServer's `redispatch_stop`), so "try again" holds there too.
+//
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
 // of outcome (useLifecycleMutation.ts) — and for the stop and
@@ -122,6 +134,7 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
   failed_stop_orphan: "dashboard.lifecycle.failedStopOrphan",
   server_properties_unreadable:
     "dashboard.lifecycle.serverPropertiesUnreadable",
+  command_expired: "dashboard.lifecycle.commandExpired",
 };
 
 // Reasons whose honest message depends on the verb, consulted before

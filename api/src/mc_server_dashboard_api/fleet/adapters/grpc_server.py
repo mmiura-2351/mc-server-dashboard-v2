@@ -484,10 +484,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 )
                 if outbound_get in done:
                     msg = outbound_get.result()
-                    if msg.WhichOneof(
-                        "payload"
-                    ) == "api_command" and self._control_plane.discard_if_stale(
-                        msg.correlation_id
+                    # A command is stamped with its expiry here, as it is sent
+                    # (issue #3305); one with no budget left is dropped as stale.
+                    if msg.WhichOneof("payload") == "api_command" and (
+                        self._control_plane.discard_if_stale(msg.correlation_id)
+                        or not self._control_plane.stamp_expiry(msg)
                     ):
                         _LOG.info(
                             "dropping stale queued command",

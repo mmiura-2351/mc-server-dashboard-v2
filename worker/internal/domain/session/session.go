@@ -318,6 +318,10 @@ func (r *Runner) serve(ctx context.Context, transport Transport, interval time.D
 // "unsupported" result. A command is never silently dropped (CONTROL_PLANE.md
 // Section 5). Every result is pushed to results, drained by the single sender in
 // serve.
+//
+// The receipt time is taken here, on the session's clock, because a command's
+// ExpiresAfter budget runs from its receipt (issue #3305): the lane checks it
+// just before the command would start.
 func (r *Runner) receiveLoop(ctx context.Context, transport Transport, disp *dispatcher) error {
 	for {
 		cmd, err := transport.RecvCommand(ctx)
@@ -330,7 +334,7 @@ func (r *Runner) receiveLoop(ctx context.Context, transport Transport, disp *dis
 			continue
 		}
 
-		disp.dispatch(cmd)
+		disp.dispatch(queuedCommand{cmd: cmd, receivedAt: r.clock.Now()})
 	}
 }
 
@@ -398,6 +402,37 @@ func (r *Runner) emitResult(ctx context.Context, results chan<- outcome, o outco
 	case results <- o:
 	case <-ctx.Done():
 	}
+}
+
+// expired reports the EXPIRED outcome for a queued command whose ExpiresAfter
+// budget has run out by now, or false when it may still run (issue #3305). The
+// API stopped waiting for such a command, so running it now would act on an
+// intent the API may already have moved past; it is answered instead, never
+// dropped. Only a command that has not started can expire: the check runs just
+// before handle, and a running command is never interrupted.
+func (r *Runner) expired(q queuedCommand) (outcome, bool) {
+	cmd := q.cmd
+	if cmd.ExpiresAfter <= 0 {
+		return outcome{}, false
+	}
+	waited := r.clock.Now().Sub(q.receivedAt)
+	if waited < cmd.ExpiresAfter {
+		return outcome{}, false
+	}
+	r.logger.Info("command expired before it started; not executing it",
+		"command_id", cmd.CommandID,
+		"server_id", cmd.ServerID,
+		"kind", cmd.Kind,
+		"waited", waited,
+		"expires_after", cmd.ExpiresAfter,
+	)
+	result := CommandResult{
+		CommandID: cmd.CommandID,
+		ErrorCode: CommandErrorExpired,
+		ErrorMessage: fmt.Sprintf("session: command expired after waiting %s to start (budget %s); not executed",
+			waited, cmd.ExpiresAfter),
+	}
+	return outcome{result: result, serverID: cmd.ServerID, kind: cmd.Kind}, true
 }
 
 // handle dispatches a command to the handler when it is a handled kind and a
@@ -510,7 +545,14 @@ type dispatcher struct {
 
 // lane is one server's serial command queue.
 type lane struct {
-	queue []Command
+	queue []queuedCommand
+}
+
+// queuedCommand is a command waiting in its lane, with the time the receive loop
+// received it, from which its ExpiresAfter budget runs (issue #3305).
+type queuedCommand struct {
+	cmd        Command
+	receivedAt time.Time
 }
 
 func newDispatcher(ctx context.Context, r *Runner, results chan<- outcome) *dispatcher {
@@ -525,18 +567,19 @@ func newDispatcher(ctx context.Context, r *Runner, results chan<- outcome) *disp
 // dispatch queues cmd on its server's lane, starting the lane's worker if it is
 // not already running. It never blocks on command execution or the concurrency
 // cap, so a slow command for one server cannot delay routing for another.
-func (d *dispatcher) dispatch(cmd Command) {
+func (d *dispatcher) dispatch(q queuedCommand) {
+	serverID := q.cmd.ServerID
 	d.mu.Lock()
-	l, ok := d.lanes[cmd.ServerID]
+	l, ok := d.lanes[serverID]
 	if !ok {
 		l = &lane{}
-		d.lanes[cmd.ServerID] = l
+		d.lanes[serverID] = l
 	}
-	l.queue = append(l.queue, cmd)
+	l.queue = append(l.queue, q)
 	d.mu.Unlock()
 
 	if !ok {
-		go d.runLane(cmd.ServerID, l)
+		go d.runLane(serverID, l)
 	}
 }
 
@@ -548,6 +591,10 @@ func (d *dispatcher) dispatch(cmd Command) {
 // #169), so an instant ServerCommand for an otherwise-idle server is not delayed
 // by other servers' slow hydrate/stop work holding every cap slot. The bypass
 // touches only the global cap — the same-server ordering above is unaffected.
+//
+// A command is checked for expiry immediately before it would start, on both
+// paths: a quick command after the lane reaches it, a capped one after it has
+// also acquired its slot, since the wait for the slot counts too (issue #3305).
 func (d *dispatcher) runLane(serverID string, l *lane) {
 	for {
 		d.mu.Lock()
@@ -556,11 +603,16 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 			d.mu.Unlock()
 			return
 		}
-		cmd := l.queue[0]
+		q := l.queue[0]
 		l.queue = l.queue[1:]
 		d.mu.Unlock()
+		cmd := q.cmd
 
 		if isQuickCommand(cmd.Kind) {
+			if o, ok := d.r.expired(q); ok {
+				d.r.emitResult(d.ctx, d.results, o)
+				continue
+			}
 			d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
 			continue
 		}
@@ -577,6 +629,11 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 		case <-d.ctx.Done():
 			d.removeLane(serverID)
 			return
+		}
+		if o, ok := d.r.expired(q); ok {
+			<-d.r.sem
+			d.r.emitResult(d.ctx, d.results, o)
+			continue
 		}
 		d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
 		<-d.r.sem
