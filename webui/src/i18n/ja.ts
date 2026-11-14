@@ -244,6 +244,9 @@ export const ja: Record<TranslationKey, string> = {
   // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
   "dashboard.lifecycle.busy":
     "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
+  // 409 command_expired (issue #3305); not applied on any verb, so retry.
+  "dashboard.lifecycle.commandExpired":
+    "操作は適用されませんでした: サーバーホストが他の処理で混み合っていて、時間内に実行できませんでした。もう一度お試しください。",
   // 409 command_failed (issue #2420); the server may or may not have moved, and
   // a retry is not known to help.
   "dashboard.lifecycle.commandFailed":
@@ -390,6 +393,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーが応答せずにコンソール接続（RCON）を切断したため、コマンドが実行されたかどうかは不明です（実行後にサーバーがクラッシュした可能性もあります）。再試行する前に、コンソールの出力とサーバーの状態を確認してください。長いコマンドはネットワークによって破棄されることがあります。実行されていなかった場合は、コマンドを短くしてください。",
   "serverDetail.console.error.serverPropertiesUnreadable":
     "コマンドは送信されませんでした: server.properties が通常のファイルではない（シンボリックリンクなど）か、4 MiB を超えているため、コンソール接続（RCON）を開けません。サーバーを停止し、置き換えられる前に取得したバックアップを復元するなどして通常の server.properties に戻してください。",
+  "serverDetail.console.error.commandExpired":
+    "コマンドは実行されませんでした: サーバーホストが他の処理で混み合っていて、時間内に実行できませんでした。もう一度送信してください。",
   "serverDetail.console.error.rconFailed":
     "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
   // Lifecycle controls.

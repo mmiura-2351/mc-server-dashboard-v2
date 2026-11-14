@@ -39,6 +39,10 @@ import type { TranslationKey } from "../i18n/index.ts";
 //   and RCON's credentials are in it, so nothing was dialled and the command was
 //   not sent (issue #3347). The file cannot be repaired while the server runs,
 //   so the line says to stop it first.
+// - `command_expired` (409) — the command waited on the Worker, behind other
+//   work, past its budget and was answered without being run (issue #3305).
+//   RCON was never opened, so this is not `command_failed`'s line: the command
+//   definitely did not run, and sending it again is safe.
 // - `command_failed` (409) — the Worker reached a running server but its RCON
 //   connection failed otherwise (open, auth, or a round trip that timed out),
 //   which is the only unclassified failure `handleServerCommand` produces. A
@@ -55,6 +59,7 @@ const CONSOLE_REASON_PRESENTATION: Record<string, TranslationKey> = {
   command_dropped: "serverDetail.console.error.commandDropped",
   server_properties_unreadable:
     "serverDetail.console.error.serverPropertiesUnreadable",
+  command_expired: "serverDetail.console.error.commandExpired",
   command_failed: "serverDetail.console.error.rconFailed",
 };
 

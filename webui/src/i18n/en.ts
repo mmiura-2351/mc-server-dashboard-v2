@@ -239,6 +239,11 @@ export const en = {
   // once that operation finishes, so the only remedy is to retry.
   "dashboard.lifecycle.busy":
     "Another operation on this server is in progress. Please wait a moment and try again.",
+  // 409 command_expired (issue #3305): the command waited on the host, behind
+  // other work, past its budget and was not applied on any verb, so a retry is
+  // the remedy. Not commandFailed: nothing moved, so there is no state to check.
+  "dashboard.lifecycle.commandExpired":
+    "Not applied: the server host was busy with other work and did not get to it in time. Try again.",
   // 409 command_failed (issue #2420): the host took the command and could not
   // apply it, for a cause it did not classify. Whether the server moved depends
   // on the verb (a failed restart can leave it down), and a retry is not known
@@ -418,6 +423,8 @@ export const en = {
     "The server closed its console connection (RCON) without answering, so it is unknown whether the command ran (the server may have run it and then crashed). Check the console output and the server's state before retrying. Long commands can be dropped on some networks: if it did not run, shorten it.",
   "serverDetail.console.error.serverPropertiesUnreadable":
     "Command not sent: the server's server.properties is not a regular file (for example, a symbolic link) or is larger than 4 MiB, so its console connection (RCON) cannot be opened. Stop the server and restore a regular server.properties, for example by restoring a backup taken before it was replaced.",
+  "serverDetail.console.error.commandExpired":
+    "Command not run: the server host was busy with other work and did not get to it in time. Send it again.",
   "serverDetail.console.error.rconFailed":
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.

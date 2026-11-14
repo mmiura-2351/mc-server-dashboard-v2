@@ -330,6 +330,8 @@ async def create_backup(
         # away at the edge. ``server_properties_unreadable`` arrives here too:
         # the Worker refuses a running snapshot it cannot quiesce because RCON's
         # credentials are in a server.properties it will not read (issue #3347).
+        # So does ``command_expired``: the snapshot waited past its budget for a
+        # slot of the Worker's concurrency cap and was not taken (issue #3305).
         # The other sanitized categories (port_conflict / image_missing) are
         # start-only, and the raw Worker message is never the reason (log-only),
         # so nothing leaks. ``command_failed`` stays the catch-all for a dispatch

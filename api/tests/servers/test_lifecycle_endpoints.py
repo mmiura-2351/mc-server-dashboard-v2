@@ -615,6 +615,82 @@ def test_command_with_a_refused_server_properties_is_409_naming_it(
     _assert_names_the_refusal_only(resp)
 
 
+# --- an expired command (issue #3305) ---------------------------------------
+
+
+def _assert_names_the_expiry_only(resp: httpx2.Response) -> None:
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason"] == "command_expired"
+    assert body["type"] == "urn:mcsd:error:command_expired"
+    assert "waited" not in resp.text
+
+
+# The Worker's EXPIRED message (worker/internal/domain/session/session.go): log
+# only, like every Worker message.
+_EXPIRED_MESSAGE = (
+    "session: command expired after waiting 31s to start (budget 29s); not executed"
+)
+
+
+def test_an_expired_start_is_409_naming_it() -> None:
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=WorkerId(uuid.uuid4()),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "command_expired"),
+                message=_EXPIRED_MESSAGE,
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_start_server] = lambda: use_case
+
+    resp = _client(app).post(_url(community, server.id.value, "start"))
+
+    _assert_names_the_expiry_only(resp)
+
+
+def test_an_expired_command_is_409_naming_it() -> None:
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community), assigned_worker_id=WorkerId(uuid.uuid4())
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("ServerCommand", "command_expired"),
+            message=_EXPIRED_MESSAGE,
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_send_server_command] = lambda: use_case
+
+    resp = _client(app).post(
+        _url(community, server.id.value, "command"), json={"line": "list"}
+    )
+
+    _assert_names_the_expiry_only(resp)
+
+
 # --- console line bound (issue #3363) ---------------------------------------
 
 

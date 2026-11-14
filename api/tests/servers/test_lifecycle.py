@@ -1024,6 +1024,8 @@ async def test_expired_start_compensates() -> None:
         )
 
     assert excinfo.value.status is CommandStatus.EXPIRED
+    # Its own reason at the edge: not run, unlike command_failed's "may have".
+    assert excinfo.value.reason == "command_expired"
     reverted = uow.servers.by_id[ServerId(server_id)]
     assert reverted.desired_state is DesiredState.STOPPED
     assert reverted.assigned_worker_id is None
@@ -2622,8 +2624,12 @@ async def test_expired_stop_dispatch_is_recorded_as_a_refusal() -> None:
         uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
     )
 
-    await _stop_expecting_failure(use_case, community, server_id)
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
 
+    assert excinfo.value.reason == "command_expired"
     assert refusals.refused_at(ServerId(server_id)) == _NOW
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
@@ -3944,6 +3950,47 @@ async def test_command_names_a_refused_server_properties(refusal: str) -> None:
         )
 
     assert excinfo.value.reason == "server_properties_unreadable"
+
+
+async def test_expired_restart_names_its_own_reason() -> None:
+    # Issue #3305: the restart waited past its budget and was not applied, so the
+    # edge says so rather than command_failed, which the dashboard reads as a
+    # restart that may have stopped the server.
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("RestartServer", "command_expired"), message="x"
+        )
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == "command_expired"
+
+
+async def test_expired_command_names_its_own_reason() -> None:
+    # Not run at all, so not command_failed: that one says RCON failed and the
+    # command may have run (issue #3305).
+    uow, community, server_id = _running_for_command()
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("ServerCommand", "command_expired"), message="x"
+        )
+    )
+    use_case = SendServerCommand(uow=uow, control_plane=cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            line="list",
+        )
+
+    assert excinfo.value.reason == "command_expired"
 
 
 # --- reconciler re-dispatch paths (issue #101) -----------------------------
