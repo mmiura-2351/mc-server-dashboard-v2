@@ -707,7 +707,13 @@ carrying its own worker-id label before launching any server, then removes a
 container after the server exits, and a Forge install container once the install
 is over. Each removal waits at most 10 s for the daemon; a container it leaves
 behind is removed when the server next creates a container under the same name,
-or by the next boot's sweep. The sweep recovers from a crash that left a
+or by the next boot's sweep. Before it creates a container, the driver waits at
+most 10 s for any earlier container of the server to stop running, and it
+refuses the start if the daemon does not list them within that time. Each create
+call then waits at most 10 s for the daemon. That includes the create retried
+after a lazy pull of a missing base image; the pull keeps its own 10 min budget.
+A container the daemon creates after a create call gave up is removed the same
+way as one a removal left behind. The sweep recovers from a crash that left a
 server's container behind, but because it force-removes *running* containers too,
 a graceful Worker restart while servers are up kills those live servers — this is
 the deliberate stateless-worker posture (the Worker adopts no prior state; the

@@ -518,18 +518,27 @@ type listScript struct {
 	answers [][]Container
 	// onList, when set, runs on each List with the number of answers still queued.
 	onList func(answersLeft int)
+	// thenStall, when set, makes every List after the scripted answers block until
+	// its context is cancelled instead of repeating the last answer: a daemon that
+	// stalls mid-wait (issue #3643).
+	thenStall bool
 }
 
-func (l *listScript) List(context.Context, string, string) ([]Container, error) {
+func (l *listScript) List(ctx context.Context, _, _ string) ([]Container, error) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.onList != nil {
 		l.onList(len(l.answers))
 	}
+	if len(l.answers) == 0 {
+		l.mu.Unlock()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	answer := l.answers[0]
-	if len(l.answers) > 1 {
+	if len(l.answers) > 1 || l.thenStall {
 		l.answers = l.answers[1:]
 	}
+	l.mu.Unlock()
 	return answer, nil
 }
 
@@ -561,6 +570,75 @@ func TestStartWaitsOutThePreviousContainerOfARestart(t *testing.T) {
 	}
 	if len(rec.seen()) == 0 || docker.createCalls != 1 {
 		t.Fatalf("chowned %v, createCalls %d; want the hand-over and one create", rec.seen(), docker.createCalls)
+	}
+}
+
+// A daemon whose container list stalls cannot hold a start past the quiescence
+// wait: each List runs under the wait's window, and the start is refused with
+// nothing handed over and nothing created. A List that stalls once a live
+// container was seen reports that container, as the wait's own timeout does
+// (issue #3643).
+func TestStartRefusesHandOverWhenTheContainerListStalls(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		docker func() dockerAPI
+		want   string
+	}{
+		{"first list", func() dockerAPI {
+			f := newFakeDocker()
+			f.listBlocksUntilCtxDone = true
+			return f
+		}, "cannot establish that no container of the server is running"},
+		{"after a live container", func() dockerAPI {
+			return &listScript{fakeDocker: newFakeDocker(), thenStall: true, answers: [][]Container{
+				{{ID: "orphan", Name: "/mcsd-s1", State: "running"}},
+			}}
+		}, `container /mcsd-s1 of the server is "running"; its working set is in use`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _ := workingSet(t)
+			docker := tc.docker()
+			d, rec := hardenedDriver(docker) // ConflictDeadline 100 ms
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := d.Start(context.Background(), specIn(dir))
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("Start error = %v, want %q", err, tc.want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("a stalled container list still blocks the start past the 100 ms quiescence window")
+			}
+			if got := rec.seen(); len(got) != 0 {
+				t.Fatalf("ownership changed for %v, want none", got)
+			}
+		})
+	}
+}
+
+// The caller's own cancellation during a stalled container list still reports
+// the list failing on the caller's cancellation (issue #3643).
+func TestQuiescenceWaitStalledListHonorsCallerCancel(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listBlocksUntilCtxDone = true
+	d, _ := hardenedDriver(docker)
+	d.conflictDeadline = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- d.awaitQuiescent(ctx, "s1") }()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cannot establish") {
+			t.Fatalf("err = %v, want the list failing on the caller's cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled container list ignored the caller's cancellation")
 	}
 }
 

@@ -699,6 +699,10 @@ async def test_commit_allows_full_dimension_delete(harness: StorageHarness) -> N
     assert read_tar(blob) == after
 
 
+# 55 real fsyncs on the fs backend. Under IO load each can stall 1.3-2.7 s, so
+# the suite-wide 120 s cap fails a correct run (issue #3638). Budget: 4 s per
+# fsync plus 30 s of other work.
+@pytest.mark.timeout(250)
 async def test_restore_of_a_backup_with_fewer_regions_bypasses_the_missing_region_gate(
     harness: StorageHarness,
 ) -> None:
@@ -2331,6 +2335,10 @@ async def test_file_history_isolated_from_same_named_directory_children(
     )
 
 
+# 61 real fsyncs on the fs backend. Under IO load each can stall 1.3-2.7 s, so
+# the suite-wide 120 s cap fails a correct run (issue #3638). Budget: 4 s per
+# fsync plus 30 s of other work.
+@pytest.mark.timeout(275)
 async def test_child_ring_does_not_count_against_parent_retention(
     backend: str, tmp_path: Path
 ) -> None:
