@@ -275,6 +275,10 @@ type Driver struct {
 	// installStartTimeout bounds superviseInstall's docker start of a retry
 	// installer or the post-install launch (issue #3622).
 	installStartTimeout time.Duration
+	// initialCreateTimeout and postPullCreateTimeout bound createPullingOnMiss's
+	// first docker create and the one retried after an image pull (issue #3643).
+	initialCreateTimeout  time.Duration
+	postPullCreateTimeout time.Duration
 	// logger records the lazy base-image pull at INFO (issue #904).
 	logger *slog.Logger
 	// handOffs tracks the stops in flight on this driver's instances, so a Worker
@@ -332,22 +336,24 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 			after:       time.After,
 			runScan:     func(f func()) { go f() },
 		},
-		flushTimeout:        flushTimeout,
-		gameBindIP:          gameBindIP,
-		network:             opts.Network,
-		scratchDir:          opts.ScratchDir,
-		runAsUID:            runAsUID,
-		runAsGID:            runAsGID,
-		chownAt:             chownAtNoFollow,
-		conflictPoll:        conflictPoll,
-		conflictDeadline:    conflictDeadline,
-		readinessTimeout:    readinessTimeout,
-		sweepCallMargin:     sweepCallMargin,
-		worldProgress:       opts.WorldProgress,
-		imagePullTimeout:    defaultImagePullTimeout,
-		exitRemoveTimeout:   exitRemoveTimeout,
-		installStartTimeout: installStartTimeout,
-		logger:              logger,
+		flushTimeout:          flushTimeout,
+		gameBindIP:            gameBindIP,
+		network:               opts.Network,
+		scratchDir:            opts.ScratchDir,
+		runAsUID:              runAsUID,
+		runAsGID:              runAsGID,
+		chownAt:               chownAtNoFollow,
+		conflictPoll:          conflictPoll,
+		conflictDeadline:      conflictDeadline,
+		readinessTimeout:      readinessTimeout,
+		sweepCallMargin:       sweepCallMargin,
+		worldProgress:         opts.WorldProgress,
+		imagePullTimeout:      defaultImagePullTimeout,
+		exitRemoveTimeout:     exitRemoveTimeout,
+		installStartTimeout:   installStartTimeout,
+		initialCreateTimeout:  initialCreateTimeout,
+		postPullCreateTimeout: postPullCreateTimeout,
+		logger:                logger,
 	}
 	d.handOffs = &stopHandOffs{d: d, stops: map[*inflightStop]struct{}{}}
 	return d
@@ -529,6 +535,20 @@ const exitRemoveTimeout = 10 * time.Second
 // container well inside it, and a Stop that waits it out still fits the API's
 // stop budget, which a failed stop leaves 50 s of (defaultStopCap).
 const installStartTimeout = 10 * time.Second
+
+// initialCreateTimeout and postPullCreateTimeout bound createPullingOnMiss's
+// docker create: the first attempt, and the one retried after a lazy image pull,
+// which keeps its own imagePullTimeout. Both run under the start's context with
+// no deadline of their own otherwise, so a stalled daemon would hold the start,
+// and a Forge launch's install supervisor, indefinitely (issue #3643). A healthy
+// daemon creates a container well inside them, the scale of installStartTimeout.
+// A container the daemon creates after the bound cut the call short is removed by
+// the next create under its name (createContainer's wait-for-name-free loop) or by
+// the next boot's Sweep.
+const (
+	initialCreateTimeout  = 10 * time.Second
+	postPullCreateTimeout = 10 * time.Second
+)
 
 // removeCreated is the best-effort cleanup of a created-but-unstarted container
 // whose Start failed. It runs detached from the command context
@@ -744,15 +764,30 @@ func isImageMissing(err error) bool {
 // sees a raw 404 — the pull error rides along for diagnostics. The retry runs
 // Create directly (not back through this helper) so a second image-missing
 // genuinely fails rather than looping.
+//
+// Each create runs under a bound of its own (initialCreateTimeout,
+// postPullCreateTimeout), started right before it, so a stalled daemon cannot
+// hold the start indefinitely while the pull keeps its separate budget (issue
+// #3643). A create the bound cuts short fails as a timeout; the caller's own
+// cancellation or deadline keeps its error.
 func (d *Driver) createPullingOnMiss(ctx context.Context, create CreateSpec) (string, error) {
-	id, err := d.docker.Create(ctx, create)
+	bounded := func(what string, timeout time.Duration) (string, error) {
+		createCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		id, err := d.docker.Create(createCtx, create)
+		if err != nil && ctx.Err() == nil && createCtx.Err() != nil {
+			return "", fmt.Errorf("%s timed out after %s: %w", what, timeout, err)
+		}
+		return id, err
+	}
+	id, err := bounded("container create", d.initialCreateTimeout)
 	if !isImageMissing(err) {
 		return id, err
 	}
 	if pullErr := d.pullImage(ctx, create.Image); pullErr != nil {
 		return "", fmt.Errorf("%w (pull failed: %v)", err, pullErr)
 	}
-	return d.docker.Create(ctx, create)
+	return bounded("container create after the image pull", d.postPullCreateTimeout)
 }
 
 // pullImage pulls the base image under its own generous deadline (issue #904),
