@@ -60,6 +60,12 @@ type forgeFakeDocker struct {
 	// the context error (issue #3622).
 	removeStallIDs map[string]bool
 	startStallIDs  map[string]bool
+	// running tracks the containers a Start ran that have neither exited nor been
+	// removed, which List reports as running when listReportsRunning is set: a
+	// stalled Start still runs its container, as a daemon that does not answer in
+	// time may (issue #3645).
+	running            map[string]bool
+	listReportsRunning bool
 	// logStalls models a stalled install log follow (issue #3644): opening the
 	// stream, or reading it once the container's log body is sent, blocks until
 	// the follow's context is cancelled. logStallEnded is closed once the stalled
@@ -110,6 +116,10 @@ func (f *forgeFakeDocker) Start(ctx context.Context, id string) error {
 	f.mu.Lock()
 	f.started = append(f.started, id)
 	stall := f.startStallIDs[id]
+	if f.running == nil {
+		f.running = map[string]bool{}
+	}
+	f.running[id] = true
 	f.mu.Unlock()
 	if stall {
 		<-ctx.Done()
@@ -175,6 +185,9 @@ func (f *forgeFakeDocker) Remove(ctx context.Context, id string) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	f.mu.Lock()
+	delete(f.running, id)
+	f.mu.Unlock()
 	return nil
 }
 
@@ -194,7 +207,16 @@ func (f *forgeFakeDocker) Inspect(_ context.Context, name string) (ContainerInfo
 }
 
 func (f *forgeFakeDocker) List(_ context.Context, _, _ string) ([]Container, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.listReportsRunning {
+		return nil, nil
+	}
+	var containers []Container
+	for id := range f.running {
+		containers = append(containers, Container{ID: id, Name: "/" + id, State: containerStateRunning})
+	}
+	return containers, nil
 }
 
 func (f *forgeFakeDocker) Logs(ctx context.Context, id string) (io.ReadCloser, error) {
@@ -276,6 +298,7 @@ func (f *forgeFakeDocker) exit(id string, code int64, err error) {
 		f.errs[id] = err
 		close(ch)
 	}
+	delete(f.running, id)
 }
 
 func (f *forgeFakeDocker) names() []string {
@@ -1406,6 +1429,56 @@ func TestForgeLaunchStartStallCrashesTheInstance(t *testing.T) {
 	if !docker.wasRemoved("mcsd-s1") || !docker.wasRemoved(forgeInstallID) {
 		t.Fatalf("removed = %v, want the unstarted launch and the install container", docker.removed)
 	}
+}
+
+// A docker start of the first Forge installer that stalls cannot hold a start
+// indefinitely: Start runs it under a bound of its own, and one the bound cuts
+// short fails as the timeout it is (issue #3650).
+func TestForgeStalledInstallerStartReturnsWithinItsBound(t *testing.T) {
+	docker := newForgeFakeDocker()
+	docker.startStallIDs = map[string]bool{forgeInstallID: true}
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.initialInstallStartTimeout = 20 * time.Millisecond
+
+	err := startWithin(context.Background(), t, d, forgeSpec(t.TempDir()))
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "install container start timed out") {
+		t.Fatalf("err = %v, want the installer start's timeout", err)
+	}
+}
+
+// The post-install launch's start times out after the daemon did start the
+// container, and the force-remove of it stalls too, so a running launch container
+// is left that the crashed instance no longer tracks. The server's next start
+// removes it and starts, instead of being refused until the next boot's sweep
+// (issue #3645).
+func TestForgeNextStartRemovesTheLaunchAnAmbiguousStartLeftRunning(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.listReportsRunning = true
+	docker.startStallIDs = map[string]bool{"mcsd-s1": true}
+	docker.removeStallIDs = map[string]bool{"mcsd-s1": true}
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.installStartTimeout = 10 * time.Millisecond
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	writeArgsfile(t, dir)
+	docker.exit(forgeInstallID, 0, nil)
+	if last := awaitStreamClosed(t, inst.Events()); last.State != execution.StateCrashed {
+		t.Fatalf("last event = %+v, want the launch start's crash", last)
+	}
+
+	docker.mu.Lock()
+	docker.startStallIDs, docker.removeStallIDs = nil, nil
+	docker.mu.Unlock()
+	next, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("next Start: %v, want the leftover launch removed and the server started", err)
+	}
+	drainTo(t, next.Events(), execution.StateRunning)
+	docker.exit("mcsd-s1", 0, nil)
+	awaitStreamClosed(t, next.Events())
 }
 
 // A stalled install log follow no longer holds back the install's exit

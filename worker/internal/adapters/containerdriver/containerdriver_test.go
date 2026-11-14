@@ -33,6 +33,14 @@ type fakeDocker struct {
 	createSpec CreateSpec
 	createErr  error
 	startErr   error
+	// startRunsThenBlocks models a start the daemon carries out but does not
+	// answer: Start marks the container running (runningID), then blocks until its
+	// context is done and returns the context error. While runningID is set, List
+	// reports the container running, until a Remove of it succeeds (issues #3645,
+	// #3650). onStart, when set, runs first in every Start, outside the lock.
+	startRunsThenBlocks bool
+	runningID           string
+	onStart             func()
 	// conflictsLeft makes the next N Create calls return errNameConflict before a
 	// success, modelling the create racing the async removal of the exited
 	// container (issue #226). createCalls counts every Create call.
@@ -278,7 +286,20 @@ func (f *fakeDocker) Inspect(ctx context.Context, _ string) (ContainerInfo, erro
 	return ContainerInfo{}, ctx.Err()
 }
 
-func (f *fakeDocker) Start(_ context.Context, _ string) error {
+func (f *fakeDocker) Start(ctx context.Context, id string) error {
+	f.mu.Lock()
+	hook, block := f.onStart, f.startRunsThenBlocks
+	if block {
+		f.runningID = id
+	}
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return f.startErr
 }
 
@@ -457,20 +478,29 @@ func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 	if err, ok := f.removeErrFor[id]; ok {
 		return err
 	}
+	err := f.removeErr
 	if len(f.removeErrs) > 0 {
-		err := f.removeErrs[0]
+		err = f.removeErrs[0]
 		if len(f.removeErrs) > 1 {
 			f.removeErrs = f.removeErrs[1:]
 		}
-		return err
 	}
-	return f.removeErr
+	if err == nil && id == f.runningID {
+		f.runningID = ""
+	}
+	return err
 }
 
 func (f *fakeDocker) List(ctx context.Context, _, _ string) ([]Container, error) {
-	if f.listBlocksUntilCtxDone {
+	f.mu.Lock()
+	block, running := f.listBlocksUntilCtxDone, f.runningID
+	f.mu.Unlock()
+	if block {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if running != "" {
+		return []Container{{ID: running, Name: "/mcsd-s1", State: containerStateRunning}}, nil
 	}
 	return f.listResult, f.listErr
 }
@@ -3710,6 +3740,98 @@ func TestCreateStalledCallHonorsCallerCancel(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("a stalled create ignored the caller's cancellation")
+	}
+}
+
+// A docker start of the launch container that stalls cannot hold a start, and
+// with it the server's reservation, indefinitely: Start runs it under a bound of
+// its own, and one the bound cuts short fails as the timeout it is (issue
+// #3650). The installer's counterpart is in forge_test.go.
+func TestStartStalledLaunchStartReturnsWithinItsBound(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startRunsThenBlocks = true
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.initialLaunchStartTimeout = 20 * time.Millisecond
+
+	err := startWithin(context.Background(), t, d, spec())
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container start timed out") {
+		t.Fatalf("err = %v, want the launch start's timeout", err)
+	}
+}
+
+// The caller's own cancellation during a stalled launch start still reports the
+// caller's error, not the start bound's timeout (issue #3650).
+func TestStartStalledLaunchStartHonorsCallerCancel(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startRunsThenBlocks = true
+	ctx, cancel := context.WithCancel(context.Background())
+	docker.onStart = cancel
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.initialLaunchStartTimeout = time.Hour
+
+	err := startWithin(ctx, t, d, spec())
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("err = %v, want the caller's cancellation", err)
+	}
+}
+
+// A start the daemon carried out without answering in time leaves a running
+// container behind, and here its force-remove fails as well. The next start of
+// the server removes it first, instead of being refused while it runs until the
+// next boot's sweep; while it still cannot be removed, the start is refused
+// naming it (issue #3645).
+func TestStartRemovesTheContainerAnAmbiguousStartLeftRunning(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startRunsThenBlocks = true
+	busy := errors.New("daemon busy")
+	docker.removeErrs = []error{busy, busy, nil}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.initialLaunchStartTimeout = 20 * time.Millisecond
+
+	if err := startWithin(context.Background(), t, d, spec()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first start err = %v, want the start's timeout", err)
+	}
+	docker.mu.Lock()
+	docker.startRunsThenBlocks = false
+	docker.mu.Unlock()
+
+	err := startWithin(context.Background(), t, d, spec())
+	if err == nil || !strings.Contains(err.Error(), "container-1") || !errors.Is(err, busy) {
+		t.Fatalf("second start err = %v, want a refusal naming the unremoved container-1", err)
+	}
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("third start: %v, want the leftover removed and the server started", err)
+	}
+	docker.mu.Lock()
+	removed := append([]string(nil), docker.removed...)
+	docker.mu.Unlock()
+	if len(removed) != 3 || removed[1] != "container-1" || removed[2] != "container-1" {
+		t.Fatalf("removed = %v, want the cleanup and two removals of container-1 by later starts", removed)
+	}
+	docker.exit(0, nil)
+	drainClosed(inst.Events())
+}
+
+// startWithin runs d.Start and returns its error, failing if the start is still
+// blocked after the guard. A start that succeeds is a failure here.
+func startWithin(ctx context.Context, t *testing.T, d *Driver, sp execution.InstanceSpec) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.Start(ctx, sp)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start succeeded, want it to fail")
+		}
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled docker start still blocks the start past its bound")
+		return nil
 	}
 }
 

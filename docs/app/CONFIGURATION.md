@@ -706,14 +706,20 @@ version's server does). At startup it sweeps and force-removes every container
 carrying its own worker-id label before launching any server, then removes a
 container after the server exits, and a Forge install container once the install
 is over. Each removal waits at most 10 s for the daemon; a container it leaves
-behind is removed when the server next creates a container under the same name,
-or by the next boot's sweep. Before it creates a container, the driver waits at
+behind that is not running is removed when the server next creates a container
+under the same name, or by the next boot's sweep. Before it creates a container, the driver waits at
 most 10 s for any earlier container of the server to stop running, and it
 refuses the start if the daemon does not list them within that time. Each create
 call then waits at most 10 s for the daemon. That includes the create retried
 after a lazy pull of a missing base image; the pull keeps its own 10 min budget.
 A container the daemon creates after a create call gave up is removed the same
-way as one a removal left behind. A Forge installer's output is followed into
+way as one a removal left behind. Each start call waits at most 10 s for the
+daemon too. A start that fails, one that timed out included, is followed by a
+force-remove of its container, since the daemon may have started it anyway. If
+that removal fails as well, the driver keeps the container's id, and the
+server's next start force-removes it before creating anything. That start is
+refused while the container still cannot be removed. A Worker restart forgets
+the id; the boot's sweep removes the container instead. A Forge installer's output is followed into
 `logs/forge-install.log` for as long as the install runs. Once the installer
 exits, the driver waits at most 5 s for the rest of that output, so a stalled log
 stream cannot hold back the install's outcome or a stop. The sweep recovers from
