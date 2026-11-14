@@ -220,3 +220,30 @@ func TestCommandWithoutExpiryNeverExpires(t *testing.T) {
 		t.Fatalf("result = %+v, want the start to run", res)
 	}
 }
+
+// A command without an expiry parked on a saturated cap runs once a slot frees,
+// however long it waited. This is a stop's final snapshot (issue #3305): the API
+// sends it unstamped because nothing retries it once it settles.
+func TestCommandWithoutExpiryRunsAfterALongCapWait(t *testing.T) {
+	handler := newGateHandler("HydrateTrigger")
+	transport, clock, stop := startExpiryRunner(t, handler, discardLogger())
+	defer stop()
+
+	for i := 0; i < maxConcurrentLanes; i++ {
+		id := fmt.Sprintf("slow-%d", i)
+		transport.commands <- Command{CommandID: id, ServerID: id, Kind: "HydrateTrigger"}
+	}
+	waitFor(t, func() bool { return handler.inflightCount() == maxConcurrentLanes })
+	transport.commands <- Command{CommandID: "final", ServerID: "s1", Kind: "SnapshotTrigger"}
+	awaitReceived(t, transport)
+	if res, ok := resultFor(transport, "final"); ok {
+		t.Fatalf("result = %+v before a slot freed, want the snapshot parked on the cap", res)
+	}
+
+	advance(clock, 10*time.Minute)
+	close(handler.release)
+
+	if res := waitForResult(t, transport, "final"); !res.Success {
+		t.Fatalf("result = %+v, want the final snapshot to run", res)
+	}
+}
