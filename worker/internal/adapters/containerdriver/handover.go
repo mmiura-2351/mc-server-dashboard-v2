@@ -51,15 +51,27 @@ var quiescentStates = map[string]bool{"created": true, "exited": true, "dead": t
 // as running for a moment after its exit was observed, and then as removing
 // while the exit-watcher reaps it (issue #226). An orphan that really is alive
 // simply outlasts the window.
+//
+// Each List runs under the window too, so a stalled daemon cannot hold the start
+// past it (issue #3643): a List it cuts short ends the wait as the window's
+// timeout, naming the live container an earlier poll saw, or failing closed when
+// no List has answered yet. The caller's cancellation keeps its own error.
 func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
-	deadline := time.NewTimer(d.conflictDeadline)
-	defer deadline.Stop()
+	waitCtx, cancel := context.WithTimeout(ctx, d.conflictDeadline)
+	defer cancel()
+	var alive *Container
 	for {
-		containers, err := d.docker.List(ctx, labelServerID, serverID)
+		containers, err := d.docker.List(waitCtx, labelServerID, serverID)
 		if err != nil {
+			if ctx.Err() == nil && waitCtx.Err() != nil {
+				if alive != nil {
+					return inUse(alive)
+				}
+				return fmt.Errorf("cannot establish that no container of the server is running: the daemon did not list them within %s: %w", d.conflictDeadline, err)
+			}
 			return fmt.Errorf("cannot establish that no container of the server is running: %w", err)
 		}
-		var alive *Container
+		alive = nil
 		for i := range containers {
 			if !quiescentStates[containers[i].State] {
 				alive = &containers[i]
@@ -71,15 +83,21 @@ func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 		}
 		poll := time.NewTimer(d.conflictPoll)
 		select {
-		case <-ctx.Done():
+		case <-waitCtx.Done():
 			poll.Stop()
-			return ctx.Err()
-		case <-deadline.C:
-			poll.Stop()
-			return fmt.Errorf("container %s of the server is %q; its working set is in use", alive.Name, alive.State)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return inUse(alive)
 		case <-poll.C:
 		}
 	}
+}
+
+// inUse is awaitQuiescent's refusal once a live-looking container outlasted the
+// wait.
+func inUse(alive *Container) error {
+	return fmt.Errorf("container %s of the server is %q; its working set is in use", alive.Name, alive.State)
 }
 
 // handOverStats describes one hand-over walk.

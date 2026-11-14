@@ -44,6 +44,9 @@ type fakeDocker struct {
 	// scripted conflicts are spent: the call blocks until its context is
 	// cancelled and then returns the context error (issue #3622).
 	createBlocksUntilCtxDone bool
+	// createCtxErrs records ctx.Err() at each Create call, so a test can assert a
+	// create arrived on a live context (issue #3643).
+	createCtxErrs []error
 	// createImageMissesLeft makes the next N Create calls fail with the daemon's
 	// "No such image" prose before a success, modelling a host that lacks the base
 	// image until the driver pulls it (issue #904). imagePulls records the images
@@ -51,6 +54,10 @@ type fakeDocker struct {
 	createImageMissesLeft int
 	imagePulls            []string
 	imagePullErr          error
+	// onImagePull, when set, runs in every ImagePull outside the lock with the
+	// pull's context, and its error fails the pull: a test can make the pull take
+	// time (issue #3643).
+	onImagePull func(ctx context.Context) error
 
 	// inspectInfo / inspectErr are returned by Inspect when resolving a conflict.
 	// inspectSteps, when non-empty, scripts the wait-for-name-free loop: each
@@ -126,7 +133,11 @@ type fakeDocker struct {
 
 	listResult []Container
 	listErr    error
-	removeErr  error
+	// listBlocksUntilCtxDone models a stalled daemon for List: the call blocks
+	// until its context is cancelled and then returns the context error (issue
+	// #3643).
+	listBlocksUntilCtxDone bool
+	removeErr              error
 	// removeErrs, when non-empty, scripts per-call Remove results for the loop
 	// (the last entry repeats once exhausted); empty falls back to removeErr.
 	removeErrs []error
@@ -205,6 +216,7 @@ func (f *fakeDocker) Create(ctx context.Context, spec CreateSpec) (string, error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCalls++
+	f.createCtxErrs = append(f.createCtxErrs, ctx.Err())
 	if f.onCreate != nil {
 		f.onCreate()
 	}
@@ -230,7 +242,15 @@ func (f *fakeDocker) Create(ctx context.Context, spec CreateSpec) (string, error
 	return "container-1", nil
 }
 
-func (f *fakeDocker) ImagePull(_ context.Context, image string) error {
+func (f *fakeDocker) ImagePull(ctx context.Context, image string) error {
+	f.mu.Lock()
+	hook := f.onImagePull
+	f.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.imagePulls = append(f.imagePulls, image)
@@ -447,7 +467,11 @@ func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 	return f.removeErr
 }
 
-func (f *fakeDocker) List(_ context.Context, _, _ string) ([]Container, error) {
+func (f *fakeDocker) List(ctx context.Context, _, _ string) ([]Container, error) {
+	if f.listBlocksUntilCtxDone {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return f.listResult, f.listErr
 }
 
@@ -3598,6 +3622,94 @@ func TestConflictLoopStalledCallHonorsCallerCancel(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("conflict loop ignored the caller's cancellation")
+	}
+}
+
+// A docker create that stalls cannot hold a start indefinitely: the first create
+// and the one retried after an image pull each run under a bound of their own,
+// and one cut short by it fails as the timeout it is. The image pull keeps its
+// own budget: a pull that outlasts the create bound still completes, and the
+// retried create starts its bound afresh (issue #3643).
+func TestCreateStalledCallReturnsWithinItsBound(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		want    string
+		arrange func(*fakeDocker, *Driver)
+	}{
+		{"initial", "container create timed out", func(_ *fakeDocker, d *Driver) {
+			d.initialCreateTimeout = 20 * time.Millisecond
+			d.postPullCreateTimeout = time.Hour
+		}},
+		{"post-pull", "container create after the image pull timed out", func(f *fakeDocker, d *Driver) {
+			f.createImageMissesLeft = 1
+			f.onImagePull = func(ctx context.Context) error {
+				select {
+				case <-time.After(100 * time.Millisecond):
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			d.initialCreateTimeout = time.Hour
+			d.postPullCreateTimeout = 20 * time.Millisecond
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.createBlocksUntilCtxDone = true
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
+			tc.arrange(docker, d)
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := d.createContainer(context.Background(), CreateSpec{Name: "mcsd-s1", Image: "img"})
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("err = %v, want %q", err, tc.want)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("a stalled %s create still blocks the start past its bound", tc.name)
+			}
+			docker.mu.Lock()
+			defer docker.mu.Unlock()
+			for n, ctxErr := range docker.createCtxErrs {
+				if ctxErr != nil {
+					t.Fatalf("create %d arrived on a context already done (%v), want a fresh bound per create", n+1, ctxErr)
+				}
+			}
+			if tc.name == "post-pull" && (len(docker.imagePulls) != 1 || len(docker.createCtxErrs) != 2) {
+				t.Fatalf("pulls %v, creates %d; want the pull to complete past the create bound and one retried create",
+					docker.imagePulls, len(docker.createCtxErrs))
+			}
+		})
+	}
+}
+
+// The caller's own cancellation during a stalled create still reports the
+// caller's error, not the create bound's timeout (issue #3643).
+func TestCreateStalledCallHonorsCallerCancel(t *testing.T) {
+	docker := newFakeDocker()
+	docker.createBlocksUntilCtxDone = true
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.initialCreateTimeout = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := d.createContainer(ctx, CreateSpec{Name: "mcsd-s1", Image: "img"})
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("err = %v, want the caller's cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled create ignored the caller's cancellation")
 	}
 }
 
