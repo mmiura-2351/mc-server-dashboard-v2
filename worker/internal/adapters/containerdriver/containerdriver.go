@@ -731,7 +731,8 @@ func (d *Driver) removeUnremoved(ctx context.Context, spec execution.InstanceSpe
 // A container the daemon does not know (a 404 to the inspect or the remove) is
 // gone. A removal in progress (a 409) returns false with no error. A failed
 // inspect, stop or remove returns false with the error. A container whose stop
-// failed is not removed.
+// failed is not removed. A stop whose SIGTERM request failed but whose kill went
+// through ended the container, so the force-remove follows, as in the Sweep.
 func (d *Driver) removeLeftover(ctx context.Context, spec execution.InstanceSpec, id string) (bool, error) {
 	inspectCtx, cancel := context.WithTimeout(ctx, d.exitRemoveTimeout)
 	info, err := d.docker.Inspect(inspectCtx, id)
@@ -744,11 +745,11 @@ func (d *Driver) removeLeftover(ctx context.Context, spec execution.InstanceSpec
 	}
 	if info.Running {
 		stopCtx, cancel := context.WithTimeout(ctx, d.unremovedStopTimeout)
-		err := d.sweepStop(stopCtx, Container{ID: id, Name: id, WorkingDir: spec.WorkingDir},
+		ended, err := d.sweepStop(stopCtx, Container{ID: id, Name: id, WorkingDir: spec.WorkingDir},
 			"the stop of a container a failed start left running was cut short; abandoning it without a kill, "+
 				"so it keeps running until the server's next start tries again")
 		cancel()
-		if err != nil {
+		if !ended {
 			return false, fmt.Errorf("graceful stop: %w", err)
 		}
 	}
@@ -1198,7 +1199,7 @@ func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
 		// can auto-save the world. Failure is logged and does not block the stop — the
 		// pre-fix behavior was no save-on at all.
 		d.sweepSaveOn(ctx, c.Name, c.Labels[labelMCVersion])
-		if err := d.sweepStop(ctx, c, "sweep: the worker is shutting down; abandoning the orphan's stop without a kill, "+
+		if _, err := d.sweepStop(ctx, c, "sweep: the worker is shutting down; abandoning the orphan's stop without a kill, "+
 			"so it keeps running until the next boot's sweep"); err != nil {
 			errs = append(errs, fmt.Errorf("stop %s (%s): %w", c.Name, c.ID, err))
 		}
@@ -1225,15 +1226,22 @@ func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
 // A Worker that shuts down mid-sweep cancels ctx, and the stop is abandoned with
 // no kill: the orphan keeps running until the next boot's sweep (issue #3515).
 // abandoned is the WARN logged then, which states that consequence for the
-// caller; removeLeftover's stop is abandoned when its own bound runs out.
-func (d *Driver) sweepStop(ctx context.Context, c Container, abandoned string) error {
+// caller; removeLeftover's stop is abandoned when its own bound runs out. The
+// other two WARNs, the fixed-grace fallback's and the kill's, keep their
+// `sweep:` text when removeLeftover stops a leftover.
+//
+// ended reports that the container is known to have stopped: it exited, the
+// fixed-grace stop succeeded, or the kill went through. A failed SIGTERM request
+// followed by a kill that went through returns ended with that request's error.
+func (d *Driver) sweepStop(ctx context.Context, c Container, abandoned string) (bool, error) {
 	if c.WorkingDir == "" || d.worldProgress == nil {
 		d.logger.Warn("sweep: no working set to watch for this orphan; stopping it with the fixed grace, "+
 			"which can cut a shutdown save short",
 			"container", c.Name, "grace", d.stopTimeout)
 		stopCtx, cancel := context.WithTimeout(ctx, d.stopTimeout+d.sweepCallMargin)
 		defer cancel()
-		return d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
+		err := d.docker.Stop(stopCtx, c.ID, d.stopTimeout)
+		return err == nil, err
 	}
 	stopCtx, cancel := context.WithTimeout(ctx, d.stopCap+stopDeadlineGrace)
 	defer cancel()
@@ -1252,20 +1260,20 @@ func (d *Driver) sweepStop(ctx context.Context, c Container, abandoned string) e
 	termErr := d.docker.Terminate(stopCtx, c.ID)
 	reason := w.wait(stopCtx)
 	if reason == "" {
-		return nil
+		return true, nil
 	}
 	if err := ctx.Err(); err != nil {
 		d.logger.Warn(abandoned, "container", c.Name, "elapsed", d.now().Sub(requested))
-		return errors.Join(termErr, fmt.Errorf("stop abandoned: %w", err))
+		return false, errors.Join(termErr, fmt.Errorf("stop abandoned: %w", err))
 	}
 	d.logger.Warn("sweep: the orphan did not exit after SIGTERM; killing it",
 		append([]any{"container", c.Name}, w.escalationArgs(requested, reason)...)...)
 	killCtx, killCancel := context.WithTimeout(ctx, stopKillCallTimeout)
 	defer killCancel()
 	if err := d.docker.Kill(killCtx, c.ID); err != nil {
-		return errors.Join(termErr, fmt.Errorf("kill: %w", err))
+		return false, errors.Join(termErr, fmt.Errorf("kill: %w", err))
 	}
-	return termErr
+	return true, termErr
 }
 
 // sweepSaveOn issues a best-effort RCON save-on to a running orphan container

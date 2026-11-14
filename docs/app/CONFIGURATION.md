@@ -710,26 +710,27 @@ behind that is not running is removed when the server next creates a container
 under the same name, or by the next boot's sweep. Before it creates a container,
 the driver waits at most 10 s for any earlier container of the server to stop
 running, and it refuses the start if the daemon does not list them within that
-time. Each create
-call then waits at most 10 s for the daemon. That includes the create retried
-after a lazy pull of a missing base image; the pull keeps its own 10 min budget.
-A container the daemon creates after a create call gave up is removed the same
-way as one a removal left behind. Each start call waits at most 10 s for the
-daemon too. A start that fails is followed by a force-remove of its container.
-A start the daemon did not answer, one that timed out included, may have
-started the container anyway. If the removal after such a start fails as well,
-the driver keeps the container's id, and the server's next start deals with it
-before creating anything. That start inspects the container. If it is running,
-which may be a live server with unsaved world progress, the start stops it the
-way the sweep stops a running container (below), for at most 70 s, and then
-force-removes it. A container the daemon no longer knows is forgotten. If the
-inspect, the stop or the removal fails, the driver keeps the id and refuses the
-start. A stop cut short sends no kill: the container keeps running until a later
-start tries again. A removal the daemon reports already in progress does not
-refuse the start, which still waits for the container to stop running as above,
-and the id is kept until a later start finds the container gone. A Worker
-restart forgets the id; the boot's sweep removes the container instead. A Forge
-installer's output is followed into
+time. Each create call then waits at most 10 s for the daemon. That includes the
+create retried after a lazy pull of a missing base image; the pull keeps its own
+10 min budget. A container the daemon creates after a create call gave up is
+removed the same way as one a removal left behind. Each start call waits at most
+10 s for the daemon too. A start that fails is followed by a force-remove of its
+container. A start the daemon did not answer, one that timed out included, may
+have started the container anyway. If the removal after such a start fails as
+well, the driver keeps the container's id, and the server's next start deals
+with it before creating anything. That start inspects the container. If it is
+running, which may be a live server with unsaved world progress, the start stops
+it the way the sweep stops a running container (below), for at most 70 s, and
+then force-removes it. That stop logs the sweep's `WARN` lines, `sweep:` prefix
+included. A container the daemon no longer knows is forgotten. If the inspect,
+the stop or the removal fails, the driver keeps the id and refuses the start. A
+stop whose SIGTERM request failed but whose kill went through has ended the
+container, so the removal follows. A stop cut short sends no kill: the container
+keeps running until a later start tries again. A removal the daemon reports
+already in progress does not refuse the start, which still waits for the
+container to stop running as above, and the id is kept until a later start finds
+the container gone. A Worker restart forgets the id; the boot's sweep removes
+the container instead. A Forge installer's output is followed into
 `logs/forge-install.log` for as long as the install runs. Once the installer
 exits, the driver waits at most 5 s for the rest of that output, so a stalled log
 stream cannot hold back the install's outcome or a stop. The sweep recovers from

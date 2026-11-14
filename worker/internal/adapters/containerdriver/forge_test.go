@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,6 +61,9 @@ type forgeFakeDocker struct {
 	// the context error (issue #3622).
 	removeStallIDs map[string]bool
 	startStallIDs  map[string]bool
+	// removeErrIDs fails the Remove of a named container with the error, leaving
+	// the container as it was.
+	removeErrIDs map[string]error
 	// running tracks the containers a Start ran that have neither exited nor been
 	// removed, and present the containers created and not yet removed. When
 	// reportsState is set, List reports the running ones and Inspect reports a
@@ -193,10 +197,14 @@ func (f *forgeFakeDocker) Remove(ctx context.Context, id string) error {
 	f.mu.Lock()
 	f.removed = append(f.removed, id)
 	stall := f.removeStallIDs[id]
+	removeErr := f.removeErrIDs[id]
 	f.mu.Unlock()
 	if stall {
 		<-ctx.Done()
 		return ctx.Err()
+	}
+	if removeErr != nil {
+		return removeErr
 	}
 	f.mu.Lock()
 	delete(f.running, id)
@@ -1463,6 +1471,46 @@ func TestForgeStalledInstallerStartReturnsWithinItsBound(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "install container start timed out") {
 		t.Fatalf("err = %v, want the installer start's timeout", err)
 	}
+}
+
+// The first installer's start times out after the daemon did start it, and the
+// force-remove of it fails too, so a running installer is left that no instance
+// tracks. The server's next start removes it and goes ahead, instead of being
+// refused until the next boot's sweep (issue #3645). The failure stands in for a
+// stalled removal, which the cleanup's fixed 10 s bound would make the test wait
+// out.
+func TestForgeNextStartRemovesTheFirstInstallerAnAmbiguousStartLeftRunning(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.reportsState = true
+	docker.startStallIDs = map[string]bool{forgeInstallID: true}
+	docker.removeErrIDs = map[string]error{forgeInstallID: errors.New("daemon busy")}
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.initialInstallStartTimeout = 20 * time.Millisecond
+
+	err := startWithin(context.Background(), t, d, forgeSpec(dir))
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "install container start timed out") {
+		t.Fatalf("first start err = %v, want the installer start's timeout", err)
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{forgeInstallID}) {
+		t.Fatalf("recorded = %v, want the installer the start left running", got)
+	}
+
+	docker.mu.Lock()
+	docker.startStallIDs, docker.removeErrIDs = nil, nil
+	docker.mu.Unlock()
+	next, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("next Start: %v, want the leftover installer removed and the server started", err)
+	}
+	if got := unremovedOf(d, "s1"); len(got) != 0 {
+		t.Fatalf("recorded = %v, want the record cleared", got)
+	}
+	writeArgsfile(t, dir)
+	docker.exit(forgeInstallID, 0, nil)
+	drainTo(t, next.Events(), execution.StateRunning)
+	docker.exit("mcsd-s1", 0, nil)
+	awaitStreamClosed(t, next.Events())
 }
 
 // The post-install launch's start times out after the daemon did start the
