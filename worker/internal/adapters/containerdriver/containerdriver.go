@@ -522,7 +522,7 @@ func (d *Driver) launchContainer(ctx context.Context, spec execution.InstanceSpe
 	}
 	if err := d.startBounded(ctx, id, "container start", d.initialLaunchStartTimeout); err != nil {
 		// Cleanup of the container the start failed on.
-		d.removeCreated(ctx, spec.ServerID, id)
+		d.removeCreated(ctx, spec.ServerID, id, err)
 		return "", err
 	}
 	return id, nil
@@ -598,17 +598,20 @@ const (
 // #1715). The detachment mirrors the driver's other cleanup calls (pullImage,
 // Stop's escalation).
 //
-// A start the daemon did not answer, cut short by its bound or the caller or lost
-// to a transport error, may have run the container all the same; the force-remove
-// stops it too. A container the removal leaves behind is recorded for the
-// server's next create to remove (unremovedStarts), since the wait-for-name-free
-// loop declines a running one (issue #3645).
-func (d *Driver) removeCreated(ctx context.Context, serverID, id string) {
+// A start the daemon did not answer (startErr is no daemon response: cut short by
+// its bound or the caller, or lost to a transport error) may have run the
+// container all the same; the force-remove stops it too. Such a container the
+// removal leaves behind is recorded for the server's next create to remove
+// (unremovedStarts), since the wait-for-name-free loop declines a running one
+// (issue #3645). One the daemon refused to start is not running, and is left to
+// that loop as before.
+func (d *Driver) removeCreated(ctx context.Context, serverID, id string, startErr error) {
 	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startCleanupRemoveTimeout)
 	defer cancel()
-	if err := d.docker.Remove(removeCtx, id); err != nil && !removedConcurrently(err) {
+	err := d.docker.Remove(removeCtx, id)
+	if err != nil && !removedConcurrently(err) && isTransportError(startErr) {
 		d.unremoved.add(serverID, id)
-		d.logger.Warn("remove container after a failed start failed; the next create of the server removes it",
+		d.logger.Warn("remove container after an unanswered start failed; the next create of the server removes it",
 			"server_id", serverID, "container_id", id, "error", err)
 	}
 }
@@ -626,9 +629,9 @@ func (d *Driver) startBounded(ctx context.Context, id, what string, timeout time
 	return err
 }
 
-// unremovedStarts records, per server, the containers a failed docker start left
-// behind because its cleanup removal failed too (issue #3645). A start the daemon
-// did not answer may have run its container, which no instance then tracks: the
+// unremovedStarts records, per server, the containers a docker start the daemon
+// did not answer left behind because its cleanup removal failed too (issue
+// #3645). Such a start may have run its container, which no instance then tracks: the
 // quiescence wait would refuse every later create of the server while it runs, and
 // the wait-for-name-free loop declines a running container, so only the next
 // boot's sweep would remove it. Instead the server's next create removes the
@@ -713,7 +716,7 @@ func (d *Driver) runInstallContainer(ctx context.Context, spec execution.Instanc
 	}
 	if err := d.startBounded(ctx, id, "install container start", d.initialInstallStartTimeout); err != nil {
 		// Cleanup, detached from the command context (issue #1715).
-		d.removeCreated(ctx, spec.ServerID, id)
+		d.removeCreated(ctx, spec.ServerID, id, err)
 		return "", err
 	}
 	return id, nil
@@ -1684,7 +1687,7 @@ func (i *instance) superviseInstall(installID string) {
 		}
 		if err := i.startInstallPhase(newID); err != nil {
 			i.mu.Unlock()
-			i.removeFailedStart(newID)
+			i.removeFailedStart(newID, err)
 			i.finishInstallCrash(execution.CrashReasonForgeInstallFailed, "forge install retry failed: "+err.Error())
 			return
 		}
@@ -1776,7 +1779,7 @@ func (i *instance) superviseInstall(installID string) {
 	}
 	if err := i.startInstallPhase(id); err != nil {
 		i.mu.Unlock()
-		i.removeFailedStart(id)
+		i.removeFailedStart(id, err)
 		i.removeContainer(installID)
 		i.finishTerminal(execution.StateCrashed, "forge launch after install failed: "+err.Error())
 		return
@@ -3100,12 +3103,34 @@ func (i *instance) supervise() {
 // back what follows the removal: the terminal, the event stream and a Stop waiting
 // on them, or the hand-over to the launch (issues #3610, #3622). A removal that
 // lost to another removal of the same container is logged at DEBUG; any other
-// failure, a timeout included, at WARN, and reported as false. A container left
-// behind that is not running is removed by the next create under its name
-// (createContainer's wait-for-name-free loop, which declines a running one) or by
-// the next boot's Sweep; one a failed start may have run, by the server's next
-// create (removeFailedStart).
-func (i *instance) removeContainer(id string) bool {
+// failure, a timeout included, at WARN. A container left behind that is not
+// running is removed by the next create under its name (createContainer's
+// wait-for-name-free loop, which declines a running one) or by the next boot's
+// Sweep; one an unanswered start may have run, by the server's next create
+// (removeFailedStart).
+func (i *instance) removeContainer(id string) {
+	i.removeLogged(id, "remove container failed; the next create under its name removes it unless it is running, else the next boot's sweep does")
+}
+
+// removeFailedStart removes a container superviseInstall's start failed on. A
+// start the daemon did not answer (startErr is no daemon response, the bound
+// included) may have run it, so such a container the removal leaves behind is
+// recorded for the server's next create to remove (unremovedStarts, issue #3645).
+// It runs after the instance lock is released, and before the terminal, so the
+// next start of the server finds the record.
+func (i *instance) removeFailedStart(id string, startErr error) {
+	if !isTransportError(startErr) {
+		i.removeContainer(id)
+		return
+	}
+	if !i.removeLogged(id, "remove container after an unanswered start failed; the next create of the server removes it") {
+		i.unremoved.add(i.spec.ServerID, id)
+	}
+}
+
+// removeLogged is removeContainer's removal, logging a failure with failure, and
+// reports whether the container is gone.
+func (i *instance) removeLogged(id, failure string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), i.exitRemoveTimeout)
 	defer cancel()
 	switch err := i.docker.Remove(ctx, id); {
@@ -3114,24 +3139,10 @@ func (i *instance) removeContainer(id string) bool {
 		i.logger.Debug("container already removed or being removed",
 			"server_id", i.spec.ServerID, "container_id", id, "error", err)
 	default:
-		i.logger.Warn("remove container failed; the next create under its name removes it unless it is running, else the next boot's sweep does",
-			"server_id", i.spec.ServerID, "container_id", id, "error", err)
+		i.logger.Warn(failure, "server_id", i.spec.ServerID, "container_id", id, "error", err)
 		return false
 	}
 	return true
-}
-
-// removeFailedStart removes a container superviseInstall's start failed on. A
-// start the bound cut short may have run it, so one the removal leaves behind is
-// recorded for the server's next create to remove (unremovedStarts, issue #3645).
-// It runs after the instance lock is released, and before the terminal, so the
-// next start of the server finds the record.
-func (i *instance) removeFailedStart(id string) {
-	if !i.removeContainer(id) {
-		i.unremoved.add(i.spec.ServerID, id)
-		i.logger.Warn("container a failed start may have run is kept for the server's next create to remove",
-			"server_id", i.spec.ServerID, "container_id", id)
-	}
 }
 
 // startInstallPhase is superviseInstall's docker start of a retry installer or

@@ -288,7 +288,7 @@ func (f *fakeDocker) Inspect(ctx context.Context, _ string) (ContainerInfo, erro
 
 func (f *fakeDocker) Start(ctx context.Context, id string) error {
 	f.mu.Lock()
-	hook, block := f.onStart, f.startRunsThenBlocks
+	hook, block, startErr := f.onStart, f.startRunsThenBlocks, f.startErr
 	if block {
 		f.runningID = id
 	}
@@ -300,7 +300,7 @@ func (f *fakeDocker) Start(ctx context.Context, id string) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	return f.startErr
+	return startErr
 }
 
 func (f *fakeDocker) Stop(ctx context.Context, id string, _ time.Duration) error {
@@ -3809,6 +3809,30 @@ func TestStartRemovesTheContainerAnAmbiguousStartLeftRunning(t *testing.T) {
 	docker.mu.Unlock()
 	if len(removed) != 3 || removed[1] != "container-1" || removed[2] != "container-1" {
 		t.Fatalf("removed = %v, want the cleanup and two removals of container-1 by later starts", removed)
+	}
+	docker.exit(0, nil)
+	drainClosed(inst.Events())
+}
+
+// A start the daemon refused outright did not run its container, so a failed
+// removal of it is left to the next create's wait-for-name-free loop and the
+// next boot's sweep, as before: the next start of the server is not refused for
+// it (issue #3645).
+func TestStartDoesNotHoldBackTheNextStartForAContainerARefusedStartLeft(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startErr = statusError{method: "POST", path: "/containers/container-1/start", code: 500, message: "port is already allocated"}
+	docker.removeErr = errors.New("daemon busy")
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if err := startWithin(context.Background(), t, d, spec()); errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first start err = %v, want the daemon's refusal", err)
+	}
+	docker.mu.Lock()
+	docker.startErr = nil
+	docker.mu.Unlock()
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("next start: %v, want it not refused for the container the refused start left", err)
 	}
 	docker.exit(0, nil)
 	drainClosed(inst.Events())
