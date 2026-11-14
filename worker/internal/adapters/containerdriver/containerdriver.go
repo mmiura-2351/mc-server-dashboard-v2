@@ -689,7 +689,10 @@ func (u *unremovedStarts) take(serverID string) []string {
 // fires is left running with no kill and stays recorded; the create is refused,
 // and a later one, by when the save has usually finished, tries again. The bound
 // is well short of the 360 s cap, since the stop holds up a start, and with it
-// the server's reservation.
+// the server's reservation and the start's slot of the Worker's command cap. It
+// can still outlast the API's 30 s start budget, as a lazy image pull
+// (defaultImagePullTimeout) can: the API may then report a failed start that
+// the Worker goes on to complete.
 const unremovedStopTimeout = defaultStopTimeout + stopDeadlineGrace + stopKillCallTimeout
 
 // removeUnremoved removes, by id, the containers failed starts of the server
