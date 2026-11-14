@@ -275,6 +275,9 @@ type Driver struct {
 	// installStartTimeout bounds superviseInstall's docker start of a retry
 	// installer or the post-install launch (issue #3622).
 	installStartTimeout time.Duration
+	// installLogDrainTimeout bounds how long superviseInstall lets an exited
+	// installer's log follow finish before cancelling it (issue #3644).
+	installLogDrainTimeout time.Duration
 	// initialCreateTimeout and postPullCreateTimeout bound createPullingOnMiss's
 	// first docker create and the one retried after an image pull (issue #3643).
 	initialCreateTimeout  time.Duration
@@ -336,24 +339,25 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 			after:       time.After,
 			runScan:     func(f func()) { go f() },
 		},
-		flushTimeout:          flushTimeout,
-		gameBindIP:            gameBindIP,
-		network:               opts.Network,
-		scratchDir:            opts.ScratchDir,
-		runAsUID:              runAsUID,
-		runAsGID:              runAsGID,
-		chownAt:               chownAtNoFollow,
-		conflictPoll:          conflictPoll,
-		conflictDeadline:      conflictDeadline,
-		readinessTimeout:      readinessTimeout,
-		sweepCallMargin:       sweepCallMargin,
-		worldProgress:         opts.WorldProgress,
-		imagePullTimeout:      defaultImagePullTimeout,
-		exitRemoveTimeout:     exitRemoveTimeout,
-		installStartTimeout:   installStartTimeout,
-		initialCreateTimeout:  initialCreateTimeout,
-		postPullCreateTimeout: postPullCreateTimeout,
-		logger:                logger,
+		flushTimeout:           flushTimeout,
+		gameBindIP:             gameBindIP,
+		network:                opts.Network,
+		scratchDir:             opts.ScratchDir,
+		runAsUID:               runAsUID,
+		runAsGID:               runAsGID,
+		chownAt:                chownAtNoFollow,
+		conflictPoll:           conflictPoll,
+		conflictDeadline:       conflictDeadline,
+		readinessTimeout:       readinessTimeout,
+		sweepCallMargin:        sweepCallMargin,
+		worldProgress:          opts.WorldProgress,
+		imagePullTimeout:       defaultImagePullTimeout,
+		exitRemoveTimeout:      exitRemoveTimeout,
+		installStartTimeout:    installStartTimeout,
+		installLogDrainTimeout: installLogDrainTimeout,
+		initialCreateTimeout:   initialCreateTimeout,
+		postPullCreateTimeout:  postPullCreateTimeout,
+		logger:                 logger,
 	}
 	d.handOffs = &stopHandOffs{d: d, stops: map[*inflightStop]struct{}{}}
 	return d
@@ -412,25 +416,26 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	}
 
 	inst := &instance{
-		spec:                spec,
-		docker:              d.docker,
-		image:               image,
-		network:             d.network,
-		gameBindIP:          d.gameBindIP,
-		labels:              d.labels(spec.ServerID, spec.MinecraftVersion),
-		createFn:            d.createServerContainer,
-		openControl:         d.openControl,
-		rconHost:            d.RconHost(spec.ServerID),
-		stopRule:            d.stopRule,
-		handOffs:            d.handOffs,
-		flushTimeout:        d.flushTimeout,
-		readinessTimeout:    d.readinessTimeout,
-		exitRemoveTimeout:   d.exitRemoveTimeout,
-		installStartTimeout: d.installStartTimeout,
-		logger:              d.logger,
-		events:              make(chan execution.StatusEvent, 8),
-		exited:              make(chan struct{}),
-		logPump:             execution.NewLogPump(spec.ServerID, logBufferLines),
+		spec:                   spec,
+		docker:                 d.docker,
+		image:                  image,
+		network:                d.network,
+		gameBindIP:             d.gameBindIP,
+		labels:                 d.labels(spec.ServerID, spec.MinecraftVersion),
+		createFn:               d.createServerContainer,
+		openControl:            d.openControl,
+		rconHost:               d.RconHost(spec.ServerID),
+		stopRule:               d.stopRule,
+		handOffs:               d.handOffs,
+		flushTimeout:           d.flushTimeout,
+		readinessTimeout:       d.readinessTimeout,
+		exitRemoveTimeout:      d.exitRemoveTimeout,
+		installStartTimeout:    d.installStartTimeout,
+		installLogDrainTimeout: d.installLogDrainTimeout,
+		logger:                 d.logger,
+		events:                 make(chan execution.StatusEvent, 8),
+		exited:                 make(chan struct{}),
+		logPump:                execution.NewLogPump(spec.ServerID, logBufferLines),
 	}
 	inst.state.Store(int32(execution.StateStarting))
 	inst.installCtx, inst.endInstall = context.WithCancel(context.Background())
@@ -535,6 +540,16 @@ const exitRemoveTimeout = 10 * time.Second
 // container well inside it, and a Stop that waits it out still fits the API's
 // stop budget, which a failed stop leaves 50 s of (defaultStopCap).
 const installStartTimeout = 10 * time.Second
+
+// installLogDrainTimeout bounds how long superviseInstall waits, once the
+// installer's exit is observed, for that attempt's log follow to reach the end of
+// the stream (issue #3644). The daemon ends an exited container's follow right
+// after its last lines, so a healthy follow finishes well inside the bound and
+// loses nothing; only a stalled open or read is cut off. The follow itself has no
+// deadline while the installer runs, however long the install takes. The bound
+// precedes the terminal of a stopped or failed install, so a Stop waiting on it
+// can be held back by at most this, well inside its budget.
+const installLogDrainTimeout = 5 * time.Second
 
 // initialCreateTimeout and postPullCreateTimeout bound createPullingOnMiss's
 // docker create: the first attempt, and the one retried after a lazy image pull,
@@ -1220,6 +1235,9 @@ type instance struct {
 	// installStartTimeout bounds superviseInstall's docker start of a retry
 	// installer or the post-install launch (issue #3622).
 	installStartTimeout time.Duration
+	// installLogDrainTimeout bounds the wait for an exited installer's log follow
+	// (installLogFollow.finish, issue #3644).
+	installLogDrainTimeout time.Duration
 	// logger records the graceful-stop -> kill escalation at WARN (issue #927), so a
 	// stop that timed out (leaving the world's regions unpadded for the stop-leg
 	// snapshot) is diagnosable. Never nil: Start copies the Driver's logger, which
@@ -1385,11 +1403,12 @@ func (i *instance) awaitReady() {
 }
 
 // superviseInstall waits for the supervised install container to exit, captures
-// its output to logs/forge-install.log, then creates+starts the launch container
-// as the SAME instance (issue #305). On a non-zero install exit the instance goes
-// crashed and no launch container is created; a Stop that terminated the install
-// container reports stopped. Every crash of the install itself carries a
-// CrashReason, so a client can tell it from a runtime crash and point at the
+// its output to logs/forge-install.log alongside the wait (a stalled log stream
+// cannot hold back the exit, issue #3644), then creates+starts the launch
+// container as the SAME instance (issue #305). On a non-zero install exit the
+// instance goes crashed and no launch container is created; a Stop that
+// terminated the install container reports stopped. Every crash of the install
+// itself carries a CrashReason, so a client can tell it from a runtime crash and point at the
 // install log (issue #1093). The install container is removed once its fate is
 // decided (in every terminal branch, and after the launch is published): keeping
 // it as the current container until then gives a concurrent Stop a valid target
@@ -1414,7 +1433,7 @@ func (i *instance) superviseInstall(installID string) {
 		waitErr  error
 	)
 	for attempt := 0; ; attempt++ {
-		scan := i.captureInstallOutput(installID)
+		follow := i.followInstallOutput(installID)
 
 		// Re-attach on transport errors the same way supervise does: a daemon
 		// blip does not mean the install container died (issue #881).
@@ -1454,6 +1473,10 @@ func (i *instance) superviseInstall(installID string) {
 		i.exitObserved = true
 		stopping := i.stopRequested
 		i.mu.Unlock()
+
+		// The attempt's log is complete before anything reads it or appends to it:
+		// the failure explanation, the next attempt and the launch.
+		scan := follow.finish(i.installLogDrainTimeout)
 
 		if stopping {
 			i.removeContainer(installID)
@@ -1753,6 +1776,44 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 	return i.createFn(i.installCtx, i.spec, create)
 }
 
+// installLogFollow is one install attempt's log follow, running alongside the
+// wait for the installer's exit (issue #3644).
+type installLogFollow struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	// scan is set before done closes.
+	scan *installOutputScan
+}
+
+// followInstallOutput starts captureInstallOutput for installID on its own
+// context, which has no deadline: a healthy install's log is followed for as
+// long as the installer runs.
+func (i *instance) followInstallOutput(installID string) *installLogFollow {
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &installLogFollow{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(f.done)
+		f.scan = i.captureInstallOutput(ctx, installID)
+	}()
+	return f
+}
+
+// finish is called once the installer's exit is observed. It gives the follow up
+// to drain to reach the end of the stream, which a healthy follow does right after
+// the exit, then cancels it and waits for it to return, and reports what the
+// attempt's output said.
+func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
+	timer := time.NewTimer(drain)
+	defer timer.Stop()
+	select {
+	case <-f.done:
+	case <-timer.C:
+	}
+	f.cancel()
+	<-f.done
+	return f.scan
+}
+
 // captureInstallOutput follows the install container's log stream and writes it to
 // logs/forge-install.log in the working dir, so an operator can read the install
 // diagnostics via the files API (issue #305). It is best-effort: a failure to open
@@ -1764,10 +1825,10 @@ func (i *instance) createInstallRetryContainer() (string, error) {
 // It returns what this attempt's output said about why it might have failed. The
 // log file is appended to across attempts and starts, so the stream — not the
 // file — is what gets scanned (issue #1093); it is scanned whether or not the
-// file could be opened.
-func (i *instance) captureInstallOutput(installID string) *installOutputScan {
+// file could be opened. Cancelling ctx ends the follow.
+func (i *instance) captureInstallOutput(ctx context.Context, installID string) *installOutputScan {
 	scan := &installOutputScan{}
-	rc, err := i.docker.Logs(context.Background(), installID)
+	rc, err := i.docker.Logs(ctx, installID)
 	if err != nil {
 		return scan
 	}
