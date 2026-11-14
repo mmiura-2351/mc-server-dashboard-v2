@@ -33,6 +33,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     MAX_MESSAGE_BYTES,
     ControlPlaneState,
     GrpcControlPlane,
+    _widest_expiry,
 )
 from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     WorkerSessionServicer,
@@ -91,11 +92,27 @@ _UNLIMITED_SEND = [
 ]
 
 
+_COMMAND_TIMEOUT = 10.0
+
+
+def _gate_size(msg: pb.ApiMessage) -> int:
+    """The size the send gate counts for ``msg``: its expiry stamp at its widest.
+
+    The gate runs at dispatch, before the stamp the command is sent with is known
+    (issue #3305), so it counts the widest one the dispatch's budget allows.
+    """
+
+    gated = pb.ApiMessage()
+    gated.CopyFrom(msg)
+    gated.api_command.expires_after.CopyFrom(_widest_expiry(_COMMAND_TIMEOUT))
+    return gated.ByteSize()
+
+
 class _Harness:
     def __init__(self) -> None:
         self.state = ControlPlaneState()
         self.control_plane = GrpcControlPlane(
-            self.state, clock=FakeClock(_T0), timeout_seconds=10.0
+            self.state, clock=FakeClock(_T0), timeout_seconds=_COMMAND_TIMEOUT
         )
         self.registry = InMemoryWorkerRegistry(
             clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT
@@ -323,10 +340,12 @@ async def test_a_command_exactly_at_the_limit_is_sent(harness: _Harness) -> None
     call = await harness.start()
     server_id = str(uuid.uuid4())
     sizes: list[int] = []
+    gate_sizes: list[int] = []
 
     async def answer() -> None:
         msg = await call.read()
         sizes.append(msg.ByteSize())
+        gate_sizes.append(_gate_size(msg))
         await call.write(
             pb.WorkerMessage(
                 correlation_id=msg.api_command.command_id,
@@ -334,13 +353,13 @@ async def test_a_command_exactly_at_the_limit_is_sent(harness: _Harness) -> None
             )
         )
 
-    # Find the line length that makes the encoded message exactly the limit: the
+    # Find the line length that makes the gated message exactly the limit: the
     # envelope's size is fixed for a given server id, so measure it once.
     probe: list[int] = []
 
     async def measure() -> None:
         msg = await call.read()
-        probe.append(msg.ByteSize())
+        probe.append(_gate_size(msg))
         await call.write(
             pb.WorkerMessage(
                 correlation_id=msg.api_command.command_id,
@@ -360,7 +379,10 @@ async def test_a_command_exactly_at_the_limit_is_sent(harness: _Harness) -> None
     )
     await worker
 
-    assert sizes == [MAX_MESSAGE_BYTES]
+    # The command the gate counts at exactly the limit is sent, and the expiry it
+    # carries never makes it larger than what the gate counted.
+    assert gate_sizes == [MAX_MESSAGE_BYTES]
+    assert sizes[0] <= MAX_MESSAGE_BYTES
     assert result.success
     over = await harness.dispatch(
         ServerCommandCommand(line=line + "x"), server_id=server_id

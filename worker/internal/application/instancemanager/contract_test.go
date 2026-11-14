@@ -97,6 +97,13 @@ func assertMessage(t *testing.T, msg contractMessage, got string) {
 	}
 }
 
+// sessionExpiredPrecondition names the one precondition whose rows the session
+// emits rather than the instancemanager (issue #3305): a command whose
+// expires_after budget ran out before it started is answered by the session's
+// lane and never reaches Manager.Handle. TestCommandErrorContract therefore
+// skips its rows, and the session package's own contract test drives each one.
+const sessionExpiredPrecondition = "command_expired"
+
 // unaffectedCode marks a cell whose precondition determines no emission for that
 // kind: the handler never consults that state (the file handlers take no instance
 // check), or the state cannot arise for it at all (a StopServer never invokes
@@ -156,6 +163,7 @@ func wantCode(t *testing.T, code string) (success bool, errCode session.CommandE
 		"busy":                         session.CommandErrorBusy,
 		"command_dropped":              session.CommandErrorCommandDropped,
 		"server_properties_unreadable": session.CommandErrorServerPropertiesUnreadable,
+		"expired":                      session.CommandErrorExpired,
 	}
 	c, ok := codes[code]
 	if !ok {
@@ -550,7 +558,7 @@ func TestCommandErrorContract(t *testing.T) {
 	table := loadContract(t)
 	messages := messagesByName(t, table)
 	for _, row := range table.Rows {
-		if row.Code == unaffectedCode {
+		if row.Code == unaffectedCode || row.Precondition == sessionExpiredPrecondition {
 			continue
 		}
 		name := fmt.Sprintf("%s/%s", row.Kind, row.Precondition)

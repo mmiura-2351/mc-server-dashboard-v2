@@ -998,6 +998,38 @@ async def test_start_failure_after_successful_hydrate_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+async def test_expired_start_compensates() -> None:
+    # Issue #3305: the start outwaited its budget on the Worker and was answered
+    # EXPIRED without being applied. Unlike a timeout, that is a definite "not
+    # started", so the committed intent compensates as for any refused start.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    expired = CommandOutcome(
+        status=worker_status("StartServer", "command_expired"), message="expired"
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": expired})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.status is CommandStatus.EXPIRED
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_start_lost_response_after_dispatch_keeps_assignment() -> None:
     # The lost-response case for the normal start (#773, mirroring #101's fix to
     # place_and_start): hydrate succeeds, the start command is SENT, then its
@@ -2569,6 +2601,33 @@ async def test_refused_stop_dispatch_is_recorded_for_the_reconciler() -> None:
     await _stop_expecting_failure(use_case, community, server_id)
 
     assert refusals.refused_at(ServerId(server_id)) == _NOW
+
+
+async def test_expired_stop_dispatch_is_recorded_as_a_refusal() -> None:
+    # Issue #3305: an EXPIRED stop was never applied and nothing of it is left in
+    # flight, so it is a settled refusal like any other: the stop intent stands and
+    # the reconciler's replay may run on the short refused-stop grace (#2478).
+    community, server_id, worker = _ids()
+    uow = _seeded_running_uow(community, server_id, worker)
+    cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(
+                status=worker_status("StopServer", "command_expired"),
+                message="expired",
+            )
+        }
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    await _stop_expecting_failure(use_case, community, server_id)
+
+    assert refusals.refused_at(ServerId(server_id)) == _NOW
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
 
 
 async def test_busy_stop_dispatch_records_no_refusal() -> None:

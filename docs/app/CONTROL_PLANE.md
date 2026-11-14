@@ -456,6 +456,18 @@ Commands and events interleave freely on the one stream. The API may have
 several commands in flight; `command_id` keeps each result matched to its
 command.
 
+A command does not always start as soon as the Worker receives it. The Worker
+runs one server's commands one at a time, in the order they arrive on the
+session, so a command waits behind an earlier one for the same server: a start
+sent during a restart's stop leg waits for the whole restart. Long-running
+commands also share a small Worker-wide concurrency cap, so a command can wait
+for a slot behind other servers' work. `ServerCommand`, `TunnelDial`,
+`OpenBedrockTunnel` and `CloseBedrockTunnel` skip the cap but still wait their
+turn in their server's order. The API waits only a bounded time for each result,
+so each command it waits for carries an expiry, `expires_after`. A command still
+waiting when its expiry runs out is answered `EXPIRED` and is never executed
+(Section 5, "Expiry").
+
 ### 4.3 Heartbeat and liveness
 
 The Worker emits `Event{Heartbeat}` every `heartbeat_interval` (returned in
@@ -569,6 +581,46 @@ Notes:
   server is stop-then-delete, and config edits on a running server go through the
   `ReadFile` / `EditFile` file-access commands above (ARCHITECTURE.md
   Section 7.2).
+- **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
+  command before it starts executing it. It is measured from when the Worker
+  received the command, so the two hosts' clocks never meet. The API stamps it
+  as it sends the command: what is left of that dispatch's timeout, minus a
+  1-second margin, so that an `EXPIRED` answer can still arrive while the API
+  waits. A command with no more than the margin left is not sent at all: it is
+  dropped like any other stale command, and the dispatch times out. The Worker
+  checks the expiry just before the command would start: after earlier commands
+  for the same server have finished and, for a command bounded by the cap, after
+  it holds a slot. If the expiry has run out, the Worker answers `EXPIRED`
+  (Section 7) and the command is never executed. Unset or zero means no expiry.
+  The API sends every fire-and-forget command without one, since nothing waits
+  for its result: `TunnelDial`, `OpenBedrockTunnel` and `CloseBedrockTunnel`.
+  Without the expiry, a command the API had already given up on ran once its
+  turn came, against an intent that may have moved on: a console line ran after
+  its request had failed (and twice if the user retried), a file edit landed
+  silently after a failure was reported, and a restart repeated a restart that
+  had already finished (issue #3305).
+
+  Two cases fall outside the expiry on purpose:
+
+  - A command that has **started** is never interrupted when its expiry passes.
+    The per-kind budgets are sized for the work, and the API already treats a
+    timeout as "may have been applied": a start or stop keeps its intent and
+    assignment for the reconciler, and a late final-snapshot result releases its
+    held assignment (Section 5.1).
+  - A **result that arrives late** is credited to nothing. Every dispatch has its
+    own `command_id`, and a result whose dispatch the API no longer waits for is
+    dropped (Section 3). Only a final snapshot's late result is acted on.
+
+  Since `EXPIRED` means the command was not applied, it is a refusal. A user
+  start that is answered `EXPIRED` is compensated, as any refused start is. An
+  expired stop leaves the stop intent standing, and the reconciler replays it
+  after the short refused-stop grace. The commonest case is a start sent during
+  a long restart. Its dispatch times out first, and the Worker answers `EXPIRED`
+  only once the restart has finished. The late answer is dropped, so the start
+  is not run against the restarted server. The reconciler's next redispatch
+  recovers the start. An expired start or hydrate that a reconciler dispatch is
+  still waiting for does not count toward that server's backoff, just as with
+  `BUSY` (CONFIGURATION.md Section 5.6).
 - **`TunnelDial` is a quick command and bypasses the slow-lane concurrency cap**
   (like `ServerCommand`) so a player join never queues behind a hydrate. Its
   `CommandResult` reports only that the dial-back + token handshake succeeded and
@@ -883,6 +935,7 @@ classes a Worker can hit:
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
 | `COMMAND_DROPPED` | A `ServerCommand` was written to RCON and the game server closed the connection (EOF or reset) before a single response byte arrived. Vanilla does that, without running the command, to a packet that did not arrive in one read, which is what a command near the length limit meets on a path that splits it (Section 3.1). A server that ran the command and then crashed before answering looks the same on the wire, so **whether the command ran is uncertain**: the user checks the console output and the server's state before retrying. A reply cut short — some response bytes arrived, then the connection ended — is not this code but `INTERNAL`, since the server was answering. It is kept apart from `INTERNAL` — RCON could not be opened or authenticated, the round trip timed out, or the reply was cut short — so the user can tell a dropped command from a server that cannot be reached. The API answers it `409 command_dropped`. |
 | `SERVER_PROPERTIES_UNREADABLE` | The server's `server.properties` cannot be read as it is: it is not a regular file (a symbolic link, a FIFO, socket, device or directory — something the server's own code can put at the name) or it is larger than the Worker's 4 MiB read cap ([`SECURITY.md`](SECURITY.md) Section 6). Every command that needs the file answers it: a `StartServer` and a `RestartServer`'s relaunch (the driver publishes its ports; no container is created), a `ServerCommand` (RCON's password is in it, so nothing is dialled), a running `SnapshotTrigger` (it cannot quiesce the world over RCON, so it is refused rather than packed live) and a `TunnelDial` (the dial resolves its game port). The message names the refusal and the file's path on the Worker but never its content; the API keeps it log-only and answers `409 server_properties_unreadable`. A graceful `StopServer` is **not** refused: its pre-stop save-off/save-all flush cannot open RCON, so the Worker logs one `WARN` saying the final save-all was skipped and the driver falls back to its stop signal: SIGTERM, then SIGKILL once the world has gone the 30 s idle window unwritten or the stop's 360 s cap has passed ([`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3). **No save is guaranteed then**: the server's own shutdown save normally completes inside that wait, but a server killed after the idle window or at the cap is left with a partial save (issue #3436). The stop answers success and the skipped flush is not reported to the API. |
+| `EXPIRED` | The command's `expires_after` ran out before it started (Section 5, "Expiry"), so the Worker **did not apply it**. It was still waiting behind an earlier command for the same server or for a slot of the concurrency cap, and the API had already stopped waiting for it. The session layer answers it before the command reaches the instancemanager, so it is the same for every kind the API stamps an expiry on. Unlike `BUSY`, nothing is wrong with the server's state; the command only waited too long. Most `EXPIRED` answers arrive after the dispatch timed out and are dropped. One that arrives in time is a refusal: a user start compensates and an expired stop keeps its intent. An expired start or hydrate sent by the reconciler does not count toward its backoff. At the HTTP edge it is the catch-all `409 command_failed`. |
 | `INTERNAL` | An unclassified failure applying the command. |
 
 A registration refusal is reported differently, since it predates any command:
@@ -903,6 +956,9 @@ rows.
 The table is **exhaustive over Worker emissions**, not over API match sites:
 it declares every kind `Manager.Handle` dispatches and every
 precondition the rows key on, and carries one row for each cell of that matrix.
+One precondition is met before `Manager.Handle`: `command_expired`. A command
+whose `expires_after` ran out is answered `EXPIRED` by the session layer
+(`worker/internal/domain/session/session.go`), whatever the server's state.
 A cell whose precondition determines no emission for that kind carries the code
 `unaffected` plus a `why` saying how we know, so an absent row always means
 *forgotten* — never *not applicable*. Every row with a real error code also
@@ -924,7 +980,9 @@ Table-driven tests hold both sides to it:
 - the Worker test
   (`worker/internal/application/instancemanager/contract_test.go`) drives the
   instancemanager into each precondition and asserts the emitted code equals the
-  table, so a code change without a table update fails the Worker suite;
+  table, so a code change without a table update fails the Worker suite. The
+  `command_expired` rows are driven through a real session lane instead, by
+  `worker/internal/domain/session/contract_test.go`;
 - the same file checks the table against the *matrix* and against `Handle`'s
   switch, so a precondition or a command kind with no row fails there too — the
   gap that would otherwise let a Worker emission stay unrecorded while both suites

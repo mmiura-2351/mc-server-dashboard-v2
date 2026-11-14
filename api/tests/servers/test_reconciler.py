@@ -69,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import make_worker
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -1432,6 +1433,60 @@ async def test_busy_start_refusal_does_not_feed_backoff() -> None:
     clock.set(_NOW + dt.timedelta(seconds=1))
     await reconciler.tick()  # well inside what the 30s base backoff would have been
     assert [k for k, _, _ in cp.dispatched] == ["start", "start"]
+
+
+async def test_expired_start_does_not_feed_backoff() -> None:
+    # Issue #3305: an EXPIRED start waited too long behind the server's lane (a
+    # restart's stop leg) and was not applied. Like BUSY it is no failure of the
+    # start itself, and the next redispatch is accepted once the lane frees, so it
+    # must not arm a backoff that keeps the server down after that.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "command_expired")
+            )
+        },
+        held={(_WORKER, server.id): 2},
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+    await reconciler.tick()  # refused EXPIRED
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+    clock.set(_NOW + dt.timedelta(seconds=1))
+    await reconciler.tick()  # well inside what the 30s base backoff would have been
+    assert [k for k, _, _ in cp.dispatched] == ["start", "start"]
+
+
+async def test_expired_hydrate_does_not_feed_backoff() -> None:
+    # The hydrate leg of a reconciler start can expire behind the lane the same way.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "command_expired")
+            )
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+    await reconciler.tick()  # hydrate refused EXPIRED
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    clock.set(_NOW + dt.timedelta(seconds=1))
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "hydrate"]
 
 
 async def test_busy_start_refusal_keeps_an_existing_backoff() -> None:

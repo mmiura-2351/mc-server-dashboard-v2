@@ -100,5 +100,7 @@ def dispatch_failure(
         detail,
     )
     return CommandDispatchError(
-        detail, reason=reason or _SANITIZED_REASONS.get(outcome.status)
+        detail,
+        reason=reason or _SANITIZED_REASONS.get(outcome.status),
+        status=outcome.status,
     )
