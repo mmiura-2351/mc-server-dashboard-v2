@@ -16,7 +16,7 @@ import io
 import json
 import logging
 import tarfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -360,7 +360,7 @@ async def test_sweep_reread_skips_prefix_made_live_after_pointer_read() -> None:
     class _FlipAfterFirstReadClient(FakeS3Client):
         async def get_object(
             self, key: str, byte_range: tuple[int, int] | None = None
-        ) -> AsyncIterator[bytes]:
+        ) -> AsyncGenerator[bytes, None]:
             result = await super().get_object(key, byte_range)
             if key == pointer_key:
                 reads["n"] += 1
@@ -1072,7 +1072,9 @@ class _MidStreamError(Exception):
     """Raised mid-iteration to simulate a client disconnect / S3 error."""
 
 
-async def _failing_stream(payload: bytes, *, fail_after: int) -> AsyncIterator[bytes]:
+async def _failing_stream(
+    payload: bytes, *, fail_after: int
+) -> AsyncGenerator[bytes, None]:
     """Yield ``fail_after`` bytes of ``payload``, then raise."""
     yielded = 0
     for i in range(0, len(payload), 7):
@@ -1127,7 +1129,7 @@ async def test_spool_object_unlinks_on_stream_error() -> None:
 
         async def get_object(
             self, key: str, byte_range: tuple[int, int] | None = None
-        ) -> AsyncIterator[bytes]:
+        ) -> AsyncGenerator[bytes, None]:
             return _failing_stream(store.objects[key], fail_after=30)
 
         def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
