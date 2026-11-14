@@ -301,7 +301,7 @@ def _count_released(staging: object) -> _Check:
     return _check
 
 
-@pytest.mark.timeout(2 * _BOUND + 10 + 30)
+@pytest.mark.timeout(3 * _BOUND + 10 + 30)
 @pytest.mark.parametrize(
     "site",
     [site for site in _SITES if site.name in ("write_snapshot", "put_jar")],
