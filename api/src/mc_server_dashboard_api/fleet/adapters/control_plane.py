@@ -21,7 +21,6 @@ domain Port stays transport-free (ARCHITECTURE.md Section 2.1).
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import math
 import uuid
@@ -497,11 +496,13 @@ class ControlPlaneState:
         than run a command it reaches only after the API has stopped waiting
         (issue #3305). A command whose remaining budget is no more than the margin
         could not be answered in time, so it is dropped unsent like a stale one,
-        and its pending entry goes with it. A command with no deadline (a
-        fire-and-forget one, or a final snapshot) is sent as it is, so a final
-        snapshot's record is never dropped here, where nothing could answer it
-        any more and the record would hold the server's stop convergence in
-        flight for as long as the session lives (issue #3491).
+        and its pending entry goes with it. So is one whose remainder is under a
+        nanosecond: it would encode as the zero Duration that means no expiry.
+        A command with no deadline (a fire-and-forget one, or a final snapshot)
+        is sent as it is, so a final snapshot's record is never dropped here,
+        where nothing could answer it any more and the record would hold the
+        server's stop convergence in flight for as long as the session lives
+        (issue #3491).
         """
 
         command_id = msg.correlation_id
@@ -509,11 +510,16 @@ class ControlPlaneState:
         if entry is None or entry[2] is None:
             return True
         loop_time = asyncio.get_running_loop().time()
-        expires_after = entry[2] - loop_time - _EXPIRY_MARGIN_SECONDS
-        if expires_after <= 0:
+        # Whole nanoseconds, rounded down so the stamp never outlasts the budget.
+        # A Duration of zero is "no expiry" to the Worker, so a remainder too small
+        # to encode as a positive Duration is dropped like any other too-late one.
+        expires_after_ns = math.floor(
+            (entry[2] - loop_time - _EXPIRY_MARGIN_SECONDS) * 1_000_000_000
+        )
+        if expires_after_ns <= 0:
             del self._pending[command_id]
             return False
-        msg.api_command.expires_after.FromTimedelta(dt.timedelta(seconds=expires_after))
+        msg.api_command.expires_after.FromNanoseconds(expires_after_ns)
         return True
 
     def final_snapshot_outstanding(self, server_id: str) -> bool:

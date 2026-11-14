@@ -1535,6 +1535,51 @@ async def test_the_stamp_is_the_budget_left_when_the_command_is_sent() -> None:
     assert 0 < expires_after <= 20.0 - _EXPIRY_MARGIN_SECONDS - 0.3
 
 
+def _stamp_at_frozen_loop_time(
+    state: ControlPlaneState, msg: pb.ApiMessage, budget: float
+) -> bool:
+    """Register ``msg`` with ``budget`` and stamp it, the loop clock held at 100.0.
+
+    A frozen clock makes the remainder exact up to float error: it is
+    ``budget - _EXPIRY_MARGIN_SECONDS``, with no time passing in between.
+    """
+
+    loop = asyncio.get_running_loop()
+    loop.time = lambda: 100.0  # type: ignore[method-assign]
+    try:
+        state.register_pending(msg.correlation_id, WorkerId(_WORKER), budget=budget)
+        return state.stamp_expiry(msg)
+    finally:
+        del loop.time
+
+
+async def test_a_sub_microsecond_remainder_is_stamped_not_the_no_expiry_zero() -> None:
+    # A Duration of zero means "never expires" to the Worker, so a remainder that
+    # is positive must reach it as a positive Duration. Rounded to microseconds,
+    # this one (about 400 ns) encoded as that zero (issue #3305).
+    state = ControlPlaneState()
+    state.open_session(WorkerId(_WORKER), 1)
+    msg = _queued_command("cmd-1")
+
+    assert _stamp_at_frozen_loop_time(state, msg, 1.0000004)
+
+    expires_after = msg.api_command.expires_after
+    assert expires_after.seconds == 0
+    assert 0 < expires_after.nanos <= 400
+
+
+async def test_a_sub_nanosecond_remainder_is_dropped_unsent() -> None:
+    # Positive, but less than the 1 ns the Duration can carry: it would encode as
+    # the no-expiry zero, so the command is dropped as stale with its entry.
+    state = ControlPlaneState()
+    state.open_session(WorkerId(_WORKER), 1)
+    msg = _queued_command("cmd-1")
+
+    assert not _stamp_at_frozen_loop_time(state, msg, 1.0000000004)
+
+    assert state.discard_if_stale("cmd-1")
+
+
 async def test_a_command_with_no_budget_left_is_dropped_unsent(
     harness: _Harness,
 ) -> None:
