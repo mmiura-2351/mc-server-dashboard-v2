@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import errno
 import gzip
 import io
 import os
@@ -44,6 +45,8 @@ class _HeldOpen:
     finished: threading.Event = field(default_factory=threading.Event)
     armed: threading.Lock = field(default_factory=threading.Lock)
     on_loop: bool = False
+    # The open, once let go, fails instead.
+    fails: bool = False
     spools: list[Path] = field(default_factory=list)
     # Strong references, so only an explicit close counts as one.
     opened: list[io.BufferedWriter] = field(default_factory=list)
@@ -80,6 +83,8 @@ def _hold_open(monkeypatch: pytest.MonkeyPatch, hold: _HeldOpen, prefix: str) ->
         if not hold.on_loop:
             hold.release.wait()
         try:
+            if hold.fails:
+                raise OSError(errno.EIO, "injected open fault")
             out = builtins.open(file, "wb")
             hold.recreated = Path(file).exists()
             hold.opened.append(out)
@@ -194,8 +199,8 @@ async def _until(predicate: Callable[[], bool]) -> None:
         await asyncio.sleep(0.01)
 
 
-def _settled(out: io.BufferedWriter, spool: Path, check: _Check) -> bool:
-    if not out.closed or os.path.exists(spool):
+def _settled(hold: _HeldOpen, spool: Path, check: _Check) -> bool:
+    if not all(out.closed for out in hold.opened) or os.path.exists(spool):
         return False
     try:
         check()
@@ -233,7 +238,38 @@ async def test_a_cancelled_open_neither_blocks_the_loop_nor_leaves_its_spool(
     assert await asyncio.to_thread(hold.finished.wait, 120)
     assert hold.recreated  # the late open recreated the removed spool
     [out] = hold.opened
-    await _until(lambda: _settled(out, spool, once_settled))
+    await _until(lambda: _settled(hold, spool, once_settled))
     assert out.closed
+    assert not spool.exists()
+    once_settled()
+
+
+async def test_a_cancelled_open_that_fails_still_hands_back_its_staging(
+    hold: _HeldOpen, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The late open fails: no file to close, and the staging it was counted
+    against is still removed and its lease released (issue #3653)."""
+
+    harness = build_harness("fs", tmp_path)
+    community, server = new_scope()
+    op, while_held, once_settled = await _write_snapshot(harness, community, server)
+    _hold_open(monkeypatch, hold, ".snapshot.")
+    hold.fails = True
+
+    task = asyncio.ensure_future(op())
+    try:
+        assert await asyncio.to_thread(hold.entered.wait, 120)  # a bound, as above
+        assert not hold.on_loop, "the spool was opened on the event loop"
+        task.cancel()
+        await asyncio.wait({task}, timeout=10)
+        assert task.cancelled()
+        await asyncio.to_thread(while_held)
+    finally:
+        hold.release.set()
+
+    assert await asyncio.to_thread(hold.finished.wait, 120)
+    assert hold.opened == []
+    [spool] = hold.spools
+    await _until(lambda: _settled(hold, spool, once_settled))
     assert not spool.exists()
     once_settled()

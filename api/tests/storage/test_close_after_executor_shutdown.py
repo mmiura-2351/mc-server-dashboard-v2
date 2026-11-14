@@ -109,7 +109,7 @@ class _FailingClose:
 
 
 _CLOSES: dict[str, Callable[[_FailingClose], Awaitable[None]]] = {
-    "fs-off_loop_file": lambda handle: fs._OffLoopFile(handle).close(),  # type: ignore[arg-type]
+    "fs-off_loop_file": lambda handle: fs._OffLoopFile(handle, lambda: None).close(),  # type: ignore[arg-type]
     "object-handle_jobs": lambda handle: object_store._HandleJobs().close(handle),  # type: ignore[arg-type]
 }
 

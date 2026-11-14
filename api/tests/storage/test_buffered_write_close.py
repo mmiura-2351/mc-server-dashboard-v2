@@ -243,6 +243,11 @@ async def test_a_cancelled_write_closes_its_file_off_the_loop(
     await _until(lambda: out.closed and not spool.exists())
     assert out.closed
     assert not spool.exists()
+    # The staging is removed only after the file's close (issue #3653). A bound,
+    # not a delay: the removal can wait behind a queued fsync on a loaded host.
+    deadline = asyncio.get_running_loop().time() + 120
+    while await leftovers() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
     assert await leftovers() == []
 
 

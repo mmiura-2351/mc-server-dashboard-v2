@@ -583,11 +583,13 @@ class _OffLoopFile:
     buffered writer's lock while it writes. Closing the file on the loop then, as a
     ``with`` exit does, waits for that lock and flushes, blocking the whole loop.
     So each job is awaited shielded, and the close runs on an executor worker: see
-    :func:`_writing_off_loop`.
+    :func:`_writing_off_loop`. The closing thread runs ``release`` once the close
+    has finished, whichever close it is.
     """
 
-    def __init__(self, out: io.BufferedWriter) -> None:
+    def __init__(self, out: io.BufferedWriter, release: Callable[[], None]) -> None:
         self._out = out
+        self._closing = _ClosedThenReleased(out, release)
         self._last: asyncio.Future[Any] | None = None
 
     async def write(self, data: bytes) -> None:
@@ -603,7 +605,7 @@ class _OffLoopFile:
         await asyncio.shield(self._last)
 
     async def close(self) -> None:
-        await _close_off_loop(self._out)
+        await _close_off_loop(self._closing)
 
     def abandon(self) -> None:
         """Close the file once its last job finishes, without waiting for it.
@@ -613,26 +615,91 @@ class _OffLoopFile:
         """
 
         if self._last is None:
-            _close_abandoned(self._out)
+            _close_abandoned(self._closing)
             return
         self._last.add_done_callback(
             functools.partial(
-                _release_after_read, functools.partial(_close_abandoned, self._out)
+                _release_after_read, functools.partial(_close_abandoned, self._closing)
             )
         )
 
 
-@contextlib.asynccontextmanager
-async def _writing_off_loop(path: Path) -> AsyncIterator[_OffLoopFile]:
-    """Open ``path`` for writing, its writes and close running off the loop.
+def _resolve(done: asyncio.Future[None]) -> None:
+    if not done.done():
+        done.set_result(None)
 
-    The file is opened on the loop: it is new, and no job uses it yet. A cancelled
-    caller abandons it (:meth:`_OffLoopFile.abandon`), so ``CancelledError``
-    propagates at once. Any other exit awaits the close, as the ``with`` exit did:
-    the file is closed before the caller goes on, and a fault closing it is raised.
+
+def _resolve_threadsafe(done: asyncio.Future[None]) -> None:
+    """Resolve ``done`` from any thread; never raises.
+
+    A loop already closed has no one left to tell.
     """
 
-    out = _OffLoopFile(open(path, "wb"))
+    with contextlib.suppress(RuntimeError):
+        done.get_loop().call_soon_threadsafe(_resolve, done)
+
+
+def _open_spool_releasing_on_fault(
+    release: Callable[[], None], path: Path
+) -> io.BufferedWriter:
+    """Open the spool ``path`` for writing, or run ``release`` if that fails."""
+
+    try:
+        return open(path, "wb")
+    except BaseException:
+        release()
+        raise
+
+
+def _reclaim_late_spool(
+    path: Path, release: Callable[[], None], handle: io.BufferedWriter
+) -> None:
+    """Close a spool opened after its writer was cancelled, then remove it again.
+
+    The cancelled writer's caller removes the spool as it unwinds, possibly before
+    the open recreates it (issue #3553), so the spool is removed once more.
+    """
+
+    _close_abandoned(_ClosedThenReleased(handle, release))
+    _start_spool_disposal(path)
+
+
+@contextlib.asynccontextmanager
+async def _writing_off_loop(
+    path: Path, *, track: Callable[[asyncio.Future[None]], None] | None = None
+) -> AsyncIterator[_OffLoopFile]:
+    """Open the spool ``path`` for writing, its open, writes and close off the loop.
+
+    The open can block on slow filesystem metadata I/O, so it runs on a worker
+    (issue #3612). A caller cancelled during it gets ``CancelledError`` at once;
+    the file the open goes on to return is closed, and the spool it may have
+    recreated after the caller removed it is removed again. A cancelled caller
+    abandons the file (:meth:`_OffLoopFile.abandon`), so ``CancelledError``
+    propagates at once. Any other exit awaits the close, as the ``with`` exit did:
+    the file is closed before the caller goes on, and a fault closing it is raised.
+
+    ``track`` is handed a future that is done once no thread uses the file any
+    more: from before the open to the end of whichever close runs, or to the end
+    of an open that fails (issue #3653).
+    """
+
+    in_use: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    if track is not None:
+        track(in_use)
+    release = functools.partial(_resolve_threadsafe, in_use)
+    try:
+        handle = await _acquire_off_loop(
+            functools.partial(_reclaim_late_spool, path, release),
+            _open_spool_releasing_on_fault,
+            release,
+            path,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        _resolve(in_use)  # the open may never have been submitted
+        raise
+    out = _OffLoopFile(handle, release)
     try:
         yield out
     except asyncio.CancelledError:
@@ -978,9 +1045,7 @@ class FsStorage(Storage):
         """
 
         job = asyncio.get_running_loop().run_in_executor(None, fn, *args)
-        with self._lease_lock:
-            self._staging_jobs.setdefault(staging, set()).add(job)
-        job.add_done_callback(functools.partial(self._settle_staging_job, staging))
+        self._count_on_staging(staging, job)
         try:
             return await asyncio.shield(job)
         except asyncio.CancelledError:
@@ -990,6 +1055,13 @@ class FsStorage(Storage):
         finally:
             if job.done():
                 self._settle_staging_job(staging, job)
+
+    def _count_on_staging(self, staging: Path, job: asyncio.Future[Any]) -> None:
+        """Count ``job`` against ``staging`` until it is settled (#3583, #3653)."""
+
+        with self._lease_lock:
+            self._staging_jobs.setdefault(staging, set()).add(job)
+        job.add_done_callback(functools.partial(self._settle_staging_job, staging))
 
     def _settle_staging_job(self, staging: Path, job: asyncio.Future[Any]) -> None:
         """Stop counting the finished ``job`` against ``staging``; idempotent."""
@@ -1017,9 +1089,10 @@ class FsStorage(Storage):
     async def _discard_staging(self, staging: Path, *, raise_fault: bool) -> None:
         """Remove ``staging`` and release its lease once no thread uses it (#3583).
 
-        While a job started by :meth:`_run_on_staging` still runs, the removal is
-        left to the end of the last one and this returns at once; a fault there is
-        logged and the sweep reclaims the staging. Otherwise the removal runs now.
+        While a job counted against it (:meth:`_count_on_staging`) still runs, the
+        removal is left to the end of the last one and this returns at once; a
+        fault there is logged and the sweep reclaims the staging. Otherwise the
+        removal runs now.
         """
 
         with self._lease_lock:
@@ -1334,7 +1407,10 @@ class FsStorage(Storage):
             # concurrent delete's prune can have removed with the rest of
             # ``incoming/`` (issue #3481).
             async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
-                async with _writing_off_loop(spool) as out:
+                # The spool's open, writes and close are staging work (#3653).
+                async with _writing_off_loop(
+                    spool, track=functools.partial(self._count_on_staging, staging)
+                ) as out:
                     async for chunk in stream:
                         await out.write(chunk)
                 await self._run_on_staging(staging, _extract_tar_into, spool, staging)
@@ -3643,16 +3719,19 @@ def _leased_file_stream(
 
 
 class _ClosedThenReleased:
-    """``handle``, whose close releases its lease once done (issue #3618).
+    """``handle``, whose close releases what it holds once done (#3618, #3653).
 
-    The release runs on the closing thread, so a close its cancelled caller left
-    running still holds the lease until it finishes.
+    A reader's lease, or a spool's count as staging work. The release runs on the
+    closing thread, so a close its cancelled caller left running still holds it
+    until it finishes.
     """
 
-    def __init__(self, handle: io.BufferedReader, release: Callable[[], None]) -> None:
+    def __init__(
+        self, handle: io.BufferedReader | io.BufferedWriter, release: Callable[[], None]
+    ) -> None:
         self._handle = handle
         self._release = release
-        self.name = handle.name
+        self.name = getattr(handle, "name", handle)
 
     def close(self) -> None:
         try:
