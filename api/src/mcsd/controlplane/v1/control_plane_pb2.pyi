@@ -862,8 +862,9 @@ class ApiCommand(_message.Message):
         COMMAND_ERROR_CODE_EXPIRED without executing it. A command that has already
         started is never interrupted. Unset or zero means the command never
         expires. The API stamps the dispatch's remaining budget minus a margin when
-        it sends the command, and leaves the field unset on a fire-and-forget
-        command, which nothing waits for (CONTROL_PLANE.md Sections 4.2 and 5).
+        it sends the command. It leaves the field unset on a fire-and-forget
+        command, which nothing waits for, and on a stop's final snapshot, which
+        must run however late (CONTROL_PLANE.md Sections 4.2 and 5).
         """
 
     def __init__(

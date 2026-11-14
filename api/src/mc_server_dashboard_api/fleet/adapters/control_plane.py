@@ -191,7 +191,8 @@ class ControlPlaneState:
         # fast, instead of letting them wait out the full command timeout. The
         # deadline is the event-loop time the caller stops waiting at, from which
         # the command's expiry is stamped when it is sent (issue #3305); None for a
-        # fire-and-forget command, which nothing waits for.
+        # command that never expires: a fire-and-forget one, which nothing waits
+        # for, and a final snapshot, which must run however late.
         self._pending: dict[
             str,
             tuple[WorkerId, asyncio.Future[pb.CommandResult], float | None],
@@ -295,8 +296,9 @@ class ControlPlaneState:
 
         ``budget`` is how long, from now, the caller waits for the result. It is
         kept as a deadline so :meth:`stamp_expiry` can tell the Worker how long it
-        may still hold the command (issue #3305). ``None`` means nothing waits and
-        the command never expires.
+        may still hold the command (issue #3305). ``None`` means the command never
+        expires: nothing waits for it (a fire-and-forget command), or it must run
+        however late (a final snapshot).
         """
 
         loop = asyncio.get_running_loop()
@@ -494,12 +496,12 @@ class ControlPlaneState:
         minus :data:`_EXPIRY_MARGIN_SECONDS`, so the Worker answers EXPIRED rather
         than run a command it reaches only after the API has stopped waiting
         (issue #3305). A command whose remaining budget is no more than the margin
-        could not be answered in time, so it is dropped unsent like a stale one.
-        Its records go with it, as for a stale command: nothing can answer it any
-        more, so its caller's timeout must find no snapshot record to promote, or
-        the record would hold the server's stop convergence in flight for as long
-        as the session lives (issue #3491). A command with no deadline (a
-        fire-and-forget one) is sent as it is.
+        could not be answered in time, so it is dropped unsent like a stale one,
+        and its pending entry goes with it. A command with no deadline (a
+        fire-and-forget one, or a final snapshot) is sent as it is, so a final
+        snapshot's record is never dropped here, where nothing could answer it
+        any more and the record would hold the server's stop convergence in
+        flight for as long as the session lives (issue #3491).
         """
 
         command_id = msg.correlation_id
@@ -510,7 +512,6 @@ class ControlPlaneState:
         expires_after = entry[2] - loop_time - _EXPIRY_MARGIN_SECONDS
         if expires_after <= 0:
             del self._pending[command_id]
-            self._snapshot_servers.pop(command_id, None)
             return False
         msg.api_command.expires_after.FromTimedelta(dt.timedelta(seconds=expires_after))
         return True
@@ -743,15 +744,6 @@ class GrpcControlPlane(ControlPlane):
         # A longer per-command budget (the start's hydrate phase, issue #822)
         # overrides the default command deadline for this one dispatch.
         timeout = self._timeout if timeout_override is None else timeout_override
-        # The command is sent with what is left of this budget as its expiry
-        # (issue #3305, ``stamp_expiry``). That stamp is not known yet, so the
-        # size gate counts the widest one the budget allows, which it overwrites.
-        api_command.expires_after.CopyFrom(_widest_expiry(timeout))
-        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
-        msg.sent_at.CopyFrom(self._now_timestamp())
-        refusal = _refuse_over_limit(msg)
-        if refusal is not None:
-            return refusal
         # A FINAL snapshot's server is recorded with the pending future so a timeout
         # or cancellation that discards the future still lets a late result — a
         # failure, canonically a TRANSFER_FAILED once the worker's transfer bound
@@ -768,11 +760,25 @@ class GrpcControlPlane(ControlPlane):
             if snapshot_is_final and isinstance(command, SnapshotCommand)
             else None
         )
+        # Every other command is sent with what is left of this budget as its
+        # expiry (issue #3305, ``stamp_expiry``). A final snapshot never expires:
+        # it is the stop's last capture and nothing retries it once it settles, so
+        # it runs however late, and its late result releases the hold. The stamp
+        # is not known yet, so the size gate counts the widest one the budget
+        # allows, which ``stamp_expiry`` overwrites.
+        expiry_budget = None if snapshot_server_id is not None else timeout
+        if expiry_budget is not None:
+            api_command.expires_after.CopyFrom(_widest_expiry(expiry_budget))
+        msg = pb.ApiMessage(correlation_id=command_id, api_command=api_command)
+        msg.sent_at.CopyFrom(self._now_timestamp())
+        refusal = _refuse_over_limit(msg)
+        if refusal is not None:
+            return refusal
         future = self._state.register_pending(
             command_id,
             worker_id,
             snapshot_server_id=snapshot_server_id,
-            budget=timeout,
+            budget=expiry_budget,
         )
         await queue.put(msg)
         try:

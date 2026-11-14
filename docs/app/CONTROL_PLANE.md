@@ -464,7 +464,8 @@ commands also share a small Worker-wide concurrency cap, so a command can wait
 for a slot behind other servers' work. `ServerCommand`, `TunnelDial`,
 `OpenBedrockTunnel` and `CloseBedrockTunnel` skip the cap but still wait their
 turn in their server's order. The API waits only a bounded time for each result,
-so each command it waits for carries an expiry, `expires_after`. A command still
+so each command it waits for, except a stop's final snapshot, carries an expiry,
+`expires_after`. A command still
 waiting when its expiry runs out is answered `EXPIRED` and is never executed
 (Section 5, "Expiry").
 
@@ -594,6 +595,13 @@ Notes:
   (Section 7) and the command is never executed. Unset or zero means no expiry.
   The API sends every fire-and-forget command without one, since nothing waits
   for its result: `TunnelDial`, `OpenBedrockTunnel` and `CloseBedrockTunnel`.
+  It also sends a stop's **final snapshot** without one. That snapshot is the
+  stop's last capture of the world, and nothing retries it once it settles, so
+  an expired one would lose everything since the last periodic snapshot. It
+  therefore runs however long it waits for a slot of the cap. The held
+  assignment keeps the server from being placed elsewhere in the meantime, and
+  its late result releases the hold (Section 5.1). Periodic and on-demand
+  snapshots carry an expiry like any other command.
   Without the expiry, a command the API had already given up on ran once its
   turn came, against an intent that may have moved on: a console line ran after
   its request had failed (and twice if the user retried), a file edit landed

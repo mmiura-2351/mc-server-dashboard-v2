@@ -1571,21 +1571,61 @@ async def test_a_command_with_no_budget_left_is_dropped_unsent(
     await call.done_writing()
 
 
-async def test_a_final_snapshot_dropped_unsent_is_not_left_outstanding() -> None:
-    # Dropped unsent, the snapshot can never report, so when its caller then times
-    # out nothing may be promoted to a late-snapshot record: it would hold the
-    # server's stop convergence in flight for as long as the session lives (#3491).
-    state = ControlPlaneState()
-    owner = WorkerId(_WORKER)
-    state.open_session(owner, 1)
-    state.register_pending(
-        "snap", owner, snapshot_server_id=_SERVER, budget=_EXPIRY_MARGIN_SECONDS / 2
+async def test_a_final_snapshot_is_never_stamped_and_runs_late() -> None:
+    # A final snapshot is the stop's last capture of the world, and nothing
+    # retries it once it settles (lifecycle.py ``_final_snapshot``): an EXPIRED one
+    # would release the hold with the progression since the last periodic snapshot
+    # lost. So it carries no expiry and still runs after its caller gave up (a
+    # long wait for a slot of the Worker-wide cap), and its late result releases
+    # the hold as before. A periodic snapshot keeps its stamp.
+    sink = _RecordingLateSnapshotSink()
+    # Past the margin, so the stamp a non-exempt snapshot would get is non-zero.
+    timeout = _EXPIRY_MARGIN_SECONDS + 0.2
+    harness = _Harness(command_timeout=timeout)
+    harness.state = ControlPlaneState(late_snapshot_sink=sink)
+    harness.control_plane = GrpcControlPlane(
+        harness.state, clock=harness.clock, timeout_seconds=timeout
     )
+    try:
+        stub = await harness.start()
+        call = await _registered_call(harness, stub)
+        worker = WorkerId(_WORKER)
+        snapshot = SnapshotCommand(transfer_url="u", transfer_token="t")
 
-    assert not state.stamp_expiry(_queued_command("snap"))
-    state.discard_pending("snap")  # the caller's timeout
+        periodic = asyncio.ensure_future(
+            harness.control_plane.dispatch(
+                worker_id=worker, server_id=_SERVER, command=snapshot
+            )
+        )
+        periodic_msg = await call.read()
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=periodic_msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        await periodic
+        assert periodic_msg.api_command.HasField("expires_after")
 
-    assert not state.final_snapshot_outstanding(_SERVER)
+        with pytest.raises(CommandTimedOutError):
+            await harness.control_plane.dispatch(
+                worker_id=worker,
+                server_id=_SERVER,
+                command=snapshot,
+                snapshot_is_final=True,
+            )
+        final_msg = await call.read()
+        assert not final_msg.api_command.HasField("expires_after")
+
+        # The capture completes after the caller timed out: the hold is released.
+        await harness.state.resolve(
+            final_msg.api_command.command_id, worker, pb.CommandResult(success=True)
+        )
+        assert sink.calls == [(_SERVER, worker.value, True, None)]
+        assert not harness.state.final_snapshot_outstanding(_SERVER)
+        await call.done_writing()
+    finally:
+        await harness.stop()
 
 
 async def test_a_fire_and_forget_command_carries_no_expiry(
@@ -1620,31 +1660,6 @@ async def test_a_fire_and_forget_command_carries_no_expiry(
 
     assert sent == ["tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel"]
     await call.done_writing()
-
-
-async def test_a_late_expired_final_snapshot_releases_the_held_assignment() -> None:
-    # The stop flow gave up on its final snapshot and holds the assignment. The
-    # Worker then answers EXPIRED: definitively not taken, so the existing
-    # late-snapshot path releases the hold as for any other failed result.
-    sink = _RecordingLateSnapshotSink()
-    state = ControlPlaneState(late_snapshot_sink=sink)
-    owner = WorkerId(_WORKER)
-    state.register_pending("snap", owner, snapshot_server_id=_SERVER)
-    state.discard_pending("snap")
-
-    await state.resolve(
-        "snap",
-        owner,
-        pb.CommandResult(
-            success=False,
-            error=pb.CommandError(
-                code=pb.COMMAND_ERROR_CODE_EXPIRED, message="expired in the lane"
-            ),
-        ),
-    )
-
-    assert sink.calls == [(_SERVER, _WORKER, False, "expired in the lane")]
-    assert not state.final_snapshot_outstanding(_SERVER)
 
 
 async def test_a_late_result_never_resolves_a_later_dispatch() -> None:
