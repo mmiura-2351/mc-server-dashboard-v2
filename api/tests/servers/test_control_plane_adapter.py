@@ -450,6 +450,8 @@ async def test_list_files_dispatches_and_carries_listing() -> None:
             CommandResultCode.SERVER_PROPERTIES_UNREADABLE,
             CommandStatus.SERVER_PROPERTIES_UNREADABLE,
         ),
+        # The start outwaited its budget before it started (issue #3305).
+        (CommandResultCode.EXPIRED, CommandStatus.EXPIRED),
     ],
 )
 async def test_sanitized_start_failure_maps_to_status(

@@ -648,6 +648,26 @@ async def test_on_demand_snapshot_names_a_refused_server_properties() -> None:
     assert excinfo.value.reason == "server_properties_unreadable"
 
 
+async def test_on_demand_snapshot_names_an_expired_snapshot() -> None:
+    # A manual backup that waited past its budget for a slot of the Worker's cap
+    # was not taken (issue #3305): its own reason, not the command_failed catch-all.
+    uow = FakeUnitOfWork()
+    server = _running_server()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(
+            status=worker_status("SnapshotTrigger", "command_expired"), message="x"
+        )
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await SnapshotServer(uow=uow, control_plane=cp)(
+            community_id=server.community_id, server_id=server.id
+        )
+
+    assert excinfo.value.reason == "command_expired"
+
+
 async def test_on_demand_snapshot_failure_logs_warning_with_server_and_kind(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

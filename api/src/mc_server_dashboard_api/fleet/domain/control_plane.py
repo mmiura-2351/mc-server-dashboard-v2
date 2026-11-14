@@ -23,6 +23,14 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.fleet.domain.errors import FleetError
 from mc_server_dashboard_api.fleet.domain.value_objects import DriverKind, WorkerId
 
+# How much sooner than the API's own deadline a sent command expires on the Worker
+# (issue #3305). The Worker answers EXPIRED in place of a command still waiting to
+# start when its expires_after runs out; the margin lets that answer arrive while
+# the API still waits, and absorbs the stream's transit time. Every awaited
+# command's budget must exceed it, or the command is never sent; the configuration
+# enforces that for the budget settings (config.py ``ControlSettings``).
+EXPIRY_MARGIN_SECONDS = 1.0
+
 
 class WorkerNotConnectedError(FleetError):
     """The target Worker has no live session to dispatch a command on.
@@ -73,6 +81,10 @@ class CommandResultCode(enum.Enum):
     # Worker to read (issue #3347), so a start, a restart's relaunch, a console
     # command or a running snapshot could not use it.
     SERVER_PROPERTIES_UNREADABLE = "server_properties_unreadable"
+    # The command's expiry budget ran out while it waited on the Worker to start
+    # (issue #3305), so the Worker did not apply it: definitively not applied, the
+    # opposite of a timeout's "may have been applied".
+    EXPIRED = "expired"
 
 
 class FileAccessReason(enum.Enum):

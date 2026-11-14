@@ -34,6 +34,19 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
+  // The command waited on the host past its budget and was not run (issue
+  // #3305). Nothing moved on any verb, so neither the pending-recovery messages
+  // command_failed takes on stop and restart nor the dispatch-failure one apply.
+  it.each([undefined, "start", "stop", "restart"] as const)(
+    "maps a 409 command_expired to the not-applied message (action %s)",
+    (action) => {
+      const error = new ApiError(409, { reason: "command_expired" });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "dashboard.lifecycle.commandExpired",
+      );
+    },
+  );
+
   it("maps a 409 server_unsettled to the at-rest precondition message", () => {
     const error = new ApiError(409, { reason: "server_unsettled" });
     expect(lifecycleErrorMessage(error)).toBe("serverDetail.error.unsettled");

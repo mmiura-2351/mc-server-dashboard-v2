@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Annotation only: control_plane imports this module.
+    from mc_server_dashboard_api.servers.domain.control_plane import CommandStatus
 
 
 class ServerError(Exception):
@@ -259,11 +264,23 @@ class CommandDispatchError(ServerError):
     409 body reason instead of the generic ``command_failed``. It stays ``None``
     for ordinary dispatch failures. The raw Worker message is never the reason:
     it can leak Worker host paths, so it is logged, not returned.
+
+    ``status`` is the outcome's status, for a caller inside the API that acts on
+    the refusal itself rather than on what the edge renders: the reconciler does
+    not count an ``EXPIRED`` start toward its backoff (issue #3305). It is never
+    rendered.
     """
 
-    def __init__(self, message: str = "", *, reason: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str | None = None,
+        status: CommandStatus | None = None,
+    ) -> None:
         super().__init__(message)
         self.reason = reason
+        self.status = status
 
 
 class ServerFileNotFoundError(ServerError):

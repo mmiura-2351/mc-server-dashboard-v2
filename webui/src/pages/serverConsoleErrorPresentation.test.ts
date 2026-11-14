@@ -34,6 +34,12 @@ describe("consoleCommandErrorPresentation", () => {
       "serverDetail.console.error.serverPropertiesUnreadable",
     ],
     [
+      // Not run at all (issue #3305), so not the RCON-failure line.
+      "names a command the busy host did not run in time",
+      new ApiError(409, { reason: "command_expired" }),
+      "serverDetail.console.error.commandExpired",
+    ],
+    [
       "names a server whose previous stop did not finish",
       new ApiError(409, { reason: "failed_stop_orphan" }),
       "serverDetail.console.error.failedStopOrphan",

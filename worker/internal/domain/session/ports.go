@@ -135,6 +135,12 @@ type Command struct {
 	// tunnel QUIC certificate for an OpenBedrockTunnel; empty means system roots
 	// (docs/app/BEDROCK_TUNNEL.md Section 4).
 	BedrockCAPEM string
+	// ExpiresAfter is how long the session may hold the command before it starts
+	// executing it, measured from when the receive loop received it (issue
+	// #3305). A command still waiting in its lane or for a cap slot when this
+	// runs out is answered CommandErrorExpired and never reaches the handler.
+	// Zero (the wire field unset) means the command never expires.
+	ExpiresAfter time.Duration
 }
 
 // CommandResult answers a Command. A failure carries an ErrorCode and message;
@@ -254,6 +260,11 @@ const (
 	// running SnapshotTrigger or a TunnelDial. Distinct from CommandErrorInternal so
 	// the user is told to restore a regular file.
 	CommandErrorServerPropertiesUnreadable
+	// CommandErrorExpired marks a command the session did not execute because its
+	// ExpiresAfter budget ran out while it waited in its lane or for a cap slot
+	// (issue #3305). The API had already stopped waiting for it, so the command was
+	// definitively not applied. The session emits it, never the handler.
+	CommandErrorExpired
 )
 
 // String renders the error code as a stable name for logs (issue #194).
@@ -281,6 +292,8 @@ func (c CommandErrorCode) String() string {
 		return "command_dropped"
 	case CommandErrorServerPropertiesUnreadable:
 		return "server_properties_unreadable"
+	case CommandErrorExpired:
+		return "expired"
 	default:
 		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
 	}

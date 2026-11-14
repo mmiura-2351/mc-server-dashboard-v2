@@ -23,6 +23,7 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+from mc_server_dashboard_api.fleet.domain.control_plane import EXPIRY_MARGIN_SECONDS
 from mc_server_dashboard_api.identity.domain.password_policy import PRESETS
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CEILING_MB,
@@ -189,24 +190,24 @@ class ControlSettings(_Section):
     heartbeat_timeout_seconds: int = Field(default=30, gt=0)
     # Deadline for a dispatched ApiCommand to be answered by a CommandResult
     # (CONTROL_PLANE.md Section 4.2); a command unanswered within it is a typed
-    # timeout the lifecycle layer treats as a failure. A zero/negative deadline
-    # would fail every command immediately.
-    command_timeout_seconds: int = Field(default=30, gt=0)
+    # timeout the lifecycle layer treats as a failure. It, and the three budgets
+    # below, must exceed the command expiry margin (``_exceed_expiry_margin``).
+    command_timeout_seconds: int = 30
     # Separate, generous deadline for the HYDRATE phase of a start (issue #822):
     # a working-set pull for a large world routinely exceeds the general command
     # timeout, so the hydrate trigger gets its own budget rather than forcing
     # operators to inflate the global ``command_timeout_seconds`` (which would
     # loosen every command it governs and widen the duplicate-start window — see
-    # the grace invariant in app.py). A zero/negative deadline would fail every hydrate.
-    hydrate_timeout_seconds: int = Field(default=600, gt=0)
+    # the grace invariant in app.py).
+    hydrate_timeout_seconds: int = 600
     # Separate, generous deadline for the final SNAPSHOT a graceful stop captures
     # (issue #847): the stop holds the assignment until this snapshot settles, so the
     # dispatch must span a full working-set upload (minutes for a large world) — under
     # the general 30s ``command_timeout_seconds`` the dispatch would time out and the
     # assignment would be released while the upload is still in flight, reopening the
     # stop->re-place race the hold exists to close. Mirrors ``hydrate_timeout_seconds``
-    # (#822/#868). A zero/negative deadline would fail every final snapshot.
-    snapshot_timeout_seconds: int = Field(default=600, gt=0)
+    # (#822/#868).
+    snapshot_timeout_seconds: int = 600
     # Separate, generous deadline for the STOP command's worker round-trip (issue
     # #930): a graceful stop does an in-container save (RCON save-all) and the
     # worker's docker-stop escalation (RCON wait -> SIGTERM grace -> SIGKILL,
@@ -218,9 +219,8 @@ class ControlSettings(_Section):
     # losing the stop-leg final snapshot. The stop therefore gets its own budget,
     # mirroring ``hydrate_timeout_seconds`` (#822) and ``snapshot_timeout_seconds``
     # (#847). Kept below ``reconciler.grace_seconds`` so the stale-stop arm never
-    # fires while a stop is legitimately in flight. A zero/negative deadline would
-    # fail every stop.
-    stop_timeout_seconds: int = Field(default=600, gt=0)
+    # fires while a stop is legitimately in flight.
+    stop_timeout_seconds: int = 600
     worker_credential: str | None = None
     tls: ControlTlsSettings = Field(default_factory=ControlTlsSettings)
 
@@ -228,6 +228,25 @@ class ControlSettings(_Section):
     # unset; collapse it to None so the app factory's fail-fast (control enabled
     # without a credential) treats a blank as missing (#939).
     _blank_credential = field_validator("worker_credential")(_blank_to_none)
+
+    @field_validator(
+        "command_timeout_seconds",
+        "hydrate_timeout_seconds",
+        "snapshot_timeout_seconds",
+        "stop_timeout_seconds",
+    )
+    @classmethod
+    def _exceed_expiry_margin(cls, value: int) -> int:
+        # A command is sent only while more than the expiry margin is left of its
+        # budget (issue #3305), so a budget at or below it never dispatches at
+        # all, even to an idle Worker. Reject it at load (fail-fast).
+        if value <= EXPIRY_MARGIN_SECONDS:
+            raise ValueError(
+                f"must be greater than the {EXPIRY_MARGIN_SECONDS:g} s command "
+                "expiry margin: a command is sent only while more than that is "
+                "left of its budget, so a smaller budget never dispatches"
+            )
+        return value
 
     @property
     def restart_timeout_seconds(self) -> int:

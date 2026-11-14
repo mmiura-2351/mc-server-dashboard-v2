@@ -3,6 +3,9 @@ package controlplane
 import (
 	"reflect"
 	"testing"
+	"time"
+
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -127,6 +130,15 @@ func TestToCommandMapsPayload(t *testing.T) {
 			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_CloseBedrockTunnel{CloseBedrockTunnel: &controlplanev1.CloseBedrockTunnel{ServerId: "s1"}}},
 			want: session.Command{Kind: "CloseBedrockTunnel"},
 		},
+		{
+			// expires_after rides beside the oneof, whatever the kind (issue #3305).
+			name: "expires after",
+			cmd: &controlplanev1.ApiCommand{
+				Command:      &controlplanev1.ApiCommand_Restart{Restart: &controlplanev1.RestartServer{}},
+				ExpiresAfter: durationpb.New(19*time.Second + 250*time.Millisecond),
+			},
+			want: session.Command{Kind: "RestartServer", ExpiresAfter: 19*time.Second + 250*time.Millisecond},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,6 +206,7 @@ func TestMapErrorCode(t *testing.T) {
 		{"busy", session.CommandErrorBusy, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_BUSY},
 		{"command dropped", session.CommandErrorCommandDropped, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED},
 		{"server.properties unreadable", session.CommandErrorServerPropertiesUnreadable, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE},
+		{"expired", session.CommandErrorExpired, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_EXPIRED},
 		{"unrecognized", session.CommandErrorCode(99), controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL},
 	}
 	for _, tc := range tests {
