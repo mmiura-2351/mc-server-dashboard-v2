@@ -36,8 +36,9 @@ type fakeDocker struct {
 	// startRunsThenBlocks models a start the daemon carries out but does not
 	// answer: Start marks the container running (runningID), then blocks until its
 	// context is done and returns the context error. While runningID is set, List
-	// reports the container running, until a Remove of it succeeds (issues #3645,
-	// #3650). onStart, when set, runs first in every Start, outside the lock.
+	// and Inspect report the container running, until a stop or a Remove of it
+	// succeeds (issues #3645, #3650). onStart, when set, runs first in every Start,
+	// outside the lock.
 	startRunsThenBlocks bool
 	runningID           string
 	onStart             func()
@@ -99,6 +100,9 @@ type fakeDocker struct {
 	// ordering for running orphans (issue #336).
 	stopped []string
 	stopErr error
+	// ops records, in order, each stop (Stop or Terminate) as "stop <id>" and each
+	// Remove as "remove <id>", so a test can tell which came first (issue #3645).
+	ops []string
 	// daemonStops counts Stop calls (`docker stop`, daemon-side SIGKILL) and
 	// terminates Terminate calls (SIGTERM alone) (issue #3436).
 	daemonStops int
@@ -265,9 +269,13 @@ func (f *fakeDocker) ImagePull(ctx context.Context, image string) error {
 	return f.imagePullErr
 }
 
-func (f *fakeDocker) Inspect(ctx context.Context, _ string) (ContainerInfo, error) {
+func (f *fakeDocker) Inspect(ctx context.Context, name string) (ContainerInfo, error) {
 	f.mu.Lock()
 	block := f.inspectBlocksUntilCtxDone
+	if !block && name != "" && name == f.runningID {
+		f.mu.Unlock()
+		return ContainerInfo{ID: name, Running: true}, nil
+	}
 	if !block {
 		if len(f.inspectSteps) > 0 {
 			step := f.inspectSteps[0]
@@ -394,6 +402,10 @@ func (f *fakeDocker) term(ctx context.Context, id string) error {
 		f.stopBudgetSeen = true
 	}
 	f.stopped = append(f.stopped, id)
+	f.ops = append(f.ops, "stop "+id)
+	// A stop of the container a start left running (runningID) ends that one, not
+	// the instance whose exit the shared exited channel releases.
+	leftover := id != "" && id == f.runningID
 	noExit := f.stopNoExit
 	stopErr := f.stopErr
 	blockUntilCancel := f.stopBlocksUntilCancel
@@ -405,7 +417,13 @@ func (f *fakeDocker) term(ctx context.Context, id string) error {
 	if stopErr != nil {
 		return stopErr
 	}
-	if !noExit {
+	switch {
+	case noExit:
+	case leftover:
+		f.mu.Lock()
+		f.runningID = ""
+		f.mu.Unlock()
+	default:
 		f.exit(0, nil)
 	}
 	return nil
@@ -467,6 +485,7 @@ func (f *fakeDocker) Remove(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.removed = append(f.removed, id)
+	f.ops = append(f.ops, "remove "+id)
 	f.removeCtxErrs = append(f.removeCtxErrs, ctx.Err())
 	if f.removeStallsLeft > 0 {
 		f.removeStallsLeft--
@@ -3824,8 +3843,8 @@ func TestStartDoesNotHoldBackTheNextStartForAContainerARefusedStartLeft(t *testi
 	docker.removeErr = errors.New("daemon busy")
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
 
-	if err := startWithin(context.Background(), t, d, spec()); errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("first start err = %v, want the daemon's refusal", err)
+	if err := startWithin(context.Background(), t, d, spec()); !errors.Is(err, execution.ErrPortConflict) {
+		t.Fatalf("first start err = %v, want the daemon's port-conflict refusal", err)
 	}
 	docker.mu.Lock()
 	docker.startErr = nil
@@ -3836,6 +3855,248 @@ func TestStartDoesNotHoldBackTheNextStartForAContainerARefusedStartLeft(t *testi
 	}
 	docker.exit(0, nil)
 	drainClosed(inst.Events())
+}
+
+// A container an unanswered start left running, which its cleanup failed to
+// remove, may be a live Minecraft server with unsaved world state. The next start
+// of the server stops it gracefully, as the boot's sweep stops a running orphan,
+// before it force-removes it (issue #3645).
+func TestStartStopsTheContainerAnAmbiguousStartLeftRunningBeforeRemovingIt(t *testing.T) {
+	docker := newFakeDocker()
+	docker.startRunsThenBlocks = true
+	docker.removeErrs = []error{errors.New("daemon busy"), nil}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.initialLaunchStartTimeout = 20 * time.Millisecond
+
+	if err := startWithin(context.Background(), t, d, spec()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first start err = %v, want the start's timeout", err)
+	}
+	docker.mu.Lock()
+	docker.startRunsThenBlocks = false
+	docker.mu.Unlock()
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("next start: %v, want the leftover stopped and removed and the server started", err)
+	}
+	docker.mu.Lock()
+	ops := append([]string(nil), docker.ops...)
+	daemonStops := docker.daemonStops
+	docker.mu.Unlock()
+	if want := []string{"remove container-1", "stop container-1", "remove container-1"}; !slices.Equal(ops, want) {
+		t.Fatalf("ops = %v, want %v: the failed cleanup, then a stop of the leftover before its removal", ops, want)
+	}
+	// The test driver has no WorldProgress, so the sweep's rule falls back to its
+	// fixed-grace docker stop.
+	if daemonStops != 1 {
+		t.Fatalf("docker stops = %d, want the one graceful stop of the leftover", daemonStops)
+	}
+	if got := unremovedOf(d, "s1"); len(got) != 0 {
+		t.Fatalf("recorded = %v, want the record cleared", got)
+	}
+	docker.exit(0, nil)
+	drainClosed(inst.Events())
+}
+
+// A graceful stop of a running leftover that stalls is cut short by its own
+// bound. The leftover is not force-removed and stays recorded, and the start is
+// refused naming it; once a later start can stop it, that start removes it and
+// goes ahead (issue #3645).
+func TestStartKeepsARunningLeftoverWhoseGracefulStopStalls(t *testing.T) {
+	docker := newFakeDocker()
+	docker.runningID = "container-1"
+	docker.stopBlocksUntilCancel = true
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.unremoved.add("s1", "container-1")
+	// The stop's own deadlines are long, so only the leftover stop's bound ends it.
+	d.stopTimeout, d.sweepCallMargin = time.Hour, time.Hour
+	d.unremovedStopTimeout = 20 * time.Millisecond
+
+	err := startWithin(context.Background(), t, d, spec())
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container container-1") ||
+		!strings.Contains(err.Error(), "graceful stop") {
+		t.Fatalf("start err = %v, want a refusal naming container-1 for its stalled stop", err)
+	}
+	docker.mu.Lock()
+	ops := append([]string(nil), docker.ops...)
+	docker.stopBlocksUntilCancel = false
+	docker.mu.Unlock()
+	if want := []string{"stop container-1"}; !slices.Equal(ops, want) {
+		t.Fatalf("ops = %v, want %v: no removal after the stop failed", ops, want)
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
+		t.Fatalf("recorded = %v, want container-1 kept", got)
+	}
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("next start: %v, want the leftover stopped and removed and the server started", err)
+	}
+	docker.mu.Lock()
+	ops = append([]string(nil), docker.ops...)
+	docker.mu.Unlock()
+	if want := []string{"stop container-1", "stop container-1", "remove container-1"}; !slices.Equal(ops, want) {
+		t.Fatalf("ops = %v, want %v", ops, want)
+	}
+	docker.exit(0, nil)
+	drainClosed(inst.Events())
+}
+
+// With a world to watch, the leftover's stop follows the sweep's rule on the
+// server's working set: SIGTERM, then a wait while the world may still be
+// written. One still running when the stop's bound runs out is abandoned with no
+// kill and stays recorded, and the WARN says the next start tries again (issue
+// #3645).
+func TestStartAbandonsAWatchedStopOfALeftoverAtItsBound(t *testing.T) {
+	docker := newFakeDocker()
+	docker.runningID = "container-1"
+	docker.stopNoExit = true
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	var logged syncBuffer
+	d.logger = slog.New(slog.NewTextHandler(&logged, nil))
+	var watched []string
+	d.worldProgress = func(dir string) func() (execution.WorldProgress, error) {
+		watched = append(watched, dir)
+		return func() (execution.WorldProgress, error) { return execution.WorldProgress{}, nil }
+	}
+	d.unremoved.add("s1", "container-1")
+	d.stopTimeout, d.stopCap = time.Hour, time.Hour
+	d.unremovedStopTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { docker.exit(0, nil) })
+
+	err := startWithin(context.Background(), t, d, spec())
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "graceful stop") {
+		t.Fatalf("start err = %v, want a refusal for the leftover's abandoned stop", err)
+	}
+	if !slices.Equal(watched, []string{spec().WorkingDir}) {
+		t.Fatalf("watched = %v, want the server's working set", watched)
+	}
+	if docker.terminateCount() != 1 || docker.daemonStopCalled() || docker.killCount() != 0 {
+		t.Fatalf("terminates = %d, docker stop = %v, kills = %d; want one SIGTERM and no kill",
+			docker.terminateCount(), docker.daemonStopCalled(), docker.killCount())
+	}
+	if out := logged.String(); !strings.Contains(out, "abandoning it without a kill") ||
+		!strings.Contains(out, "the server's next start tries again") {
+		t.Fatalf("log = %q, want the abandoned stop's WARN", out)
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
+		t.Fatalf("recorded = %v, want container-1 kept", got)
+	}
+}
+
+// A recorded leftover that cannot be inspected may still be running, so it is
+// neither stopped nor removed: it stays recorded and the start is refused naming
+// it (issue #3645).
+func TestStartRefusesWhileALeftoverCannotBeInspected(t *testing.T) {
+	docker := newFakeDocker()
+	docker.inspectBlocksUntilCtxDone = true
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.unremoved.add("s1", "container-1")
+	d.exitRemoveTimeout = 20 * time.Millisecond
+
+	err := startWithin(context.Background(), t, d, spec())
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container container-1") ||
+		!strings.Contains(err.Error(), "inspect") {
+		t.Fatalf("start err = %v, want a refusal naming container-1 for its stalled inspect", err)
+	}
+	docker.mu.Lock()
+	ops := append([]string(nil), docker.ops...)
+	docker.mu.Unlock()
+	if len(ops) != 0 {
+		t.Fatalf("ops = %v, want no stop or removal of a container whose state is unknown", ops)
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
+		t.Fatalf("recorded = %v, want container-1 kept", got)
+	}
+}
+
+// A recorded leftover the daemon no longer knows, answered 404 by the inspect or
+// by the removal (the cleanup's removal may have finished on the daemon after it
+// timed out on ours), is gone: the record is cleared and the start goes ahead
+// (issue #3645). One that is present but not running is removed with no stop.
+func TestStartClearsALeftoverTheDaemonNoLongerKnows(t *testing.T) {
+	notFound := statusError{method: "DELETE", path: "/containers/container-1", code: 404, message: "No such container"}
+	for _, tc := range []struct {
+		name       string
+		inspectErr error
+		removeErr  error
+		wantOps    []string
+	}{
+		{name: "inspect 404", inspectErr: fmt.Errorf("%w: status 404", errNotFound), wantOps: nil},
+		{name: "remove 404", removeErr: notFound, wantOps: []string{"remove container-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.inspectErr = tc.inspectErr
+			docker.removeErrs = []error{tc.removeErr, nil}
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
+			d.unremoved.add("s1", "container-1")
+
+			inst, err := d.Start(context.Background(), spec())
+			if err != nil {
+				t.Fatalf("start: %v, want the gone leftover not to refuse it", err)
+			}
+			docker.mu.Lock()
+			ops := append([]string(nil), docker.ops...)
+			docker.mu.Unlock()
+			if !slices.Equal(ops, tc.wantOps) {
+				t.Fatalf("ops = %v, want %v", ops, tc.wantOps)
+			}
+			if got := unremovedOf(d, "s1"); len(got) != 0 {
+				t.Fatalf("recorded = %v, want the record cleared", got)
+			}
+			docker.exit(0, nil)
+			drainClosed(inst.Events())
+		})
+	}
+}
+
+// A recorded leftover whose removal the daemon reports in progress (409) does not
+// refuse the start: the quiescence wait that follows refuses it while the
+// container still runs. The daemon may still fail that removal, so the id stays
+// recorded, and the next create's removal, answered 404 once it is gone, clears
+// it (issue #3645).
+func TestStartKeepsALeftoverWhoseRemovalIsInProgress(t *testing.T) {
+	docker := newFakeDocker()
+	docker.removeErrs = []error{fmt.Errorf("%w: status 409", errRemovalInProgress), nil}
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d.unremoved.add("s1", "container-1")
+
+	inst, err := d.Start(context.Background(), spec())
+	if err != nil {
+		t.Fatalf("start: %v, want a removal in progress not to refuse it", err)
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
+		t.Fatalf("recorded = %v, want container-1 kept for the next create", got)
+	}
+	docker.exit(0, nil)
+	drainClosed(inst.Events())
+
+	docker.mu.Lock()
+	docker.removeErrs = []error{statusError{method: "DELETE", path: "/containers/container-1", code: 404, message: "No such container"}}
+	removes := len(docker.removed)
+	docker.mu.Unlock()
+	// The next create's first step.
+	if err := d.removeUnremoved(context.Background(), spec()); err != nil {
+		t.Fatalf("removeUnremoved: %v, want the gone leftover cleared", err)
+	}
+	docker.mu.Lock()
+	retried := len(docker.removed) - removes
+	docker.mu.Unlock()
+	if retried != 1 {
+		t.Fatalf("removals = %d, want the next create to retry the removal once", retried)
+	}
+	if got := unremovedOf(d, "s1"); len(got) != 0 {
+		t.Fatalf("recorded = %v, want the record cleared", got)
+	}
+}
+
+// unremovedOf returns the containers d records for serverID's next create to
+// remove (issue #3645).
+func unremovedOf(d *Driver, serverID string) []string {
+	d.unremoved.mu.Lock()
+	defer d.unremoved.mu.Unlock()
+	return append([]string(nil), d.unremoved.ids[serverID]...)
 }
 
 // startWithin runs d.Start and returns its error, failing if the start is still

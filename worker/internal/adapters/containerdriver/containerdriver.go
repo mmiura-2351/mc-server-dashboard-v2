@@ -289,6 +289,9 @@ type Driver struct {
 	// unremoved records the containers failed docker starts left behind, for the
 	// server's next create to remove (issue #3645).
 	unremoved *unremovedStarts
+	// unremovedStopTimeout bounds removeUnremoved's graceful stop of a recorded
+	// container that is still running.
+	unremovedStopTimeout time.Duration
 	// logger records the lazy base-image pull at INFO (issue #904).
 	logger *slog.Logger
 	// handOffs tracks the stops in flight on this driver's instances, so a Worker
@@ -367,6 +370,7 @@ func New(docker dockerAPI, images *ImageSelector, openControl controlFunc, opts 
 		initialLaunchStartTimeout:  initialLaunchStartTimeout,
 		initialInstallStartTimeout: initialInstallStartTimeout,
 		unremoved:                  &unremovedStarts{},
+		unremovedStopTimeout:       unremovedStopTimeout,
 		logger:                     logger,
 	}
 	d.handOffs = &stopHandOffs{d: d, stops: map[*inflightStop]struct{}{}}
@@ -605,6 +609,11 @@ const (
 // (unremovedStarts), since the wait-for-name-free loop declines a running one
 // (issue #3645). One the daemon refused to start is not running, and is left to
 // that loop as before.
+//
+// Any status the daemon answers the start with, a 5xx included, counts as that
+// refusal, as it did before this record existed. Should a daemon have run the
+// container all the same, the next create still fails closed: awaitQuiescent
+// refuses it while the container runs.
 func (d *Driver) removeCreated(ctx context.Context, serverID, id string, startErr error) {
 	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startCleanupRemoveTimeout)
 	defer cancel()
@@ -639,6 +648,13 @@ func (d *Driver) startBounded(ctx context.Context, id, what string, timeout time
 // Driver; a Worker restart loses it, and the boot's sweep removes the containers
 // it named. Its mutex guards only the map, never a Docker call or an instance
 // lock.
+//
+// removeUnremoved's take and the add of what it could not remove are two steps,
+// not one. That relies on two invariants: the manager's reservation serializes
+// the creates of one server, so no other create of it runs in between, and
+// every record is written before the failed start that left the container
+// returns, or before the instance's terminal, so the server's next create finds
+// it.
 type unremovedStarts struct {
 	mu  sync.Mutex
 	ids map[string][]string
@@ -664,27 +680,87 @@ func (u *unremovedStarts) take(serverID string) []string {
 	return ids
 }
 
-// removeUnremoved force-removes, by id, the containers failed starts of serverID
+// unremovedStopTimeout bounds removeUnremoved's graceful stop of a recorded
+// container that is still running. It covers the stop rule's 30 s idle window,
+// its deadline grace and the kill call (defaultStopTimeout, stopDeadlineGrace,
+// stopKillCallTimeout), so a container that ignores SIGTERM and writes nothing
+// is still killed and removed. It also covers the fixed-grace `docker stop`
+// with its margin. A container still writing its shutdown save when the bound
+// fires is left running with no kill and stays recorded; the create is refused,
+// and a later one, by when the save has usually finished, tries again. The bound
+// is well short of the 360 s cap, since the stop holds up a start, and with it
+// the server's reservation.
+const unremovedStopTimeout = defaultStopTimeout + stopDeadlineGrace + stopKillCallTimeout
+
+// removeUnremoved removes, by id, the containers failed starts of the server
 // left behind (unremovedStarts), before the server's next create (issue #3645).
-// Each removal is bounded by exitRemoveTimeout and the caller's context, and none
-// runs under an instance lock. A container gone already, or being removed, counts
-// as removed. One still not removed stays recorded and refuses the create, since
-// it may be running against the working set; a later create tries again.
-func (d *Driver) removeUnremoved(ctx context.Context, serverID string) error {
+// None of it runs under an instance lock. Each recorded container goes through
+// removeLeftover. One whose removal is in progress does not refuse the create,
+// but it stays recorded, because the daemon may fail that removal. The
+// awaitQuiescent wait right after refuses the create while the container still
+// runs, and the next create tries the removal again. Any other container that is
+// not removed stays recorded and refuses the create, since it may be running
+// against the working set; a later create tries again.
+func (d *Driver) removeUnremoved(ctx context.Context, spec execution.InstanceSpec) error {
 	var refusal error
-	for _, id := range d.unremoved.take(serverID) {
-		removeCtx, cancel := context.WithTimeout(ctx, d.exitRemoveTimeout)
-		err := d.docker.Remove(removeCtx, id)
-		cancel()
-		if err == nil || removedConcurrently(err) {
+	for _, id := range d.unremoved.take(spec.ServerID) {
+		gone, err := d.removeLeftover(ctx, spec, id)
+		if gone {
 			continue
 		}
-		d.unremoved.add(serverID, id)
-		if refusal == nil {
+		d.unremoved.add(spec.ServerID, id)
+		if err != nil && refusal == nil {
 			refusal = fmt.Errorf("container %s, which a failed start may have left running, is not removed: %w", id, err)
 		}
 	}
 	return refusal
+}
+
+// removeLeftover removes one container removeUnremoved found recorded, and
+// reports whether it is gone. Such a container may be a live Minecraft server,
+// reachable on its game port and holding unsaved world state. So the driver
+// inspects it first, and stops a running one gracefully before the force-remove.
+// The stop follows the rule the boot's Sweep applies to a running orphan
+// (sweepStop, issues #336, #3445), watching the server's working set, and is
+// bounded by unremovedStopTimeout. The inspect and the remove are each bounded
+// by exitRemoveTimeout, all under the caller's context.
+//
+// A container the daemon does not know (a 404 to the inspect or the remove) is
+// gone. A removal in progress (a 409) returns false with no error. A failed
+// inspect, stop or remove returns false with the error. A container whose stop
+// failed is not removed.
+func (d *Driver) removeLeftover(ctx context.Context, spec execution.InstanceSpec, id string) (bool, error) {
+	inspectCtx, cancel := context.WithTimeout(ctx, d.exitRemoveTimeout)
+	info, err := d.docker.Inspect(inspectCtx, id)
+	cancel()
+	switch {
+	case errors.Is(err, errNotFound):
+		return true, nil
+	case err != nil:
+		return false, fmt.Errorf("inspect: %w", err)
+	}
+	if info.Running {
+		stopCtx, cancel := context.WithTimeout(ctx, d.unremovedStopTimeout)
+		err := d.sweepStop(stopCtx, Container{ID: id, Name: id, WorkingDir: spec.WorkingDir},
+			"the stop of a container a failed start left running was cut short; abandoning it without a kill, "+
+				"so it keeps running until the server's next start tries again")
+		cancel()
+		if err != nil {
+			return false, fmt.Errorf("graceful stop: %w", err)
+		}
+	}
+	removeCtx, cancel := context.WithTimeout(ctx, d.exitRemoveTimeout)
+	err = d.docker.Remove(removeCtx, id)
+	cancel()
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, errRemovalInProgress):
+		return false, nil
+	case removedConcurrently(err):
+		return true, nil
+	}
+	return false, err
 }
 
 // runInstallContainer creates and starts the supervised Forge install container,
@@ -803,7 +879,7 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 		return "", errors.New("containerdriver: not handing over the working set: the spec carries no working-set lock")
 	}
 	begin := time.Now()
-	if err := d.removeUnremoved(ctx, spec.ServerID); err != nil {
+	if err := d.removeUnremoved(ctx, spec); err != nil {
 		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
 	}
 	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
@@ -1119,7 +1195,8 @@ func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
 		// can auto-save the world. Failure is logged and does not block the stop — the
 		// pre-fix behavior was no save-on at all.
 		d.sweepSaveOn(ctx, c.Name, c.Labels[labelMCVersion])
-		if err := d.sweepStop(ctx, c); err != nil {
+		if err := d.sweepStop(ctx, c, "sweep: the worker is shutting down; abandoning the orphan's stop without a kill, "+
+			"so it keeps running until the next boot's sweep"); err != nil {
 			errs = append(errs, fmt.Errorf("stop %s (%s): %w", c.Name, c.ID, err))
 		}
 	}
@@ -1144,7 +1221,9 @@ func (d *Driver) sweepContainer(ctx context.Context, c Container) error {
 //
 // A Worker that shuts down mid-sweep cancels ctx, and the stop is abandoned with
 // no kill: the orphan keeps running until the next boot's sweep (issue #3515).
-func (d *Driver) sweepStop(ctx context.Context, c Container) error {
+// abandoned is the WARN logged then, which states that consequence for the
+// caller; removeLeftover's stop is abandoned when its own bound runs out.
+func (d *Driver) sweepStop(ctx context.Context, c Container, abandoned string) error {
 	if c.WorkingDir == "" || d.worldProgress == nil {
 		d.logger.Warn("sweep: no working set to watch for this orphan; stopping it with the fixed grace, "+
 			"which can cut a shutdown save short",
@@ -1173,9 +1252,7 @@ func (d *Driver) sweepStop(ctx context.Context, c Container) error {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
-		d.logger.Warn("sweep: the worker is shutting down; abandoning the orphan's stop without a kill, "+
-			"so it keeps running until the next boot's sweep",
-			"container", c.Name, "elapsed", d.now().Sub(requested))
+		d.logger.Warn(abandoned, "container", c.Name, "elapsed", d.now().Sub(requested))
 		return errors.Join(termErr, fmt.Errorf("stop abandoned: %w", err))
 	}
 	d.logger.Warn("sweep: the orphan did not exit after SIGTERM; killing it",
@@ -3117,7 +3194,9 @@ func (i *instance) removeContainer(id string) {
 // included) may have run it, so such a container the removal leaves behind is
 // recorded for the server's next create to remove (unremovedStarts, issue #3645).
 // It runs after the instance lock is released, and before the terminal, so the
-// next start of the server finds the record.
+// next start of the server finds the record. A start the daemon answered with an
+// error status, a 5xx included, is taken as refused, as in removeCreated:
+// awaitQuiescent fails closed should the container be running anyway.
 func (i *instance) removeFailedStart(id string, startErr error) {
 	if !isTransportError(startErr) {
 		i.removeContainer(id)
