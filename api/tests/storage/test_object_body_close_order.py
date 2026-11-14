@@ -51,6 +51,7 @@ class _Rig:
     stalled: asyncio.Event = field(default_factory=asyncio.Event)
     fail_after: int | None = None
     on_close: Callable[[], None] | None = None
+    exit_suspends: bool = False
 
     def log(self, event: str) -> None:
         if self.armed:
@@ -77,9 +78,9 @@ class _Body:
         return chunk
 
     def close(self) -> None:
+        self._rig.log("close")
         if self._rig.on_close is not None:
             self._rig.on_close()
-        self._rig.log("close")
 
 
 class _BodyClient(FakeS3Client):
@@ -106,7 +107,15 @@ async def _storage(
         try:
             yield _BodyClient(store, rig)
         finally:
-            rig.log("client-exit")
+            try:
+                if rig.exit_suspends:
+                    # A real client's exit awaits, so a cancel can land in it.
+                    await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                rig.log("exit-cancelled")
+                raise
+            finally:
+                rig.log("client-exit")
 
     storage = ObjectStorage(_factory)
     community, server = new_scope()
@@ -223,8 +232,10 @@ async def test_a_cancel_during_a_held_body_close_keeps_the_lease_until_it_finish
 ) -> None:
     # The body's close is synchronous, so holding it holds the loop. A helper
     # thread observes the lease ledger (lock-guarded) while the close is held,
-    # requests a second cancel, then lets the close finish.
+    # requests a second cancel, then lets the close finish. That cancel lands in
+    # the client's exit, the one await between the close and the release.
     storage, community, server, rig = await _storage(monkeypatch)
+    rig.exit_suspends = True
     loop = asyncio.get_running_loop()
     entered = threading.Event()
     resume = threading.Event()
@@ -264,5 +275,27 @@ async def test_a_cancel_during_a_held_body_close_keeps_the_lease_until_it_finish
         await asyncio.to_thread(helper.join, 10)
 
     assert held_during_close == [True]
+    assert rig.events == ["close", "exit-cancelled", "client-exit", "release"]
+    assert not storage._leases
+
+
+@_STREAMS
+async def test_a_body_close_fault_is_raised_once_and_the_lease_still_goes(
+    monkeypatch: pytest.MonkeyPatch, open_stream: _Open
+) -> None:
+    storage, community, server, rig = await _storage(monkeypatch)
+    fault = OSError("injected body close fault")
+
+    def _fail() -> None:
+        raise fault
+
+    rig.on_close = _fail
+
+    with pytest.raises(OSError) as excinfo:
+        async with open_stream(storage, community, server, rig) as stream:
+            await _until_served(stream, rig)
+            await stream.aclose()  # type: ignore[attr-defined]
+
+    assert excinfo.value is fault
     assert rig.events == _ORDER
     assert not storage._leases
