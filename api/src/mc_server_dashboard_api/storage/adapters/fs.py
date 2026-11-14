@@ -307,6 +307,18 @@ def _close_orphaned_read(opened: tuple[io.BufferedReader, Callable[[], None]]) -
         release()
 
 
+def _open_releasing_on_fault(
+    release: Callable[[], None], path: Path, not_found: str
+) -> tuple[io.BufferedReader, Callable[[], None]]:
+    """Open ``path`` for a stream whose lease ``release`` releases, or release it."""
+
+    try:
+        return _open_readable_sync(path, not_found), release
+    except BaseException:
+        release()
+        raise
+
+
 def _release_after_read(
     release: Callable[[], None], reading: asyncio.Future[Any]
 ) -> None:
@@ -536,8 +548,10 @@ async def _close_off_loop(handle: _Closable) -> None:
     Shielded: a cancel while the close still waits for a worker would otherwise
     drop it, leaving the handle to the GC, so a cancelled caller's close goes on,
     its fault logged. A close the shut-down executor refuses runs on a thread of
-    its own, as :func:`_close_abandoned`'s does, and is awaited the same way. The
-    close and any log of its fault run in the caller's context.
+    its own, as :func:`_close_abandoned`'s does, and is awaited the same way. If
+    that thread cannot start either, the close runs here, on the loop: the last
+    resort, so the handle is still closed, and what its close does still runs
+    (issue #3618). The close and any log of its fault run in the caller's context.
     """
 
     loop = asyncio.get_running_loop()
@@ -548,7 +562,12 @@ async def _close_off_loop(handle: _Closable) -> None:
     except RuntimeError:  # "Executor shutdown has been called"
         woken = loop.create_future()
         wake = functools.partial(loop.call_soon_threadsafe, woken.set_result, None)
-        threading.Thread(target=context.run, args=(close.run, wake)).start()
+        try:
+            threading.Thread(target=context.run, args=(close.run, wake)).start()
+        except RuntimeError:  # "can't start new thread"
+            close.run(_no_wake)
+            close.raise_fault()
+            return
     try:
         await asyncio.shield(woken)
     except asyncio.CancelledError:
@@ -902,11 +921,7 @@ class FsStorage(Storage):
         return release
 
     async def _read_leased(
-        self,
-        snapshot: Path,
-        fn: Callable[..., _R],
-        *args: Any,
-        reclaim: Callable[[_R], None] | None = None,
+        self, snapshot: Path, fn: Callable[..., _R], *args: Any
     ) -> _R:
         """Run ``fn(*args)`` — a job that reads ``snapshot`` — off the loop.
 
@@ -915,8 +930,6 @@ class FsStorage(Storage):
         unwinds, while the thread is still reading (issue #3577). So the job takes
         a lease of its own, which the job's done-callback releases. The job is
         awaited shielded, so that callback runs only once the thread has finished.
-        A cancelled caller hands what the job returns to ``reclaim``, as
-        :func:`_acquire_off_loop` does (issue #3584).
         """
 
         self._acquire_lease(snapshot)
@@ -927,12 +940,7 @@ class FsStorage(Storage):
             release()
             raise
         reading.add_done_callback(functools.partial(_release_after_read, release))
-        try:
-            return await asyncio.shield(reading)
-        except asyncio.CancelledError:
-            if reclaim is not None:
-                reading.add_done_callback(functools.partial(_reclaim_orphan, reclaim))
-            raise
+        return await asyncio.shield(reading)
 
     # --- active-staging leases (issue #183) --------------------------------
 
@@ -3917,21 +3925,24 @@ class _FsWorkingSetView(WorkingSetView):
         The stream's lease, not the view's, covers it to the end of its close: a
         consumer cancelled during the close exits the view, releasing the view's
         lease, while the close still runs (issue #3618). It is taken on the loop
-        while the view's lease still pins ``pinned``. The open, which reads the
-        snapshot on a thread, takes one of its own (issue #3577).
+        while the view's lease still pins ``pinned``, and covers the open on its
+        thread too (issue #3577). A caller cancelled during the open hands the lease
+        to the open, as :meth:`FsStorage.open_file_stream`'s does: a late handle is
+        closed before the lease is released, and an open that fails releases it.
         """
 
         self._storage._acquire_lease(pinned)
         release = self._storage._lease_release(pinned)
         try:
-            handle = await self._storage._read_leased(
-                pinned,
-                _open_readable_sync,
+            return await _acquire_off_loop(
+                _close_orphaned_read,
+                _open_releasing_on_fault,
+                release,
                 target,
                 f"file not found: {rel}",
-                reclaim=_close_orphaned_handle,
             )
+        except asyncio.CancelledError:
+            raise  # the still-running open owns the lease
         except BaseException:
-            release()
+            release()  # the open was refused, or already released it as it failed
             raise
-        return handle, release

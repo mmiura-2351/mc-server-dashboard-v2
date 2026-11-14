@@ -23,6 +23,7 @@ import pytest
 
 from mc_server_dashboard_api.storage.adapters import fs
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     RelPath,
@@ -330,3 +331,95 @@ async def test_a_finished_file_stream_releases_its_lease_once(
         assert [chunk async for chunk in stream] == [b"OLD"]
 
     assert release.calls == 1
+
+
+class _SweptAtClose:
+    """A real file whose close first sweeps and records whether ``snapshot`` survived.
+
+    The close of a cancelled open's late handle runs on the loop, so it cannot be
+    held while a sweep runs: the sweep runs at the close's entry instead.
+    """
+
+    def __init__(
+        self, handle: Any, storage: FsStorage, snapshot: Path, survived: list[bool]
+    ) -> None:
+        self.name = handle.name
+        self._handle = handle
+        self._storage = storage
+        self._snapshot = snapshot
+        self._survived = survived
+
+    def close(self) -> None:
+        self._storage.sweep()
+        self._survived.append(self._snapshot.exists())
+        self._handle.close()
+
+
+def _lease_ledger(
+    storage: FsStorage, snapshot: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[str]:
+    """Each lease taken (``+``) and released (``-``) on ``snapshot``, in order."""
+
+    ledger: list[str] = []
+    acquire, release = storage._acquire_lease, storage._release_lease
+
+    def _acquiring(path: Path) -> None:
+        acquire(path)
+        if path == snapshot:
+            ledger.append("+")
+
+    def _releasing(path: Path) -> None:
+        if path == snapshot:
+            ledger.append("-")
+        release(path)
+
+    monkeypatch.setattr(storage, "_acquire_lease", _acquiring)
+    monkeypatch.setattr(storage, "_release_lease", _releasing)
+    return ledger
+
+
+@pytest.mark.parametrize("opens", [True, False], ids=["late-handle", "open-fault"])
+async def test_a_view_stream_cancelled_in_its_open_holds_its_lease_through_the_cleanup(
+    opens: bool, pause: _Pause, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stream's lease passes to the cleanup of its cancelled open (PR #3646 B2).
+
+    A late handle is closed under it, and each lease is released once either way.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"a.txt": b"OLD"})
+    snapshot = storage._current_dir(community, server)
+    ledger = _lease_ledger(storage, snapshot, monkeypatch)
+    released = _watch_release(storage, snapshot, monkeypatch)
+    survived: list[bool] = []
+    open_readable = fs._open_readable_sync
+
+    def _opening(path: Path, not_found: str) -> _SweptAtClose:
+        if not opens:
+            raise NotFoundError(not_found)
+        return _SweptAtClose(
+            open_readable(path, not_found), storage, snapshot, survived
+        )
+
+    monkeypatch.setattr(fs, "_open_readable_sync", pause.once(_opening))
+    task = asyncio.ensure_future(_view_file_chunk(storage, community, server))
+    assert await asyncio.to_thread(pause.entered.wait, 10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    try:
+        await publish(storage, community, server, {"a.txt": b"NEW"})
+        storage.sweep()
+        assert snapshot.exists()
+    finally:
+        pause.resume.set()
+
+    # A bound, not a delay: the open's thread can stall on a loaded host.
+    assert await asyncio.to_thread(released.wait, 120)
+    assert survived == ([True] if opens else [])
+    assert ledger.count("+") == ledger.count("-")
+    storage.sweep()
+    assert not snapshot.exists()

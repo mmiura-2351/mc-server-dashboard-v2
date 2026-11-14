@@ -338,3 +338,49 @@ def test_a_close_fault_logged_off_the_loop_carries_the_callers_correlation_id(
         loop.close()
 
     assert [line.get("correlation_id") for line in close_faults] == ["review-3613"]
+
+
+class _RecordedClose:
+    """A real file whose close is recorded in ``events``."""
+
+    def __init__(self, path: Path, events: list[str]) -> None:
+        self._handle = builtins.open(path, "rb")
+        self._events = events
+        self.name = self._handle.name
+        self.read = self._handle.read
+
+    def close(self) -> None:
+        self._handle.close()
+        self._events.append("close")
+
+
+def _no_thread_starts(_thread: threading.Thread) -> None:
+    raise RuntimeError("can't start new thread")
+
+
+async def test_a_leased_stream_whose_close_cannot_start_closes_then_releases_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No worker and no thread will take the close: the stream still owns cleanup.
+
+    It closes the handle, then releases its lease, each once (PR #3646 review B1).
+    """
+
+    path = tmp_path / "stored.bin"
+    path.write_bytes(_PAYLOAD)
+    events: list[str] = []
+
+    async def _open_source() -> tuple[Any, Callable[[], None]]:
+        return _RecordedClose(path, events), lambda: events.append("release")
+
+    stream = fs._leased_file_stream(_open_source)
+    assert await anext(stream) == _PAYLOAD
+    await asyncio.get_running_loop().shutdown_default_executor()
+
+    with monkeypatch.context() as mp:
+        mp.setattr(threading.Thread, "start", _no_thread_starts)
+        await stream.aclose()  # type: ignore[attr-defined]
+        assert events == ["close", "release"]
+        await stream.aclose()  # type: ignore[attr-defined]
+
+    assert events == ["close", "release"]
