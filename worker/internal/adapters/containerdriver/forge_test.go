@@ -60,7 +60,25 @@ type forgeFakeDocker struct {
 	// the context error (issue #3622).
 	removeStallIDs map[string]bool
 	startStallIDs  map[string]bool
+	// logStalls models a stalled install log follow (issue #3644): opening the
+	// stream, or reading it once the container's log body is sent, blocks until
+	// the follow's context is cancelled. logStallEnded is closed once the stalled
+	// follow has let go of the stream.
+	logStalls     map[string]logStall
+	logStallEnded chan struct{}
+	// logTrails maps a container id to output its log stream sends only after the
+	// container has exited, just before the stream ends, as the daemon does with
+	// the last lines it flushes (issue #3644).
+	logTrails map[string]string
 }
+
+// logStall is where a stalled log follow blocks.
+type logStall int
+
+const (
+	logStallOpen logStall = iota + 1
+	logStallRead
+)
 
 func newForgeFakeDocker() *forgeFakeDocker {
 	return &forgeFakeDocker{
@@ -179,10 +197,64 @@ func (f *forgeFakeDocker) List(_ context.Context, _, _ string) ([]Container, err
 	return nil, nil
 }
 
-func (f *forgeFakeDocker) Logs(_ context.Context, id string) (io.ReadCloser, error) {
+func (f *forgeFakeDocker) Logs(ctx context.Context, id string) (io.ReadCloser, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return io.NopCloser(strings.NewReader(f.logBodies[id])), nil
+	body := strings.NewReader(f.logBodies[id])
+	stall := f.logStalls[id]
+	ended := f.logStallEnded
+	trail, trails := f.logTrails[id]
+	exited := f.exited[id]
+	f.mu.Unlock()
+	switch {
+	case stall == logStallOpen:
+		<-ctx.Done()
+		close(ended)
+		return nil, ctx.Err()
+	case stall == logStallRead:
+		return stalledFollow{Reader: io.MultiReader(body, ctxFollowReader{ctx}), ended: ended}, nil
+	case trails:
+		return io.NopCloser(io.MultiReader(body, &trailingFollow{ctx: ctx, exited: exited, trail: trail})), nil
+	}
+	return io.NopCloser(body), nil
+}
+
+// stalledFollow is a log stream whose reads stall once its body is sent; Close
+// reports that the follow let go of it.
+type stalledFollow struct {
+	io.Reader
+	ended chan struct{}
+}
+
+func (s stalledFollow) Close() error {
+	close(s.ended)
+	return nil
+}
+
+// trailingFollow is the end of a log stream: it sends trail a little after the
+// container exits, then ends.
+type trailingFollow struct {
+	ctx    context.Context
+	exited <-chan struct{}
+	trail  string
+	sent   bool
+}
+
+func (r *trailingFollow) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	select {
+	case <-r.exited:
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	}
+	select {
+	case <-time.After(20 * time.Millisecond):
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	}
+	r.sent = true
+	return copy(p, r.trail), nil
 }
 
 func (f *forgeFakeDocker) Stats(_ context.Context, _ string) (ContainerStats, error) {
@@ -1333,6 +1405,119 @@ func TestForgeLaunchStartStallCrashesTheInstance(t *testing.T) {
 	}
 	if !docker.wasRemoved("mcsd-s1") || !docker.wasRemoved(forgeInstallID) {
 		t.Fatalf("removed = %v, want the unstarted launch and the install container", docker.removed)
+	}
+}
+
+// A stalled install log follow no longer holds back the install's exit
+// supervision (issue #3644): whether the stream's open or a read stalls, an
+// installer that exits hands over to the launch, and a Stop during the install is
+// released with stopped. Each time the follow is cancelled after its drain bound
+// and lets go of the stream, and output it read before the stall is kept.
+func TestForgeInstallFinishesWhenTheInstallLogStalls(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stall logStall
+	}{
+		{"open", logStallOpen},
+		{"read", logStallRead},
+	} {
+		t.Run(tc.name+"/launch", func(t *testing.T) {
+			dir := t.TempDir()
+			docker := stalledLogForgeDocker(tc.stall)
+			inst, err := stalledLogForgeDriver(docker).Start(context.Background(), forgeSpec(dir))
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			writeArgsfile(t, dir)
+			docker.exit(forgeInstallID, 0, nil)
+
+			drainTo(t, inst.Events(), execution.StateRunning)
+			assertStalledFollowEnded(t, docker, dir, tc.stall)
+			docker.exit("mcsd-s1", 0, nil)
+			awaitStreamClosed(t, inst.Events())
+		})
+		t.Run(tc.name+"/stop", func(t *testing.T) {
+			dir := t.TempDir()
+			docker := stalledLogForgeDocker(tc.stall)
+			inst, err := stalledLogForgeDriver(docker).Start(context.Background(), forgeSpec(dir))
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+
+			stopped := make(chan error, 1)
+			go func() { stopped <- inst.Stop(context.Background(), false) }()
+			last := awaitStreamClosed(t, inst.Events())
+			select {
+			case err := <-stopped:
+				if err != nil {
+					t.Fatalf("Stop: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("Stop still waiting while the install log stalls")
+			}
+			if last.State != execution.StateStopped {
+				t.Fatalf("last event = %+v, want stopped", last)
+			}
+			if got, ok := inst.Terminal(); !ok || got != last {
+				t.Fatalf("Terminal = %+v, %v, want %+v", got, ok, last)
+			}
+			assertStalledFollowEnded(t, docker, dir, tc.stall)
+		})
+	}
+}
+
+// stalledLogForgeDocker is a forge fake whose install log follow stalls.
+func stalledLogForgeDocker(stall logStall) *forgeFakeDocker {
+	docker := newForgeFakeDocker()
+	docker.logBodies[forgeInstallID] = string(frame(dockerStreamStdout, installLogOutput))
+	docker.logStalls = map[string]logStall{forgeInstallID: stall}
+	docker.logStallEnded = make(chan struct{})
+	return docker
+}
+
+// stalledLogForgeDriver is stalledCallForgeDriver with the install log drain bound
+// shrunk, so a stalled follow is cancelled at once.
+func stalledLogForgeDriver(docker dockerAPI) *Driver {
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.installLogDrainTimeout = 10 * time.Millisecond
+	return d
+}
+
+// assertStalledFollowEnded fails unless the stalled follow has already let go of
+// its stream, and, for a read stall, unless the output read before it is in the
+// install log.
+func assertStalledFollowEnded(t *testing.T, docker *forgeFakeDocker, dir string, stall logStall) {
+	t.Helper()
+	select {
+	case <-docker.logStallEnded:
+	default:
+		t.Fatal("the stalled install log follow is still running")
+	}
+	if stall == logStallRead {
+		if got := readInstallLog(t, dir); got != installLogOutput {
+			t.Fatalf("install log = %q, want %q", got, installLogOutput)
+		}
+	}
+}
+
+// Output the installer's log stream sends only after the container exited is
+// still captured within the drain bound (issue #3644): it lands in the install
+// log and is what explains the failure.
+func TestForgeInstallLogCapturesOutputSentAfterTheExit(t *testing.T) {
+	dir := t.TempDir()
+	docker := newForgeFakeDocker()
+	docker.logBodies[forgeInstallID] = string(frame(dockerStreamStdout, installLogOutput))
+	const trail = "java.lang.OutOfMemoryError: Java heap space\n"
+	docker.logTrails = map[string]string{forgeInstallID: string(frame(dockerStreamStderr, trail))}
+	inst := startForgeInstall(t, docker, forgeSpec(dir))
+	docker.exit(forgeInstallID, 1, nil)
+
+	crash := drainToEvent(t, inst.Events(), execution.StateCrashed)
+	if crash.CrashReason != execution.CrashReasonForgeInstallOutOfMemory {
+		t.Fatalf("crash = %+v, want the out-of-memory install crash", crash)
+	}
+	if got := readInstallLog(t, dir); got != installLogOutput+trail {
+		t.Fatalf("install log = %q, want %q", got, installLogOutput+trail)
 	}
 }
 

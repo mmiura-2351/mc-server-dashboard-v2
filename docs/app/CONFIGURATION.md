@@ -713,8 +713,11 @@ refuses the start if the daemon does not list them within that time. Each create
 call then waits at most 10 s for the daemon. That includes the create retried
 after a lazy pull of a missing base image; the pull keeps its own 10 min budget.
 A container the daemon creates after a create call gave up is removed the same
-way as one a removal left behind. The sweep recovers from a crash that left a
-server's container behind, but because it force-removes *running* containers too,
+way as one a removal left behind. A Forge installer's output is followed into
+`logs/forge-install.log` for as long as the install runs. Once the installer
+exits, the driver waits at most 5 s for the rest of that output, so a stalled log
+stream cannot hold back the install's outcome or a stop. The sweep recovers from
+a crash that left a server's container behind, but because it force-removes *running* containers too,
 a graceful Worker restart while servers are up kills those live servers — this is
 the deliberate stateless-worker posture (the Worker adopts no prior state; the
 API observes the resulting state via the Worker's reconnect/status).

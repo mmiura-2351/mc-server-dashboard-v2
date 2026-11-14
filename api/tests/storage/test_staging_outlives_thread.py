@@ -15,8 +15,10 @@ the staging is removed and its active-staging lease released.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import concurrent.futures
 import contextlib
+import io
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -365,3 +367,105 @@ async def test_a_backup_op_whose_jobs_end_at_once_removes_its_staging_before_it_
     incoming = storage._server_root(community, server) / "incoming"
     assert not incoming.exists() or not any(incoming.iterdir())
     assert not storage._active_staging
+
+
+@dataclass(frozen=True)
+class _SpoolCase:
+    """How a cancelled ``write_snapshot`` leaves its spool's file in use (#3653)."""
+
+    chunk: bytes
+    # The stream stalls after its chunk, so the cancel lands between writes.
+    stalls: bool
+    # The spool's raw calls held, in the order the file reaches them.
+    holds: tuple[str, ...]
+
+
+# Past the writer's 8 KiB buffer, so the write job hands it to the raw file.
+_LARGE = bytes(64 * 1024)
+
+_SPOOL_CASES = {
+    "write": _SpoolCase(_LARGE, stalls=False, holds=("write",)),
+    # The close that follows the cancelled write, chained from it.
+    "write-then-close": _SpoolCase(_LARGE, stalls=False, holds=("write", "close")),
+    # Abandoned with no write in flight.
+    "close-between-writes": _SpoolCase(b"x", stalls=True, holds=("close",)),
+    # The close of a clean exit, its caller cancelled while it runs.
+    "awaited-close": _SpoolCase(b"x", stalls=False, holds=("close",)),
+}
+
+
+def _pausing_spool(
+    mp: pytest.MonkeyPatch, write: _Pause | None, close: _Pause | None
+) -> None:
+    """Open the snapshot spool on a raw file whose first write or close is held."""
+
+    raw_write = write.once(io.FileIO.write) if write else io.FileIO.write
+    raw_close = close.once(io.FileIO.close) if close else io.FileIO.close
+
+    class _PausedRaw(io.FileIO):
+        def write(self, data: Any) -> int:
+            return raw_write(self, data)
+
+        def close(self) -> None:
+            raw_close(self)
+
+    def _open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if mode == "wb" and Path(file).name.startswith(".snapshot."):
+            return io.BufferedWriter(_PausedRaw(file, "wb"))
+        return builtins.open(file, mode, *args, **kwargs)
+
+    mp.setattr(fs, "open", _open, raising=False)
+
+
+@pytest.mark.parametrize("case", _SPOOL_CASES.values(), ids=_SPOOL_CASES.keys())
+async def test_an_aborted_transfer_keeps_its_staging_until_its_spool_is_closed(
+    case: _SpoolCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    staging = _only_staging(storage, community, server)
+    released = _watch_release(storage, monkeypatch)
+    pauses = {name: _Pause() for name in case.holds}
+    _pausing_spool(monkeypatch, pauses.get("write"), pauses.get("close"))
+    stalled = asyncio.Event()
+
+    async def _stream() -> AsyncIterator[bytes]:
+        yield case.chunk
+        if case.stalls:
+            stalled.set()
+            await asyncio.Event().wait()  # until the cancel
+
+    async def _as_the_snapshot_endpoint() -> None:
+        # The data-plane edge aborts the handle on any failure, a cancel included.
+        try:
+            await storage.write_snapshot(handle, _stream())
+        except BaseException:
+            await storage.abort_snapshot(handle)
+            raise
+
+    task = asyncio.ensure_future(_as_the_snapshot_endpoint())
+    try:
+        if case.stalls:
+            await asyncio.wait_for(stalled.wait(), 120)
+        else:
+            assert await asyncio.to_thread(pauses[case.holds[0]].entered.wait, 120)
+        await _cancel_promptly(task)
+
+        for name in case.holds:
+            pause = pauses[name]
+            assert await asyncio.to_thread(pause.entered.wait, 120), name
+            await asyncio.to_thread(storage.sweep)
+            assert staging.is_dir(), name
+            assert storage._is_staging_active(staging), name
+            assert not released.is_set(), name
+            pause.resume.set()
+    finally:
+        # No timeout on the holds (issue #3600): this releases every one of them.
+        for pause in pauses.values():
+            pause.resume.set()
+
+    assert await asyncio.to_thread(released.wait, 120)
+    assert not staging.exists()
+    assert not storage._is_staging_active(staging)
+    assert storage._staging_jobs == {}

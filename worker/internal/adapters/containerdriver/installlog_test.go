@@ -35,7 +35,7 @@ func captureInstallLog(t *testing.T, workingDir, output string) (*installOutputS
 		spec:   forgeSpec(workingDir),
 		logger: slog.New(slog.NewTextHandler(logged, nil)),
 	}
-	return i.captureInstallOutput(forgeInstallID), logged.String()
+	return i.captureInstallOutput(context.Background(), forgeInstallID), logged.String()
 }
 
 // assertRefused fails unless the capture reported that it wrote no log.
