@@ -775,3 +775,103 @@ async def test_an_abort_during_a_failed_refusal_cleanup_leaves_the_lease_to_the_
     assert not staging.exists()
     assert not storage._is_staging_active(staging)
     assert storage._staging_jobs == {}
+
+
+def _hand_settled_removals_of(
+    staging: Path, mp: pytest.MonkeyPatch
+) -> list[asyncio.Future[None]]:
+    """Each removal job of ``staging``, a loop future the test settles by hand.
+
+    Settling two of them back to back ends both jobs in one loop iteration, a
+    window no thread timing reaches reliably. Other jobs run as they are.
+    """
+
+    loop = asyncio.get_running_loop()
+    run_in_executor = loop.run_in_executor
+    jobs: list[asyncio.Future[None]] = []
+
+    def _submit(executor: Any, fn: Callable[..., Any], *args: Any) -> Any:
+        if fn is not fs._rmtree or args != (staging,):
+            return run_in_executor(executor, fn, *args)
+        jobs.append(loop.create_future())
+        return jobs[-1]
+
+    mp.setattr(loop, "run_in_executor", _submit)
+    return jobs
+
+
+def _registered_staging(storage: FsStorage, tmp_path: Path) -> Path:
+    staging = tmp_path / "incoming" / "staging"
+    staging.mkdir(parents=True)
+    storage._register_staging(staging)
+    return staging
+
+
+def _assert_released_once(
+    storage: FsStorage, staging: Path, releases: list[Path]
+) -> None:
+    assert releases == [staging]
+    assert not storage._is_staging_active(staging)
+    assert storage._staging_jobs == {}
+    assert storage._staging_removers == {}
+    assert storage._staging_removals_due == set()
+
+
+@pytest.mark.timeout(10)
+async def test_overlapping_removals_whose_jobs_end_together_release_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    # Two removals under way at once, as a rerun and a discard in the gap before
+    # the rerun's first step.
+    removals = [
+        asyncio.ensure_future(storage._remove_staging(staging, raise_fault=False))
+        for _ in range(2)
+    ]
+    await asyncio.sleep(0)
+    assert len(jobs) == 2
+    assert storage._staging_removers == {staging: 2}
+
+    for job in jobs:
+        job.set_result(None)
+    await asyncio.gather(*removals)
+
+    _assert_released_once(storage, staging, releases)
+
+
+@pytest.mark.timeout(10)
+async def test_a_job_ending_with_a_removal_leaves_the_due_removal_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    removing = asyncio.ensure_future(
+        storage._discard_staging(staging, raise_fault=False)
+    )
+    await asyncio.sleep(0)
+    assert len(jobs) == 1
+    # Another job begins on the staging, and a discard marks a removal due.
+    other: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    storage._count_on_staging(staging, other)
+    await storage._discard_staging(staging, raise_fault=False)
+    assert storage._staging_removals_due == {staging}
+
+    # The removal's job and the other job end in one loop iteration.
+    jobs[0].set_result(None)
+    other.set_result(None)
+    await removing
+
+    # The rerun owns the lease until its own job ends.
+    await asyncio.sleep(0)
+    assert len(jobs) == 2
+    assert storage._is_staging_active(staging)
+    assert releases == []
+    jobs[1].set_result(None)
+    await _settle_deferred_removals()
+
+    _assert_released_once(storage, staging, releases)
