@@ -800,6 +800,9 @@ class FsStorage(Storage):
         # removal waits for them (issue #3583). Guarded by ``_lease_lock``.
         self._staging_jobs: dict[Path, set[asyncio.Future[Any]]] = {}
         self._staging_removals_due: set[Path] = set()
+        # The removals of each staging dir under way (issue #3664), each owning the
+        # removal owed when it ends. Guarded by ``_lease_lock``.
+        self._staging_removers: dict[Path, int] = {}
         self._lease_lock = threading.Lock()
         # Per-server publish/edit serialization (issue #899). Every authoritative
         # mutation of ``current/`` and its generation marker — a snapshot commit, a
@@ -1085,9 +1088,15 @@ class FsStorage(Storage):
             if jobs:
                 return
             del self._staging_jobs[staging]
-            if staging not in self._staging_removals_due:
+            if (
+                staging not in self._staging_removals_due
+                or staging in self._staging_removers
+            ):
                 return
             self._staging_removals_due.discard(staging)
+        self._schedule_staging_removal(staging)
+
+    def _schedule_staging_removal(self, staging: Path) -> None:
         removal = asyncio.get_running_loop().create_task(
             self._remove_staging(staging, raise_fault=False)
         )
@@ -1116,10 +1125,17 @@ class FsStorage(Storage):
         an outcome a cleanup fault must never replace, such as a restore's
         publication (issue #3564): the fault is logged, and the sweep reclaims the
         staging, mirroring the object restore's cleanup.
+
+        The removal is a job on the staging (:meth:`_run_on_staging`), so a discard
+        arriving while it runs is left to its end, as :meth:`_discard_staging` does
+        for any job (issue #3664). Exactly one party then releases the lease, after
+        the final removal (:meth:`_end_staging_removal`).
         """
 
+        with self._lease_lock:
+            self._staging_removers[staging] = self._staging_removers.get(staging, 0) + 1
         try:
-            await asyncio.to_thread(_rmtree, staging)
+            await self._run_on_staging(staging, _rmtree, staging)
         except Exception:
             if raise_fault:
                 raise
@@ -1129,6 +1145,39 @@ class FsStorage(Storage):
                 exc_info=True,
             )
         finally:
+            self._end_staging_removal(staging)
+
+    def _end_staging_removal(self, staging: Path) -> None:
+        """End one removal of ``staging``: release its lease or hand it on (#3664).
+
+        The lease is released once, by the removal that ends last with nothing left
+        owed. While a removal is under way, the end of a job leaves a removal due to
+        it rather than scheduling one, so whichever way the removal ends, the
+        removal ending last decides:
+
+        - another removal of the staging is still under way (a discard landed
+          between a rerun's scheduling and its first step): that one decides;
+        - a job still uses the staging (the removal's own, its caller cancelled, or
+          one begun meanwhile): a removal is due at the end of the last one, which
+          then owns the lease;
+        - a discard arrived while it ran: it hands the lease to a rerun of the
+          removal, which runs even if this one failed;
+        - otherwise it releases the lease.
+        """
+
+        with self._lease_lock:
+            removers = self._staging_removers.pop(staging) - 1
+            if removers:
+                self._staging_removers[staging] = removers
+                return
+            if staging in self._staging_jobs:
+                self._staging_removals_due.add(staging)
+                return
+            rerun = staging in self._staging_removals_due
+            self._staging_removals_due.discard(staging)
+        if rerun:
+            self._schedule_staging_removal(staging)
+        else:
             self._release_staging(staging)
 
     # --- the resolve rule: containment + symlink refusal (Section 6) --------
@@ -1476,8 +1525,7 @@ class FsStorage(Storage):
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
             report = await self._run_on_staging(staging, check_working_set, staging)
         if not report.healthy:
-            await asyncio.to_thread(_rmtree, staging)
-            self._release_staging(staging)
+            await self._discard_staging(staging, raise_fault=False)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
         fence: Callable[[], bool] | None = None
@@ -1504,8 +1552,7 @@ class FsStorage(Storage):
             # under the lock (issue #3544). Discard the staging exactly as the other
             # refusal paths do (the prior ``current`` keeps the newer/good copy, no
             # bump) and re-raise.
-            await asyncio.to_thread(_rmtree, staging)
-            self._release_staging(staging)
+            await self._discard_staging(staging, raise_fault=False)
             fs_handle.consumed = True
             raise
         # Publish moved the staging dir into snapshots/; release its active-staging
@@ -1555,8 +1602,7 @@ class FsStorage(Storage):
         )
         if pruned is None:
             return
-        await asyncio.to_thread(_rmtree, staging)
-        self._release_staging(staging)
+        await self._discard_staging(staging, raise_fault=False)
         fs_handle.consumed = True
         raise PrunedStoreError(expected_base, pruned)
 
