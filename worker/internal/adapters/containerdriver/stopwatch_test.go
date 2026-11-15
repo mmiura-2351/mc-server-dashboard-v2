@@ -478,7 +478,19 @@ func TestRCONPhaseWaitsWhileTheWorldIsWrittenThenSendsSIGTERM(t *testing.T) {
 			t.Fatalf("escalated after %v idle, want the full %v", idle, testIdle)
 		}
 	}
-	returned := r.step(testPoll)
+	// The last idle poll sends SIGTERM, which ends the server, and Stop needs no
+	// further clock advance to return. It sees the exit only once the supervisor
+	// has closed the instance's exited channel, though, and under load it can park
+	// on its next poll first, which step would report as still waiting (issue
+	// #3657). So wait for the return itself. Nothing on this path touches the
+	// filesystem, so it gets awaitReturn's 10 s bound, not the 120 s I/O one (#3637).
+	r.clock.advance(testPoll)
+	returned := false
+	select {
+	case r.err = <-r.done:
+		returned = true
+	case <-time.After(10 * time.Second):
+	}
 	if !docker.stopWasCalled() {
 		t.Fatalf("no SIGTERM after %v idle following RCON stop", testIdle)
 	}
