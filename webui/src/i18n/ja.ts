@@ -244,7 +244,8 @@ export const ja: Record<TranslationKey, string> = {
   // 409 worker_busy / server_busy (issue #2400); retry is the only remedy.
   "dashboard.lifecycle.busy":
     "このサーバーで別の操作が進行中です。しばらく待ってから再試行してください。",
-  // 409 command_expired (issue #3305); not applied on any verb, so retry.
+  // 409 command_expired (issue #3305); the host never ran the command, so retry.
+  // A stop keeps its intent and is also replayed on its own after a short grace.
   "dashboard.lifecycle.commandExpired":
     "操作は適用されませんでした: サーバーホストが他の処理で混み合っていて、時間内に実行できませんでした。もう一度お試しください。",
   // 409 command_failed (issue #2420); the server may or may not have moved, and

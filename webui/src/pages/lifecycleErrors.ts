@@ -111,13 +111,21 @@ export type LifecycleAction = "start" | "stop" | "restart";
 //
 // `command_expired` is a command that waited on the Worker past its budget —
 // behind an earlier command for the server, or for a slot of the Worker-wide
-// concurrency cap — and was answered without being run (issue #3305). It is
-// deliberately NOT verb-specific and not `command_failed`'s message: on every
-// verb nothing was applied, so there is no state to go and check, and nothing is
-// pending that the *Pending messages could promise. A start is compensated back
-// to stopped and a restart left the server as it was. A stop leaves its intent
-// committed, but the server is still running and the stop button replays the
-// stop (StopServer's `redispatch_stop`), so "try again" holds there too.
+// concurrency cap — and was answered without being run (issue #3305). What it
+// says on every verb is that this Worker command did not execute. It is
+// deliberately NOT verb-specific and not `command_failed`'s message: the host
+// never ran the command, so nothing was half-done and there is no state to go
+// and check. What the API committed before dispatch still differs per verb. A
+// start is compensated back to stopped, and a restart commits no state change
+// and left the server as it was, so nothing is pending on either. A stop keeps
+// desired=stopped committed over a server that is still running. Its refusal is
+// recorded (stop_dispatch_refusals.py), so while it stays the latest thing known
+// about the row the reconciler's `redispatch_stop` replays the stop on its own
+// after the short refused-stop grace. "Try again" still holds there, and it is
+// kept over stopPending: an operator stop of that row skips the grace and
+// replays the stop at once (StopServer's `redispatch_stop`), whereas the
+// `worker_busy` stop that stopPending also covers would only collect another
+// BUSY on a retry.
 //
 // The refetch is deliberately kept (issue #2420): it is not a side effect of
 // this mapping — every lifecycle mutation invalidates in `onSettled` regardless
