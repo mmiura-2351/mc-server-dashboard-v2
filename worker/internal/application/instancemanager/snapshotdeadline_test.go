@@ -346,7 +346,14 @@ func TestRunningSnapshotCommittedBeforeTheDeadlineAnswersSuccess(t *testing.T) {
 	assertBusy(t, m, snapshotCmd())
 
 	lock.Unlock()
-	awaitEnter(t, exited)
+	// Once released, the body's tail stamps the marker, which fsyncs. Its
+	// completion therefore gets the 120 s I/O bound (#3637), not awaitEnter's 2 s
+	// arrival bound, which one fsync stall on a loaded host exceeds (issue #3662).
+	select {
+	case <-exited:
+	case <-time.After(120 * time.Second):
+		t.Fatal("the committed body did not release its claim after the working-set lock was released")
+	}
 	if got := recordedGeneration(filepath.Join(m.scratchDir, s1), s1, m.logger); got != 7 {
 		t.Fatalf("marker = %d, want the committed body's stamp (7)", got)
 	}
