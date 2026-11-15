@@ -1270,7 +1270,7 @@ def test_read_server_backup_retention_null_when_unconfigured() -> None:
 # --- config payload bounds (issue #94) -------------------------------------
 
 
-def test_create_at_size_bound_is_accepted() -> None:
+def test_create_at_size_bound_is_accepted(body_credential: dict[str, str]) -> None:
     community = uuid.uuid4()
     server = _server_entity(community_id=community)
     app = _app(member=True, allow=True, create=_FakeUseCase(result=server))
@@ -1278,16 +1278,22 @@ def test_create_at_size_bound_is_accepted() -> None:
     overhead = len('{"k": ""}')
     body = _create_body()
     body["config"] = {"k": "a" * (MAX_CONFIG_BYTES - overhead)}
-    resp = client.post(f"/api/communities/{community}/servers", json=body)
+    resp = client.post(
+        f"/api/communities/{community}/servers", json=body, headers=body_credential
+    )
     assert resp.status_code == 201
 
 
-def test_create_over_size_bound_is_422_too_large() -> None:
+def test_create_over_size_bound_is_422_too_large(
+    body_credential: dict[str, str],
+) -> None:
     app = _app(member=True, allow=True, create=_FakeUseCase())
     client = _client(app)
     body = _create_body()
     body["config"] = {"k": "a" * (MAX_CONFIG_BYTES + 1)}
-    resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=body)
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers", json=body, headers=body_credential
+    )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_too_large"
 
@@ -1325,12 +1331,15 @@ def test_create_null_config_value_is_422_null_value() -> None:
     assert resp.json()["reason"] == "config_null_value"
 
 
-def test_update_over_size_bound_is_422_too_large() -> None:
+def test_update_over_size_bound_is_422_too_large(
+    body_credential: dict[str, str],
+) -> None:
     app = _app(member=True, allow=True, update=_FakeUseCase())
     client = _client(app)
     resp = client.patch(
         f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
         json={"config": {"k": "a" * (MAX_CONFIG_BYTES + 1)}},
+        headers=body_credential,
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "config_too_large"
@@ -1403,7 +1412,7 @@ def test_update_lone_surrogate_config_is_422_lone_surrogate() -> None:
     assert resp.json()["reason"] == "config_lone_surrogate"
 
 
-def test_update_at_size_bound_is_accepted() -> None:
+def test_update_at_size_bound_is_accepted(body_credential: dict[str, str]) -> None:
     community = uuid.uuid4()
     server = _server_entity(community_id=community)
     app = _app(member=True, allow=True, update=_FakeUseCase(result=server))
@@ -1412,6 +1421,7 @@ def test_update_at_size_bound_is_accepted() -> None:
     resp = client.patch(
         f"/api/communities/{community}/servers/{uuid.uuid4()}",
         json={"config": {"k": "a" * (MAX_CONFIG_BYTES - overhead)}},
+        headers=body_credential,
     )
     assert resp.status_code == 200
 

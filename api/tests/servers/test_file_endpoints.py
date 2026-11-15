@@ -681,7 +681,9 @@ _FILE_TOO_LARGE = {
 
 
 @pytest.mark.parametrize("size", [MAX_EDIT_BYTES, MAX_EDIT_BYTES + 1])
-def test_write_of_the_longest_base64_reaches_the_use_case(size: int) -> None:
+def test_write_of_the_longest_base64_reaches_the_use_case(
+    size: int, body_credential: dict[str, str]
+) -> None:
     # A file at the edit cap encodes to exactly MAX_EDIT_BASE64_CHARS, and is
     # written. So does one a byte past the cap (base64 pads to a multiple of
     # four): the string bound cannot tell them apart, and the use case's byte
@@ -697,6 +699,7 @@ def test_write_of_the_longest_base64_reaches_the_use_case(size: int) -> None:
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
         json={"content_base64": encoded},
+        headers=body_credential,
     )
 
     assert resp.status_code == 204
@@ -704,7 +707,7 @@ def test_write_of_the_longest_base64_reaches_the_use_case(size: int) -> None:
 
 
 def test_write_of_a_longer_base64_is_413_undecoded(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, body_credential: dict[str, str]
 ) -> None:
     # One character past the bound (issue #3363): refused as the over-size edit
     # it is, before the string is decoded.
@@ -720,6 +723,7 @@ def test_write_of_a_longer_base64_is_413_undecoded(
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
         json={"content_base64": "A" * (MAX_EDIT_BASE64_CHARS + 1)},
+        headers=body_credential,
     )
 
     assert resp.status_code == 413
@@ -728,7 +732,7 @@ def test_write_of_a_longer_base64_is_413_undecoded(
     assert write.calls == []
 
 
-def test_write_body_past_its_limit_is_413() -> None:
+def test_write_body_past_its_limit_is_413(body_credential: dict[str, str]) -> None:
     # Further past the cap the body itself is over the route's limit, and is
     # refused while it streams in (test_http_body_limit.py) -- the same answer.
     write = _FakeUseCase()
@@ -739,6 +743,7 @@ def test_write_body_past_its_limit_is_413() -> None:
         _url(uuid.uuid4(), uuid.uuid4()),
         params={"path": "f"},
         json={"content_base64": "A" * MAX_WRITE_BODY_BYTES},
+        headers=body_credential,
     )
 
     assert resp.status_code == 413
@@ -1940,12 +1945,14 @@ def _edit_body(content: bytes, *, escape_slashes: bool) -> bytes:
     return ('{"content_base64": "' + encoded + '"}').encode("ascii")
 
 
-def _put_raw(client: TestClient, url: str, body: bytes) -> httpx2.Response:
+def _put_raw(
+    client: TestClient, url: str, body: bytes, credential: dict[str, str]
+) -> httpx2.Response:
     return client.put(
         url,
         params={"path": "f.bin"},
         content=body,
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **credential},
     )
 
 
@@ -1958,7 +1965,10 @@ def _stored(tmp_path: object) -> list[bytes]:
     "content", [_MIXED_AT_CAP, _ALL_SLASHES_AT_CAP], ids=["mixed", "all-slashes"]
 )
 def test_write_at_the_cap_is_stored_in_either_serialization(
-    tmp_path: object, content: bytes, escape_slashes: bool
+    tmp_path: object,
+    content: bytes,
+    escape_slashes: bool,
+    body_credential: dict[str, str],
 ) -> None:
     assert len(content) == MAX_EDIT_BYTES
     community, server = uuid.uuid4(), uuid.uuid4()
@@ -1966,7 +1976,7 @@ def test_write_at_the_cap_is_stored_in_either_serialization(
     body = _edit_body(content, escape_slashes=escape_slashes)
     assert len(body) <= MAX_WRITE_BODY_BYTES
 
-    resp = _put_raw(client, _url(community, server), body)
+    resp = _put_raw(client, _url(community, server), body, body_credential)
 
     assert resp.status_code == 204
     assert content in _stored(tmp_path)
@@ -1980,13 +1990,13 @@ def test_the_fully_escaped_cap_is_the_largest_supported_body() -> None:
 
 @pytest.mark.parametrize("escape_slashes", [False, True], ids=["plain", "escaped"])
 def test_write_one_byte_past_the_cap_is_413_in_either_serialization(
-    tmp_path: object, escape_slashes: bool
+    tmp_path: object, escape_slashes: bool, body_credential: dict[str, str]
 ) -> None:
     community, server = uuid.uuid4(), uuid.uuid4()
     client = _client(_real_write_app(tmp_path, community, server))
     body = _edit_body(_MIXED_AT_CAP + b"\x00", escape_slashes=escape_slashes)
 
-    resp = _put_raw(client, _url(community, server), body)
+    resp = _put_raw(client, _url(community, server), body, body_credential)
 
     assert resp.status_code == 413
     assert resp.json() == _FILE_TOO_LARGE
@@ -1994,7 +2004,9 @@ def test_write_one_byte_past_the_cap_is_413_in_either_serialization(
 
 
 @pytest.mark.parametrize("past", [0, 1])
-def test_write_body_limit_is_exact(tmp_path: object, past: int) -> None:
+def test_write_body_limit_is_exact(
+    tmp_path: object, past: int, body_credential: dict[str, str]
+) -> None:
     # Padding the JSON with insignificant whitespace sizes the body without
     # changing the file in it: at exactly the limit it is read and stored, one
     # byte past it the body limit refuses it.
@@ -2003,7 +2015,7 @@ def test_write_body_limit_is_exact(tmp_path: object, past: int) -> None:
     body = _edit_body(_MIXED_AT_CAP, escape_slashes=False)
     body = body + b" " * (MAX_WRITE_BODY_BYTES + past - len(body))
 
-    resp = _put_raw(client, _url(community, server), body)
+    resp = _put_raw(client, _url(community, server), body, body_credential)
 
     if past:
         assert resp.status_code == 413

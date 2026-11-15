@@ -13,7 +13,8 @@
 >
 > **Scope.** Authentication-hardening behaviour, the unauthenticated endpoints in
 > [Section 5](#5-unauthenticated-endpoints) (`/api/healthz`, `/api/readyz`, the
-> OpenAPI schema and docs pages, and the separate Prometheus listener), plus
+> OpenAPI schema and docs pages, and the separate Prometheus listener) and how
+> much request body a caller without a credential can make the API read, plus
 > [Section 6](#6-minecraft-server-container-trust-model), which records what a
 > Minecraft server container is trusted to do, which of the two docker networks
 > each service is attached to, and what is reachable from where. This document
@@ -384,6 +385,50 @@ any scraper. What keeps it private differs by deployment:
   does not cover it: different port, the proxy never sees it. Set `metrics.host`
   to `127.0.0.1` (same-host scraper) or a private interface, or firewall the
   port. IPv4 and IPv6 literals are both accepted, as for `server.host`.
+
+### Request bodies without a credential
+
+FastAPI reads a route's declared body (it buffers the JSON or spools the
+multipart form to disk) before it solves the route's dependencies, and its
+authentication is one of those dependencies. So a route's 401 comes after its
+body has been read. The API bounds how much a caller without a credential can
+make it read (issues #3365, #3561):
+
+- At a request's first body read, the body-limit middleware
+  (`api/src/mc_server_dashboard_api/http_body_limit.py`) checks the request's
+  credential from its headers alone. A valid credential is a user access token
+  that `AuthenticateRequest` accepts, as `get_current_user` would, or the Worker
+  credential.
+- A request with a valid credential keeps its route's body limit. Any other
+  request is held to `ANONYMOUS_MAX_REQUEST_BODY_BYTES` (64 KiB), or to the
+  route's limit if that is smaller. That covers no credential, a malformed or
+  invalid one, an expired or revoked token, and a deactivated account. 64 KiB
+  is sized for the routes that take a body from such a caller: registration,
+  login, refresh and logout. `tests/test_http_body_credential.py` derives that
+  set from the route table and pins each route's largest legitimate body.
+- A body past that limit is refused with a 413 `request_too_large`. When the
+  declared `Content-Length` is too large, the request is refused before a byte
+  is read; otherwise it is refused once the running count passes the limit.
+  Within the limit the body is read, and the route answers as it always has. Its
+  401, 403 and 404 come from its own dependencies, after the read.
+
+So a request without a valid credential cannot make the API read more than the
+anonymous limit, plus at most one chunk as the server received it, before its
+401. No route keeps a list of public routes, and no route changes how it
+receives its request.
+
+The accepted costs (#3560):
+
+- A request without a valid credential that declares more than the limit gets
+  413, not 401. That includes an upload sent with an expired token. A client
+  that refreshes on 401 sees the 413 first.
+- A route decides 403 and 404 after it has read the body, within its own limit.
+  This affects only callers with a valid credential.
+- While the database is unavailable, a token whose signature and expiry verify
+  keeps its route's limit. Only the holder of a token this API signed gets that
+  far, and the route's own authentication meets the outage after the read.
+- Usernames and emails have no cap of their own. For a caller without a
+  credential, the anonymous limit is now their cap on registration and login.
 
 ---
 

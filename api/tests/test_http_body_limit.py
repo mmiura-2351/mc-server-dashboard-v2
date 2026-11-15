@@ -43,6 +43,7 @@ from mc_server_dashboard_api.dependencies import (
     get_permission_checker,
 )
 from mc_server_dashboard_api.http_body_limit import (
+    ANONYMOUS_MAX_REQUEST_BODY_BYTES,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     EARLY_ANSWER_DISCARD_BYTES,
     MULTIPART_OVERHEAD_BYTES,
@@ -172,10 +173,16 @@ class _Echo(BaseModel):
     value: str
 
 
+async def _credentialled(_request: Request) -> bool:
+    # Every request here carries a credential: these are the route limits, which
+    # the anonymous limit only lowers (test_http_body_credential.py).
+    return True
+
+
 def _small_app() -> FastAPI:
     app = FastAPI()
     install_problem_handlers(app)
-    app.add_middleware(RequestBodyLimitMiddleware)
+    app.add_middleware(RequestBodyLimitMiddleware, credentialled=_credentialled)
 
     @app.post("/default")
     async def default(request: Request) -> dict[str, int]:
@@ -369,11 +376,11 @@ async def test_a_route_that_never_reads_its_body_is_left_alone() -> None:
 
 # --- an answer given before the body was read through --------------------------
 #
-# A refusal -- over-size, or the route's credential check (issue #3365) -- leaves
-# the rest of the body unread, with the client possibly still sending it. Either
-# the rest is small enough to read and drop, so the client finishes and sees the
-# answer on a connection that stays usable, or the answer says the connection is
-# closing and nothing more is read.
+# A refusal -- over-size, or the route's own answer given before it read its
+# body (issue #3365) -- leaves the rest of the body unread, with the client
+# possibly still sending it. Either the rest is small enough to read and drop,
+# so the client finishes and sees the answer on a connection that stays usable,
+# or the answer says the connection is closing and nothing more is read.
 
 _REST = 4 * DEFAULT_MAX_REQUEST_BODY_BYTES
 
@@ -604,7 +611,7 @@ async def test_a_length_beside_a_transfer_encoding_does_not_refuse_the_body() ->
 # --- every method: a body nobody reads -----------------------------------------
 #
 # GET, HEAD and OPTIONS can carry a body too. No route reads one, so there is
-# nothing to authorize or to limit -- but the answer still comes with the body
+# nothing to classify or to limit -- but the answer still comes with the body
 # unread. These are never read and dropped (their responses include the
 # streaming downloads, which watch ``receive`` themselves): a body on them closes
 # the connection. One with no body, which is all ordinary traffic, is untouched.
@@ -892,8 +899,9 @@ class _Checker(PermissionChecker):
 def _sign_in(app: FastAPI, *, member: bool = True, allow: bool = True) -> None:
     """Make every request to ``app`` an authenticated one, allowed as given.
 
-    A route checks its caller before it reads a body (issue #3365), so a test of
-    what a route does with a body has to get past that first.
+    A test of what a route does with a body has to get past the route's own
+    checks of its caller. Over the anonymous body limit it also needs a
+    credential the body limit counts (``body_credential``, issue #3561).
     """
 
     app.dependency_overrides[get_current_user] = make_user
@@ -913,7 +921,7 @@ def test_the_write_body_limit_carries_a_file_at_the_edit_cap() -> None:
 
 
 async def test_the_real_app_refuses_an_endless_file_write_within_its_limit(
-    shared_app: FastAPI,
+    shared_app: FastAPI, body_credential: dict[str, str]
 ) -> None:
     # The memory-shaped case of the issue: PUT .../files used to buffer and parse
     # whatever it was sent before checking MAX_EDIT_BYTES.
@@ -923,13 +931,15 @@ async def test_the_real_app_refuses_an_endless_file_write_within_its_limit(
         "/servers/00000000-0000-0000-0000-000000000002/files"
     )
 
-    result = await _request(
-        shared_app,
-        "PUT",
-        path,
-        _endless(),
-        headers={"content-type": "application/json"},
-    )
+    # The lifespan open: the body limit's credential check reads ``app.state``.
+    async with shared_app.router.lifespan_context(shared_app):
+        result = await _request(
+            shared_app,
+            "PUT",
+            path,
+            _endless(),
+            headers={"content-type": "application/json", **body_credential},
+        )
 
     assert result.status == 413
     assert result.headers["content-type"] == "application/problem+json"
@@ -940,9 +950,10 @@ async def test_the_real_app_refuses_an_endless_file_write_within_its_limit(
     assert result.headers["x-content-type-options"] == "nosniff"
 
 
-async def test_the_real_app_refuses_an_endless_json_body_at_the_default(
+async def test_the_real_app_refuses_an_endless_anonymous_json_body(
     shared_app: FastAPI,
 ) -> None:
+    # Login takes a body from a caller with no credential: the anonymous limit.
     result = await _request(
         shared_app,
         "POST",
@@ -953,4 +964,4 @@ async def test_the_real_app_refuses_an_endless_json_body_at_the_default(
 
     assert result.status == 413
     assert result.json() == _problem("request_too_large")
-    assert result.consumed <= DEFAULT_MAX_REQUEST_BODY_BYTES + _CHUNK
+    assert result.consumed <= ANONYMOUS_MAX_REQUEST_BODY_BYTES + _CHUNK

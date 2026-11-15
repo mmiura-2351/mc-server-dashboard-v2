@@ -45,6 +45,7 @@ from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
     build_registration_config,
+    has_body_credential,
 )
 from mc_server_dashboard_api.docs import mount_docs
 from mc_server_dashboard_api.download_cookie import download_cookie_middleware
@@ -1391,11 +1392,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
-    # Bound how much request body a route reads (issue #3363). Registered before
-    # everything below so it sits inside all of it, next to routing: it refuses by
-    # raising into the route's own body read, where the problem handlers above
-    # render the 413 as an ordinary response that leaves through every middleware.
-    app.add_middleware(RequestBodyLimitMiddleware)
+    # Bound how much request body a route reads (issue #3363), and how much a
+    # request without a valid credential can make it read (issue #3561).
+    # Registered before everything below so it sits inside all of it, next to
+    # routing: it refuses by raising into the route's own body read, where the
+    # problem handlers above render the 413 as an ordinary response that leaves
+    # through every middleware.
+    app.add_middleware(RequestBodyLimitMiddleware, credentialled=has_body_credential)
     # Middleware is applied outermost-last: the catch-all exception middleware is
     # registered FIRST of the ``http`` middlewares, so it is the innermost of them.
     # An unhandled exception caught here returns a problem+json 500 that flows

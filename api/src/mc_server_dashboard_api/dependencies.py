@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hmac
 import logging
 import time
 import uuid
@@ -1142,7 +1143,80 @@ def get_authenticate_download_grant(request: Request) -> AuthenticateDownloadGra
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
+# The ``request.state`` attribute :func:`has_body_credential` leaves the user it
+# authenticated under, for :func:`get_current_user` to take instead of verifying
+# the same token again. ``request.state`` is Starlette's documented store for a
+# request's own data (https://www.starlette.io/requests/#other-state); it lives
+# in the request scope, so the body-limit middleware and the route read one store.
+_AUTHENTICATED_USER_STATE = "mcsd_authenticated_user"
+
+
+async def has_body_credential(request: Request) -> bool:
+    """Whether ``request`` carries a valid credential, from its headers alone.
+
+    The body-limit middleware's check (``http_body_limit``, issue #3561): a
+    request that does keeps its route's body limit, one that does not is held to
+    the anonymous limit. It decides nothing else -- the route's own dependencies
+    still answer the request -- and it never raises.
+
+    A valid credential is the Worker credential (compared as
+    :func:`~mc_server_dashboard_api.dataplane.api.transfers.require_worker_credential`
+    compares it) or a user access token that :class:`AuthenticateRequest`
+    accepts, whose user is then left on ``request.state`` for
+    :func:`get_current_user`. A token it rejects, of any kind, is no credential.
+
+    A token whose user could not be looked up because the database is
+    unavailable (a transient error, as #3313 tells one apart) counts as a
+    credential: the use case verifies the token's signature and expiry before it
+    looks the user up, so only the holder of a token this API signed gets there,
+    and holding that caller to the anonymous limit would answer a legitimate
+    upload 413 for an outage. The route's own authentication meets the outage
+    after the read and answers it as it always has. Any other failure is logged
+    and is no credential.
+    """
+
+    credentials = await _bearer_scheme(request)
+    if credentials is None:
+        return False
+    try:
+        worker_credential = get_worker_credential(request)
+        if worker_credential is not None and hmac.compare_digest(
+            credentials.credentials.encode(), worker_credential.encode()
+        ):
+            return True
+        authentication = await _authenticate_body_token(
+            request, credentials.credentials
+        )
+    except InvalidAccessTokenError:
+        return False
+    except Exception as exc:
+        if is_transient_database_error(exc):
+            _logger.warning(
+                "body limit: the database is unavailable to look up a signed "
+                "token's user (%s); its route's limit applies",
+                type(exc).__name__,
+            )
+            return True
+        _logger.exception("body limit: could not check the request's credential")
+        return False
+    setattr(request.state, _AUTHENTICATED_USER_STATE, authentication.user)
+    return True
+
+
+async def _authenticate_body_token(request: Request, token: str) -> Authentication:
+    """Verify ``token`` as :func:`get_current_user` does, outside injection.
+
+    :func:`has_body_credential` runs before any dependency is solved, so it
+    builds the use case itself, and the ``dependency_overrides`` a test gives
+    the route do not reach it; such a test substitutes this instead, as the
+    events socket's tests do ``_authenticate_ws``.
+    """
+
+    return await get_authenticate_request(request)(access_token=token)
+
+
 async def get_current_user(
+    request: Request,
     credentials: Annotated[
         HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)
     ],
@@ -1152,8 +1226,16 @@ async def get_current_user(
 
     Every protected endpoint depends on this. A missing, malformed, or expired
     token is a uniform 401 (no detail that aids enumeration).
+
+    A request whose body was read had its token verified then
+    (:func:`has_body_credential`); its user is taken from there rather than
+    verified a second time. Any other request -- a GET, a route that reads its
+    body itself after its dependencies -- is verified here.
     """
 
+    authenticated: User | None = getattr(request.state, _AUTHENTICATED_USER_STATE, None)
+    if authenticated is not None:
+        return authenticated
     if credentials is None:
         raise _unauthenticated()
     try:

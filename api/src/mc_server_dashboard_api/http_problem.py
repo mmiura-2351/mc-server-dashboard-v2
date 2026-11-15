@@ -211,9 +211,9 @@ async def validation_exception_handler(
 def validation_problem(errors: Sequence[Any]) -> ProblemException:
     """The 422 :func:`validation_exception_handler` renders, as an exception.
 
-    For the one place that has to *raise* a validation failure rather than let
-    the framework's own error reach the handler: the credential check made
-    before a body is read (:mod:`mc_server_dashboard_api.http_body_auth`).
+    For code that has to *raise* a validation failure rather than let the
+    framework's own error reach the handler: a header the data plane parses
+    itself (``dataplane/api/transfers.py``).
     """
 
     from fastapi.encoders import jsonable_encoder
