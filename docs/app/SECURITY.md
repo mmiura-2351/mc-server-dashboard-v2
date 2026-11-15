@@ -411,6 +411,10 @@ make it read (issues #3365, #3561):
   is read; otherwise it is refused once the running count passes the limit.
   Within the limit the body is read, and the route answers as it always has. Its
   401, 403 and 404 come from its own dependencies, after the read.
+- After an answer that left a body unread, a rest of at most 16 MiB is read and
+  dropped, never buffered, so the client receives the answer on a usable
+  connection. A longer rest is not read, and the connection closes
+  (`http_body_limit.py`, `EARLY_ANSWER_DISCARD_BYTES`).
 
 So a request without a valid credential cannot make the API read more than the
 anonymous limit, plus at most one chunk as the server received it, before its

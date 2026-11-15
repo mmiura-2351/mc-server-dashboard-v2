@@ -158,20 +158,21 @@ ignores the length): it is bounded by streamed size only. An edit's `content_bas
 refused 413 `file_too_large` before it is decoded; one that decodes to more than
 4 MiB is refused the same way after.
 
-**Authentication precedes body reads.** On every route that requires a
-credential, the credential — and with it the route's membership and permission
-check — is decided from the request's headers and path before a byte of the body
-is read: a caller the route refuses gets the same `401` / `403` / `404` problem
-as ever, with nothing buffered, parsed or spooled to disk for it, and it gets
-that answer in preference to a `413`. The routes that take a body without a
+**A body sent without a credential is held to 64 KiB.** The credential is
+checked from the request's headers alone, before its body is read. A valid user
+access token or the Worker credential keeps the route's limit above. Any other
+request is held to **64 KiB** of body, or to its route's limit if that is
+smaller: no `Authorization` header, a malformed or invalid one, an expired or
+revoked token, or a deactivated account. Past 64 KiB such a request is answered
+`413 request_too_large`, by `Content-Length` before reading anything and by
+streamed size otherwise. Within it the body is read and the route answers as
+usual, with its `401`, after the read. The routes that take a body without a
 credential are `POST /users`, `POST /auth/login`, `/auth/refresh` and
-`/auth/logout`; the data-plane routes check the Worker credential before they
-stream. One consequence: a request that is both unauthorized and malformed is
-now answered for the former (it used to be a `422` when its JSON did not parse).
-The check fails closed: if it cannot be made — a parameter the check itself
-reads does not validate, or it fails unexpectedly — the body is still not read,
-and the request is answered with that `422 validation_error` (carrying the
-check's errors only; the unread body contributes none) or a `500`.
+`/auth/logout`, and their bodies are far below the limit. A caller with a valid
+credential whom the route refuses gets its `403` or `404` once the body, within
+the route's limit, has been read. One consequence: an upload or a large edit
+sent with an expired access token is answered `413 request_too_large`, not
+`401`.
 
 **An answer given before the body was read through** — the refusals above, a
 `413`, or any response to a request whose body was not read, on any method and

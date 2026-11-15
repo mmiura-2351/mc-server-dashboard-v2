@@ -55,6 +55,11 @@ from pydantic import BaseModel
 from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.dependencies import (
     get_authenticate_request,
+    get_login,
+    get_logout,
+    get_refresh_session,
+    get_register_user,
+    get_restore_session,
     get_update_profile,
 )
 from mc_server_dashboard_api.http_body_limit import (
@@ -386,6 +391,26 @@ async def test_a_credentialled_body_keeps_the_routes_full_limit(
         assert result.json() == read
 
 
+async def test_a_malformed_request_with_a_credential_is_answered_after_the_read() -> (
+    None
+):
+    # The route's 422 for a path id that does not parse, as before, after the
+    # body -- past the anonymous limit, within the route's -- is read.
+    size = 4 * _ANONYMOUS
+
+    result = await _request(
+        _small_app(),
+        "POST",
+        "/items/nope",
+        iter([_json_of(size)]),
+        headers=_bearer("member", **_CHUNKED),
+    )
+
+    assert result.status == 422
+    assert [e["loc"] for e in result.json()["errors"]] == [["path", "item"]]
+    assert result.consumed == size
+
+
 @pytest.mark.parametrize("path", ["/json", "/upload"])
 async def test_a_caller_the_route_does_not_allow_is_answered_after_the_read(
     path: str,
@@ -536,6 +561,18 @@ class _Gate:
         self.user = user
 
 
+async def _paged(user: Annotated[str, Depends(_user)], page: int = 1) -> str:
+    # A check with a query parameter of its own.
+    return user
+
+
+async def _reads_the_body(user: Annotated[str, Depends(_user)], body: _Echo) -> str:
+    # A check that reads the body it stands in front of: the pre-body check of
+    # #3365 could not be made for it; now it simply runs after the read.
+    assert body.value
+    return user
+
+
 async def _scoped(scopes: SecurityScopes, user: Annotated[str, Depends(_user)]) -> str:
     assert scopes.scopes == ["items:write"]
     return user
@@ -565,6 +602,8 @@ def _shaped(shape: str, *, limited: bool = True) -> tuple[FastAPI, list[str]]:
         "security": {"user": Security(_scoped, scopes=["items:write"])},
         "class": {"user": Depends(_Gate)},
         "yield": {"user": Depends(session)},
+        "query": {"user": Depends(_paged)},
+        "body": {"user": Depends(_reads_the_body)},
     }
     inner = APIRouter(
         prefix="/inner",
@@ -592,7 +631,17 @@ def _shaped(shape: str, *, limited: bool = True) -> tuple[FastAPI, list[str]]:
     return app, log
 
 
-_SHAPES = ["depends", "security", "class", "yield", "route", "router", "include"]
+_SHAPES = [
+    "depends",
+    "security",
+    "class",
+    "yield",
+    "query",
+    "body",
+    "route",
+    "router",
+    "include",
+]
 
 
 @pytest.mark.parametrize("shape", _SHAPES)
@@ -964,20 +1013,51 @@ def test_every_route_that_takes_an_anonymous_body_fits_the_limit(
     assert max(len(body) for body in largest.values()) == 36_921
 
 
+class _Reached(Exception):
+    """What a stand-in use case raises: the route got as far as calling it."""
+
+
+class _StandIn:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def __call__(self, *_: object, **__: object) -> None:
+        self.calls += 1
+        raise _Reached
+
+
+# The use case behind each route, and whether its body reaches it: the session
+# restore takes its refresh token from a cookie, which these requests carry none
+# of, and answers 401 before it calls its use case.
+_USE_CASES: dict[tuple[str, str], tuple[Any, bool]] = {
+    ("POST", "/api/users"): (get_register_user, True),
+    ("POST", "/api/auth/login"): (get_login, True),
+    ("POST", "/api/auth/refresh"): (get_refresh_session, True),
+    ("POST", "/api/auth/logout"): (get_logout, True),
+    ("POST", "/api/auth/session"): (get_restore_session, False),
+}
+
+
 @pytest.mark.parametrize("route", sorted(_largest_bodies()))
 async def test_every_anonymous_route_takes_its_largest_body(
     live_app: FastAPI, route: tuple[str, str]
 ) -> None:
     method, path = route
     body = _largest_bodies()[route]
+    provider, reaches = _USE_CASES[route]
+    stand_in = _StandIn()
+    live_app.dependency_overrides[provider] = lambda: stand_in
 
     result = await _request(
         live_app, method, path, iter([body]), headers=_declared(len(body))
     )
 
-    # Read whole and answered by the route, whatever it makes of the request.
-    assert result.status != 413
+    # Read whole and parsed: the route handed it to its use case.
     assert result.consumed == len(body)
+    if reaches:
+        assert (result.status, stand_in.calls) == (500, 1)
+    else:
+        assert result.status == 401
 
 
 def _concrete_routes(app: FastAPI) -> Iterator[tuple[str, str]]:
