@@ -688,6 +688,17 @@ func (u *unremovedStarts) take(serverID string) []string {
 	return ids
 }
 
+// first returns the first container recorded for serverID, and whether there is
+// one, leaving the record as it is.
+func (u *unremovedStarts) first(serverID string) (string, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if ids := u.ids[serverID]; len(ids) > 0 {
+		return ids[0], true
+	}
+	return "", false
+}
+
 // unremovedStopTimeout bounds removeUnremoved's graceful stop of a recorded
 // container that is still running. It covers the stop rule's 30 s idle window,
 // its deadline grace and the kill call (defaultStopTimeout, stopDeadlineGrace,
@@ -725,6 +736,34 @@ func (d *Driver) removeUnremoved(ctx context.Context, spec execution.InstanceSpe
 		}
 	}
 	return refusal
+}
+
+// EndLeftovers implements execution.LeftoverGuard (issue #3672): it gives the
+// containers failed starts of the server left behind the treatment the server's
+// next create gives them (removeUnremoved), watching workingDir during a
+// graceful stop. The manager calls it while it holds the server's reservation,
+// which keeps removeUnremoved's take-then-add safe, as for a create.
+func (d *Driver) EndLeftovers(ctx context.Context, serverID, workingDir string) error {
+	if err := d.removeUnremoved(ctx, execution.InstanceSpec{ServerID: serverID, WorkingDir: workingDir}); err != nil {
+		return fmt.Errorf("containerdriver: %w", err)
+	}
+	return nil
+}
+
+// Busy implements execution.LeftoverGuard (issue #3672). A recorded leftover
+// makes the server busy on its own, without a daemon call: a start the daemon
+// did not answer may still run its container after a List showed it created.
+// Otherwise awaitQuiescent decides, which fails closed and is bounded by the
+// conflict window. It waits out a container still listed as running for a
+// moment after its exit, as right after a stop (issue #226).
+func (d *Driver) Busy(ctx context.Context, serverID string) error {
+	if id, ok := d.unremoved.first(serverID); ok {
+		return fmt.Errorf("containerdriver: container %s, which a failed start may have left running, is not removed", id)
+	}
+	if err := d.awaitQuiescent(ctx, serverID); err != nil {
+		return fmt.Errorf("containerdriver: %w", err)
+	}
+	return nil
 }
 
 // removeLeftover removes one container removeUnremoved found recorded, and

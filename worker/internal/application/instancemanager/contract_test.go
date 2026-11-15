@@ -419,6 +419,15 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		}
 		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
 
+	case "untracked_container":
+		// A stopped server whose working set is present, and whose driver records a
+		// leftover it cannot end and so cannot rule out a container running against
+		// the set (issue #3672).
+		g := &fakeGuard{endErr: errLeftover, busyErr: errLeftover}
+		m := newContractManager(t, guardedDriver{&fakeDriver{}, g})
+		seedScratch(t, m, serverID)
+		return m.Handle(ctx, contractCmd(t, row.Kind, serverID))
+
 	default:
 		t.Fatalf("contract table: no fixture for precondition %q", row.Precondition)
 		return session.CommandResult{}

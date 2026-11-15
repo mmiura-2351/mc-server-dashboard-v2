@@ -262,7 +262,6 @@ func TestReplacementWaitsForAFailedLaunchsCorrection(t *testing.T) {
 		defer m.mu.Unlock()
 		return m.reserved[s1].leg != legStarting
 	})
-	m.drivers["container"] = &fakeDriver{}
 	replacement := m.Handle(context.Background(), startCmd())
 	m.statusMu.Unlock()
 
@@ -272,6 +271,9 @@ func TestReplacementWaitsForAFailedLaunchsCorrection(t *testing.T) {
 	if res := <-done; res.Success {
 		t.Fatalf("start = %+v, want the launch's failure", res)
 	}
+	// Swapped only once the launch has returned: its corrective report reads the
+	// drivers (issue #3672).
+	m.drivers["container"] = &fakeDriver{}
 	if ev := drainStatuses(t, m, 1)[0]; ev.ServerID != s1 || ev.State != "stopped" {
 		t.Fatalf("status = %+v, want %s stopped", ev, s1)
 	}
