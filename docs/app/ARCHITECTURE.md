@@ -263,6 +263,15 @@ round trip is at most 550 s, inside the API's 600 s stop budget and the Worker's
 600 s shutdown grace in `compose.yaml` (values, the derivation and the test that
 pins them in [`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3).
 
+A start the Docker daemon did not answer may leave its container running where
+no instance tracks it. Before the Worker touches the working set of a server it
+tracks no instance of (a hydrate, a stopped server's snapshot, the reclaim of a
+deleted server's scratch), it asks the driver's `LeftoverGuard` whether such a
+container may be running (issue #3672). While one may, the hydrate and the
+snapshot are refused as busy and the reclaim keeps the scratch. The hydrate and
+the reclaim first have the driver end the containers it recorded, as the
+server's next start would.
+
 The Worker side deliberately has **no `Storage` Port**: it never sees the
 authoritative backend (FR-DATA-3). It reaches authoritative data only through
 `DataTransfer` to the API.

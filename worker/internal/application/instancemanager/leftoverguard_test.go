@@ -121,7 +121,9 @@ func TestHydrateRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T) {
 		name            string
 		endErr, busyErr error
 	}{
-		{name: "leftover recorded and not ended", endErr: errLeftover, busyErr: errLeftover},
+		// A leftover the driver failed to end refuses on its own, whatever Busy
+		// would answer.
+		{name: "leftover recorded and not ended", endErr: errLeftover},
 		{name: "untracked container running", busyErr: errors.New("test: container /mcsd-s1 of the server is \"running\"; its working set is in use")},
 		{name: "busy query fails", busyErr: errors.New("test: cannot establish that no container of the server is running: daemon down")},
 	} {
@@ -324,7 +326,7 @@ func TestReclaimSkipsADeletedServerWhoseWorkingSetMayBeInUse(t *testing.T) {
 		name            string
 		endErr, busyErr error
 	}{
-		{name: "leftover not ended", endErr: errLeftover, busyErr: errLeftover},
+		{name: "leftover not ended", endErr: errLeftover},
 		{name: "untracked container running", busyErr: errors.New("test: its working set is in use")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
