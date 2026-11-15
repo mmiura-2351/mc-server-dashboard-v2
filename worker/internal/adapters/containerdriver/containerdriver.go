@@ -437,6 +437,7 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 		gameBindIP:             d.gameBindIP,
 		labels:                 d.labels(spec.ServerID, spec.MinecraftVersion),
 		createFn:               d.createServerContainer,
+		cleanBeforeInstallFn:   d.cleanBeforeInstall,
 		openControl:            d.openControl,
 		rconHost:               d.RconHost(spec.ServerID),
 		stopRule:               d.stopRule,
@@ -457,13 +458,8 @@ func (d *Driver) Start(ctx context.Context, spec execution.InstanceSpec) (execut
 	inst.emit(execution.StateStarting, "")
 
 	if plan.NeedsInstall {
-		// Remove stale Forge install artifacts (args files, legacy jars) so the
-		// re-install starts from a clean slate and never hits ambiguous-match
-		// errors (issue #1127). A cleanup failure is logged but does not block
-		// the install.
-		if cleanErr := cleanForgeInstallArtifacts(spec.WorkingDir, d.logger.With("server_id", spec.ServerID)); cleanErr != nil {
-			d.logger.Warn("failed to clean stale Forge artifacts before install",
-				"server_id", spec.ServerID, "err", cleanErr)
+		if err := d.cleanBeforeInstall(ctx, spec); err != nil {
+			return nil, fmt.Errorf("containerdriver: start install container: %w", err)
 		}
 		id, err := d.runInstallContainer(ctx, spec, image, plan)
 		if err != nil {
@@ -704,7 +700,9 @@ func (u *unremovedStarts) take(serverID string) []string {
 const unremovedStopTimeout = defaultStopTimeout + stopDeadlineGrace + stopKillCallTimeout
 
 // removeUnremoved removes, by id, the containers failed starts of the server
-// left behind (unremovedStarts), before the server's next create (issue #3645).
+// left behind (unremovedStarts), before the server's next create (issue #3645)
+// or anything else its next start writes to the working set (gateWorkingSet,
+// issue #3680).
 // None of it runs under an instance lock. Each recorded container goes through
 // removeLeftover. One whose removal is in progress does not refuse the create,
 // but it stays recorded, because the daemon may fail that removal. The
@@ -827,6 +825,41 @@ func (d *Driver) removeLeftover(ctx context.Context, spec execution.InstanceSpec
 	return false, err
 }
 
+// gateWorkingSet is the leftover/quiescence gate every write the driver makes to
+// a server's working set on the start path comes after: it removes the
+// containers failed starts of the server left behind (removeUnremoved), then
+// waits until no container of the server runs (awaitQuiescent). An error means
+// one may still be running against the working set.
+func (d *Driver) gateWorkingSet(ctx context.Context, spec execution.InstanceSpec) error {
+	if err := d.removeUnremoved(ctx, spec); err != nil {
+		return err
+	}
+	return d.awaitQuiescent(ctx, spec.ServerID)
+}
+
+// cleanBeforeInstall removes stale Forge install artifacts (args files, legacy
+// jars) so an install, first attempt or retry, starts from a clean slate and
+// never hits ambiguous-match errors (issue #1127). A cleanup failure is logged
+// but does not block the install.
+//
+// The cleanup unlinks what a container of the server may still be writing, such
+// as an installer an unanswered start left running (issue #3645), so it runs
+// only once the gate (gateWorkingSet) passed, and a refused gate cleans nothing
+// (issue #3680). The create that follows passes the gate again before its
+// hand-over (createServerContainer), which every create goes through. Right
+// after this one passed, that is one List, plus one inspect and remove of a
+// record kept for a removal in progress.
+func (d *Driver) cleanBeforeInstall(ctx context.Context, spec execution.InstanceSpec) error {
+	if err := d.gateWorkingSet(ctx, spec); err != nil {
+		return fmt.Errorf("containerdriver: not cleaning stale Forge install artifacts: %w", err)
+	}
+	if err := cleanForgeInstallArtifacts(spec.WorkingDir, d.logger.With("server_id", spec.ServerID)); err != nil {
+		d.logger.Warn("failed to clean stale Forge artifacts before install",
+			"server_id", spec.ServerID, "err", err)
+	}
+	return nil
+}
+
 // runInstallContainer creates and starts the supervised Forge install container,
 // returning its id. It runs `java -jar <jar> --installServer` (exec form) against
 // the same image and bind-mounted working dir as the launch, under a distinct
@@ -943,10 +976,7 @@ func (d *Driver) createServerContainer(ctx context.Context, spec execution.Insta
 		return "", errors.New("containerdriver: not handing over the working set: the spec carries no working-set lock")
 	}
 	begin := time.Now()
-	if err := d.removeUnremoved(ctx, spec); err != nil {
-		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
-	}
-	if err := d.awaitQuiescent(ctx, spec.ServerID); err != nil {
+	if err := d.gateWorkingSet(ctx, spec); err != nil {
 		return "", fmt.Errorf("containerdriver: not handing over the working set: %w", err)
 	}
 	// The server's code is gone; the lock keeps the Worker's own writers out of
@@ -1465,6 +1495,11 @@ type instance struct {
 	labels      map[string]string
 	createFn    func(ctx context.Context, spec execution.InstanceSpec, create CreateSpec) (string, error)
 	openControl controlFunc
+
+	// cleanBeforeInstallFn is Driver.cleanBeforeInstall, which an install retry
+	// runs before its re-plan.
+	cleanBeforeInstallFn func(ctx context.Context, spec execution.InstanceSpec) error
+
 	// installCtx is what superviseInstall creates its containers under — the
 	// install retry and the launch container, each of which first waits for the
 	// working-set lock and walks the working set (issue #3371). endInstall cancels
@@ -1809,10 +1844,6 @@ func (i *instance) superviseInstall(installID string) {
 		// blocks for the one Start call and then acts on the already-started retry
 		// container. There is therefore no published-but-unstarted sub-window for
 		// Stop to mishandle (issue #1987).
-		if cleanErr := cleanForgeInstallArtifacts(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID)); cleanErr != nil {
-			i.logger.Warn("failed to clean stale Forge artifacts before install",
-				"server_id", i.spec.ServerID, "err", cleanErr)
-		}
 		newID, err := i.createInstallRetryContainer()
 		if err != nil {
 			if i.stopWasRequested() {
@@ -2006,13 +2037,16 @@ func (i *instance) installBackoffOrStopping(d time.Duration) bool {
 	return false
 }
 
-// createInstallRetryContainer creates (but does not start) a new install
-// container for a retry attempt, reusing the instance's captured fields. Starting
-// is deferred to the latch-guarded critical section so a Stop can abort the retry
-// before it starts (issue #1987). It mirrors Driver.runInstallContainer's create
-// but omits Start, like createLaunchContainer for the install→launch handoff
-// (issue #306).
+// createInstallRetryContainer cleans the failed attempt's artifacts, then
+// creates (but does not start) a new install container for a retry attempt,
+// reusing the instance's captured fields. Starting is deferred to the
+// latch-guarded critical section so a Stop can abort the retry before it starts
+// (issue #1987). It mirrors Driver.runInstallContainer's create but omits Start,
+// like createLaunchContainer for the install→launch handoff (issue #306).
 func (i *instance) createInstallRetryContainer() (string, error) {
+	if err := i.cleanBeforeInstallFn(i.installCtx, i.spec); err != nil {
+		return "", err
+	}
 	plan, err := execution.BuildLaunchPlan(i.spec, containerPathResolver(i.spec.WorkingDir, i.logger.With("server_id", i.spec.ServerID)))
 	if err != nil {
 		return "", err

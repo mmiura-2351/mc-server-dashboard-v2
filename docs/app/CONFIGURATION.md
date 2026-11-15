@@ -731,8 +731,10 @@ keeps running until a later start tries again. A removal the daemon reports
 already in progress does not refuse the start, which still waits for the
 container to stop running as above, and the id is kept until a later start finds
 the container gone. A Worker restart forgets the id; the boot's sweep removes
-the container instead. The commands that touch the working set of a server with
-no running instance take the same care. Such a server is busy while the driver
+the container instead. A Forge install, the first attempt or a retry, passes both
+checks before it removes the stale install artifacts an earlier install left, and
+removes nothing when it is refused. The commands that touch the working set of
+a server with no running instance take the same care. Such a server is busy while the driver
 keeps an id for it whose container the daemon still knows or cannot inspect
 within 10 s, lists a running container of it, or cannot list its containers
 within 10 s. A hydrate first deals with the kept ids the way the next
