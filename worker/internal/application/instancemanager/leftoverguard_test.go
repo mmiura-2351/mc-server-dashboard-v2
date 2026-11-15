@@ -37,10 +37,15 @@ func (g *fakeGuard) EndLeftovers(_ context.Context, serverID, workingDir string)
 	return err
 }
 
-func (g *fakeGuard) Busy(_ context.Context, serverID string) error {
+// Busy fails on a context that has ended, as the container driver's does: its
+// List cannot answer on one.
+func (g *fakeGuard) Busy(ctx context.Context, serverID string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.calls = append(g.calls, "busy "+serverID)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return g.busyErr
 }
 
@@ -211,30 +216,42 @@ func TestRunningServerPathsAskTheGuardNothing(t *testing.T) {
 // left its container running reports `crashed`, not `stopped` (issue #3672): a
 // container may still be running, and `stopped` would say none is. The
 // reconciler redispatches the start either way, and that start ends the
-// leftover. With the server clear it still reports `stopped`.
+// leftover. With the server clear it still reports `stopped`, a cancelled launch
+// included: the question is not asked on the launch's own context.
 func TestResyncReportedLaunchThatFailsReportsCrashedWhileALeftoverMayRun(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
+		cancelled bool
 		busyErr   error
 		wantState string
 	}{
 		{name: "leftover", busyErr: errLeftover, wantState: "crashed"},
 		{name: "clear", wantState: "stopped"},
+		{name: "cancelled and clear", cancelled: true, wantState: "stopped"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &fakeGuard{busyErr: tc.busyErr}
 			held := newHeldLaunchDriver(errors.New("test: launch failed"))
+			if tc.cancelled {
+				held = newHeldLaunchDriver(nil)
+			}
 			m := newManager(t, guardedDriver{held, g}, nil)
 			seedScratch(t, m, s1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			done := make(chan session.CommandResult, 1)
-			go func() { done <- m.Handle(context.Background(), startCmd()) }()
+			go func() { done <- m.Handle(ctx, startCmd()) }()
 			awaitEnter(t, held.entered)
 			m.ResyncStatus()
 			if states := statesOf(t, m, 1); states[s1] != "starting" {
 				t.Fatalf("resync states = %v, want %s starting", states, s1)
 			}
 
-			close(held.release)
+			if tc.cancelled {
+				cancel()
+			} else {
+				close(held.release)
+			}
 			if res := <-done; res.Success {
 				t.Fatalf("start = %+v, want the launch's failure", res)
 			}
