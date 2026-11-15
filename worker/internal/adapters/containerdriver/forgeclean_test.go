@@ -3,10 +3,13 @@ package containerdriver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -493,4 +496,152 @@ func TestForgeInstallRetryCleansTheFailedAttemptsArtifacts(t *testing.T) {
 	assertGone(t, stale)
 	docker.exit("mcsd-s1", 0, nil)
 	drainClosed(inst.Events())
+}
+
+// A start retried after one whose first installer the daemon did not answer,
+// while that installer still runs and is recorded (issue #3645), ends it before
+// the stale-artifact cleanup unlinks anything: the cleanup writes the working
+// set, so it comes after the leftover/quiescence gate (issue #3680). The
+// leftover is stopped and removed once, with what it wrote still in place; then
+// the cleanup and the install run.
+func TestForgeStartEndsARecordedInstallerBeforeCleaningArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	jar := filepath.Join(dir, "forge-1.12.2-14.23.5.2859.jar")
+	docker := newForgeFakeDocker()
+	docker.reportsState = true
+	docker.startStallIDs = map[string]bool{forgeInstallID: true}
+	docker.removeErrIDs = map[string]error{forgeInstallID: errors.New("daemon busy")}
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.initialInstallStartTimeout = 20 * time.Millisecond
+	if err := startWithin(context.Background(), t, d, forgeSpec(dir)); !strings.Contains(err.Error(), "install container start timed out") {
+		t.Fatalf("first start err = %v, want the installer start's timeout", err)
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{forgeInstallID}) {
+		t.Fatalf("recorded = %v, want the installer the start left running", got)
+	}
+	// The installer left running goes on writing the working set.
+	plant(t, jar, "x")
+
+	var (
+		mu    sync.Mutex
+		calls []string
+	)
+	record := func(call string) {
+		_, err := os.Lstat(jar)
+		mu.Lock()
+		calls = append(calls, fmt.Sprintf("%s, artifact present: %t", call, err == nil))
+		mu.Unlock()
+	}
+	docker.mu.Lock()
+	docker.startStallIDs, docker.removeErrIDs = nil, nil
+	docker.onStopOrRemove = func(call, id string) {
+		if id == forgeInstallID {
+			record(call)
+		}
+	}
+	docker.onCreateHook = func(spec CreateSpec) {
+		if spec.Name == forgeInstallID {
+			record("create")
+		}
+	}
+	docker.mu.Unlock()
+
+	next, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("next Start: %v, want the leftover installer ended and the install started", err)
+	}
+	mu.Lock()
+	got := slices.Clone(calls)
+	mu.Unlock()
+	want := []string{"stop, artifact present: true", "remove, artifact present: true", "create, artifact present: false"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	if got := unremovedOf(d, "s1"); len(got) != 0 {
+		t.Fatalf("recorded = %v, want the record cleared", got)
+	}
+	writeArgsfile(t, dir)
+	docker.exit(forgeInstallID, 0, nil)
+	drainTo(t, next.Events(), execution.StateRunning)
+	docker.exit("mcsd-s1", 0, nil)
+	awaitStreamClosed(t, next.Events())
+}
+
+// A start the leftover/quiescence gate refuses cleans nothing: a container of
+// the server that may still be running keeps the artifacts it wrote, and no
+// installer is created (issue #3680).
+func TestForgeStartRefusedByTheGateLeavesArtifactsUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(d *Driver, docker *forgeFakeDocker)
+		want  string
+	}{
+		{
+			name: "recorded leftover not removed",
+			setup: func(d *Driver, docker *forgeFakeDocker) {
+				d.unremoved.add("s1", forgeInstallID)
+				docker.inspectGate = make(chan inspectStep, 1)
+				docker.inspectGate <- inspectStep{err: errors.New("daemon busy")}
+			},
+			want: "is not removed: inspect: daemon busy",
+		},
+		{
+			name: "untracked container running",
+			setup: func(_ *Driver, docker *forgeFakeDocker) {
+				docker.reportsState = true
+				docker.running = map[string]bool{forgeInstallID: true}
+			},
+			want: "its working set is in use",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			jar := filepath.Join(dir, "forge-1.12.2-14.23.5.2859.jar")
+			plant(t, jar, "x")
+			docker := newForgeFakeDocker()
+			d := forgeDriver(docker)
+			tc.setup(d, docker)
+
+			err := startWithin(context.Background(), t, d, forgeSpec(dir))
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want a refusal containing %q", err, tc.want)
+			}
+			assertContent(t, jar, "x")
+			if got := docker.names(); len(got) != 0 {
+				t.Fatalf("created = %v, want no container", got)
+			}
+		})
+	}
+}
+
+// An install retry the leftover/quiescence gate refuses cleans nothing either:
+// the failed attempt's installer, whose Wait the daemon failed and whose
+// removal failed, may still be running and keeps what it wrote (issue #3680).
+func TestForgeInstallRetryRefusedByTheGateLeavesArtifactsUntouched(t *testing.T) {
+	shrinkInstallBackoff(t)
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "forge-1.12.2-14.23.5.2859.jar")
+	docker := newForgeFakeDocker()
+	docker.reportsState = true
+	docker.removeErrIDs = map[string]error{forgeInstallID: errors.New("daemon busy")}
+	docker.waitGates[forgeInstallID] = make(chan waitResult, 1)
+	docker.waitGates[forgeInstallID] <- waitResult{err: statusError{method: "POST", path: "/wait", code: 500, message: "wait failed"}}
+	docker.onCreateHook = func(spec CreateSpec) {
+		if spec.Name == forgeInstallID {
+			plant(t, stale, "x")
+		}
+	}
+
+	inst, err := forgeDriver(docker).Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	last := awaitStreamClosed(t, inst.Events())
+	if last.State != execution.StateCrashed || !strings.Contains(last.Detail, "its working set is in use") {
+		t.Fatalf("last event = %+v, want the retry refused while the installer may run", last)
+	}
+	assertContent(t, stale, "x")
+	if got := docker.names(); len(got) != 1 {
+		t.Fatalf("created = %v, want only the first installer", got)
+	}
 }
