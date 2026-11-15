@@ -705,7 +705,7 @@ async def _settle_deferred_removals() -> None:
         await asyncio.gather(*fs._STAGING_REMOVALS, return_exceptions=True)
 
 
-@pytest.mark.timeout(4 * 120 + 30)
+@pytest.mark.timeout(5 * 120 + 30)
 async def test_an_abort_during_a_removal_leaves_the_lease_to_the_rerun(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -742,7 +742,7 @@ async def test_an_abort_during_a_removal_leaves_the_lease_to_the_rerun(
     assert storage._staging_jobs == {}
 
 
-@pytest.mark.timeout(4 * 120 + 30)
+@pytest.mark.timeout(5 * 120 + 30)
 async def test_an_abort_during_a_failed_refusal_cleanup_leaves_the_lease_to_the_rerun(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

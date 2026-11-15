@@ -1155,7 +1155,8 @@ class FsStorage(Storage):
         it rather than scheduling one, so whichever way the removal ends, the
         removal ending last decides:
 
-        - another removal of the staging is still under way: that one decides;
+        - another removal of the staging is still under way (a discard landed
+          between a rerun's scheduling and its first step): that one decides;
         - a job still uses the staging (the removal's own, its caller cancelled, or
           one begun meanwhile): a removal is due at the end of the last one, which
           then owns the lease;
