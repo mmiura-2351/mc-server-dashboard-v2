@@ -1105,7 +1105,8 @@ class FsStorage(Storage):
         The fallback catches any ``RuntimeError`` from the submit, including "can't
         start new thread", so a live loop can stall for the length of the removal.
         That is deliberate: leaving the tree to the sweep instead would leak its
-        disk until the next start, since the sweep runs only at startup.
+        disk until the next sweep pass (``storage_sweep.interval_seconds``, a day
+        by default) or a restart.
         """
 
         try:
@@ -1119,7 +1120,7 @@ class FsStorage(Storage):
             return
         # The order is load-bearing: the job must be settled before the removal
         # ends, or the end finds its own job, marks the removal due again, and the
-        # settle then schedules another removal that nothing ends.
+        # settle then schedules another removal, and so on without end.
         self._count_on_staging(staging, job)
         job.add_done_callback(functools.partial(self._end_deferred_removal, staging))
 
@@ -1317,7 +1318,8 @@ class FsStorage(Storage):
         ``snapshots/<id>/`` not pointed at by ``current`` is unreferenced and is
         removed, and every leftover ``incoming/`` staging dir is removed.
         Safe to re-run; never touches the snapshot ``current`` resolves to. Exposed
-        for the API startup lifespan hook and manual invocation.
+        for the API startup lifespan hook, the periodic sweep loop (issue #2252),
+        and manual invocation.
 
         Sweep-vs-flip race (issue #1606): a concurrent publish whose new snapshot
         directory was already in the iteration but whose pointer flip lands after
@@ -1368,7 +1370,8 @@ class FsStorage(Storage):
         # mirror the ``.final.*.tmp`` sweep prune_to_final_snapshot does at its own
         # write site; centralising backup tmp hygiene here covers both write paths.
         # An mtime age threshold skips a spool a live write may still be filling
-        # (issue #903), so the sweep stays safe if it ever runs outside startup.
+        # (issue #903), so the sweep stays safe now that it also runs on an
+        # interval (issue #2252).
         backups = server_root / "backups"
         if backups.is_dir():
             for stale in backups.glob(".backup.*.tmp"):
