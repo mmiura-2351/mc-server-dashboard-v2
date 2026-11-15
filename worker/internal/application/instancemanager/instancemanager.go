@@ -1130,6 +1130,16 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// hydrate cannot hang the lane indefinitely.
 	transferCtx, cancel := m.transferContext(ctx)
 	defer cancel()
+	// No tracked instance means no process the Worker knows of, but a start the
+	// daemon did not answer may have left its container running against the
+	// working set (issue #3672). Its shutdown save lands on the working set as it
+	// is at that moment, so it is ended BEFORE the pull, which then replaces what it
+	// saved. Refusing instead would hold back the start that ends it, which the
+	// API sends only after a successful hydrate. A container that cannot be ended,
+	// or that the driver cannot rule out, refuses the hydrate as BUSY.
+	if err := m.endLeftovers(transferCtx, cmd.ServerID, workingDir); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorBusy, fmt.Sprintf(untrackedBusyMsg, "hydrate", err))
+	}
 	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
@@ -1466,6 +1476,16 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// command has answered (issue #3511).
 		if ok, code, msg := m.reserve(cmd.ServerID, legNone); !ok {
 			return fail(cmd.CommandID, code, msg)
+		}
+		// The reservation rules out only the processes the Worker tracks; a start the
+		// daemon did not answer may have left its container running against the set
+		// (issue #3672). Packing a set it is writing is a mixed capture, so the
+		// snapshot is refused as BUSY while the driver cannot rule one out. It does
+		// not end the container: the snapshot is no precondition of the start that
+		// does, and what it packed would be that container's shutdown save.
+		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
+			m.release(cmd.ServerID)
+			return fail(cmd.CommandID, session.CommandErrorBusy, fmt.Sprintf(untrackedBusyMsg, "snapshot", err))
 		}
 		release = func() { m.release(cmd.ServerID) }
 	}
@@ -2780,7 +2800,7 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 	// API's phrase is pinned to the same entry (issue #2843).
 	workingDir := filepath.Join(m.scratchDir, cmd.ServerID)
 	if err := generationMarkerPresent(workingDir); err != nil {
-		m.releaseFailedLaunch(cmd.ServerID)
+		m.releaseFailedLaunch(ctx, cmd.ServerID)
 		m.logger.Warn("launch refused: working dir absent",
 			"server_id", cmd.ServerID, "working_dir", workingDir, "reason", "working_set_absent", "marker", err)
 		return fail(cmd.CommandID, session.CommandErrorServerNotFound,
@@ -2808,7 +2828,7 @@ func (m *Manager) launchReserved(ctx context.Context, cmd session.Command, drive
 		WorldProgress: m.worldProgress(workingDir),
 	})
 	if err != nil {
-		m.releaseFailedLaunch(cmd.ServerID)
+		m.releaseFailedLaunch(ctx, cmd.ServerID)
 		return fail(cmd.CommandID, startErrorCode(err),
 			fmt.Sprintf("instancemanager: start: %v", err))
 	}
@@ -3300,6 +3320,21 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 			// an in-flight command — skip it rather than interfere.
 			continue
 		}
+		dir := filepath.Join(m.scratchDir, id)
+		// A start the daemon did not answer may have left the deleted server's
+		// container running, and nothing else would end it before the next boot's
+		// sweep (issue #3672). It is ended here, with the working set still in place
+		// for its graceful stop to watch, under the shutdown context, so a Close
+		// abandons that stop rather than waits it out. While a container may still be
+		// running, nothing is removed: the scratch would be pulled from under it. The
+		// scratch that stays keeps the id advertised, so the next registration offers
+		// it again, and the boot's sweep is the backstop.
+		if err := m.endLeftovers(m.shutdown, id, dir); err != nil {
+			m.logger.Warn("not reclaiming deleted-server scratch: a container the Worker does not track may be running against it",
+				"server_id", id, "dir", dir, "error", err)
+			m.release(id)
+			continue
+		}
 		// The leftovers go FIRST, and the order is load-bearing (issue #2934).
 		// <scratch>/<id> is what keeps the id advertised — both held-set scans skip
 		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
@@ -3318,7 +3353,6 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// retry-stop leg, and an interruption here costs nothing at any value of it —
 		// or in a crash or a power loss, which no value reaches.
 		m.sweepHydrateLeftovers(id)
-		dir := filepath.Join(m.scratchDir, id)
 		if _, statErr := os.Stat(dir); statErr == nil {
 			if err := os.RemoveAll(dir); err != nil {
 				m.logger.Warn("failed to reclaim deleted-server scratch",
@@ -4505,10 +4539,51 @@ func (m *Manager) release(serverID string) {
 	delete(m.reserved, serverID)
 }
 
+// untrackedBusy asks every driver that can leave a server's process running
+// where no instance tracks it (execution.LeftoverGuard) whether one of serverID's
+// may be running against its working set (issue #3672). Its error is that
+// driver's answer, nil when none may be. Hydrate and snapshot commands name no
+// driver, so every one is asked. The caller holds serverID's reservation and
+// tracks no instance of it; a running server's paths do not call it, so they pay
+// no daemon round-trip.
+func (m *Manager) untrackedBusy(ctx context.Context, serverID string) error {
+	for _, d := range m.drivers {
+		if g, ok := d.(execution.LeftoverGuard); ok {
+			if err := g.Busy(ctx, serverID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// endLeftovers first has every LeftoverGuard driver end what it left running for
+// serverID, as the server's next start would: a graceful stop watching
+// workingDir, then a removal (issue #3672). It then answers as untrackedBusy. A
+// command that is a precondition of that start, the hydrate, uses it rather than
+// untrackedBusy alone: a refusal there would hold back the start that ends the
+// leftover.
+func (m *Manager) endLeftovers(ctx context.Context, serverID, workingDir string) error {
+	for _, d := range m.drivers {
+		if g, ok := d.(execution.LeftoverGuard); ok {
+			if err := g.EndLeftovers(ctx, serverID, workingDir); err != nil {
+				return err
+			}
+		}
+	}
+	return m.untrackedBusy(ctx, serverID)
+}
+
+// untrackedBusyMsg is the BUSY refusal of a command that would touch the working
+// set while a container no instance tracks may be running against it (issue
+// #3672).
+const untrackedBusyMsg = "instancemanager: %s refused: a container of the server the Worker does not track may be running against the working set: %v"
+
 // releaseFailedLaunch releases the reservation of a launch that ended without
 // registering an instance: refused, failed, cancelled or past its deadline. When a
 // resync reported the launch `starting` (issue #3302), it first reports the server
-// `stopped`, which is what it is: no process was left behind. Nothing else would
+// `stopped`, or `crashed` while a container may have been left running (below).
+// Nothing else would
 // correct that report. The failed launch emits no status of its own, its command
 // result goes to the session the command arrived on, which is the one that dropped,
 // and a restart's own `stopped` from its stop leg went out before the resync. The
@@ -4524,13 +4599,27 @@ func (m *Manager) release(serverID string) {
 // which cannot claim the id until the release below, enqueues its events after it.
 // The reservation is first marked leg-less under mu, so a resync that comes later
 // reports nothing for the id instead of `starting` again.
-func (m *Manager) releaseFailedLaunch(serverID string) {
+//
+// `stopped` holds only if no process was left behind, and a start the daemon did
+// not answer may have left its container running (issue #3672). So the report
+// first asks the driver (untrackedBusy), on a context the launch's own
+// cancellation does not end, since a cancelled launch is one of the cases here.
+// While a container may be running it reports `crashed` with the driver's answer
+// as its detail: the start did fail, and the reconciler redispatches a crashed
+// server's start as it does a stopped one's, under its crash backoff. That start
+// is what ends the leftover. A failed launch no resync reported asks nothing.
+func (m *Manager) releaseFailedLaunch(ctx context.Context, serverID string) {
 	m.mu.Lock()
 	reported := m.reserved[serverID].reported
 	m.reserved[serverID] = reservation{leg: legNone}
 	m.mu.Unlock()
 	if reported {
-		m.sendStatus(session.StatusEvent{ServerID: serverID, State: execution.StateStopped.String()})
+		ev := session.StatusEvent{ServerID: serverID, State: execution.StateStopped.String()}
+		if err := m.untrackedBusy(context.WithoutCancel(ctx), serverID); err != nil {
+			ev.State = execution.StateCrashed.String()
+			ev.Detail = fmt.Sprintf("the start failed, and a container of the server may still be running: %v", err)
+		}
+		m.sendStatus(ev)
 	}
 	m.release(serverID)
 }

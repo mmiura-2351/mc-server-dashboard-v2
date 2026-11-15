@@ -261,6 +261,24 @@ type StopHandOff interface {
 	HandOffStops(ctx context.Context) error
 }
 
+// LeftoverGuard is implemented by a driver that can leave a server's process
+// running where no Instance tracks it: a container whose start the daemon did
+// not answer, and which the cleanup after it could not remove (issue #3672).
+// The instance manager asks it before it touches the working set of a server it
+// tracks no instance of, because such a process may still be writing there.
+type LeftoverGuard interface {
+	// EndLeftovers ends what the driver itself left running for serverID, as the
+	// server's next start would: a graceful stop that watches workingDir, then a
+	// removal. It is bounded. An error means a leftover was not ended and is
+	// still recorded.
+	EndLeftovers(ctx context.Context, serverID, workingDir string) error
+	// Busy returns nil once no process of serverID that no Instance tracks can
+	// be running against its working set: the backend knows no leftover the
+	// driver recorded, and lists none alive. It ends nothing. It is bounded and
+	// fails closed: when it cannot tell, it returns an error.
+	Busy(ctx context.Context, serverID string) error
+}
+
 // Instance is a launched server handle. Its Events channel delivers state
 // transitions including the crash notification (process exit → StateCrashed
 // unless a Stop is in flight). The channel closes when the instance reaches a

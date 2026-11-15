@@ -731,7 +731,19 @@ keeps running until a later start tries again. A removal the daemon reports
 already in progress does not refuse the start, which still waits for the
 container to stop running as above, and the id is kept until a later start finds
 the container gone. A Worker restart forgets the id; the boot's sweep removes
-the container instead. A Forge installer's output is followed into
+the container instead. The commands that touch the working set of a server with
+no running instance take the same care. Such a server is busy while the driver
+keeps an id for it whose container the daemon still knows or cannot inspect
+within 10 s, lists a running container of it, or cannot list its containers
+within 10 s. A hydrate first deals with the kept ids the way the next
+start would, so a container's shutdown save lands before the pull replaces the
+working set, and it is refused as busy if the server still is. A snapshot of a
+stopped server is refused as busy, and stops nothing. The reclaim of a deleted
+server's scratch at registration deals with the kept ids like the hydrate, and
+keeps the scratch while the server is busy, so the next registration offers it
+again. A failed start that a reconnect had reported as `starting` is then
+reported `crashed` rather than `stopped` while the server is busy. A Forge
+installer's output is followed into
 `logs/forge-install.log` for as long as the install runs. Once the installer
 exits, the driver waits at most 5 s for the rest of that output, so a stalled log
 stream cannot hold back the install's outcome or a stop. The sweep recovers from
