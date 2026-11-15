@@ -1116,20 +1116,31 @@ class FsStorage(Storage):
         an outcome a cleanup fault must never replace, such as a restore's
         publication (issue #3564): the fault is logged, and the sweep reclaims the
         staging, mirroring the object restore's cleanup.
+
+        The removal is a job on the staging (:meth:`_run_on_staging`), so a caller
+        cancelled while it runs leaves the lease to the end of the removal, as
+        :meth:`_discard_staging` does for any job (issue #3664).
         """
 
         try:
-            await asyncio.to_thread(_rmtree, staging)
+            await self._run_on_staging(staging, _rmtree, staging)
+        except asyncio.CancelledError:
+            with self._lease_lock:
+                if staging in self._staging_jobs:
+                    self._staging_removals_due.add(staging)
+                    raise
+            self._release_staging(staging)
+            raise
         except Exception:
             if raise_fault:
+                self._release_staging(staging)
                 raise
             _LOG.warning(
                 "removing the staging %s failed; the sweep reclaims it",
                 staging,
                 exc_info=True,
             )
-        finally:
-            self._release_staging(staging)
+        self._release_staging(staging)
 
     # --- the resolve rule: containment + symlink refusal (Section 6) --------
 
@@ -1476,8 +1487,7 @@ class FsStorage(Storage):
         async with self._refusing_pruned_staging(fs_handle, staging, expected_base):
             report = await self._run_on_staging(staging, check_working_set, staging)
         if not report.healthy:
-            await asyncio.to_thread(_rmtree, staging)
-            self._release_staging(staging)
+            await self._discard_staging(staging, raise_fault=False)
             fs_handle.consumed = True
             raise IntegrityCheckError(report)
         fence: Callable[[], bool] | None = None
@@ -1504,8 +1514,7 @@ class FsStorage(Storage):
             # under the lock (issue #3544). Discard the staging exactly as the other
             # refusal paths do (the prior ``current`` keeps the newer/good copy, no
             # bump) and re-raise.
-            await asyncio.to_thread(_rmtree, staging)
-            self._release_staging(staging)
+            await self._discard_staging(staging, raise_fault=False)
             fs_handle.consumed = True
             raise
         # Publish moved the staging dir into snapshots/; release its active-staging
@@ -1555,8 +1564,7 @@ class FsStorage(Storage):
         )
         if pruned is None:
             return
-        await asyncio.to_thread(_rmtree, staging)
-        self._release_staging(staging)
+        await self._discard_staging(staging, raise_fault=False)
         fs_handle.consumed = True
         raise PrunedStoreError(expected_base, pruned)
 
