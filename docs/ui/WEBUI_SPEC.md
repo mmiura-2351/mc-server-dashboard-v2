@@ -1051,8 +1051,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `command_expired` says the host was busy with other work and did not get to
   the action in time, so it was not applied and the operator tries again
   (Section 2, "A command the host did not get to"). It is the same message on
-  every verb: nothing was applied, so the stop and restart messages below,
-  which describe something left pending, would be wrong;
+  every verb, because what it reports holds on each: the host never ran that
+  command, so nothing was half-done and retrying is safe. A start or a restart
+  leaves nothing pending, so the restart message below would be wrong. A stop
+  keeps its stop intent, and the system replays the stop on its own after a
+  short wait; the message still asks for a retry rather than taking the stop
+  message below, since trying again replays the stop at once;
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
   the server's state — a failed start is compensated back, but a failed stop or

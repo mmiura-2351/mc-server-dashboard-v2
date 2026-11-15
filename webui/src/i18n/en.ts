@@ -240,8 +240,10 @@ export const en = {
   "dashboard.lifecycle.busy":
     "Another operation on this server is in progress. Please wait a moment and try again.",
   // 409 command_expired (issue #3305): the command waited on the host, behind
-  // other work, past its budget and was not applied on any verb, so a retry is
-  // the remedy. Not commandFailed: nothing moved, so there is no state to check.
+  // other work, past its budget, and the host never ran it, so a retry is safe.
+  // Not commandFailed: nothing was half-done, so there is no state to check. A
+  // start or restart leaves nothing pending. A stop keeps its intent, which the
+  // system replays on its own after a short grace, and a retry replays it at once.
   "dashboard.lifecycle.commandExpired":
     "Not applied: the server host was busy with other work and did not get to it in time. Try again.",
   // 409 command_failed (issue #2420): the host took the command and could not
