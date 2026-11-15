@@ -29,6 +29,13 @@ import pytest
 
 from mc_server_dashboard_api.storage.adapters import fs
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.domain.errors import (
+    IntegrityCheckError,
+    MissingRegionsError,
+    PrunedStoreError,
+    PublisherFencedError,
+    StaleGenerationError,
+)
 from mc_server_dashboard_api.storage.domain.port import SnapshotHandle
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -36,7 +43,15 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from mc_server_dashboard_api.storage.integrity.region import check_working_set
-from tests.storage.helpers import drain, new_scope, publish, read_tar, tar_stream
+from tests.storage.helpers import (
+    corrupt_region_bytes,
+    drain,
+    healthy_region_bytes,
+    new_scope,
+    publish,
+    read_tar,
+    tar_stream,
+)
 
 
 @dataclass
@@ -469,3 +484,394 @@ async def test_an_aborted_transfer_keeps_its_staging_until_its_spool_is_closed(
     assert not staging.exists()
     assert not storage._is_staging_active(staging)
     assert storage._staging_jobs == {}
+
+
+# A refused commit removes its staging (#3664). The commit's arrange step returns
+# the handle to commit, the staging and the commit's keyword arguments.
+_Refused = tuple[SnapshotHandle, Path, dict[str, Any]]
+_Arrange = Callable[[FsStorage, CommunityId, ServerId], Awaitable[_Refused]]
+
+_REGION = "world/region/r.0.0.mca"
+
+
+async def _staged(
+    storage: FsStorage,
+    community: CommunityId,
+    server: ServerId,
+    files: dict[str, bytes],
+) -> tuple[SnapshotHandle, Path]:
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(files))
+    return handle, _only_staging(storage, community, server)
+
+
+async def _pruned(storage: FsStorage, c: CommunityId, s: ServerId) -> _Refused:
+    await publish(storage, c, s, {"a.txt": b"OLD"})
+    base = await storage.current_generation(c, s)
+    handle, staging = await _staged(storage, c, s, {"a.txt": b"NEW"})
+
+    def _prune() -> None:
+        with storage._server_lock(c, s):
+            storage._prune_to_final_snapshot_inner(c, s)
+
+    await asyncio.to_thread(_prune)
+    # The prune empties the staging before it removes it (issue #3481): caught
+    # midway, the commit finds it empty and asks whether a prune ran.
+    staging.mkdir(parents=True)
+    return handle, staging, {"expected_base": base}
+
+
+async def _corrupt(storage: FsStorage, c: CommunityId, s: ServerId) -> _Refused:
+    await publish(storage, c, s, {_REGION: healthy_region_bytes()})
+    handle, staging = await _staged(storage, c, s, {_REGION: corrupt_region_bytes()})
+    return handle, staging, {}
+
+
+async def _stale(storage: FsStorage, c: CommunityId, s: ServerId) -> _Refused:
+    await publish(storage, c, s, {"a.txt": b"OLD"})
+    base = await storage.current_generation(c, s)
+    handle, staging = await _staged(storage, c, s, {"a.txt": b"NEW"})
+    await publish(storage, c, s, {"a.txt": b"NEWER"})
+    return handle, staging, {"expected_base": base}
+
+
+async def _missing_regions(storage: FsStorage, c: CommunityId, s: ServerId) -> _Refused:
+    region = healthy_region_bytes()
+    await publish(storage, c, s, {_REGION: region, "world/region/r.0.1.mca": region})
+    handle, staging = await _staged(storage, c, s, {_REGION: region})
+    return handle, staging, {}
+
+
+async def _refusing_fence() -> bool:
+    return False
+
+
+async def _fenced(storage: FsStorage, c: CommunityId, s: ServerId) -> _Refused:
+    await publish(storage, c, s, {"a.txt": b"OLD"})
+    handle, staging = await _staged(storage, c, s, {"a.txt": b"NEW"})
+    return handle, staging, {"publisher_fence": _refusing_fence}
+
+
+_REFUSALS: dict[str, tuple[_Arrange, type[Exception]]] = {
+    "pruned": (_pruned, PrunedStoreError),
+    "integrity": (_corrupt, IntegrityCheckError),
+    "stale": (_stale, StaleGenerationError),
+    "missing-regions": (_missing_regions, MissingRegionsError),
+    "fenced": (_fenced, PublisherFencedError),
+}
+
+
+def _holding_removal_of(staging: Path, pause: _Pause, mp: pytest.MonkeyPatch) -> None:
+    """Hold the first removal of ``staging``; any other removal runs as is.
+
+    The prune, the sweep and the superseded snapshot's reclaim remove paths too.
+    """
+
+    rmtree = fs._rmtree
+    held = pause.once(rmtree)
+
+    def _rmtree(path: Path) -> None:
+        (held if path == staging else rmtree)(path)
+
+    mp.setattr(fs, "_rmtree", _rmtree)
+
+
+@pytest.mark.timeout(2 * 120 + 5 + 30)
+@pytest.mark.parametrize("arrange", [a for a, _ in _REFUSALS.values()], ids=_REFUSALS)
+async def test_a_refusal_cancelled_in_its_cleanup_releases_the_lease_after_the_removal(
+    arrange: _Arrange, pause: _Pause, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle, staging, kwargs = await arrange(storage, community, server)
+    released = _watch_release(storage, monkeypatch)
+    _holding_removal_of(staging, pause, monkeypatch)
+    task = asyncio.ensure_future(storage.commit_snapshot(handle, **kwargs))
+    # A bound, not a delay: the commit fsyncs its staging before most refusals.
+    assert await asyncio.to_thread(pause.entered.wait, 120)
+
+    await _cancel_promptly(task)
+
+    await _assert_staging_waits_for_the_thread(storage, staging, pause, released)
+    assert storage._staging_jobs == {}
+
+
+@pytest.mark.timeout(120 + 30)
+@pytest.mark.parametrize(("arrange", "error"), _REFUSALS.values(), ids=_REFUSALS)
+async def test_a_refusal_leaves_its_staging_to_a_job_still_using_it(
+    arrange: _Arrange, error: type[Exception], tmp_path: Path
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle, staging, kwargs = await arrange(storage, community, server)
+    # A job a cancelled step left running on the staging, as a spool's close.
+    job: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    storage._count_on_staging(staging, job)
+    try:
+        with pytest.raises(error):
+            await storage.commit_snapshot(handle, **kwargs)
+
+        await asyncio.to_thread(storage.sweep)
+        assert staging.is_dir()
+        assert storage._is_staging_active(staging)
+    finally:
+        job.set_result(None)
+
+    async def _removed() -> None:
+        while storage._is_staging_active(staging):
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(_removed(), 120)  # a bound, not a delay
+    assert not staging.exists()
+    assert storage._staging_jobs == {}
+
+
+@pytest.mark.parametrize(("arrange", "error"), _REFUSALS.values(), ids=_REFUSALS)
+async def test_a_refusal_whose_cleanup_fails_still_raises_the_refusal(
+    arrange: _Arrange,
+    error: type[Exception],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle, staging, kwargs = await arrange(storage, community, server)
+    rmtree = fs._rmtree
+
+    def _failing(path: Path) -> None:
+        if path == staging:
+            raise OSError("removal fault")
+        rmtree(path)
+
+    monkeypatch.setattr(fs, "_rmtree", _failing)
+
+    # The sweep reclaims a staging its cleanup could not remove.
+    with pytest.raises(error):
+        await storage.commit_snapshot(handle, **kwargs)
+
+    assert not storage._is_staging_active(staging)
+    assert "the sweep reclaims it" in caplog.text
+
+
+def _count_releases(storage: FsStorage, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """The staging leases released, one entry per ``_release_staging`` call."""
+
+    calls: list[Path] = []
+    release_staging = storage._release_staging
+
+    def _releasing(staging: Path) -> None:
+        calls.append(staging)
+        release_staging(staging)
+
+    monkeypatch.setattr(storage, "_release_staging", _releasing)
+    return calls
+
+
+def _holding_each_removal_of(
+    staging: Path,
+    pauses: list[_Pause],
+    mp: pytest.MonkeyPatch,
+    *,
+    first_fails: bool = False,
+) -> None:
+    """Hold the n-th removal of ``staging`` on ``pauses[n]``; others run as is.
+
+    With ``first_fails``, the first removal raises once it is let go.
+    """
+
+    rmtree = fs._rmtree
+    calls = iter(range(len(pauses)))
+    lock = threading.Lock()
+
+    def _rmtree(path: Path) -> None:
+        if path != staging:
+            rmtree(path)
+            return
+        with lock:
+            n = next(calls, None)
+        if n is not None:
+            pauses[n].entered.set()
+            pauses[n].resume.wait()
+            if first_fails and n == 0:
+                raise OSError("removal fault")
+        rmtree(path)
+
+    mp.setattr(fs, "_rmtree", _rmtree)
+
+
+async def _settle_deferred_removals() -> None:
+    while fs._STAGING_REMOVALS:
+        await asyncio.gather(*fs._STAGING_REMOVALS, return_exceptions=True)
+
+
+@pytest.mark.timeout(5 * 120 + 30)
+async def test_an_abort_during_a_removal_leaves_the_lease_to_the_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream({"a.txt": b"NEW"}))
+    staging = _only_staging(storage, community, server)
+    releases = _count_releases(storage, monkeypatch)
+    first, rerun = _Pause(), _Pause()
+    _holding_each_removal_of(staging, [first, rerun], monkeypatch)
+    try:
+        removing = asyncio.ensure_future(storage.abort_snapshot(handle))
+        assert await asyncio.to_thread(first.entered.wait, 120)
+        # The second abort finds the removal running and leaves it the removal.
+        await asyncio.wait_for(storage.abort_snapshot(handle), 120)
+        first.resume.set()
+        await asyncio.wait_for(removing, 120)
+        assert await asyncio.to_thread(rerun.entered.wait, 120)
+
+        # The rerun owns the lease while it removes the staging.
+        await asyncio.to_thread(storage.sweep)
+        assert storage._is_staging_active(staging)
+        assert releases == []
+    finally:
+        # No timeout on the holds (issue #3600): this releases every one of them.
+        first.resume.set()
+        rerun.resume.set()
+
+    await asyncio.wait_for(_settle_deferred_removals(), 120)
+    assert releases == [staging]
+    assert not staging.exists()
+    assert not storage._is_staging_active(staging)
+    assert storage._staging_jobs == {}
+
+
+@pytest.mark.timeout(5 * 120 + 30)
+async def test_an_abort_during_a_failed_refusal_cleanup_leaves_the_lease_to_the_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle, staging, kwargs = await _corrupt(storage, community, server)
+    releases = _count_releases(storage, monkeypatch)
+    first, rerun = _Pause(), _Pause()
+    _holding_each_removal_of(staging, [first, rerun], monkeypatch, first_fails=True)
+    try:
+        refusing = asyncio.ensure_future(storage.commit_snapshot(handle, **kwargs))
+        assert await asyncio.to_thread(first.entered.wait, 120)
+        await asyncio.wait_for(storage.abort_snapshot(handle), 120)
+        first.resume.set()
+        with pytest.raises(IntegrityCheckError):
+            await asyncio.wait_for(refusing, 120)
+        assert await asyncio.to_thread(rerun.entered.wait, 120)
+
+        # The failed cleanup left the staging; the rerun still owns its lease.
+        await asyncio.to_thread(storage.sweep)
+        assert staging.is_dir()
+        assert storage._is_staging_active(staging)
+        assert releases == []
+    finally:
+        first.resume.set()
+        rerun.resume.set()
+
+    await asyncio.wait_for(_settle_deferred_removals(), 120)
+    assert releases == [staging]
+    assert not staging.exists()
+    assert not storage._is_staging_active(staging)
+    assert storage._staging_jobs == {}
+
+
+def _hand_settled_removals_of(
+    staging: Path, mp: pytest.MonkeyPatch
+) -> list[asyncio.Future[None]]:
+    """Each removal job of ``staging``, a loop future the test settles by hand.
+
+    Settling two of them back to back ends both jobs in one loop iteration, a
+    window no thread timing reaches reliably. Other jobs run as they are.
+    """
+
+    loop = asyncio.get_running_loop()
+    run_in_executor = loop.run_in_executor
+    jobs: list[asyncio.Future[None]] = []
+
+    def _submit(executor: Any, fn: Callable[..., Any], *args: Any) -> Any:
+        if fn is not fs._rmtree or args != (staging,):
+            return run_in_executor(executor, fn, *args)
+        jobs.append(loop.create_future())
+        return jobs[-1]
+
+    mp.setattr(loop, "run_in_executor", _submit)
+    return jobs
+
+
+def _registered_staging(storage: FsStorage, tmp_path: Path) -> Path:
+    staging = tmp_path / "incoming" / "staging"
+    staging.mkdir(parents=True)
+    storage._register_staging(staging)
+    return staging
+
+
+def _assert_released_once(
+    storage: FsStorage, staging: Path, releases: list[Path]
+) -> None:
+    assert releases == [staging]
+    assert not storage._is_staging_active(staging)
+    assert storage._staging_jobs == {}
+    assert storage._staging_removers == {}
+    assert storage._staging_removals_due == set()
+
+
+@pytest.mark.timeout(10)
+async def test_overlapping_removals_whose_jobs_end_together_release_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    # Two removals under way at once, as a rerun and a discard in the gap before
+    # the rerun's first step.
+    removals = [
+        asyncio.ensure_future(storage._remove_staging(staging, raise_fault=False))
+        for _ in range(2)
+    ]
+    await asyncio.sleep(0)
+    assert len(jobs) == 2
+    assert storage._staging_removers == {staging: 2}
+
+    for job in jobs:
+        job.set_result(None)
+    await asyncio.gather(*removals)
+
+    _assert_released_once(storage, staging, releases)
+
+
+@pytest.mark.timeout(10)
+async def test_a_job_ending_with_a_removal_leaves_the_due_removal_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    removing = asyncio.ensure_future(
+        storage._discard_staging(staging, raise_fault=False)
+    )
+    await asyncio.sleep(0)
+    assert len(jobs) == 1
+    # Another job begins on the staging, and a discard marks a removal due.
+    other: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    storage._count_on_staging(staging, other)
+    await storage._discard_staging(staging, raise_fault=False)
+    assert storage._staging_removals_due == {staging}
+
+    # The removal's job and the other job end in one loop iteration.
+    jobs[0].set_result(None)
+    other.set_result(None)
+    await removing
+
+    # The rerun owns the lease until its own job ends.
+    await asyncio.sleep(0)
+    assert len(jobs) == 2
+    assert storage._is_staging_active(staging)
+    assert releases == []
+    jobs[1].set_result(None)
+    await _settle_deferred_removals()
+
+    _assert_released_once(storage, staging, releases)
