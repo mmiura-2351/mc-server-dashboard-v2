@@ -700,9 +700,17 @@ def _holding_each_removal_of(
     mp.setattr(fs, "_rmtree", _rmtree)
 
 
-async def _settle_deferred_removals() -> None:
-    while fs._STAGING_REMOVALS:
-        await asyncio.gather(*fs._STAGING_REMOVALS, return_exceptions=True)
+def _removal_pending(storage: FsStorage) -> bool:
+    return bool(
+        storage._staging_removers
+        or storage._staging_jobs
+        or storage._staging_removals_due
+    )
+
+
+async def _settle_deferred_removals(storage: FsStorage) -> None:
+    while _removal_pending(storage):
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.timeout(5 * 120 + 30)
@@ -735,7 +743,7 @@ async def test_an_abort_during_a_removal_leaves_the_lease_to_the_rerun(
         first.resume.set()
         rerun.resume.set()
 
-    await asyncio.wait_for(_settle_deferred_removals(), 120)
+    await asyncio.wait_for(_settle_deferred_removals(storage), 120)
     assert releases == [staging]
     assert not staging.exists()
     assert not storage._is_staging_active(staging)
@@ -770,7 +778,7 @@ async def test_an_abort_during_a_failed_refusal_cleanup_leaves_the_lease_to_the_
         first.resume.set()
         rerun.resume.set()
 
-    await asyncio.wait_for(_settle_deferred_removals(), 120)
+    await asyncio.wait_for(_settle_deferred_removals(storage), 120)
     assert releases == [staging]
     assert not staging.exists()
     assert not storage._is_staging_active(staging)
@@ -872,6 +880,172 @@ async def test_a_job_ending_with_a_removal_leaves_the_due_removal_to_it(
     assert storage._is_staging_active(staging)
     assert releases == []
     jobs[1].set_result(None)
-    await _settle_deferred_removals()
+    await _settle_deferred_removals(storage)
 
+    _assert_released_once(storage, staging, releases)
+
+
+def _cancel_other_tasks() -> None:
+    """Cancel every task but the test's, as the loop's teardown does."""
+
+    for task in asyncio.all_tasks() - {asyncio.current_task()}:
+        task.cancel()
+
+
+async def _defer_removal(storage: FsStorage, staging: Path) -> asyncio.Future[None]:
+    """A job on ``staging`` whose end owes its removal, as a cancelled step's."""
+
+    job: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    storage._count_on_staging(staging, job)
+    await storage._discard_staging(staging, raise_fault=False)
+    assert storage._staging_removals_due == {staging}
+    return job
+
+
+async def _finish_removals(
+    storage: FsStorage, staging: Path, jobs: list[asyncio.Future[None]]
+) -> None:
+    """Remove the staging for each hand-settled removal job, until none is owed."""
+
+    while True:
+        for job in jobs:
+            if not job.done():
+                fs._rmtree(staging)
+                job.set_result(None)
+        # Timed, so a task created by a callback takes its first step meanwhile.
+        await asyncio.sleep(0.01)
+        if not _removal_pending(storage) and all(job.done() for job in jobs):
+            return
+
+
+@pytest.mark.timeout(10)
+async def test_a_teardown_as_a_deferred_removal_is_owed_still_removes_and_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    job = await _defer_removal(storage, staging)
+    job.set_result(None)
+    await asyncio.sleep(0)  # the job's end owes the removal
+
+    # Every task is cancelled before the next takes a step (issue #3675).
+    _cancel_other_tasks()
+    await asyncio.sleep(0)
+    assert storage._is_staging_active(staging)
+    assert storage._staging_removers == {staging: 1}
+
+    await _finish_removals(storage, staging, jobs)
+    assert not staging.exists()
+    _assert_released_once(storage, staging, releases)
+
+
+@pytest.mark.timeout(10)
+async def test_a_teardown_during_a_deferred_removal_still_removes_and_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    job = await _defer_removal(storage, staging)
+    job.set_result(None)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert len(jobs) == 1
+
+    # Cancelled while the removal's job runs, then again as each removal is owed.
+    _cancel_other_tasks()
+    await asyncio.sleep(0)
+    fs._rmtree(staging)
+    jobs[0].set_result(None)
+    await asyncio.sleep(0)
+    _cancel_other_tasks()
+
+    await _finish_removals(storage, staging, jobs)
+    assert not staging.exists()
+    _assert_released_once(storage, staging, releases)
+
+
+@pytest.mark.timeout(10)
+async def test_a_discard_as_a_rerun_is_owed_leaves_the_lease_to_the_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    loop = asyncio.get_running_loop()
+    submit = loop.run_in_executor
+    refused: list[Path] = []
+    refusing = False
+
+    # A removal the discard submits finds the executor shut down, so it would end,
+    # and release, before the rerun's (the residual window of #3664).
+    def _refusing(executor: Any, fn: Callable[..., Any], *args: Any) -> Any:
+        if refusing and fn is fs._rmtree:
+            refused.append(args[0])
+            raise RuntimeError("Executor shutdown has been called")
+        return submit(executor, fn, *args)
+
+    monkeypatch.setattr(loop, "run_in_executor", _refusing)
+    removing = asyncio.ensure_future(
+        storage._discard_staging(staging, raise_fault=False)
+    )
+    await asyncio.sleep(0)
+    assert len(jobs) == 1
+    await storage._discard_staging(staging, raise_fault=False)
+    fs._rmtree(staging)
+    jobs[0].set_result(None)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)  # the removal ends, owing a rerun
+
+    refusing = True
+    await storage._discard_staging(staging, raise_fault=False)
+    refusing = False
+    assert releases == []
+    assert refused == []
+    assert storage._staging_removals_due == {staging}
+
+    await removing
+    await _finish_removals(storage, staging, jobs)
+    assert not staging.exists()
+    _assert_released_once(storage, staging, releases)
+
+
+async def test_a_removal_owed_after_the_executor_shuts_down_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    (staging / "region.mca").write_bytes(b"x")
+    releases = _count_releases(storage, monkeypatch)
+    job = await _defer_removal(storage, staging)
+
+    await asyncio.get_running_loop().shutdown_default_executor()
+    job.set_result(None)
+    await asyncio.wait_for(_settle_deferred_removals(storage), 10)
+
+    assert not staging.exists()
+    _assert_released_once(storage, staging, releases)
+
+
+@pytest.mark.timeout(120 + 30)
+def test_a_removal_owed_as_the_loop_closes_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    (staging / "region.mca").write_bytes(b"x")
+    releases = _count_releases(storage, monkeypatch)
+
+    async def _main() -> None:
+        # The removal is owed as the loop finishes, before it takes a turn.
+        job = await _defer_removal(storage, staging)
+        job.set_result(None)
+
+    asyncio.run(_main())
+
+    assert not staging.exists()
     _assert_released_once(storage, staging, releases)

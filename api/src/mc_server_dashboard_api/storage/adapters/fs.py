@@ -719,11 +719,6 @@ async def _writing_off_loop(
     await out.close()
 
 
-# Staging removals left to the end of the last thread using the staging (issue
-# #3583): the strong reference keeps each alive to the end.
-_STAGING_REMOVALS: set[asyncio.Task[None]] = set()
-
-
 def _io_fault_translating_stream(inner: ByteStream) -> AsyncIterator[bytes]:
     """Wrap a backup egress stream so an I/O fault mid-read translates (issue #2555).
 
@@ -1094,14 +1089,37 @@ class FsStorage(Storage):
             ):
                 return
             self._staging_removals_due.discard(staging)
+            self._staging_removers[staging] = 1
         self._schedule_staging_removal(staging)
 
     def _schedule_staging_removal(self, staging: Path) -> None:
-        removal = asyncio.get_running_loop().create_task(
-            self._remove_staging(staging, raise_fault=False)
-        )
-        _STAGING_REMOVALS.add(removal)
-        removal.add_done_callback(_STAGING_REMOVALS.discard)
+        """Start a deferred removal of ``staging``, counted in ``_staging_removers``.
+
+        The caller counts it, in the locked section that decides it is owed, so the
+        lease has an owner throughout (issue #3675). Its job is submitted here and
+        counted against the staging, and the job's end ends the removal: there is
+        no task that a cancel could catch before its job exists. A shut-down
+        executor refuses the job, as at the loop's teardown: the removal then runs
+        here, once, on the loop, and a fault is logged.
+        """
+
+        try:
+            job = asyncio.get_running_loop().run_in_executor(None, _rmtree, staging)
+        except RuntimeError:  # "Executor shutdown has been called"
+            try:
+                _rmtree(staging)
+            except Exception:
+                _log_staging_removal_fault(staging)
+            self._end_staging_removal(staging)
+            return
+        self._count_on_staging(staging, job)
+        job.add_done_callback(functools.partial(self._end_deferred_removal, staging))
+
+    def _end_deferred_removal(self, staging: Path, job: asyncio.Future[None]) -> None:
+        fault = None if job.cancelled() else job.exception()
+        if fault is not None:
+            _log_staging_removal_fault(staging, fault)
+        self._end_staging_removal(staging)
 
     async def _discard_staging(self, staging: Path, *, raise_fault: bool) -> None:
         """Remove ``staging`` and release its lease once no thread uses it (#3583).
@@ -1139,11 +1157,7 @@ class FsStorage(Storage):
         except Exception:
             if raise_fault:
                 raise
-            _LOG.warning(
-                "removing the staging %s failed; the sweep reclaims it",
-                staging,
-                exc_info=True,
-            )
+            _log_staging_removal_fault(staging)
         finally:
             self._end_staging_removal(staging)
 
@@ -1156,12 +1170,12 @@ class FsStorage(Storage):
         removal ending last decides:
 
         - another removal of the staging is still under way (a discard landed
-          between a rerun's scheduling and its first step): that one decides;
+          after one's job ended, before that one resumed): that one decides;
         - a job still uses the staging (the removal's own, its caller cancelled, or
           one begun meanwhile): a removal is due at the end of the last one, which
           then owns the lease;
         - a discard arrived while it ran: it hands the lease to a rerun of the
-          removal, which runs even if this one failed;
+          removal, counted here, which runs even if this one failed;
         - otherwise it releases the lease.
         """
 
@@ -1175,6 +1189,8 @@ class FsStorage(Storage):
                 return
             rerun = staging in self._staging_removals_due
             self._staging_removals_due.discard(staging)
+            if rerun:
+                self._staging_removers[staging] = 1
         if rerun:
             self._schedule_staging_removal(staging)
         else:
@@ -3216,6 +3232,16 @@ def _rmtree(path: Path) -> None:
         path.unlink(missing_ok=True)
     elif path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _log_staging_removal_fault(
+    staging: Path, fault: BaseException | bool = True
+) -> None:
+    _LOG.warning(
+        "removing the staging %s failed; the sweep reclaims it",
+        staging,
+        exc_info=fault,
+    )
 
 
 async def _reclaim_superseded(old_snapshot: Path | None) -> None:
