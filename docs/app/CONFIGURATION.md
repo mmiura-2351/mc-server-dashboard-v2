@@ -717,11 +717,12 @@ removed the same way as one a removal left behind. Each start call waits at most
 10 s for the daemon too. A start that fails is followed by a force-remove of its
 container. A start the daemon did not answer, one that timed out included, may
 have started the container anyway. If the removal after such a start fails as
-well, the driver keeps the container's id, and the server's next start deals
-with it before creating anything. That start inspects the container. If it is
-running, which may be a live server with unsaved world progress, the start stops
-it the way the sweep stops a running container (below), for at most 70 s, and
-then force-removes it. That stop logs the sweep's `WARN` lines, `sweep:` prefix
+well, or is reported already in progress, which the daemon may still fail, the
+driver keeps the container's id, and the server's next start deals with it
+before creating anything. That start inspects the container. If it is running,
+which may be a live server with unsaved world progress, the start stops it the
+way the sweep stops a running container (below), for at most 70 s, and then
+force-removes it. That stop logs the sweep's `WARN` lines, `sweep:` prefix
 included. A container the daemon no longer knows is forgotten. If the inspect,
 the stop or the removal fails, the driver keeps the id and refuses the start. A
 stop whose SIGTERM request failed but whose kill went through has ended the

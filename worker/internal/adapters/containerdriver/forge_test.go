@@ -1517,35 +1517,51 @@ func TestForgeNextStartRemovesTheFirstInstallerAnAmbiguousStartLeftRunning(t *te
 // container, and the force-remove of it stalls too, so a running launch container
 // is left that the crashed instance no longer tracks. The server's next start
 // removes it and starts, instead of being refused until the next boot's sweep
-// (issue #3645).
+// (issue #3645). A removal the daemon reports already in progress keeps the id
+// too, since the daemon may fail that removal and leave the container running.
 func TestForgeNextStartRemovesTheLaunchAnAmbiguousStartLeftRunning(t *testing.T) {
-	dir := t.TempDir()
-	docker := newForgeFakeDocker()
-	docker.reportsState = true
-	docker.startStallIDs = map[string]bool{"mcsd-s1": true}
-	docker.removeStallIDs = map[string]bool{"mcsd-s1": true}
-	d := stalledCallForgeDriver(docker, &syncBuffer{})
-	d.installStartTimeout = 10 * time.Millisecond
-	inst, err := d.Start(context.Background(), forgeSpec(dir))
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	writeArgsfile(t, dir)
-	docker.exit(forgeInstallID, 0, nil)
-	if last := awaitStreamClosed(t, inst.Events()); last.State != execution.StateCrashed {
-		t.Fatalf("last event = %+v, want the launch start's crash", last)
-	}
+	for _, tc := range []struct {
+		name       string
+		stalls     bool
+		removeErrs map[string]error
+	}{
+		{name: "removal stalls", stalls: true},
+		{name: "removal in progress", removeErrs: map[string]error{"mcsd-s1": errRemovalInProgress}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			docker := newForgeFakeDocker()
+			docker.reportsState = true
+			docker.startStallIDs = map[string]bool{"mcsd-s1": true}
+			docker.removeStallIDs = map[string]bool{"mcsd-s1": tc.stalls}
+			docker.removeErrIDs = tc.removeErrs
+			d := stalledCallForgeDriver(docker, &syncBuffer{})
+			d.installStartTimeout = 10 * time.Millisecond
+			inst, err := d.Start(context.Background(), forgeSpec(dir))
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			writeArgsfile(t, dir)
+			docker.exit(forgeInstallID, 0, nil)
+			if last := awaitStreamClosed(t, inst.Events()); last.State != execution.StateCrashed {
+				t.Fatalf("last event = %+v, want the launch start's crash", last)
+			}
+			if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"mcsd-s1"}) {
+				t.Fatalf("recorded = %v, want the launch the start left running", got)
+			}
 
-	docker.mu.Lock()
-	docker.startStallIDs, docker.removeStallIDs = nil, nil
-	docker.mu.Unlock()
-	next, err := d.Start(context.Background(), forgeSpec(dir))
-	if err != nil {
-		t.Fatalf("next Start: %v, want the leftover launch removed and the server started", err)
+			docker.mu.Lock()
+			docker.startStallIDs, docker.removeStallIDs, docker.removeErrIDs = nil, nil, nil
+			docker.mu.Unlock()
+			next, err := d.Start(context.Background(), forgeSpec(dir))
+			if err != nil {
+				t.Fatalf("next Start: %v, want the leftover launch removed and the server started", err)
+			}
+			drainTo(t, next.Events(), execution.StateRunning)
+			docker.exit("mcsd-s1", 0, nil)
+			awaitStreamClosed(t, next.Events())
+		})
 	}
-	drainTo(t, next.Events(), execution.StateRunning)
-	docker.exit("mcsd-s1", 0, nil)
-	awaitStreamClosed(t, next.Events())
 }
 
 // The retry installer's start times out after the daemon did start it, and the

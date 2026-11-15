@@ -607,8 +607,10 @@ const (
 // container all the same; the force-remove stops it too. Such a container the
 // removal leaves behind is recorded for the server's next create to remove
 // (unremovedStarts), since the wait-for-name-free loop declines a running one
-// (issue #3645). One the daemon refused to start is not running, and is left to
-// that loop as before.
+// (issue #3645). So is one whose removal the daemon reports already in progress
+// (a 409), since the daemon may fail that removal; the next create's
+// removeLeftover finds out. One the daemon refused to start is not running, and
+// is left to that loop as before.
 //
 // Any status the daemon answers the start with, a 5xx included, counts as that
 // refusal, as it did before this record existed. Should a daemon have run the
@@ -618,7 +620,13 @@ func (d *Driver) removeCreated(ctx context.Context, serverID, id string, startEr
 	removeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startCleanupRemoveTimeout)
 	defer cancel()
 	err := d.docker.Remove(removeCtx, id)
-	if err != nil && !removedConcurrently(err) && isTransportError(startErr) {
+	switch {
+	case err == nil || !isTransportError(startErr):
+	case errors.Is(err, errRemovalInProgress):
+		d.unremoved.add(serverID, id)
+		d.logger.Debug("container after an unanswered start is being removed; the next create of the server checks it",
+			"server_id", serverID, "container_id", id, "error", err)
+	case !removedConcurrently(err):
 		d.unremoved.add(serverID, id)
 		d.logger.Warn("remove container after an unanswered start failed; the next create of the server removes it",
 			"server_id", serverID, "container_id", id, "error", err)
@@ -639,15 +647,15 @@ func (d *Driver) startBounded(ctx context.Context, id, what string, timeout time
 }
 
 // unremovedStarts records, per server, the containers a docker start the daemon
-// did not answer left behind because its cleanup removal failed too (issue
-// #3645). Such a start may have run its container, which no instance then tracks: the
-// quiescence wait would refuse every later create of the server while it runs, and
-// the wait-for-name-free loop declines a running container, so only the next
-// boot's sweep would remove it. Instead the server's next create removes the
-// recorded containers first (removeUnremoved). The record lives as long as the
-// Driver; a Worker restart loses it, and the boot's sweep removes the containers
-// it named. Its mutex guards only the map, never a Docker call or an instance
-// lock.
+// did not answer left behind because its cleanup removal failed too, or was
+// answered as already in progress (issue #3645). Such a start may have run its
+// container, which no instance then tracks: the quiescence wait would refuse
+// every later create of the server while it runs, and the wait-for-name-free
+// loop declines a running container, so only the next boot's sweep would remove
+// it. Instead the server's next create removes the recorded containers first
+// (removeUnremoved). The record lives as long as the Driver; a Worker restart
+// loses it, and the boot's sweep removes the containers it named. Its mutex
+// guards only the map, never a Docker call or an instance lock.
 //
 // removeUnremoved's take and the add of what it could not remove are two steps,
 // not one. That relies on two invariants: the manager's reservation serializes
@@ -3203,11 +3211,13 @@ func (i *instance) removeContainer(id string) {
 // removeFailedStart removes a container superviseInstall's start failed on. A
 // start the daemon did not answer (startErr is no daemon response, the bound
 // included) may have run it, so such a container the removal leaves behind is
-// recorded for the server's next create to remove (unremovedStarts, issue #3645).
-// It runs after the instance lock is released, and before the terminal, so the
-// next start of the server finds the record. A start the daemon answered with an
-// error status, a 5xx included, is taken as refused, as in removeCreated:
-// awaitQuiescent fails closed should the container be running anyway.
+// recorded for the server's next create to remove (unremovedStarts, issue
+// #3645), as is one whose removal the daemon reports already in progress (a
+// 409), since the daemon may fail that removal. It runs after the instance lock
+// is released, and before the terminal, so the next start of the server finds
+// the record. A start the daemon answered with an error status, a 5xx included,
+// is taken as refused, as in removeCreated: awaitQuiescent fails closed should
+// the container be running anyway.
 func (i *instance) removeFailedStart(id string, startErr error) {
 	if !isTransportError(startErr) {
 		i.removeContainer(id)
@@ -3219,7 +3229,8 @@ func (i *instance) removeFailedStart(id string, startErr error) {
 }
 
 // removeLogged is removeContainer's removal, logging a failure with failure, and
-// reports whether the container is gone.
+// reports whether the container is gone. One whose removal is in progress (a 409)
+// is not known to be: the daemon may fail that removal.
 func (i *instance) removeLogged(id, failure string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), i.exitRemoveTimeout)
 	defer cancel()
@@ -3228,6 +3239,7 @@ func (i *instance) removeLogged(id, failure string) bool {
 	case removedConcurrently(err):
 		i.logger.Debug("container already removed or being removed",
 			"server_id", i.spec.ServerID, "container_id", id, "error", err)
+		return !errors.Is(err, errRemovalInProgress)
 	default:
 		i.logger.Warn(failure, "server_id", i.spec.ServerID, "container_id", id, "error", err)
 		return false
