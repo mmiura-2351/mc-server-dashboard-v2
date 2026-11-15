@@ -35,8 +35,10 @@ describe("lifecycleErrorMessage", () => {
   );
 
   // The command waited on the host past its budget and was not run (issue
-  // #3305). Nothing moved on any verb, so neither the pending-recovery messages
-  // command_failed takes on stop and restart nor the dispatch-failure one apply.
+  // #3305). Nothing was half-done, so the dispatch-failure message does not
+  // apply. A start or restart leaves nothing pending, so restartPending would be
+  // wrong. A stop keeps its intent and is replayed after a short grace, but a
+  // retry replays it at once, so it keeps "try again" over stopPending.
   it.each([undefined, "start", "stop", "restart"] as const)(
     "maps a 409 command_expired to the not-applied message (action %s)",
     (action) => {
