@@ -833,8 +833,8 @@ async def test_overlapping_removals_whose_jobs_end_together_release_once(
     staging = _registered_staging(storage, tmp_path)
     releases = _count_releases(storage, monkeypatch)
     jobs = _hand_settled_removals_of(staging, monkeypatch)
-    # Two removals under way at once, as a rerun and a discard in the gap before
-    # the rerun's first step.
+    # Two removals under way at once, as when a discard lands after one removal's
+    # job has ended, before that removal resumes.
     removals = [
         asyncio.ensure_future(storage._remove_staging(staging, raise_fault=False))
         for _ in range(2)
@@ -1029,6 +1029,64 @@ async def test_a_removal_owed_after_the_executor_shuts_down_still_runs(
 
     assert not staging.exists()
     _assert_released_once(storage, staging, releases)
+
+
+def _assert_removal_fault_logged(
+    caplog: pytest.LogCaptureFixture, staging: Path
+) -> None:
+    faults = [
+        record
+        for record in caplog.records
+        if record.getMessage()
+        == f"removing the staging {staging} failed; the sweep reclaims it"
+    ]
+    assert len(faults) == 1
+    assert faults[0].exc_info is not None
+    assert isinstance(faults[0].exc_info[1], OSError)
+
+
+@pytest.mark.timeout(10)
+async def test_a_deferred_removal_whose_job_fails_still_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    jobs = _hand_settled_removals_of(staging, monkeypatch)
+    job = await _defer_removal(storage, staging)
+    job.set_result(None)
+    await asyncio.sleep(0)
+    assert len(jobs) == 1
+
+    jobs[0].set_exception(OSError("removal fault"))
+    await asyncio.sleep(0)  # the job's settle, then the removal's end
+
+    # The sweep reclaims a staging its removal could not remove.
+    _assert_released_once(storage, staging, releases)
+    _assert_removal_fault_logged(caplog, staging)
+
+
+@pytest.mark.timeout(10)
+async def test_a_removal_owed_after_the_executor_shuts_down_and_failing_releases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    storage = FsStorage(tmp_path)
+    staging = _registered_staging(storage, tmp_path)
+    releases = _count_releases(storage, monkeypatch)
+    job = await _defer_removal(storage, staging)
+    await asyncio.get_running_loop().shutdown_default_executor()
+
+    def _failing(path: Path) -> None:
+        raise OSError("removal fault")
+
+    monkeypatch.setattr(fs, "_rmtree", _failing)
+    job.set_result(None)
+    await asyncio.sleep(0)  # the job's end owes the removal, run on the loop
+
+    # The sweep reclaims a staging its removal could not remove.
+    assert staging.exists()
+    _assert_released_once(storage, staging, releases)
+    _assert_removal_fault_logged(caplog, staging)
 
 
 @pytest.mark.timeout(120 + 30)

@@ -1101,6 +1101,11 @@ class FsStorage(Storage):
         no task that a cancel could catch before its job exists. A shut-down
         executor refuses the job, as at the loop's teardown: the removal then runs
         here, once, on the loop, and a fault is logged.
+
+        The fallback catches any ``RuntimeError`` from the submit, including "can't
+        start new thread", so a live loop can stall for the length of the removal.
+        That is deliberate: leaving the tree to the sweep instead would leak its
+        disk until the next start, since the sweep runs only at startup.
         """
 
         try:
@@ -1112,6 +1117,9 @@ class FsStorage(Storage):
                 _log_staging_removal_fault(staging)
             self._end_staging_removal(staging)
             return
+        # The order is load-bearing: the job must be settled before the removal
+        # ends, or the end finds its own job, marks the removal due again, and the
+        # settle then schedules another removal that nothing ends.
         self._count_on_staging(staging, job)
         job.add_done_callback(functools.partial(self._end_deferred_removal, staging))
 
