@@ -733,8 +733,9 @@ container to stop running as above, and the id is kept until a later start finds
 the container gone. A Worker restart forgets the id; the boot's sweep removes
 the container instead. The commands that touch the working set of a server with
 no running instance take the same care. Such a server is busy while the driver
-keeps an id for it, lists a running container of it, or cannot list its
-containers within 10 s. A hydrate first deals with the kept ids the way the next
+keeps an id for it whose container the daemon still knows or cannot inspect
+within 10 s, lists a running container of it, or cannot list its containers
+within 10 s. A hydrate first deals with the kept ids the way the next
 start would, so a container's shutdown save lands before the pull replaces the
 working set, and it is refused as busy if the server still is. A snapshot of a
 stopped server is refused as busy, and stops nothing. The reclaim of a deleted

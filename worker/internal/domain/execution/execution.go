@@ -273,9 +273,9 @@ type LeftoverGuard interface {
 	// still recorded.
 	EndLeftovers(ctx context.Context, serverID, workingDir string) error
 	// Busy returns nil once no process of serverID that no Instance tracks can
-	// be running against its working set: the driver recorded no leftover, and
-	// the backend lists none alive. It is bounded and fails closed: when it
-	// cannot tell, it returns an error.
+	// be running against its working set: the backend knows no leftover the
+	// driver recorded, and lists none alive. It ends nothing. It is bounded and
+	// fails closed: when it cannot tell, it returns an error.
 	Busy(ctx context.Context, serverID string) error
 }
 

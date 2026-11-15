@@ -688,17 +688,6 @@ func (u *unremovedStarts) take(serverID string) []string {
 	return ids
 }
 
-// first returns the first container recorded for serverID, and whether there is
-// one, leaving the record as it is.
-func (u *unremovedStarts) first(serverID string) (string, bool) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if ids := u.ids[serverID]; len(ids) > 0 {
-		return ids[0], true
-	}
-	return "", false
-}
-
 // unremovedStopTimeout bounds removeUnremoved's graceful stop of a recorded
 // container that is still running. It covers the stop rule's 30 s idle window,
 // its deadline grace and the kill call (defaultStopTimeout, stopDeadlineGrace,
@@ -751,14 +740,38 @@ func (d *Driver) EndLeftovers(ctx context.Context, serverID, workingDir string) 
 }
 
 // Busy implements execution.LeftoverGuard (issue #3672). A recorded leftover
-// makes the server busy on its own, without a daemon call: a start the daemon
-// did not answer may still run its container after a List showed it created.
-// Otherwise awaitQuiescent decides, which fails closed and is bounded by the
-// conflict window. It waits out a container still listed as running for a
-// moment after its exit, as right after a stop (issue #226).
+// the daemon still knows makes the server busy whatever a List shows: a start
+// the daemon did not answer may still run its container after a List showed it
+// created. So each recorded container is inspected, bounded by
+// exitRemoveTimeout. One the daemon answers 404 for is gone and is dropped, as
+// removeLeftover drops it; without that, a removal answered 409 that then went
+// through would refuse the server's stopped snapshot until its next start. Any
+// other answer, a failed or stalled inspect included, is busy, and the record
+// is kept. It stops and removes nothing. The manager calls it under the
+// server's reservation, which keeps the take-then-add safe, as for a create.
+//
+// With no leftover recorded, awaitQuiescent decides, which fails closed and is
+// bounded by the conflict window. It waits out a container still listed as
+// running for a moment after its exit, as right after a stop (issue #226).
 func (d *Driver) Busy(ctx context.Context, serverID string) error {
-	if id, ok := d.unremoved.first(serverID); ok {
-		return fmt.Errorf("containerdriver: container %s, which a failed start may have left running, is not removed", id)
+	var busy error
+	for _, id := range d.unremoved.take(serverID) {
+		inspectCtx, cancel := context.WithTimeout(ctx, d.exitRemoveTimeout)
+		_, err := d.docker.Inspect(inspectCtx, id)
+		cancel()
+		if errors.Is(err, errNotFound) {
+			continue
+		}
+		d.unremoved.add(serverID, id)
+		if busy == nil {
+			busy = fmt.Errorf("containerdriver: container %s, which a failed start may have left running, is not removed", id)
+			if err != nil {
+				busy = fmt.Errorf("%w: inspect: %w", busy, err)
+			}
+		}
+	}
+	if busy != nil {
+		return busy
 	}
 	if err := d.awaitQuiescent(ctx, serverID); err != nil {
 		return fmt.Errorf("containerdriver: %w", err)
@@ -3440,8 +3453,12 @@ func (i *instance) emitLocked(state execution.ServerState, detail string, reason
 	}
 }
 
-// ensure the driver satisfies the ExecutionDriver Port.
-var _ execution.ExecutionDriver = (*Driver)(nil)
+// ensure the driver satisfies the ExecutionDriver Port, and the LeftoverGuard
+// capability the instance manager type-asserts (issue #3672).
+var (
+	_ execution.ExecutionDriver = (*Driver)(nil)
+	_ execution.LeftoverGuard   = (*Driver)(nil)
+)
 
 // instance implements the optional log/metrics capabilities the instance manager
 // type-asserts (FR-MON-2, FR-MON-3).

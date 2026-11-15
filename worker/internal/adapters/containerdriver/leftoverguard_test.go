@@ -3,6 +3,7 @@ package containerdriver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -11,27 +12,54 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
-// The driver answers the instance manager's question before it touches a
-// stopped server's working set: may a container no instance tracks be running
-// against it (issue #3672)?
-var _ execution.LeftoverGuard = (*Driver)(nil)
-
-// A recorded leftover makes the server busy whatever the daemon lists: the start
-// the daemon did not answer may still run the container after a List showed it
-// created, so the record alone answers, without a daemon call.
+// A recorded leftover the daemon still knows makes the server busy whatever the
+// daemon lists: the start the daemon did not answer may still run the container
+// after a List showed it created. So its inspect answers, without a List. One
+// whose inspect fails or stalls is busy too, since it may be running.
 func TestBusyReportsARecordedLeftover(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(*fakeDocker)
+	}{
+		{name: "present", setup: func(*fakeDocker) {}},
+		{name: "inspect fails", setup: func(f *fakeDocker) { f.inspectErr = errors.New("daemon busy") }},
+		{name: "inspect stalls", setup: func(f *fakeDocker) { f.inspectBlocksUntilCtxDone = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			docker := newFakeDocker()
+			docker.listBlocksUntilCtxDone = true
+			tc.setup(docker)
+			d := newTestDriver(docker, nil, errors.New("no rcon"))
+			d.conflictDeadline = time.Hour
+			d.exitRemoveTimeout = 20 * time.Millisecond
+			d.unremoved.add("s1", "container-1")
+
+			err := busyWithin(t, d, "s1")
+			if err == nil || !strings.Contains(err.Error(), "container container-1") {
+				t.Fatalf("Busy = %v, want the recorded leftover named", err)
+			}
+			if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
+				t.Fatalf("recorded = %v, want the record left as it was", got)
+			}
+		})
+	}
+}
+
+// A recorded leftover the daemon no longer knows is gone: Busy drops it and
+// answers from the List. Without that, a removal answered 409 that then went
+// through would keep the server's final snapshot refused after a healthy run,
+// until its next start.
+func TestBusyDropsARecordedLeftoverTheDaemonNoLongerKnows(t *testing.T) {
 	docker := newFakeDocker()
-	docker.listBlocksUntilCtxDone = true
+	docker.inspectErr = fmt.Errorf("%w: status 404", errNotFound)
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
-	d.conflictDeadline = time.Hour
 	d.unremoved.add("s1", "container-1")
 
-	err := busyWithin(t, d, "s1")
-	if err == nil || !strings.Contains(err.Error(), "container-1") {
-		t.Fatalf("Busy = %v, want the recorded leftover named", err)
+	if err := busyWithin(t, d, "s1"); err != nil {
+		t.Fatalf("Busy = %v, want nil once the leftover is gone", err)
 	}
-	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
-		t.Fatalf("recorded = %v, want the record left as it was", got)
+	if got := unremovedOf(d, "s1"); len(got) != 0 {
+		t.Fatalf("recorded = %v, want the record cleared", got)
 	}
 }
 
