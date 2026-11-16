@@ -265,6 +265,13 @@ const (
 	// (issue #3305). The API had already stopped waiting for it, so the command was
 	// definitively not applied. The session emits it, never the handler.
 	CommandErrorExpired
+	// CommandErrorUnavailable marks a command the Worker could not apply because
+	// its execution backend did not answer a bounded call in time, or because a
+	// process of the server that no instance tracks could not be ended or ruled
+	// out (issues #3673, #3678). Distinct from CommandErrorBusy: no other command
+	// holds the id, so the refusal does not clear once one settles. The API retries
+	// it under its backoff.
+	CommandErrorUnavailable
 )
 
 // String renders the error code as a stable name for logs (issue #194).
@@ -294,6 +301,8 @@ func (c CommandErrorCode) String() string {
 		return "server_properties_unreadable"
 	case CommandErrorExpired:
 		return "expired"
+	case CommandErrorUnavailable:
+		return "unavailable"
 	default:
 		return fmt.Sprintf("CommandErrorCode(%d)", int(c))
 	}

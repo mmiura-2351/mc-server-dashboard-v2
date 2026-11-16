@@ -332,6 +332,16 @@ const (
 	// a command that arrives while another one holds the id. An EXPIRED command
 	// was refused only because it waited too long.
 	CommandErrorCode_COMMAND_ERROR_CODE_EXPIRED CommandErrorCode = 12
+	// The Worker could not apply the command because its execution backend (the
+	// Docker daemon) did not answer a bounded call in time, or because a container
+	// of the server that no instance tracks could not be ended or ruled out
+	// (issues #3673, #3678): a start's create or start call timed out, a container
+	// a failed start left behind was not removed, or the daemon could not list or
+	// inspect the server's containers. Not DRIVER_UNAVAILABLE, which says the
+	// driver is not offered at all. Not BUSY either: no other command holds the
+	// id, so a retry is not known to succeed once something settles. It is
+	// retryable, but the API backs off its retries like any other failure.
+	CommandErrorCode_COMMAND_ERROR_CODE_UNAVAILABLE CommandErrorCode = 13
 )
 
 // Enum value maps for CommandErrorCode.
@@ -350,6 +360,7 @@ var (
 		10: "COMMAND_ERROR_CODE_COMMAND_DROPPED",
 		11: "COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE",
 		12: "COMMAND_ERROR_CODE_EXPIRED",
+		13: "COMMAND_ERROR_CODE_UNAVAILABLE",
 	}
 	CommandErrorCode_value = map[string]int32{
 		"COMMAND_ERROR_CODE_UNSPECIFIED":                  0,
@@ -365,6 +376,7 @@ var (
 		"COMMAND_ERROR_CODE_COMMAND_DROPPED":              10,
 		"COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE": 11,
 		"COMMAND_ERROR_CODE_EXPIRED":                      12,
+		"COMMAND_ERROR_CODE_UNAVAILABLE":                  13,
 	}
 )
 
@@ -3099,7 +3111,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"!FILE_ACCESS_REASON_IS_A_DIRECTORY\x10\x01\x12&\n" +
 	"\"FILE_ACCESS_REASON_NOT_A_DIRECTORY\x10\x02\x12&\n" +
 	"\"FILE_ACCESS_REASON_SYMLINK_REFUSED\x10\x03\x12(\n" +
-	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\x8a\x04\n" +
+	"$FILE_ACCESS_REASON_PAYLOAD_TOO_LARGE\x10\x04*\xae\x04\n" +
 	"\x10CommandErrorCode\x12\"\n" +
 	"\x1eCOMMAND_ERROR_CODE_UNSPECIFIED\x10\x00\x12'\n" +
 	"#COMMAND_ERROR_CODE_SERVER_NOT_FOUND\x10\x01\x12$\n" +
@@ -3114,7 +3126,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\"COMMAND_ERROR_CODE_COMMAND_DROPPED\x10\n" +
 	"\x123\n" +
 	"/COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE\x10\v\x12\x1e\n" +
-	"\x1aCOMMAND_ERROR_CODE_EXPIRED\x10\f*\xb2\x01\n" +
+	"\x1aCOMMAND_ERROR_CODE_EXPIRED\x10\f\x12\"\n" +
+	"\x1eCOMMAND_ERROR_CODE_UNAVAILABLE\x10\r*\xb2\x01\n" +
 	"\vCrashReason\x12\x1c\n" +
 	"\x18CRASH_REASON_UNSPECIFIED\x10\x00\x12%\n" +
 	"!CRASH_REASON_FORGE_INSTALL_FAILED\x10\x01\x12,\n" +

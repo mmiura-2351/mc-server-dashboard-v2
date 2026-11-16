@@ -207,6 +207,7 @@ func TestMapErrorCode(t *testing.T) {
 		{"command dropped", session.CommandErrorCommandDropped, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_COMMAND_DROPPED},
 		{"server.properties unreadable", session.CommandErrorServerPropertiesUnreadable, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE},
 		{"expired", session.CommandErrorExpired, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_EXPIRED},
+		{"unavailable", session.CommandErrorUnavailable, controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_UNAVAILABLE},
 		{"unrecognized", session.CommandErrorCode(99), controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL},
 	}
 	for _, tc := range tests {

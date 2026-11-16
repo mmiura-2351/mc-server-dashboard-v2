@@ -389,3 +389,14 @@ var ErrImageMissing = errors.New("execution: container image missing")
 // regular file instead of seeing a generic failure (issue #3347).
 // An absent file is not this error.
 var ErrServerPropertiesUnreadable = errors.New("execution: server.properties is not a regular file or is too large")
+
+// ErrBackendUnavailable is wrapped into a driver error when the driver could not
+// act because its backend did not answer a bounded call in time, or because a
+// process of the server that no Instance tracks could not be ended or ruled out
+// (issues #3673, #3678): a container create or start that timed out, a container
+// a failed start left behind that was not removed, or a daemon that could not
+// list or inspect the server's containers. The caller's own cancellation is not
+// this error. The instance manager matches it with errors.Is to emit a retryable
+// unavailable failure code instead of the generic internal one; the API backs
+// off its retries.
+var ErrBackendUnavailable = errors.New("execution: backend unavailable")
