@@ -196,7 +196,21 @@ class RequestBodyLimitRoute(APIRoute):
     hands the request to FastAPI's own handler, which reads the body. The route
     receives its request exactly as without it; the class only makes the limit
     reach the middleware. FastAPI documents this hook as "Custom Request and
-    APIRoute class" (``get_route_handler`` and ``APIRouter(route_class=...)``).
+    APIRoute class" (``get_route_handler`` and ``APIRouter(route_class=...)``,
+    https://fastapi.tiangolo.com/how-to/custom-request-and-route/).
+
+    ``__init__`` takes the endpoint from its constructor arguments. That relies
+    on the constructor shape Starlette documents for ``Route(path, endpoint)``
+    (https://www.starlette.io/routing/), which FastAPI's ``APIRoute`` keeps and
+    its routers call; FastAPI's page shows only ``get_route_handler``
+    overridden. If that shape changes, the routers fail at import with a
+    ``TypeError``, never with a wrong limit. The owner accepted this reliance on
+    2026-11-16 under the public-API-only premise (#3560, DEPENDENCIES.md
+    Section 7).
+
+    FastAPI 0.162.2 marks ``APIRoute.get_route_handler`` (``fastapi/routing.py``,
+    around line 1280) with an upstream TODO to replace or deprecate the hook. If
+    it does, this class must follow the documented replacement.
     """
 
     def __init__(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
