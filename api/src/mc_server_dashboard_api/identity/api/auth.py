@@ -47,6 +47,7 @@ from mc_server_dashboard_api.dependencies import (
     get_restore_session,
     get_settings,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
@@ -59,7 +60,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     RefreshTokenReuseError,
 )
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 # Fixed cookie attributes (the security posture, not operator knobs): confine the
 # cookie to the auth endpoints and forbid cross-site attachment. See module docstring.

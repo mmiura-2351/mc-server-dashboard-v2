@@ -115,6 +115,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_body_limit import (
     MULTIPART_OVERHEAD_BYTES,
+    RequestBodyLimitRoute,
     request_body_limit,
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
@@ -170,7 +171,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
 

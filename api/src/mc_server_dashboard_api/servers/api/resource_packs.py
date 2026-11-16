@@ -48,6 +48,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_body_limit import (
     MULTIPART_OVERHEAD_BYTES,
+    RequestBodyLimitRoute,
     request_body_limit,
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
@@ -84,9 +85,9 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePackId,
 )
 
-router = APIRouter()
-public_router = APIRouter()
-assignment_router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
+public_router = APIRouter(route_class=RequestBodyLimitRoute)
+assignment_router = APIRouter(route_class=RequestBodyLimitRoute)
 
 # Chunked read buffer for the upload body (same pattern as backups.py).
 _UPLOAD_CHUNK_BYTES = 1024 * 1024

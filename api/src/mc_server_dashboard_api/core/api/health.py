@@ -16,8 +16,9 @@ from pydantic import BaseModel
 from mc_server_dashboard_api.core.application.check_health import CheckHealth
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.dependencies import get_database_ping
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class HealthResponse(BaseModel):

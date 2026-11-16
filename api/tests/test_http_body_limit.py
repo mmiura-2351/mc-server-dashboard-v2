@@ -18,20 +18,23 @@ the app *consumed*, which no HTTP client reports.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 import uvicorn
 from fastapi import FastAPI, Request, UploadFile
-from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from starlette.types import Message
 
+import mc_server_dashboard_api
 from mc_server_dashboard_api import http_body_limit
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
@@ -47,9 +50,10 @@ from mc_server_dashboard_api.http_body_limit import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     EARLY_ANSWER_DISCARD_BYTES,
     MULTIPART_OVERHEAD_BYTES,
+    STATE_ATTRIBUTE,
     RequestBodyLimitMiddleware,
+    RequestBodyLimitRoute,
     request_body_limit,
-    request_body_limit_of,
 )
 from mc_server_dashboard_api.http_problem import install_problem_handlers
 from mc_server_dashboard_api.servers.api.files import (
@@ -76,6 +80,8 @@ class _Result:
         self.body = b""
         # Body bytes the app pulled out of ``receive`` -- what it could have held.
         self.consumed = 0
+        # The request scope, as the app left it.
+        self.scope: dict[str, Any] = {}
 
     def json(self) -> Any:
         return json.loads(self.body)
@@ -132,6 +138,7 @@ async def _request(
             result.body += message.get("body", b"")
 
     await app(scope, receive, send)
+    result.scope = scope
     return result
 
 
@@ -181,6 +188,7 @@ async def _credentialled(_request: Request) -> bool:
 
 def _small_app() -> FastAPI:
     app = FastAPI()
+    app.router.route_class = RequestBodyLimitRoute
     install_problem_handlers(app)
     app.add_middleware(RequestBodyLimitMiddleware, credentialled=_credentialled)
 
@@ -862,22 +870,85 @@ _EXPECTED_OVERRIDES: dict[tuple[str, str], tuple[int, str]] = {
 }
 
 
-def test_every_route_has_the_limit_the_inventory_says(shared_app: FastAPI) -> None:
-    overrides: dict[tuple[str, str], tuple[int, str]] = {}
-    for route in shared_app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        limit = request_body_limit_of(route.endpoint)
-        if (limit.max_bytes, limit.reason) == (
-            DEFAULT_MAX_REQUEST_BODY_BYTES,
-            "request_too_large",
-        ):
-            continue
-        assert route.methods is not None
-        for method in route.methods:
-            overrides[(method, route.path)] = (limit.max_bytes, limit.reason)
+async def test_every_route_has_the_limit_the_inventory_says(
+    shared_app: FastAPI,
+) -> None:
+    # Every operation the app publishes (``app.openapi()``: public, and the same
+    # on every FastAPI version) that a body is read for is sent once, and the
+    # limit its route handed the middleware on ``request.state`` is read back.
+    # So a route whose router lacks ``RequestBodyLimitRoute`` -- whose declared
+    # limit would never apply -- fails here too. The request carries no
+    # credential and a body past the anonymous limit, declared past what a
+    # refusal reads and drops: a route that reads its body first is refused 413
+    # before a byte is read, and every other one is answered 401 by its own
+    # authentication. Any other answer, or a byte read, means a route did work.
+    declared = EARLY_ANSWER_DISCARD_BYTES + 1
+    assert declared > ANONYMOUS_MAX_REQUEST_BODY_BYTES
+    limits: dict[tuple[str, str], tuple[int, str] | None] = {}
+    worked: list[tuple[str, str, int, int]] = []
+    async with shared_app.router.lifespan_context(shared_app):
+        for path, operations in shared_app.openapi()["paths"].items():
+            for method in operations.keys() & {"post", "put", "patch", "delete"}:
+                result = await _request(
+                    shared_app,
+                    method.upper(),
+                    re.sub(r"\{[^}]+\}", "00000000-0000-0000-0000-000000000001", path),
+                    _exactly(declared),
+                    headers={"content-length": str(declared)},
+                )
+                if result.status not in (401, 413) or result.consumed:
+                    worked.append((method, path, result.status, result.consumed))
+                limit = getattr(Request(result.scope).state, STATE_ATTRIBUTE, None)
+                limits[(method.upper(), path)] = (
+                    None if limit is None else (limit.max_bytes, limit.reason)
+                )
 
+    assert worked == []
+    assert [operation for operation, limit in limits.items() if limit is None] == []
+    overrides = {
+        operation: limit
+        for operation, limit in limits.items()
+        if limit != (DEFAULT_MAX_REQUEST_BODY_BYTES, "request_too_large")
+    }
     assert overrides == _EXPECTED_OVERRIDES
+
+
+def test_every_router_hands_its_routes_limits_to_the_middleware() -> None:
+    # The inventory above sees only the routes in the schema; this sees every
+    # ``APIRouter(...)`` call in the source. ``api_router`` (app.py) is exempt:
+    # it only includes the other routers and defines no route of its own.
+    source = Path(mc_server_dashboard_api.__file__).parent
+    exempt = {("app.py", "api_router")}
+    missing: list[str] = []
+    for file in sorted(source.rglob("*.py")):
+        tree = ast.parse(file.read_text(), filename=str(file))
+        exempt_calls = {
+            id(node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+            and (file.relative_to(source).as_posix(), target.id) in exempt
+        }
+        for node in ast.walk(tree):
+            if (
+                not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "APIRouter"
+                )
+                or id(node) in exempt_calls
+            ):
+                continue
+            if not any(
+                keyword.arg == "route_class"
+                and isinstance(keyword.value, ast.Name)
+                and keyword.value.id == "RequestBodyLimitRoute"
+                for keyword in node.keywords
+            ):
+                missing.append(f"{file.relative_to(source)}:{node.lineno}")
+
+    assert missing == []
 
 
 class _Visibility(MembershipVisibility):

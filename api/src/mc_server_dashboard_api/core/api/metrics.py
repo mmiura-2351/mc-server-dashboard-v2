@@ -34,8 +34,9 @@ from mc_server_dashboard_api.dependencies import (
     get_worker_registry,
 )
 from mc_server_dashboard_api.fleet.domain.registry import WorkerRegistry
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 @router.get("/metrics")
