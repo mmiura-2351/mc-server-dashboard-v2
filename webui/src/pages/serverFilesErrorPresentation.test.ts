@@ -52,6 +52,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.fileTooLarge" },
     ],
     [
+      "maps a body refused for want of a credential to the lapsed session",
+      new ApiError(413, { reason: "credential_required_for_body" }),
+      { key: "login.sessionExpired" },
+    ],
+    [
       "maps an invalid path",
       new ApiError(422, { reason: "invalid_path" }),
       { key: "files.error.invalidPath" },

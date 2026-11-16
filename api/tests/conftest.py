@@ -17,9 +17,15 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 
+from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.dependencies import get_audit_recorder
+from mc_server_dashboard_api.identity.application.authenticate_request import (
+    AuthenticateRequest,
+    Authentication,
+)
 from tests.client_utils import bind_exit_stack
+from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
 
 _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
@@ -221,3 +227,28 @@ def shared_app(_session_app: FastAPI) -> Iterator[FastAPI]:
     )
     yield _session_app
     _session_app.dependency_overrides = {}
+
+
+@pytest.fixture
+def body_credential(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """An ``Authorization`` header the body limit counts as a valid credential.
+
+    A test that signs its caller in through ``dependency_overrides`` sends no
+    credential, and the body-limit middleware, which judges one from the
+    request's headers alone, holds such a request to the anonymous limit (issue
+    #3561). With this header, and the middleware's token check run over the fake
+    identity store (as the events socket's tests do for its own), the request
+    keeps its route's limit; the route still answers through the overrides.
+    """
+
+    user = make_user()
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    tokens = FakeTokenService()
+    use_case = AuthenticateRequest(uow=uow, tokens=tokens)
+
+    async def authenticate(_request: object, token: str) -> Authentication:
+        return await use_case(access_token=token)
+
+    monkeypatch.setattr(dependencies, "_authenticate_body_token", authenticate)
+    return {"Authorization": f"Bearer {tokens.issue_access_token(user.id)}"}

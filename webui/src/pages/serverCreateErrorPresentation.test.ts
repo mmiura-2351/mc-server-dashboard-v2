@@ -57,6 +57,12 @@ describe("serverImportErrorPresentation", () => {
     });
   });
 
+  it("names the lapsed session for a 413 refused for want of a credential", () => {
+    expect(
+      serverImportErrorPresentation(413, "credential_required_for_body"),
+    ).toEqual({ target: "toast", key: "login.sessionExpired" });
+  });
+
   // Import-only verdicts. `platform_managed_path` is not the Backups upload's
   // string: a zip never yields a directory entry (issue #2979). `slug_taken` is
   // the auto-assigned address raced mid-import, so it asks for a retry instead

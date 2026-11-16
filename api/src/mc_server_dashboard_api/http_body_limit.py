@@ -25,7 +25,7 @@ has happened. A request no route matched has the default.
 It bounds what a route **reads**, and nothing else. A body the route never asks
 for is never buffered (uvicorn applies flow control and discards it). ``GET``,
 ``HEAD`` and ``OPTIONS`` requests — which no route reads a body for — are neither
-authorized nor limited here: their routes include the streaming downloads, and a
+classified nor limited here: their routes include the streaming downloads, and a
 streaming response calls ``receive`` itself, to watch for the client going away,
 before its first byte is sent — a call that cannot be told from a route reading
 its body. Once a response has started the middleware stands aside.
@@ -35,10 +35,21 @@ exception surfaces in the route's own body read, and the problem handlers render
 it like any other error, so the 413 leaves through every other middleware with
 the headers every response carries.
 
-**Authentication precedes the body** (issue #3365). The first read of a request
-is also where the route's credential checks are made
-(:mod:`mc_server_dashboard_api.http_body_auth`), ahead of the limit: a caller the
-route refuses is answered before a byte of its body is read, whatever its size.
+**A body without a credential is held to a small limit** (issues #3365, #3561).
+Routes check their caller in their own dependencies, and FastAPI solves those
+only after it has read the declared body. So, at a request's first body read,
+the middleware asks the ``credentialled`` check it is given whether the request
+carries a valid credential, from its headers alone (in the app,
+:func:`mc_server_dashboard_api.dependencies.has_body_credential`: a valid user
+access token or the Worker credential). A request that does keeps its route's
+limit; one that does not is held to :data:`ANONYMOUS_MAX_REQUEST_BODY_BYTES`, or
+the route's limit if that is smaller, and refused past it with a 413 whose
+``reason`` is :data:`ANONYMOUS_REASON` (by ``Content-Length`` before a byte is
+read, or by running count). Within that, its
+body is read and the route answers it as it always has -- the 401, and any 403
+or 404, come from the route's dependencies after the read. So a caller without
+a credential cannot make the API read more than the anonymous limit, and no
+route changes how it receives its request or keeps a list of public routes.
 
 **An answer given before the body was read through** (issue #3365) -- either
 refusal above, or any response to a request whose body was not read: a route
@@ -68,14 +79,14 @@ or a length of zero -- has nothing unread, and its response is never touched.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from fastapi import status
+from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from mc_server_dashboard_api.http_body_auth import authorize_before_body
 from mc_server_dashboard_api.http_problem import problem
 
 # The limit of a route that declares none: every JSON route. The largest
@@ -83,6 +94,24 @@ from mc_server_dashboard_api.http_problem import problem
 # (``MAX_CONFIG_BYTES``), so 1 MiB is ample.
 DEFAULT_MAX_REQUEST_BODY_BYTES = 1024 * 1024
 DEFAULT_REASON = "request_too_large"
+
+# The limit of a request without a valid credential (module docstring), sized
+# for the routes that take a body from such a caller, as the route table has
+# them: registration, login, refresh and logout (``POST /api/auth/session``
+# takes none). ``test_http_body_credential.py`` derives that set from the table
+# and pins each route's largest legitimate body. The largest is a registration
+# of 36,921 bytes: a password at its 1024-code-point cap
+# (``RegisterUserRequest``), at worst 12 bytes each on the wire (an astral code
+# point JSON-escaped as a surrogate pair), and a username and an email, which
+# have no cap of their own, taken at the same 1024 code points -- far past any
+# real login name or address (RFC 5321 bounds an address at 254 octets). A
+# login is 24,608 bytes; a refresh or a logout carries a 43-character token.
+# This limit is now also the bound on those uncapped fields for such a caller.
+ANONYMOUS_MAX_REQUEST_BODY_BYTES = 64 * 1024
+# The 413 ``reason`` past it: not the route's own cap (``request_too_large``)
+# but the want of a credential, so a client whose access token has expired can
+# tell the two apart, refresh, and send the body again -- as it does on a 401.
+ANONYMOUS_REASON = "credential_required_for_body"
 
 # What a multipart upload route allows on top of its file cap for the envelope:
 # the boundaries, the part headers and the route's few short text fields. It keeps
@@ -101,7 +130,7 @@ EARLY_ANSWER_DISCARD_SECONDS = 10.0
 _ATTRIBUTE = "__mcsd_request_body_limit__"
 
 # Methods no route reads a body for (module docstring): a ``receive`` call on
-# them is not a body read, so it is neither authorized nor limited, and a body
+# them is not a body read, so it is neither classified nor limited, and a body
 # they do carry is never read and dropped.
 _BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -117,6 +146,11 @@ class RequestBodyLimit:
 
 
 _DEFAULT = RequestBodyLimit(DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_REASON)
+_ANONYMOUS = RequestBodyLimit(ANONYMOUS_MAX_REQUEST_BODY_BYTES, ANONYMOUS_REASON)
+
+# Whether a request carries a valid credential, judged from its headers alone
+# (module docstring). It answers, and never raises.
+CredentialCheck = Callable[[Request], Awaitable[bool]]
 
 
 def request_body_limit(
@@ -184,8 +218,9 @@ async def _discard(receive: Receive, rest: int | None) -> bool:
 class RequestBodyLimitMiddleware:
     """Refuse a request body past its route's limit (module docstring)."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, credentialled: CredentialCheck) -> None:
         self._app = app
+        self._credentialled = credentialled
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -197,7 +232,7 @@ class RequestBodyLimitMiddleware:
         declared = _declared_length(headers)
         received = 0
         ended = False
-        authorized = False
+        limit: RequestBodyLimit | None = None
         responding = False
 
         def unread() -> int | None:
@@ -216,21 +251,23 @@ class RequestBodyLimitMiddleware:
             return declared - received
 
         async def limited_receive() -> Message:
-            nonlocal received, ended, authorized
+            nonlocal received, ended, limit
             if responding:
                 return await receive()
             if reads_a_body:
-                if not authorized:
-                    await authorize_before_body(scope)
-                    authorized = True
-                limit = request_body_limit_of(scope.get("endpoint"))
+                if limit is None:
+                    limit = request_body_limit_of(scope.get("endpoint"))
+                    if limit.max_bytes > _ANONYMOUS.max_bytes and not (
+                        await self._credentialled(Request(scope))
+                    ):
+                        limit = _ANONYMOUS
                 if declared is not None and declared > limit.max_bytes:
                     raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)
             message = await receive()
             ended = not message.get("more_body", False)
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if reads_a_body and received > limit.max_bytes:
+                if limit is not None and received > limit.max_bytes:
                     raise problem(status.HTTP_413_CONTENT_TOO_LARGE, limit.reason)
             return message
 

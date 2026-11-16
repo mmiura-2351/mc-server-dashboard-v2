@@ -9,6 +9,7 @@
  * and the restore dialog also closes on it, before a caller reaches here.
  */
 
+import { CREDENTIAL_REQUIRED_FOR_BODY } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 
 /**
@@ -59,6 +60,10 @@ export function backupErrorPresentation(
       // The object store, not the server host, is down (issue #2378). Without
       // this case the 503 below would blame the host for a storage outage.
       return "backups.error.storageUnavailable";
+    case CREDENTIAL_REQUIRED_FOR_BODY:
+      // A 413 for a lapsed session the client's one refresh could not mend;
+      // without this case the 413 below would call the archive too large.
+      return "login.sessionExpired";
   }
 
   // Check status (less specific).

@@ -13,6 +13,8 @@ on:
       - ".github/workflows/dependabot-uv-lock.yml"
       - ".github/workflows/python-lock-refresh.yml"
       - ".github/workflows/api.yml"
+      # Mirrors the anonymous body limit, pinned by test_http_body_credential.py.
+      - "webui/src/api/limits.ts"
   push:
     branches: [main]
     paths:
@@ -26,6 +28,8 @@ on:
       - ".github/workflows/dependabot-uv-lock.yml"
       - ".github/workflows/python-lock-refresh.yml"
       - ".github/workflows/api.yml"
+      # Mirrors the anonymous body limit, pinned by test_http_body_credential.py.
+      - "webui/src/api/limits.ts"
 
 permissions:
   contents: read

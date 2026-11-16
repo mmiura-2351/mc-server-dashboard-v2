@@ -87,6 +87,11 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.tooLarge",
     ],
     [
+      "maps a jar refused for want of a credential to the lapsed session",
+      new ApiError(413, { reason: "credential_required_for_body" }),
+      "login.sessionExpired",
+    ],
+    [
       "maps storage_unavailable apart from the unavailable worker",
       new ApiError(503, { reason: "storage_unavailable" }),
       "plugins.error.storageUnavailable",

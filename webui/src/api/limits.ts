@@ -17,6 +17,17 @@ export const MAX_WARNING_MESSAGE_BYTES = 1442;
 /** The largest file the editor can save (larger files are uploaded instead). */
 export const MAX_EDIT_BYTES = 4 * 1024 * 1024;
 
+/**
+ * The most body the API reads of a request without a valid credential, an
+ * expired access token included (SECURITY.md Section 5): past it the request is
+ * refused 413 `credential_required_for_body`. The client refreshes an expiring
+ * token before it sends a larger body. It mirrors the API's
+ * `ANONYMOUS_MAX_REQUEST_BODY_BYTES` (`http_body_limit.py`), which is not in
+ * the OpenAPI document; `api/tests/test_http_body_credential.py` pins the two
+ * together.
+ */
+export const ANONYMOUS_MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
 /** The size of `text` as the API measures it: its UTF-8 encoding, in bytes. */
 export function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).length;

@@ -12,6 +12,7 @@
  * this mapper. The page has no 403 glue: `server:create` gates the whole page.
  */
 
+import { CREDENTIAL_REQUIRED_FOR_BODY } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 
 export interface CreateErrorPresentation {
@@ -92,6 +93,11 @@ export function serverImportErrorPresentation(
   status: number | undefined,
   reason: string | undefined,
 ): ImportErrorPresentation {
+  // A 413 for a lapsed session the client's one refresh could not mend, not an
+  // archive over the cap.
+  if (reason === CREDENTIAL_REQUIRED_FOR_BODY) {
+    return { target: "toast", key: "login.sessionExpired" };
+  }
   if (status === 413) {
     return { target: "toast", key: "serverCreate.import.tooLarge" };
   }

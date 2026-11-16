@@ -9,7 +9,7 @@
  * permission-refresh side effect before a caller reaches this mapper.
  */
 
-import { ApiError } from "../api/client.ts";
+import { ApiError, CREDENTIAL_REQUIRED_FOR_BODY } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 
 // `file_too_large` (413-only) and `worker_unavailable` (503-only) deliberately
@@ -34,6 +34,9 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   storage_unavailable: "plugins.error.storageUnavailable",
   not_found: "plugins.error.notFound",
   plugin_jar_missing: "plugins.error.jarMissing",
+  // A 413 for a lapsed session the client's one refresh could not mend, not a
+  // jar over the cap.
+  [CREDENTIAL_REQUIRED_FOR_BODY]: "login.sessionExpired",
 };
 
 /** Select the Plugins-tab toast key for a failed operation. */

@@ -27,6 +27,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.types import Message
 
+from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.dependencies import (
     get_assigned_worker_lookup,
     get_resolved_jar_lookup,
@@ -34,6 +35,7 @@ from mc_server_dashboard_api.dependencies import (
     get_transfer_semaphore,
     get_worker_credential,
 )
+from mc_server_dashboard_api.http_body_limit import ANONYMOUS_MAX_REQUEST_BODY_BYTES
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage, _FsSnapshotHandle
 from mc_server_dashboard_api.storage.adapters.object_store import (
     _POINTER,
@@ -313,6 +315,37 @@ def test_snapshot_publishes_atomically(tmp_path: Path) -> None:
 
     published = asyncio.run(_read())
     assert _read_tar(published) == {"world/level.dat": b"new-world"}
+
+
+def test_snapshot_past_the_anonymous_body_limit_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    # The Worker credential keeps the route's own limit (issue #3561): the body
+    # limit reads the configured credential, which the shared app has none of.
+    monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: _CREDENTIAL)
+    client, storage = _setup(tmp_path)
+    community, server = _scope()
+    level = os.urandom(4 * ANONYMOUS_MAX_REQUEST_BODY_BYTES)
+    body = _tar_bytes({"world/level.dat": level})
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+    assert resp.status_code == 204
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"world/level.dat": level}
 
 
 def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:

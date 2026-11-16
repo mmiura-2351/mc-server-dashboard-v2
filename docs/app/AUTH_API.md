@@ -136,6 +136,13 @@ branches on exactly one contract:
   can name the missing permission in its denial toast (WEBUI_SPEC.md Section 7.4).
   This exposes only which permission a known endpoint requires —
   static catalog data (WEBUI_SPEC.md Section 2.2) — not resource existence.
+- A `413` with `reason: "credential_required_for_body"` refuses a body past
+  64 KiB that carries no valid credential: none, an invalid one, an expired
+  token, or a deactivated account's ([`SECURITY.md`](SECURITY.md) Section 5).
+  It carries no other member. It stands in for the route's `401`, so a client
+  refreshes its access token and sends the request again. A body past the
+  route's own cap is a different `413` reason (`request_too_large`,
+  `file_too_large`, ...) and does not ask for a refresh.
 
 Reason codes the `/auth/*` endpoints emit:
 

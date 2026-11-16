@@ -323,3 +323,17 @@ window (Section 3). Re-pin the digest and the
 `# chrislusf/seaweedfs:<tag> (pushed <date>, outside the cooldown)` comment
 above the `docker run` in one change: the version and date in that comment are
 what a later reader checks the pin against.
+
+## 7. Public API only
+
+First-party code does not depend on the internal API of an external library
+(#3560). Internal means any of:
+
+- an underscore-prefixed module, function, class or attribute;
+- an object the library neither exports nor documents;
+- an undocumented ASGI scope key or attribute that a library happens to set.
+
+Such a dependency can break on a release that keeps the public API unchanged,
+so every upgrade becomes a code change. When a need cannot be met with public
+API, do not add the dependency and do not carve out an exception for it: raise
+it for an owner decision.

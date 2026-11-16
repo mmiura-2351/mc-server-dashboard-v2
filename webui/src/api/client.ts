@@ -14,12 +14,16 @@
  *
  * On top of that it carries the session plumbing (WEBUI_SPEC.md 7.1): it
  * attaches the in-memory access token as a Bearer credential and, on a 401 from
- * a non-auth endpoint, transparently performs a single-flight refresh and
- * retries the request once. The refresh itself is owned by the session layer
- * and registered here, so the client does not depend on it.
+ * a non-auth endpoint -- or the 413 `credential_required_for_body` the API
+ * answers a large body sent without a valid credential -- transparently
+ * performs a single-flight refresh and retries the request once. Before it
+ * sends a body past the API's anonymous limit with an access token that has
+ * expired or is about to, it refreshes first. The refresh itself is owned by
+ * the session layer and registered here, so the client does not depend on it.
  */
 
 import { getAccessToken, getAuthEpoch } from "../auth/tokenStore.ts";
+import { ANONYMOUS_MAX_REQUEST_BODY_BYTES, utf8ByteLength } from "./limits.ts";
 import type { paths } from "./schema";
 
 /** Paths that declare the given HTTP method in the generated schema. */
@@ -140,6 +144,119 @@ function isJsonContentTypeHeader(contentType: string | null): boolean {
   return /\bapplication\/(problem\+)?json\b/i.test(contentType ?? "");
 }
 
+/**
+ * The `reason` of the 413 the API answers a body past 64 KiB that carries no
+ * valid credential (SECURITY.md Section 5): an expired access token, as far as
+ * this client is concerned. The route's own cap is a different reason
+ * (`request_too_large`, `file_too_large`, ...) and is not retried.
+ */
+export const CREDENTIAL_REQUIRED_FOR_BODY = "credential_required_for_body";
+
+/**
+ * Whether an answer means the access token must be refreshed: a 401, or the
+ * 413 {@link CREDENTIAL_REQUIRED_FOR_BODY}, read from its problem `body`.
+ * Either is retried once after a refresh. Every body this client sends can be
+ * sent again -- a JSON string or a FormData -- so the retry needs nothing but
+ * the original request.
+ */
+function asksForRefresh(
+  status: number,
+  contentType: string | null,
+  body: string,
+): boolean {
+  if (status === 401) {
+    return true;
+  }
+  if (status !== 413 || !isJsonContentTypeHeader(contentType)) {
+    return false;
+  }
+  try {
+    return (
+      readProblemString(JSON.parse(body), "reason") ===
+      CREDENTIAL_REQUIRED_FOR_BODY
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How close to its expiry an access token is refreshed before a large body is
+ * sent with it: room for the request to reach the API, and for clock skew.
+ */
+const EXPIRY_MARGIN_SECONDS = 30;
+
+/**
+ * The `exp` claim of a JWT access token, in seconds since the epoch, read
+ * without verifying the token (the API verifies it); `undefined` for anything
+ * that is not a JWT carrying one.
+ */
+function accessTokenExpiry(token: string): number | undefined {
+  const payload = token.split(".")[1];
+  if (payload === undefined) {
+    return undefined;
+  }
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const claims: unknown = JSON.parse(atob(base64));
+    const exp =
+      typeof claims === "object" && claims !== null
+        ? (claims as { exp?: unknown }).exp
+        : undefined;
+    return typeof exp === "number" ? exp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The body's size as sent, near enough: a JSON string's UTF-8 bytes, a
+ * FormData's parts without their multipart envelope. A body that crosses the
+ * limit by its envelope alone is still caught by the 413 retry.
+ */
+function bodySize(body: BodyInit | null | undefined): number {
+  if (typeof body === "string") {
+    return utf8ByteLength(body);
+  }
+  if (body instanceof FormData) {
+    let size = 0;
+    for (const [, value] of body) {
+      size += typeof value === "string" ? utf8ByteLength(value) : value.size;
+    }
+    return size;
+  }
+  return 0;
+}
+
+/**
+ * Whether to refresh before sending `body`: it is past the API's anonymous
+ * limit and the access token has expired or is about to. Such a body would be
+ * refused 413 `credential_required_for_body`, and an upload refused while still
+ * being sent can reach the browser as a dropped connection rather than as that
+ * answer, so the retry on it would never run (#3688). The retry stays as the
+ * backstop: a token that is not a JWT, or a refresh that failed, is sent as it
+ * is. Synchronous, so a request that needs no refresh is sent in the same step
+ * as before.
+ */
+function refreshesBeforeSending(
+  url: string,
+  body: BodyInit | null | undefined,
+): boolean {
+  const token = getAccessToken();
+  if (
+    refresher === null ||
+    token === null ||
+    isAuthPath(url) ||
+    bodySize(body) <= ANONYMOUS_MAX_REQUEST_BODY_BYTES
+  ) {
+    return false;
+  }
+  const expiry = accessTokenExpiry(token);
+  return (
+    expiry !== undefined && expiry - EXPIRY_MARGIN_SECONDS <= Date.now() / 1000
+  );
+}
+
 function isJsonContentType(response: Response): boolean {
   return isJsonContentTypeHeader(response.headers.get("content-type"));
 }
@@ -178,14 +295,32 @@ async function request<P extends keyof paths, M extends string>(
   // The session the request is sent under (rawRequest reads its token in this
   // same synchronous step).
   const epoch = getAuthEpoch();
+  if (refreshesBeforeSending(url, init?.body)) {
+    await refresher?.(epoch);
+    // A session that ended meanwhile gets the 401 the request would have met:
+    // it never goes out under another session (#3224).
+    if (epoch !== getAuthEpoch()) {
+      throw new ApiError(401, undefined);
+    }
+  }
   let response = await rawRequest(httpMethod, url, init);
 
-  // Transparent refresh: a 401 from a non-auth endpoint means the access token
-  // expired. Run the shared single-flight refresh and retry once. The
-  // /api/auth/* endpoints surface their own 401s untouched (no refresh on the
-  // refresh). The retry happens only while the request's session is still
-  // current, so a request never replays under a different user (#3224).
-  if (response.status === 401 && refresher !== null && !isAuthPath(url)) {
+  // Transparent refresh: a 401 from a non-auth endpoint, or a large body
+  // refused for want of a credential, means the access token expired. Run the
+  // shared single-flight refresh and retry once. The /api/auth/* endpoints
+  // surface their own answers untouched (no refresh on the refresh). The retry
+  // happens only while the request's session is still current, so a request
+  // never replays under a different user (#3224).
+  if (
+    refresher !== null &&
+    !isAuthPath(url) &&
+    asksForRefresh(
+      response.status,
+      response.headers.get("content-type"),
+      // Only a 413 is read here; a clone leaves the body for the parse below.
+      response.status === 413 ? await response.clone().text() : "",
+    )
+  ) {
     const refreshed = await refresher(epoch);
     if (refreshed && epoch === getAuthEpoch()) {
       response = await rawRequest(httpMethod, url, init);
@@ -294,7 +429,7 @@ function sendForm(
 /**
  * Multipart POST with real-time upload progress (issue #1207). XHR is the
  * pragmatic choice: fetch cannot surface bytes-uploaded progress. It runs the
- * FormData body through the same auth, single-flight 401 refresh, and typed
+ * FormData body through the same auth, single-flight refresh, and typed
  * error/JSON handling as {@link request}, adding the `onProgress` feedback.
  */
 export async function postFormWithProgress<P extends PathsWith<"post">>(
@@ -305,12 +440,28 @@ export async function postFormWithProgress<P extends PathsWith<"post">>(
 ): Promise<JsonResponse<Op<P, "post">>> {
   const url = path as string;
   const epoch = getAuthEpoch();
+  if (refreshesBeforeSending(url, body)) {
+    await refresher?.(epoch);
+    // As in `request`: never sent under another session (#3224).
+    if (epoch !== getAuthEpoch()) {
+      throw new ApiError(401, undefined);
+    }
+  }
   let xhr = await sendForm(url, body, onProgress, signal);
 
-  // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint
-  // means the access token expired — refresh once and retry the upload, only
-  // while the upload's session is still current.
-  if (xhr.status === 401 && refresher !== null && !isAuthPath(url)) {
+  // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint,
+  // or an upload refused for want of a credential, means the access token
+  // expired — refresh once and retry the upload (a FormData is sent again
+  // whole), only while the upload's session is still current.
+  if (
+    refresher !== null &&
+    !isAuthPath(url) &&
+    asksForRefresh(
+      xhr.status,
+      xhr.getResponseHeader("content-type"),
+      xhr.responseText,
+    )
+  ) {
     const refreshed = await refresher(epoch);
     if (refreshed && epoch === getAuthEpoch()) {
       xhr = await sendForm(url, body, onProgress, signal);
