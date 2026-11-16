@@ -355,8 +355,7 @@ counts, per-route request volume (whose `http_route` and
 `http_server_request_duration_seconds_count{http_route="/api/auth/login"}`
 split by `http_response_status_code`, 200 against 401 — a live oracle for anyone
 probing the FR-AUTH-4 brute-force behaviour), scanning activity as 404s with an
-empty `http_route`, process start timestamps, control-plane liveness, and
-latency histograms.
+empty `http_route`, control-plane liveness, and latency histograms.
 
 **The bind address is not the control, and which control applies depends on the
 topology.** The listener binds `0.0.0.0` by default, because the API's canonical

@@ -16,8 +16,8 @@ dependencies = [
     "protobuf>=6.31.1,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
-    # versions respect the 7-day cooldown (Section 3): released on/before
-    # 2026-05-28 as of this change.
+    # versions respect the 7-day cooldown (Section 3); each entry's comment dates
+    # its release.
     # 0.162.2 (2026-11-07) is the newest release outside the 7-day cooldown
     # (Section 3) as of this change; cap the next minor. 0.142.0+ ships the
     # native OpenTelemetry HTTP metrics the app records with (#3563).
