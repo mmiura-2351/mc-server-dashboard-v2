@@ -432,6 +432,10 @@ def _pausing_spool(
     mp.setattr(fs, "open", _open, raising=False)
 
 
+# Sequential waits, worst case: the first arrival (120 s), the cancel (5 s), the
+# second hold's arrival (120 s) and the release (120 s), plus 30 s of headroom
+# (issue #3651).
+@pytest.mark.timeout(3 * 120 + 5 + 30)
 @pytest.mark.parametrize("case", _SPOOL_CASES.values(), ids=_SPOOL_CASES.keys())
 async def test_an_aborted_transfer_keeps_its_staging_until_its_spool_is_closed(
     case: _SpoolCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

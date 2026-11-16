@@ -791,6 +791,10 @@ async def test_version_capture_fsyncs_before_rename(
     assert dir_fsyncs_after, "no dir fsync after version rename — entry not durable"
 
 
+# 24 real fsyncs on the fs backend. Under heavy IO load each can stall about
+# 10 s: a 12-fsync test hit the suite-wide 120 s cap (issue #3651). Budget:
+# 10 s per fsync plus 30 s of other work.
+@pytest.mark.timeout(24 * 10 + 30)
 async def test_version_litter_does_not_consume_retention_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
