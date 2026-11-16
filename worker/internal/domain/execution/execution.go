@@ -265,7 +265,9 @@ type StopHandOff interface {
 // running where no Instance tracks it: a container whose start the daemon did
 // not answer, and which the cleanup after it could not remove (issue #3672).
 // The instance manager asks it before it touches the working set of a server it
-// tracks no instance of, because such a process may still be writing there.
+// tracks no instance of, because such a process may still be writing there. It
+// answers any error from it as unavailable, not busy (issue #3678): no other
+// command holds the id, so the API backs its retries off.
 type LeftoverGuard interface {
 	// EndLeftovers ends what the driver itself left running for serverID, as the
 	// server's next start would: a graceful stop that watches workingDir, then a
