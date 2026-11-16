@@ -41,6 +41,14 @@ describe("backupErrorPresentation", () => {
     );
   });
 
+  // An upload refused for want of a credential is a lapsed session, not an
+  // archive past the cap.
+  it("names the lapsed session for a 413 credential_required_for_body", () => {
+    expect(backupErrorPresentation(413, "credential_required_for_body")).toBe(
+      "login.sessionExpired",
+    );
+  });
+
   it.each([
     [413, "backups.error.tooLarge"],
     [503, "backups.error.workerUnavailable"],

@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import pathlib
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -1012,6 +1013,19 @@ def test_every_route_that_takes_an_anonymous_body_fits_the_limit(
         assert len(body) <= _ANONYMOUS, route
     # The figure the limit's comment (``http_body_limit.py``) is derived from.
     assert max(len(body) for body in largest.values()) == 36_921
+
+
+def test_the_web_ui_holds_the_same_anonymous_limit() -> None:
+    # The Web UI refreshes an expiring access token before it sends a body past
+    # this limit, so a large upload is not refused for the token it carries. The
+    # limit is not in the OpenAPI document, so the client mirrors it.
+    limits = pathlib.Path(__file__).resolve().parents[2] / "webui/src/api/limits.ts"
+
+    assert ANONYMOUS_MAX_REQUEST_BODY_BYTES == 64 * 1024
+    assert (
+        "export const ANONYMOUS_MAX_REQUEST_BODY_BYTES = 64 * 1024;"
+        in limits.read_text()
+    )
 
 
 class _Reached(Exception):

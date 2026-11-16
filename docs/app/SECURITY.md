@@ -402,7 +402,9 @@ make it read (issues #3365, #3561):
 - A request with a valid credential keeps its route's body limit. Any other
   request is held to `ANONYMOUS_MAX_REQUEST_BODY_BYTES` (64 KiB), or to the
   route's limit if that is smaller. That covers no credential, a malformed or
-  invalid one, an expired or revoked token, and a deactivated account. 64 KiB
+  invalid one, an expired token, and a deactivated account's token. An access
+  token carries no revocation: one whose session was revoked stays valid until
+  it expires, here as on every route. 64 KiB
   is sized for the routes that take a body from such a caller: registration,
   login, refresh and logout. `tests/test_http_body_credential.py` derives that
   set from the route table and pins each route's largest legitimate body.
@@ -428,13 +430,20 @@ The accepted costs (#3560):
 
 - A request without a valid credential that declares more than the limit gets
   413, not 401. That includes an upload sent with an expired token. The Web UI
-  client treats `credential_required_for_body` as a 401: it refreshes once and
-  retries once (WEBUI_SPEC.md Section 7.1).
+  client refreshes an expired or expiring token before it sends a body past the
+  limit, and treats `credential_required_for_body` as a 401: it refreshes once
+  and retries once (WEBUI_SPEC.md Section 7.1).
 - A route decides 403 and 404 after it has read the body, within its own limit.
   This affects only callers with a valid credential.
-- While the database is unavailable, a token whose signature and expiry verify
-  keeps its route's limit. Only the holder of a token this API signed gets that
-  far, and the route's own authentication meets the outage after the read.
+- The account and the token's expiry are checked once, when the body starts.
+  The user verified then is the one the route receives (`get_current_user`
+  takes it from the request's state), so a token that expires, or an account
+  deactivated, while the upload is still arriving does not stop that request:
+  it completes. Membership and permission are still decided after the read.
+- While the database is unavailable (a transient error), a token with a valid
+  signature that has not expired keeps its route's limit, even a deactivated
+  account's. Only the holder of a token this API signed gets that far, and the
+  route's own authentication still decides, meeting the outage after the read.
 - Usernames and emails have no cap of their own. For a caller without a
   credential, the anonymous limit is now their cap on registration and login.
 

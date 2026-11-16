@@ -11,7 +11,7 @@
  * for a toast presentation.
  */
 
-import { ApiError } from "../api/client.ts";
+import { ApiError, CREDENTIAL_REQUIRED_FOR_BODY } from "../api/client.ts";
 import type { TranslationKey } from "../i18n/index.ts";
 import { FileTooLargeToEditError, UnencodableTextError } from "./fileText.ts";
 
@@ -48,7 +48,11 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.conflict" };
       }
     case 413:
-      return { key: "files.error.fileTooLarge" };
+      // A body refused for want of a credential is a lapsed session that the
+      // client's one refresh could not mend, not a file over the cap.
+      return error.reason === CREDENTIAL_REQUIRED_FOR_BODY
+        ? { key: "login.sessionExpired" }
+        : { key: "files.error.fileTooLarge" };
     case 422:
       switch (error.reason) {
         case "invalid_path":
@@ -100,7 +104,7 @@ export function fileReadErrorPresentation(
     if (error.status === 409 && error.reason === "server_unsettled") {
       return { key: "files.error.readUnsettled" };
     }
-    if (error.status === 413) {
+    if (error.status === 413 && error.reason !== CREDENTIAL_REQUIRED_FOR_BODY) {
       return { key: "files.error.readTooLarge" };
     }
   }

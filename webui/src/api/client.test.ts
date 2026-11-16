@@ -20,6 +20,7 @@ import {
   postFormWithProgress,
   setRefresher,
 } from "./client.ts";
+import { ANONYMOUS_MAX_REQUEST_BODY_BYTES } from "./limits.ts";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(body === undefined ? "" : JSON.stringify(body), {
@@ -759,6 +760,130 @@ describe("postFormWithProgress on an upload refused for want of a credential", (
     const error = await promise;
     expect(refresher).not.toHaveBeenCalled();
     expect(error.reason).toBe("too_large");
+  });
+});
+
+// A JWT-shaped access token whose `exp` is `seconds` from now. The client reads
+// the claim without verifying the token, so the signature is a stand-in.
+function tokenExpiringIn(seconds: number): string {
+  const payload = btoa(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + seconds }),
+  )
+    .replace(/=+$/, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+  return `eyJhbGciOiJIUzI1NiJ9.${payload}.signature`;
+}
+
+describe("refresh before sending a body past the anonymous limit", () => {
+  const largeBody = JSON.stringify({
+    name: "x".repeat(ANONYMOUS_MAX_REQUEST_BODY_BYTES),
+  });
+
+  function freshRefresher() {
+    return vi.fn(async () => {
+      setAccessToken(tokenExpiringIn(900));
+      return true;
+    });
+  }
+
+  beforeEach(() => {
+    MockXHR.instances = [];
+    vi.stubGlobal("XMLHttpRequest", MockXHR);
+  });
+
+  afterEach(() => {
+    resetSession();
+  });
+
+  it.each([
+    ["expired", -60],
+    ["about to expire", 10],
+  ])(
+    "refreshes an %s token first, so the body is sent once",
+    async (_label, seconds) => {
+      setAccessToken(tokenExpiringIn(seconds));
+      const refresher = freshRefresher();
+      setRefresher(refresher);
+      fetchMock.mockResolvedValueOnce(jsonResponse(201, { id: "c1" }));
+
+      await expect(
+        api.post("/api/communities", { body: largeBody }),
+      ).resolves.toEqual({ id: "c1" });
+
+      expect(refresher).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, sent] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect((sent.headers as Record<string, string>).authorization).toBe(
+        `Bearer ${getAccessToken()}`,
+      );
+    },
+  );
+
+  it("does not refresh ahead of a body within the limit", async () => {
+    setAccessToken(tokenExpiringIn(-60));
+    const refresher = freshRefresher();
+    setRefresher(refresher);
+    fetchMock.mockResolvedValueOnce(jsonResponse(201, { id: "c1" }));
+
+    await api.post("/api/communities", { body: '{"name": "x"}' });
+
+    expect(refresher).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refresh ahead of a large body sent with a valid token", async () => {
+    setAccessToken(tokenExpiringIn(600));
+    const refresher = freshRefresher();
+    setRefresher(refresher);
+    fetchMock.mockResolvedValueOnce(jsonResponse(201, { id: "c1" }));
+
+    await api.post("/api/communities", { body: largeBody });
+
+    expect(refresher).not.toHaveBeenCalled();
+  });
+
+  it("refreshes an expired token before a large upload, so it is sent once", async () => {
+    setAccessToken(tokenExpiringIn(-60));
+    const refresher = freshRefresher();
+    setRefresher(refresher);
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob(["x".repeat(ANONYMOUS_MAX_REQUEST_BODY_BYTES + 1)]),
+    );
+
+    const promise = postFormWithProgress("/api/resource-packs", form);
+    await vi.waitFor(() => expect(MockXHR.instances).toHaveLength(1));
+    const sent = MockXHR.last();
+    sent.respond(201, { id: "rp1" });
+
+    await expect(promise).resolves.toEqual({ id: "rp1" });
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(MockXHR.instances).toHaveLength(1);
+    expect(sent.reqHeaders().authorization).toBe(`Bearer ${getAccessToken()}`);
+  });
+
+  it("logs out and sends nothing when the refresh ahead is refused", async () => {
+    setAccessToken(tokenExpiringIn(-60));
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setRefresher(refreshForRetry);
+    fetchMock.mockResolvedValue(new Response("", { status: 401 }));
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob(["x".repeat(ANONYMOUS_MAX_REQUEST_BODY_BYTES + 1)]),
+    );
+
+    const error = await postFormWithProgress("/api/resource-packs", form).catch(
+      (e) => e,
+    );
+
+    expect(onLogout).toHaveBeenCalledWith("expired");
+    expect(MockXHR.instances).toHaveLength(0);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(401);
   });
 });
 

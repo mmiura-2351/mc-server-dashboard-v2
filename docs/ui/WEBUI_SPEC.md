@@ -162,17 +162,17 @@ refused 413 `file_too_large` before it is decoded; one that decodes to more than
 checked from the request's headers alone, before its body is read. A valid user
 access token or the Worker credential keeps the route's limit above. Any other
 request is held to **64 KiB** of body, or to its route's limit if that is
-smaller: no `Authorization` header, a malformed or invalid one, an expired or
-revoked token, or a deactivated account. Past 64 KiB such a request is answered
+smaller: no `Authorization` header, a malformed or invalid one, an expired
+token, or a deactivated account's token. Past 64 KiB such a request is answered
 `413 credential_required_for_body`, by `Content-Length` before reading anything
 and by streamed size otherwise. That reason is distinct from the route's own cap
-(`request_too_large` and the reasons in the table above). Within the limit the body is
-read and the route answers as usual, with its `401`, after the read. The routes
-that take a body without a credential are `POST /users`, `POST /auth/login`,
-`/auth/refresh` and `/auth/logout`, and their bodies are far below the limit. A
-caller with a valid credential whom the route refuses gets its `403` or `404`
-once the body, within the route's limit, has been read. An upload or a large
-edit sent with an expired access token is therefore answered `413
+(`request_too_large` and the reasons in the table above). Within the limit the
+body is read and the route answers as usual, with its `401`, after the read. The
+routes that take a body without a credential are `POST /users`, `POST
+/auth/login`, `/auth/refresh` and `/auth/logout`, and their bodies are far below
+the limit. A caller with a valid credential whom the route refuses gets its
+`403` or `404` once the body, within the route's limit, has been read. An upload
+or a large edit sent with an expired access token is therefore answered `413
 credential_required_for_body`, not `401`; the client refreshes and sends it
 again, as on a 401 (Section 7.1).
 
@@ -900,7 +900,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `413 credential_required_for_body` (Section 2.3, "A body sent without a
   credential") is the 401 of a large body and is treated the same way: one
   refresh, then the same request — the JSON string or `FormData` it sent — once
-  more. Page reload
+  more. Before it sends a body past 64 KiB, the client refreshes first if the
+  access token has expired or expires within 30 seconds (read from the token's
+  `exp` claim, unverified), so a large upload is not refused while it is still
+  being sent; the retry stays as the backstop. Page reload
   (bootstrap) re-establishes the session via the **non-rotating**
   `POST /api/auth/session` probe — it exchanges the cookie for an access token
   without rotating the refresh token, so a reload / F5 storm can never race an

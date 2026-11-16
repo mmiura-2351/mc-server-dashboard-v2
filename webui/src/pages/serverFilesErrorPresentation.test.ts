@@ -52,6 +52,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.fileTooLarge" },
     ],
     [
+      "maps a body refused for want of a credential to the lapsed session",
+      new ApiError(413, { reason: "credential_required_for_body" }),
+      { key: "login.sessionExpired" },
+    ],
+    [
       "maps an invalid path",
       new ApiError(422, { reason: "invalid_path" }),
       { key: "files.error.invalidPath" },
@@ -163,6 +168,11 @@ describe("fileReadErrorPresentation", () => {
       "maps an oversized file to the running-read cap, not the edit cap",
       new ApiError(413, { reason: "file_too_large" }),
       { key: "files.error.readTooLarge" },
+    ],
+    [
+      "maps a refusal for want of a credential to the lapsed session",
+      new ApiError(413, { reason: "credential_required_for_body" }),
+      { key: "login.sessionExpired" },
     ],
     [
       "maps a server in transition to the read wording",

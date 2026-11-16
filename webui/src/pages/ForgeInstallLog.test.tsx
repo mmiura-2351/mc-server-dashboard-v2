@@ -141,6 +141,18 @@ describe("ForgeInstallLog", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the lapsed session for a 413 refused for want of a credential", async () => {
+    mockApi.get.mockRejectedValue(
+      new ApiError(413, { reason: "credential_required_for_body" }),
+    );
+    renderLog();
+    open();
+
+    expect(
+      await screen.findByText(t("login.sessionExpired")),
+    ).toBeInTheDocument();
+  });
+
   it("reports any other failure without breaking the page", async () => {
     mockApi.get.mockRejectedValue(new ApiError(503, {}));
     renderLog();

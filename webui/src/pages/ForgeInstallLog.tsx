@@ -17,7 +17,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { ApiError, api } from "../api/client.ts";
+import { ApiError, api, CREDENTIAL_REQUIRED_FOR_BODY } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -55,7 +55,11 @@ function loadErrorKey(error: unknown): TranslationKey {
       return "serverDetail.installLog.unsettled";
     }
     if (error.status === 413) {
-      return "serverDetail.installLog.tooLarge";
+      // A refusal for want of a credential is a lapsed session, not a log past
+      // the read cap.
+      return error.reason === CREDENTIAL_REQUIRED_FOR_BODY
+        ? "login.sessionExpired"
+        : "serverDetail.installLog.tooLarge";
     }
   }
   return "serverDetail.installLog.error";
