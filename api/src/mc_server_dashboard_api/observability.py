@@ -51,8 +51,10 @@ def create_observability_app() -> FastAPI:
 
     No OpenAPI schema and no docs routes — this app exists to answer one scrape,
     and every extra route on it is another surface an operator must reason
-    about. It carries none of the public app's middleware either, so a scrape no
-    longer counts itself into ``http_requests_total``.
+    about. It carries none of the public app's middleware, and its FastAPI
+    telemetry is off entirely, so a scrape does not count itself into the HTTP
+    request metrics, and no ``FASTAPI_OTEL_*`` / ``OTEL_*`` environment variable
+    can start tracing, logging or OTLP export from it (issue #3563).
 
     The caller must put ``engine`` and ``worker_registry`` on ``app.state``: the
     route's dependencies read them from there, exactly as they do on the public
@@ -64,6 +66,12 @@ def create_observability_app() -> FastAPI:
         openapi_url=None,
         docs_url=None,
         redoc_url=None,
+        telemetry={
+            "metrics": False,
+            "tracing": False,
+            "logs": False,
+            "auto_configure": False,
+        },
     )
     app.include_router(metrics.router)
     return app

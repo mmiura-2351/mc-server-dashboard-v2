@@ -18,9 +18,10 @@ dependencies = [
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3): released on/before
     # 2026-05-28 as of this change.
-    # FastAPI 0.137 introduces effective route contexts that break pre-body
-    # authorization and prefixed metrics; migrate those integrations in #3470.
-    "fastapi>=0.136.3,<0.137",          # 2026-05-23
+    # 0.162.2 (2026-11-07) is the newest release outside the 7-day cooldown
+    # (Section 3) as of this change; cap the next minor. 0.142.0+ ships the
+    # native OpenTelemetry HTTP metrics the app records with (#3563).
+    "fastapi>=0.162.2,<0.163",          # 2026-11-07
     "uvicorn>=0.48.0,<0.55",            # 2026-05-24
     # Structured-concurrency primitives. Already in the tree through Starlette,
     # which cancels a streaming response through an anyio cancel scope when the
@@ -88,6 +89,16 @@ dependencies = [
     # protocol the servers-by-state gauge uses. 0.25.0 (2026-04-09) is well outside
     # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
     "prometheus-client>=0.25.0,<0.27",  # 2026-04-09
+    # OpenTelemetry SDK meter provider and its Prometheus reader behind FastAPI's
+    # native HTTP request metrics (#3563): the reader renders the OTel
+    # instruments into the same process-owned registry as the metrics above.
+    # The SDK is declared directly rather than through ``fastapi[opentelemetry]``,
+    # which would also pull the OTLP exporter this deployment never uses. Both
+    # 2026-10-29, outside the 7-day cooldown (Section 3). The SDK is 1.x, so cap
+    # the next major; the exporter is a 0.x beta pinned in lockstep with the SDK
+    # (it requires ``opentelemetry-sdk~=1.45.2``), so cap the next minor.
+    "opentelemetry-sdk>=1.45.2,<2",     # 2026-10-29
+    "opentelemetry-exporter-prometheus>=0.66b2,<0.67",  # 2026-10-29
     # Cron-expression engine behind the scheduler's NextRunCalculator Port
     # (epic #649, issue #1835): validates 5-field expressions and computes the
     # next occurrence with Debian-cron DST semantics. Confined to

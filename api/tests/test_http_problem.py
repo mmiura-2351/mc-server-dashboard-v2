@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
+from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, Field
 
-from mc_server_dashboard_api.core.adapters.metrics import REGISTRY
-from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
+from mc_server_dashboard_api.core.adapters.metrics import HTTP_TELEMETRY
 from mc_server_dashboard_api.http_problem import (
     ProblemException,
     install_problem_handlers,
@@ -163,28 +165,77 @@ def test_validation_error_entries_omit_input_and_ctx() -> None:
 # -- Regression tests: unhandled 500 must flow through user middleware (#1951) --
 
 
-def _client_with_middleware() -> TestClient:
+def _recording_app() -> tuple[FastAPI, CollectorRegistry]:
+    """A throwaway app that records HTTP metrics the way the real one does.
+
+    It takes the real app's telemetry settings with only the meter provider
+    swapped for one read into a registry of its own, so the throwaway routes
+    declared here (``/boom``) never reach the process-wide exposition, whose
+    route vocabulary ``test_metrics_label_vocabulary`` pins to the real app's.
+    """
+
+    registry = CollectorRegistry()
+    reader = PrometheusMetricReader(
+        disable_target_info=True, scope_info_enabled=False, registry=registry
+    )
+    provider = MeterProvider(metric_readers=[reader])
+    return FastAPI(telemetry={**HTTP_TELEMETRY, "meter_provider": provider}), registry
+
+
+def _request_count(
+    registry: CollectorRegistry, route: str, status_code: str, error_type: str
+) -> float:
+    """The recorded count of ``GET route`` answered ``status_code``.
+
+    An empty value stands for an absent label, which is how Prometheus reads
+    it: ``status_code`` is ``""`` for a request that sent no response, and the
+    exporter renders a label a family carries elsewhere as ``""`` on the series
+    that lack it (and omits it when no series has it).
+    """
+
+    wanted = {
+        "http_request_method": "GET",
+        "http_route": route,
+        "http_response_status_code": status_code,
+        "error_type": error_type,
+        "network_protocol_version": "1.1",
+        "url_scheme": "http",
+    }
+    return sum(
+        sample.value
+        for metric in registry.collect()
+        for sample in metric.samples
+        if sample.name == "http_server_request_duration_seconds_count"
+        and {k: v for k, v in sample.labels.items() if v}
+        == {k: v for k, v in wanted.items() if v}
+    )
+
+
+def _app_with_middleware() -> tuple[FastAPI, CollectorRegistry]:
     """Build a test app with the full user middleware stack.
 
     Mirrors the ``app.py`` registration order so the 500 response produced by
-    ``unhandled_exception_middleware`` flows through correlation-ID, security
-    headers, and metrics middleware — the exact path that was broken before
-    issue #1951.
+    ``unhandled_exception_middleware`` flows through correlation-ID and security
+    headers middleware — the exact path that was broken before issue #1951 —
+    and out through FastAPI's request metrics.
     """
 
-    app = FastAPI()
+    app, registry = _recording_app()
     install_problem_handlers(app)
     # Same registration order as app.py: innermost first.
     app.middleware("http")(unhandled_exception_middleware)
     app.middleware("http")(correlation_id_middleware)
     app.middleware("http")(security_headers_middleware)
-    app.middleware("http")(metrics_middleware)
 
     @app.get("/boom")
     def boom() -> None:
         raise RuntimeError("kaboom")
 
-    return TestClient(app, raise_server_exceptions=False)
+    return app, registry
+
+
+def _client_with_middleware() -> TestClient:
+    return TestClient(_app_with_middleware()[0], raise_server_exceptions=False)
 
 
 def test_unhandled_500_carries_security_headers() -> None:
@@ -219,30 +270,16 @@ def test_unhandled_500_carries_correlation_id() -> None:
 
 
 def test_unhandled_500_increments_metrics() -> None:
-    """An unhandled-exception 500 must be visible to ``http_requests_total``
+    """An unhandled-exception 500 must be visible to the request metrics
     (issue #1951). Before the fix, the 500 bypassed the metrics middleware
-    so it was invisible to the counter."""
+    so it was invisible to the counter.
 
-    client = _client_with_middleware()
-    # Snapshot the counter before the request. The label combination for
-    # an unmatched-template GET 500 is method=GET, route=<unmatched> or
-    # the actual template, status=500. We check any 500 increment.
-    before = (
-        REGISTRY.get_sample_value(
-            "http_requests_total",
-            {"method": "GET", "route": "/boom", "status": "500"},
-        )
-        or 0.0
-    )
-    client.get("/boom")
-    after = (
-        REGISTRY.get_sample_value(
-            "http_requests_total",
-            {"method": "GET", "route": "/boom", "status": "500"},
-        )
-        or 0.0
-    )
-    assert after == before + 1
+    The catch-all answers it, so no exception reaches FastAPI's telemetry and
+    ``error_type`` is the status code itself."""
+
+    app, registry = _app_with_middleware()
+    TestClient(app, raise_server_exceptions=False).get("/boom")
+    assert _request_count(registry, "/boom", "500", error_type="500") == 1
 
 
 # -- Disconnect filtering: client disconnects must not be logged/counted as 500 --
@@ -298,37 +335,28 @@ def test_no_response_returned_runtime_error_is_not_swallowed() -> None:
         )
 
 
-def test_disconnect_does_not_increment_500_metrics() -> None:
-    """A client disconnect must NOT increment ``http_requests_total`` with
-    status=500 (issue #2161)."""
+def test_disconnect_does_not_count_as_a_500() -> None:
+    """A client disconnect must not count as a 500 (issue #2161).
+
+    FastAPI's telemetry records every request, a disconnected one included
+    (issue #3563), so the request does appear. But both catch-alls re-raise the
+    disconnect instead of answering it, so no response is sent: the series
+    carries no status code, and ``error_type`` names the disconnect, never the
+    ``"500"`` of a request this API failed."""
 
     from starlette.requests import ClientDisconnect
 
-    app = FastAPI()
+    app, registry = _recording_app()
     install_problem_handlers(app)
     app.middleware("http")(unhandled_exception_middleware)
-    app.middleware("http")(metrics_middleware)
 
     @app.get("/disconnect-metrics")
     def disconnect_metrics() -> None:
         raise ClientDisconnect()
 
-    client = TestClient(app, raise_server_exceptions=False)
-    before = (
-        REGISTRY.get_sample_value(
-            "http_requests_total",
-            {"method": "GET", "route": "/disconnect-metrics", "status": "500"},
-        )
-        or 0.0
-    )
-    client.get("/disconnect-metrics")
-    after = (
-        REGISTRY.get_sample_value(
-            "http_requests_total",
-            {"method": "GET", "route": "/disconnect-metrics", "status": "500"},
-        )
-        or 0.0
-    )
-    assert after == before, (
-        f"500 metric incremented by {after - before} for a client disconnect"
-    )
+    TestClient(app, raise_server_exceptions=False).get("/disconnect-metrics")
+    route = "/disconnect-metrics"
+    assert _request_count(registry, route, "500", "500") == 0
+    disconnect = "starlette.requests.ClientDisconnect"
+    assert _request_count(registry, route, "500", disconnect) == 0
+    assert _request_count(registry, route, "", disconnect) == 1
