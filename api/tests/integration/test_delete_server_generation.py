@@ -111,9 +111,9 @@ async def _publish(
     return await storage.commit_snapshot(handle, expected_base=base)
 
 
-# 28 real fsyncs on the fs backend. Under heavy IO load each can stall about
-# 10 s: a 12-fsync test hit the suite-wide 120 s cap (issue #3651). Budget:
-# 10 s per fsync plus 30 s of other work.
+# 28 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
 @pytest.mark.timeout(28 * 10 + 30)
 @pytest.mark.parametrize(
     "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]

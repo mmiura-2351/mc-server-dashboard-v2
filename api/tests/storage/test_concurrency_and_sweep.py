@@ -40,9 +40,9 @@ from tests.storage.helpers import (
 )
 
 
-# 12 real fsyncs on the fs backend. Under heavy IO load each can stall about
-# 10 s: a 12-fsync test hit the suite-wide 120 s cap (issue #3651). Budget:
-# 10 s per fsync plus 30 s of other work.
+# 12 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
 @pytest.mark.timeout(12 * 10 + 30)
 async def test_hydrate_lease_survives_publish_then_reclaims_on_release(
     tmp_path: Path,
@@ -379,9 +379,9 @@ async def test_list_dir_survives_concurrent_publish_reclaim(
     assert names == ["a", "b"]
 
 
-# 14 real fsyncs on the fs backend. Under heavy IO load each can stall about
-# 10 s: a 12-fsync test hit the suite-wide 120 s cap (issue #3651). Budget:
-# 10 s per fsync plus 30 s of other work.
+# 14 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
 @pytest.mark.timeout(14 * 10 + 30)
 async def test_retain_file_version_survives_concurrent_publish_reclaim(
     tmp_path: Path,

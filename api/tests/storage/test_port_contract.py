@@ -2109,9 +2109,9 @@ async def test_write_file_onto_existing_directory_is_refused(
         await harness.storage.write_file(community, server, RelPath("config"), b"x")
 
 
-# 48 real fsyncs on the fs backend. Under heavy IO load each can stall about
-# 10 s: a 12-fsync test hit the suite-wide 120 s cap (issue #3651). Budget:
-# 10 s per fsync plus 30 s of other work.
+# 48 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
 @pytest.mark.timeout(48 * 10 + 30)
 async def test_version_retention_is_count_bounded(backend: str, tmp_path: Path) -> None:
     harness = build_harness(backend, tmp_path, version_retention=3)

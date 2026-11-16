@@ -397,9 +397,9 @@ def test_snapshot_past_the_anonymous_body_limit_is_published(
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": level}
 
 
-# 13 real fsyncs on the fs backend. Under heavy IO load each can stall about
-# 10 s: a 12-fsync test hit the suite-wide 120 s cap (issue #3651). Budget:
-# 10 s per fsync plus 30 s of other work.
+# 13 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
 @pytest.mark.timeout(13 * 10 + 30)
 def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:
     # Issue #847 publish-time generation guard: a Worker that declares the store's
