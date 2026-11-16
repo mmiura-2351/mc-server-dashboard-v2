@@ -197,13 +197,23 @@ async def require_worker_credential(
     if (
         expected is None
         or presented is None
-        or not hmac.compare_digest(presented.encode(), expected.encode())
+        or not _credential_matches(presented, expected)
     ):
         raise problem(
             status.HTTP_401_UNAUTHORIZED,
             "worker_credential_rejected",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def _credential_matches(presented: str, expected: str) -> bool:
+    # A value with no UTF-8 encoding (a lone surrogate, as an undecodable
+    # environment byte becomes) matches nothing: the request fails closed with
+    # the uniform 401 rather than a 500.
+    try:
+        return hmac.compare_digest(presented.encode(), expected.encode())
+    except UnicodeEncodeError:
+        return False
 
 
 def _bearer(authorization: str | None) -> str | None:
