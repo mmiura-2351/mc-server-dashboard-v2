@@ -885,6 +885,48 @@ describe("refresh before sending a body past the anonymous limit", () => {
     expect(error).toBeInstanceOf(ApiError);
     expect(error.status).toBe(401);
   });
+
+  // Another user signs in while the refresh ahead is in flight: the body was
+  // meant for the session it was made in, so it is not sent under the new one
+  // (#3224).
+  function switchingUserRefresher() {
+    return vi.fn(async () => {
+      advanceAuthEpoch();
+      setAccessToken(tokenExpiringIn(900));
+      return true;
+    });
+  }
+
+  it("sends nothing when the session changes during the refresh ahead", async () => {
+    setAccessToken(tokenExpiringIn(-60));
+    setRefresher(switchingUserRefresher());
+
+    const error = await api
+      .post("/api/communities", { body: largeBody })
+      .catch((e) => e);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(401);
+  });
+
+  it("sends no upload when the session changes during the refresh ahead", async () => {
+    setAccessToken(tokenExpiringIn(-60));
+    setRefresher(switchingUserRefresher());
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob(["x".repeat(ANONYMOUS_MAX_REQUEST_BODY_BYTES + 1)]),
+    );
+
+    const error = await postFormWithProgress("/api/resource-packs", form).catch(
+      (e) => e,
+    );
+
+    expect(MockXHR.instances).toHaveLength(0);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(401);
+  });
 });
 
 describe("isUploadAbortError", () => {

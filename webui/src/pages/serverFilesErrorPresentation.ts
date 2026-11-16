@@ -104,7 +104,7 @@ export function fileReadErrorPresentation(
     if (error.status === 409 && error.reason === "server_unsettled") {
       return { key: "files.error.readUnsettled" };
     }
-    if (error.status === 413 && error.reason !== CREDENTIAL_REQUIRED_FOR_BODY) {
+    if (error.status === 413) {
       return { key: "files.error.readTooLarge" };
     }
   }

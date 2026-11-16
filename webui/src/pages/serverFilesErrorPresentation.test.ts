@@ -170,11 +170,6 @@ describe("fileReadErrorPresentation", () => {
       { key: "files.error.readTooLarge" },
     ],
     [
-      "maps a refusal for want of a credential to the lapsed session",
-      new ApiError(413, { reason: "credential_required_for_body" }),
-      { key: "login.sessionExpired" },
-    ],
-    [
       "maps a server in transition to the read wording",
       new ApiError(409, { reason: "server_unsettled" }),
       { key: "files.error.readUnsettled" },

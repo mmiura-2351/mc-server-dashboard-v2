@@ -139,11 +139,10 @@ branches on exactly one contract:
 - A `413` with `reason: "credential_required_for_body"` refuses a body past
   64 KiB that carries no valid credential: none, an invalid one, an expired
   token, or a deactivated account's ([`SECURITY.md`](SECURITY.md) Section 5).
-  It carries no other
-  member. It stands in for the route's `401`, so a client refreshes its access
-  token and sends the request again. A body past the route's own cap is a
-  different `413` reason (`request_too_large`, `file_too_large`, ...) and does
-  not ask for a refresh.
+  It carries no other member. It stands in for the route's `401`, so a client
+  refreshes its access token and sends the request again. A body past the
+  route's own cap is a different `413` reason (`request_too_large`,
+  `file_too_large`, ...) and does not ask for a refresh.
 
 Reason codes the `/auth/*` endpoints emit:
 
