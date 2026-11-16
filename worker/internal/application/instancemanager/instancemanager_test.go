@@ -1267,6 +1267,21 @@ func TestStartImageMissingSurfacesCode(t *testing.T) {
 	}
 }
 
+// A driver Start error wrapping execution.ErrBackendUnavailable (a bounded
+// Docker call that timed out, or a leftover container the driver could not
+// remove) surfaces as the retryable unavailable code, not the generic internal
+// one (issue #3673).
+func TestStartBackendUnavailableSurfacesCode(t *testing.T) {
+	d := &fakeDriver{startErr: fmt.Errorf("containerdriver: start container: container start timed out after 10s: %w", execution.ErrBackendUnavailable)}
+	m := newManager(t, d, nil)
+
+	seedScratch(t, m, s1)
+	res := m.Handle(context.Background(), startCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorUnavailable {
+		t.Fatalf("start = %+v, want UNAVAILABLE failure", res)
+	}
+}
+
 // An unclassified driver Start error keeps the generic internal code (issue #225).
 func TestStartUnclassifiedFailureIsInternal(t *testing.T) {
 	d := &fakeDriver{startErr: fmt.Errorf("daemon unreachable")}

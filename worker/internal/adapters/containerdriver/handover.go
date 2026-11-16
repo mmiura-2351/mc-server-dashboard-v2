@@ -55,7 +55,8 @@ var quiescentStates = map[string]bool{"created": true, "exited": true, "dead": t
 // Each List runs under the window too, so a stalled daemon cannot hold the start
 // past it (issue #3643): a List it cuts short ends the wait as the window's
 // timeout, naming the live container an earlier poll saw, or failing closed when
-// no List has answered yet. The caller's cancellation keeps its own error.
+// no List has answered yet. The caller's cancellation keeps its own error. Every
+// other refusal is the backend's unavailability (unavailable, issue #3673).
 func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, d.conflictDeadline)
 	defer cancel()
@@ -67,9 +68,13 @@ func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 				if alive != nil {
 					return inUse(alive)
 				}
-				return fmt.Errorf("cannot establish that no container of the server is running: the daemon did not list them within %s: %w", d.conflictDeadline, err)
+				return unavailable(fmt.Errorf("cannot establish that no container of the server is running: the daemon did not list them within %s: %w", d.conflictDeadline, err))
 			}
-			return fmt.Errorf("cannot establish that no container of the server is running: %w", err)
+			err = fmt.Errorf("cannot establish that no container of the server is running: %w", err)
+			if ctx.Err() != nil {
+				return err
+			}
+			return unavailable(err)
 		}
 		alive = nil
 		for i := range containers {
@@ -97,7 +102,7 @@ func (d *Driver) awaitQuiescent(ctx context.Context, serverID string) error {
 // inUse is awaitQuiescent's refusal once a live-looking container outlasted the
 // wait.
 func inUse(alive *Container) error {
-	return fmt.Errorf("container %s of the server is %q; its working set is in use", alive.Name, alive.State)
+	return unavailable(fmt.Errorf("container %s of the server is %q; its working set is in use", alive.Name, alive.State))
 }
 
 // handOverStats describes one hand-over walk.

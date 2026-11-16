@@ -3665,6 +3665,9 @@ func TestConflictLoopStalledCallReturnsWithinDeadline(t *testing.T) {
 				if !errors.Is(err, errNameConflict) || !strings.Contains(err.Error(), "conflict resolution timed out") {
 					t.Fatalf("err = %v, want the loop's timeout wrapping the original name conflict", err)
 				}
+				if !errors.Is(err, execution.ErrBackendUnavailable) {
+					t.Fatalf("err = %v, want the timeout classified as the backend's unavailability (issue #3673)", err)
+				}
 			case <-time.After(10 * time.Second):
 				t.Fatalf("conflict loop still blocked on a stalled %s past its 100 ms ConflictDeadline", tc.name)
 			}
@@ -3689,7 +3692,8 @@ func TestConflictLoopStalledCallHonorsCallerCancel(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "conflict resolution cancelled") {
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "conflict resolution cancelled") ||
+			errors.Is(err, execution.ErrBackendUnavailable) {
 			t.Fatalf("err = %v, want the caller's cancellation", err)
 		}
 	case <-time.After(10 * time.Second):
@@ -3742,6 +3746,9 @@ func TestCreateStalledCallReturnsWithinItsBound(t *testing.T) {
 				if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), tc.want) {
 					t.Fatalf("err = %v, want %q", err, tc.want)
 				}
+				if !errors.Is(err, execution.ErrBackendUnavailable) {
+					t.Fatalf("err = %v, want the timeout classified as the backend's unavailability (issue #3673)", err)
+				}
 			case <-time.After(10 * time.Second):
 				t.Fatalf("a stalled %s create still blocks the start past its bound", tc.name)
 			}
@@ -3777,7 +3784,8 @@ func TestCreateStalledCallHonorsCallerCancel(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") {
+		if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") ||
+			errors.Is(err, execution.ErrBackendUnavailable) {
 			t.Fatalf("err = %v, want the caller's cancellation", err)
 		}
 	case <-time.After(10 * time.Second):
@@ -3796,8 +3804,9 @@ func TestStartStalledLaunchStartReturnsWithinItsBound(t *testing.T) {
 	d.initialLaunchStartTimeout = 20 * time.Millisecond
 
 	err := startWithin(context.Background(), t, d, spec())
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container start timed out") {
-		t.Fatalf("err = %v, want the launch start's timeout", err)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container start timed out") ||
+		!errors.Is(err, execution.ErrBackendUnavailable) {
+		t.Fatalf("err = %v, want the launch start's timeout, classified as the backend's unavailability", err)
 	}
 }
 
@@ -3812,7 +3821,8 @@ func TestStartStalledLaunchStartHonorsCallerCancel(t *testing.T) {
 	d.initialLaunchStartTimeout = time.Hour
 
 	err := startWithin(ctx, t, d, spec())
-	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") {
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "timed out") ||
+		errors.Is(err, execution.ErrBackendUnavailable) {
 		t.Fatalf("err = %v, want the caller's cancellation", err)
 	}
 }
@@ -3952,8 +3962,8 @@ func TestStartKeepsARunningLeftoverWhoseGracefulStopStalls(t *testing.T) {
 
 	err := startWithin(context.Background(), t, d, spec())
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "container container-1") ||
-		!strings.Contains(err.Error(), "graceful stop") {
-		t.Fatalf("start err = %v, want a refusal naming container-1 for its stalled stop", err)
+		!strings.Contains(err.Error(), "graceful stop") || !errors.Is(err, execution.ErrBackendUnavailable) {
+		t.Fatalf("start err = %v, want a refusal naming container-1 for its stalled stop, classified as the backend's unavailability", err)
 	}
 	docker.mu.Lock()
 	ops := append([]string(nil), docker.ops...)

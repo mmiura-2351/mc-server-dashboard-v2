@@ -258,7 +258,12 @@ answers ``EXPIRED`` once the lane frees, past the command's budget (issue #3305)
 An ``EXPIRED`` start or hydrate that arrives while the dispatch still waits is
 treated like ``BUSY``: not applied, and accepted on a later tick. Scoped to the
 start actions: a stop refused ``BUSY`` keeps its backoff, its cadence being the
-Worker converger's (see the refused-stop grace above).
+Worker converger's (see the refused-stop grace above). An ``UNAVAILABLE`` start or
+hydrate is NOT treated like ``BUSY`` (issue #3678): the Worker's daemon did not
+answer, or a container a failed start left behind could not be ended, and no other
+command holds the id, so nothing says the next attempt succeeds. It counts as a
+failure like any other, which is what keeps a hydrate that spends a graceful stop
+on an unendable leftover from being re-sent every tick.
 
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a

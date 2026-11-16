@@ -452,6 +452,8 @@ async def test_list_files_dispatches_and_carries_listing() -> None:
         ),
         # The start outwaited its budget before it started (issue #3305).
         (CommandResultCode.EXPIRED, CommandStatus.EXPIRED),
+        # The Worker's backend did not answer the start (issue #3673).
+        (CommandResultCode.UNAVAILABLE, CommandStatus.UNAVAILABLE),
     ],
 )
 async def test_sanitized_start_failure_maps_to_status(

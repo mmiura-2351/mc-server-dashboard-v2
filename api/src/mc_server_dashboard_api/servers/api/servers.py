@@ -1427,14 +1427,23 @@ _SERVICE_UNAVAILABLE_REASONS = {
 }
 
 
-def _lifecycle_http_error(exc: Exception) -> ProblemException:
-    _, reason = _LIFECYCLE_CLASSIFICATION[type(exc)]
-    # A start failure the Worker classified into a sanitized category (issue #225)
+def _lifecycle_classification(exc: Exception) -> tuple[Outcome, str]:
+    outcome, reason = _LIFECYCLE_CLASSIFICATION[type(exc)]
+    # A failure the Worker classified into a sanitized category (issue #225)
     # carries its own reason (e.g. port_conflict / image_missing), surfacing it in
-    # the 409 body in place of the generic command_failed. The raw daemon text is
-    # never the reason (log-only), so no Worker internals leak.
+    # place of the generic command_failed. The raw daemon text is never the reason
+    # (log-only), so no Worker internals leak. One of them, worker_unavailable
+    # (issue #3673), is transient like a Worker that did not answer, so it takes
+    # that reason's ERROR outcome and its 503.
     if isinstance(exc, CommandDispatchError) and exc.reason is not None:
-        return _conflict(exc.reason)
+        reason = exc.reason
+        if reason in _SERVICE_UNAVAILABLE_REASONS:
+            outcome = Outcome.ERROR
+    return outcome, reason
+
+
+def _lifecycle_http_error(exc: Exception) -> ProblemException:
+    _, reason = _lifecycle_classification(exc)
     if reason in _SERVICE_UNAVAILABLE_REASONS:
         return _service_unavailable(reason)
     return _conflict(reason)
@@ -1450,7 +1459,7 @@ async def _record_op_failure(
 ) -> None:
     """Record a failed privileged server op (FR-AUD-1): DENIED or ERROR per ``exc``."""
 
-    outcome, _ = _LIFECYCLE_CLASSIFICATION[type(exc)]
+    outcome, _ = _lifecycle_classification(exc)
     await recorder.record(
         AuditEvent(
             operation=operation,

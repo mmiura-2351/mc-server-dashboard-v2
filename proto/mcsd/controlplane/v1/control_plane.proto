@@ -637,6 +637,16 @@ enum CommandErrorCode {
   // a command that arrives while another one holds the id. An EXPIRED command
   // was refused only because it waited too long.
   COMMAND_ERROR_CODE_EXPIRED = 12;
+  // The Worker could not apply the command because its execution backend (the
+  // Docker daemon) did not answer a bounded call in time, or because a container
+  // of the server that no instance tracks could not be ended or ruled out
+  // (issues #3673, #3678): a start's create or start call timed out, a container
+  // a failed start left behind was not removed, or the daemon could not list or
+  // inspect the server's containers. Not DRIVER_UNAVAILABLE, which says the
+  // driver is not offered at all. Not BUSY either: no other command holds the
+  // id, so a retry is not known to succeed once something settles. It is
+  // retryable, but the API backs off its retries like any other failure.
+  COMMAND_ERROR_CODE_UNAVAILABLE = 13;
 }
 
 // ---------------------------------------------------------------------------

@@ -247,6 +247,17 @@ class _CommandErrorCodeEnumTypeWrapper(_enum_type_wrapper._EnumTypeWrapper[_Comm
     a command that arrives while another one holds the id. An EXPIRED command
     was refused only because it waited too long.
     """
+    COMMAND_ERROR_CODE_UNAVAILABLE: _CommandErrorCode.ValueType  # 13
+    """The Worker could not apply the command because its execution backend (the
+    Docker daemon) did not answer a bounded call in time, or because a container
+    of the server that no instance tracks could not be ended or ruled out
+    (issues #3673, #3678): a start's create or start call timed out, a container
+    a failed start left behind was not removed, or the daemon could not list or
+    inspect the server's containers. Not DRIVER_UNAVAILABLE, which says the
+    driver is not offered at all. Not BUSY either: no other command holds the
+    id, so a retry is not known to succeed once something settles. It is
+    retryable, but the API backs off its retries like any other failure.
+    """
 
 class CommandErrorCode(_CommandErrorCode, metaclass=_CommandErrorCodeEnumTypeWrapper):
     """CommandErrorCode classifies a command failure."""
@@ -310,6 +321,17 @@ still waiting in the server's lane or for a concurrency-cap slot, and the
 API had already stopped waiting for it. Distinct from BUSY, which refuses
 a command that arrives while another one holds the id. An EXPIRED command
 was refused only because it waited too long.
+"""
+COMMAND_ERROR_CODE_UNAVAILABLE: CommandErrorCode.ValueType  # 13
+"""The Worker could not apply the command because its execution backend (the
+Docker daemon) did not answer a bounded call in time, or because a container
+of the server that no instance tracks could not be ended or ruled out
+(issues #3673, #3678): a start's create or start call timed out, a container
+a failed start left behind was not removed, or the daemon could not list or
+inspect the server's containers. Not DRIVER_UNAVAILABLE, which says the
+driver is not offered at all. Not BUSY either: no other command holds the
+id, so a retry is not known to succeed once something settles. It is
+retryable, but the API backs off its retries like any other failure.
 """
 Global___CommandErrorCode: _TypeAlias = CommandErrorCode  # noqa: Y015
 
