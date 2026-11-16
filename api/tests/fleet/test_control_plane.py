@@ -315,6 +315,9 @@ async def test_dispatch_list_files_carries_listing_back(harness: _Harness) -> No
         ),
         # The command outwaited its budget before it started (issue #3305).
         (pb.COMMAND_ERROR_CODE_EXPIRED, CommandResultCode.EXPIRED),
+        # The Worker's backend did not answer, or a leftover container of the
+        # server could not be ended (issues #3673, #3678).
+        (pb.COMMAND_ERROR_CODE_UNAVAILABLE, CommandResultCode.UNAVAILABLE),
     ],
 )
 async def test_dispatch_failure_maps_typed_code(

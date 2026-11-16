@@ -91,6 +91,7 @@ _STATUS_BY_CODE: dict[CommandResultCode, CommandStatus] = {
         CommandStatus.SERVER_PROPERTIES_UNREADABLE
     ),
     CommandResultCode.EXPIRED: CommandStatus.EXPIRED,
+    CommandResultCode.UNAVAILABLE: CommandStatus.UNAVAILABLE,
 }
 
 # Map the fleet file-access reason to the servers outcome reason (issue #548;

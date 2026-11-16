@@ -1479,8 +1479,9 @@ func TestForgeStalledInstallerStartReturnsWithinItsBound(t *testing.T) {
 	d.initialInstallStartTimeout = 20 * time.Millisecond
 
 	err := startWithin(context.Background(), t, d, forgeSpec(t.TempDir()))
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "install container start timed out") {
-		t.Fatalf("err = %v, want the installer start's timeout", err)
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "install container start timed out") ||
+		!errors.Is(err, execution.ErrBackendUnavailable) {
+		t.Fatalf("err = %v, want the installer start's timeout, classified as the backend's unavailability", err)
 	}
 }
 

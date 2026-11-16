@@ -1489,6 +1489,105 @@ async def test_expired_hydrate_does_not_feed_backoff() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "hydrate"]
 
 
+async def test_unavailable_start_feeds_backoff() -> None:
+    # Issue #3673: the Worker's daemon did not answer the start's create or start
+    # in time, or a leftover container of the server could not be removed. No
+    # other command holds the id, so nothing promises the next start succeeds:
+    # it is a failure like any other and backs off, unlike BUSY.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "backend_unavailable")
+            )
+        },
+        held={(_WORKER, server.id): 2},
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+    await reconciler.tick()  # refused, counted -> 30s backoff
+    clock.set(_NOW + dt.timedelta(seconds=1))
+    await reconciler.tick()  # inside the backoff -> skipped
+    assert [k for k, _, _ in cp.dispatched] == ["start"]
+    clock.set(_NOW + dt.timedelta(seconds=31))
+    await reconciler.tick()  # past it -> retried
+    assert [k for k, _, _ in cp.dispatched] == ["start", "start"]
+
+
+async def test_a_leftover_the_worker_cannot_end_backs_off_with_growing_waits() -> None:
+    # Issue #3678: a container a failed start left behind that the Worker cannot
+    # end refuses every hydrate of the server, and each hydrate first spends up to
+    # a 70 s graceful stop on it. The refusal is the one the Worker emits for
+    # {HydrateTrigger, untracked_container} (the contract table, which the
+    # Worker's contract test drives through the real instancemanager). It counts
+    # toward the backoff, so the redispatches thin out exponentially instead of
+    # hitting the Worker every tick.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "untracked_container"),
+                message="instancemanager: hydrate refused: a container of the server "
+                "the Worker does not track may be running against the working set",
+            )
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+
+    def hydrates() -> int:
+        assert all(k == "hydrate" for k, _, _ in cp.dispatched)
+        return len(cp.dispatched)
+
+    # One tick per second for 200 s: the waits grow 30 s, 60 s, 120 s.
+    dispatched_at: list[int] = []
+    for second in range(200):
+        clock.set(_NOW + dt.timedelta(seconds=second))
+        before = hydrates()
+        await reconciler.tick()
+        if hydrates() > before:
+            dispatched_at.append(second)
+    assert dispatched_at == [0, 30, 90]
+
+
+async def test_busy_hydrate_refusal_does_not_feed_backoff() -> None:
+    # The control for the test above: a hydrate refused because another command
+    # holds the id is contention, which clears on its own, so the next tick
+    # retries it (issue #3209).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "command_in_flight")
+            )
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, store_generation=2)
+    await reconciler.tick()  # refused BUSY
+    clock.set(_NOW + dt.timedelta(seconds=1))
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "hydrate"]
+
+
 async def test_busy_start_refusal_keeps_an_existing_backoff() -> None:
     # Not counting a BUSY refusal is not the same as clearing: a crash-looping
     # server's damping (#343) must survive a busy window.

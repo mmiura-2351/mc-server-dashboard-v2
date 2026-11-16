@@ -487,6 +487,25 @@ def test_create_dispatch_failure_keeps_the_sanitized_reason() -> None:
     assert recorder.events[0].target_type == ops.TARGET_SERVER
 
 
+def test_create_unavailable_dispatch_failure_is_503() -> None:
+    # The create snapshots only a server observed running, whose Worker takes the
+    # running path and asks no leftover guard. A stale observed state can still
+    # send it to the stopped-id path, which the Worker refuses UNAVAILABLE while a
+    # leftover container may be running against the working set (issue #3678).
+    # That is the transient ``worker_unavailable``, rendered 503 like a Worker
+    # that did not answer.
+    use_case = _FakeUseCase(
+        error=CommandDispatchError("leftover", reason="worker_unavailable")
+    )
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "worker_unavailable"
+    assert [e.outcome for e in recorder.events] == [Outcome.ERROR]
+
+
 def test_create_unclassified_dispatch_failure_is_command_failed() -> None:
     # A dispatch failure the Worker did not classify (no sanitized reason) keeps
     # the catch-all so the reason stays a closed set (issue #2436).

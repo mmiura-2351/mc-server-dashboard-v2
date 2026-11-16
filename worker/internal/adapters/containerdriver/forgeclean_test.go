@@ -603,8 +603,8 @@ func TestForgeStartRefusedByTheGateLeavesArtifactsUntouched(t *testing.T) {
 			tc.setup(d, docker)
 
 			err := startWithin(context.Background(), t, d, forgeSpec(dir))
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("err = %v, want a refusal containing %q", err, tc.want)
+			if !strings.Contains(err.Error(), tc.want) || !errors.Is(err, execution.ErrBackendUnavailable) {
+				t.Fatalf("err = %v, want a refusal containing %q, classified as the backend's unavailability", err, tc.want)
 			}
 			assertContent(t, jar, "x")
 			if got := docker.names(); len(got) != 0 {

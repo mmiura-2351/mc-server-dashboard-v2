@@ -487,6 +487,8 @@ func mapErrorCode(code session.CommandErrorCode) controlplanev1.CommandErrorCode
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_SERVER_PROPERTIES_UNREADABLE
 	case session.CommandErrorExpired:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_EXPIRED
+	case session.CommandErrorUnavailable:
+		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_UNAVAILABLE
 	default:
 		return controlplanev1.CommandErrorCode_COMMAND_ERROR_CODE_INTERNAL
 	}

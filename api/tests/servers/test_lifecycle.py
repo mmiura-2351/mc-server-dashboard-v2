@@ -1032,6 +1032,51 @@ async def test_expired_start_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
+@pytest.mark.parametrize(
+    ("leg", "kind", "precondition"),
+    [
+        # The driver's create/start timed out, or it could not remove a leftover
+        # container of the server (issue #3673): the start itself was refused.
+        ("start", "StartServer", "backend_unavailable"),
+        # The hydrate before it met a leftover the Worker could not end (issue
+        # #3678): the start was never sent.
+        ("hydrate", "HydrateTrigger", "untracked_container"),
+    ],
+)
+async def test_unavailable_start_compensates_and_renders_worker_unavailable(
+    leg: str, kind: str, precondition: str
+) -> None:
+    # Nothing was started, so the committed intent compensates as for any refused
+    # start. The reason is the transient ``worker_unavailable``, not the catch-all
+    # ``command_failed`` nor the contention ``worker_busy``.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    refused = CommandOutcome(
+        status=worker_status(kind, precondition), message="backend unavailable"
+    )
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={leg: refused})
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == "worker_unavailable"
+    reverted = uow.servers.by_id[ServerId(server_id)]
+    assert reverted.desired_state is DesiredState.STOPPED
+    assert reverted.assigned_worker_id is None
+    assert cp.decremented == [WorkerId(worker)]
+
+
 async def test_start_lost_response_after_dispatch_keeps_assignment() -> None:
     # The lost-response case for the normal start (#773, mirroring #101's fix to
     # place_and_start): hydrate succeeds, the start command is SENT, then its
@@ -3538,6 +3583,40 @@ async def test_restart_dispatches_and_keeps_running() -> None:
 
     assert result.desired_state is DesiredState.RUNNING
     assert cp.dispatched == [("restart", WorkerId(worker), ServerId(server_id))]
+
+
+async def test_unavailable_relaunch_renders_worker_unavailable() -> None:
+    # The restart stopped the server, and the relaunch's container calls timed out
+    # (issue #3673). No branch of the restart intercepts it, so it carries the
+    # transient reason, and desired=running stands for the reconciler.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "restart": CommandOutcome(
+                status=worker_status("RestartServer", "backend_unavailable"),
+                message="instancemanager: start: backend unavailable",
+            )
+        }
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == "worker_unavailable"
+    assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
 
 
 async def test_restart_lost_race_is_conflict_without_dispatch() -> None:

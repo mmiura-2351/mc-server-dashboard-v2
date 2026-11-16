@@ -1136,9 +1136,15 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// is at that moment, so it is ended BEFORE the pull, which then replaces what it
 	// saved. Refusing instead would hold back the start that ends it, which the
 	// API sends only after a successful hydrate. A container that cannot be ended,
-	// or that the driver cannot rule out, refuses the hydrate as BUSY.
+	// or that the driver cannot rule out, refuses the hydrate as UNAVAILABLE, not
+	// BUSY: no other command holds the id, so the API backs its retries off rather
+	// than send one every tick, each of which may wait out another graceful stop
+	// (issue #3678). A guard error the command's own cancellation or transfer
+	// deadline caused is UNAVAILABLE too, deliberately: the leftover is still not
+	// ruled out, which is all the refusal claims, and a cancelled command's answer
+	// goes to a session that is gone, so no caller reads it as anything else.
 	if err := m.endLeftovers(transferCtx, cmd.ServerID, workingDir); err != nil {
-		return fail(cmd.CommandID, session.CommandErrorBusy, fmt.Sprintf(untrackedBusyMsg, "hydrate", err))
+		return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "hydrate", err))
 	}
 	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
 	if err != nil {
@@ -1480,12 +1486,15 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// The reservation rules out only the processes the Worker tracks; a start the
 		// daemon did not answer may have left its container running against the set
 		// (issue #3672). Packing a set it is writing is a mixed capture, so the
-		// snapshot is refused as BUSY while the driver cannot rule one out. It does
-		// not end the container: the snapshot is no precondition of the start that
-		// does, and what it packed would be that container's shutdown save.
+		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
+		// the driver cannot rule one out. It does not end the container: the
+		// snapshot is no precondition of the start that does, and what it packed
+		// would be that container's shutdown save. A guard error the command's own
+		// cancellation caused is UNAVAILABLE too, as in handleHydrate: nothing was
+		// ruled out, and the answer reaches no caller.
 		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
 			m.release(cmd.ServerID)
-			return fail(cmd.CommandID, session.CommandErrorBusy, fmt.Sprintf(untrackedBusyMsg, "snapshot", err))
+			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
 		}
 		release = func() { m.release(cmd.ServerID) }
 	}
@@ -4574,10 +4583,12 @@ func (m *Manager) endLeftovers(ctx context.Context, serverID, workingDir string)
 	return m.untrackedBusy(ctx, serverID)
 }
 
-// untrackedBusyMsg is the BUSY refusal of a command that would touch the working
-// set while a container no instance tracks may be running against it (issue
-// #3672).
-const untrackedBusyMsg = "instancemanager: %s refused: a container of the server the Worker does not track may be running against the working set: %v"
+// untrackedRefusalMsg is the UNAVAILABLE refusal of a command that would touch
+// the working set while a container no instance tracks may be running against it
+// (issues #3672, #3678). Every LeftoverGuard error is that case: the guard fails
+// closed on daemon or leftover trouble, and never on another command holding the
+// id, which reserve() refuses BUSY before the guard is asked.
+const untrackedRefusalMsg = "instancemanager: %s refused: a container of the server the Worker does not track may be running against the working set: %v"
 
 // releaseFailedLaunch releases the reservation of a launch that ended without
 // registering an instance: refused, failed, cancelled or past its deadline. When a
@@ -5168,7 +5179,8 @@ func launchModeFor(name string) (execution.LaunchMode, bool) {
 // sanitized execution sentinel so the API can surface a friendlier 409 reason
 // than the generic one; any other failure stays internal (issue #225). A
 // server.properties the driver refused to read is one such failure (issue
-// #3347).
+// #3347). So is a backend that did not answer in time, or a leftover container
+// the driver could not remove (issue #3673): retryable, but the API backs it off.
 func startErrorCode(err error) session.CommandErrorCode {
 	switch {
 	case errors.Is(err, execution.ErrPortConflict):
@@ -5177,6 +5189,8 @@ func startErrorCode(err error) session.CommandErrorCode {
 		return session.CommandErrorImageMissing
 	case errors.Is(err, execution.ErrServerPropertiesUnreadable):
 		return session.CommandErrorServerPropertiesUnreadable
+	case errors.Is(err, execution.ErrBackendUnavailable):
+		return session.CommandErrorUnavailable
 	default:
 		return session.CommandErrorInternal
 	}
