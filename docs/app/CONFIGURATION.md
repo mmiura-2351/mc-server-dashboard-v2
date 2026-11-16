@@ -742,9 +742,9 @@ start would, so a container's shutdown save lands before the pull replaces the
 working set, and it is refused if the server still is. A snapshot of a
 stopped server is refused too, and stops nothing. Both refusals, and a start the
 driver refuses for a kept id or a running container, or whose create or start
-call the daemon did not answer in time, are `UNAVAILABLE` rather than `BUSY`
-([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 7): the reconciler counts them
-toward its backoff (`reconciler.backoff_base_seconds`), so a leftover it cannot
+call the daemon did not answer in time, answer `UNAVAILABLE`
+([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 7). Unlike `BUSY`, the
+reconciler counts them toward its backoff (`reconciler.backoff_base_seconds`), so a leftover it cannot
 end is not sent a hydrate, and with it another graceful stop, every tick. The reclaim of a deleted
 server's scratch at registration deals with the kept ids like the hydrate, and
 keeps the scratch while the server is busy, so the next registration offers it

@@ -647,8 +647,9 @@ func (d *Driver) startBounded(ctx context.Context, id, what string, timeout time
 // daemon did not answer a bounded call in time, or a container of the server
 // that no instance tracks could not be removed or ruled out. The instance
 // manager answers such a failure with a retryable code the API backs off,
-// rather than the generic internal one. The caller's own cancellation is never
-// marked.
+// rather than the generic internal one. A bounded call or wait does not mark a
+// failure the caller's own cancellation caused; a leftover that stays recorded
+// is marked whatever cut its removal short.
 func unavailable(err error) error {
 	return fmt.Errorf("%w: %w", execution.ErrBackendUnavailable, err)
 }

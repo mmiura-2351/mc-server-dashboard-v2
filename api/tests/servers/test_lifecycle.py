@@ -3585,6 +3585,40 @@ async def test_restart_dispatches_and_keeps_running() -> None:
     assert cp.dispatched == [("restart", WorkerId(worker), ServerId(server_id))]
 
 
+async def test_unavailable_relaunch_renders_worker_unavailable() -> None:
+    # The restart stopped the server, and the relaunch's container calls timed out
+    # (issue #3673). No branch of the restart intercepts it, so it carries the
+    # transient reason, and desired=running stands for the reconciler.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "restart": CommandOutcome(
+                status=worker_status("RestartServer", "backend_unavailable"),
+                message="instancemanager: start: backend unavailable",
+            )
+        }
+    )
+    use_case = RestartServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == "worker_unavailable"
+    assert uow.servers.by_id[ServerId(server_id)].desired_state is DesiredState.RUNNING
+
+
 async def test_restart_lost_race_is_conflict_without_dispatch() -> None:
     # The in-memory check passes (loaded as running/assigned), but a concurrent
     # stop commits stopped before our compare-and-set runs. The CAS

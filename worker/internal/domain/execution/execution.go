@@ -397,8 +397,9 @@ var ErrServerPropertiesUnreadable = errors.New("execution: server.properties is 
 // process of the server that no Instance tracks could not be ended or ruled out
 // (issues #3673, #3678): a container create or start that timed out, a container
 // a failed start left behind that was not removed, or a daemon that could not
-// list or inspect the server's containers. The caller's own cancellation is not
-// this error. The instance manager matches it with errors.Is to emit a retryable
+// list or inspect the server's containers. A bounded call or wait the caller's
+// own cancellation cut short keeps the caller's error instead; a leftover that
+// stays recorded is this error whatever cut its removal short. The instance manager matches it with errors.Is to emit a retryable
 // unavailable failure code instead of the generic internal one; the API backs
 // off its retries.
 var ErrBackendUnavailable = errors.New("execution: backend unavailable")
