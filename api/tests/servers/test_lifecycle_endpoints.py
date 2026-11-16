@@ -691,6 +691,63 @@ def test_an_expired_command_is_409_naming_it() -> None:
     _assert_names_the_expiry_only(resp)
 
 
+# --- a Worker whose backend is unavailable (issues #3673, #3678) ------------
+
+
+def test_an_unavailable_start_is_503_worker_unavailable() -> None:
+    # The Worker answered, but its Docker daemon did not, or a leftover container
+    # of the server could not be removed: a transient condition the client
+    # retries, so 503 like a Worker that did not answer at all.
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=WorkerId(uuid.uuid4()),
+        outcomes={
+            "start": CommandOutcome(
+                status=worker_status("StartServer", "backend_unavailable"),
+                message="instancemanager: start: containerdriver: start container: "
+                "execution: backend unavailable: container start timed out after "
+                "10s: context deadline exceeded",
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_start_server] = lambda: use_case
+
+    resp = _client(app).post(_url(community, server.id.value, "start"))
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "worker_unavailable"
+    assert "timed out" not in resp.text
+
+
+def test_an_unavailable_restart_is_503_worker_unavailable() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        restart=_FakeUseCase(
+            error=CommandDispatchError("x", reason="worker_unavailable")
+        ),
+    )
+    resp = _client(app).post(_url(uuid.uuid4(), uuid.uuid4(), "restart"))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "worker_unavailable"
+
+
 # --- console line bound (issue #3363) ---------------------------------------
 
 

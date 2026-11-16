@@ -85,6 +85,10 @@ class CommandResultCode(enum.Enum):
     # (issue #3305), so the Worker did not apply it: definitively not applied, the
     # opposite of a timeout's "may have been applied".
     EXPIRED = "expired"
+    # The Worker's execution backend did not answer in time, or a container of the
+    # server it does not track could not be ended or ruled out (issues #3673,
+    # #3678). Retryable, but unlike BUSY no other command holds the id.
+    UNAVAILABLE = "unavailable"
 
 
 class FileAccessReason(enum.Enum):
