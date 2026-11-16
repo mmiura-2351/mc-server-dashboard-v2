@@ -105,8 +105,10 @@ class CommandStatus(enum.Enum):
     EXPIRED = "expired"
     # The Worker's execution backend did not answer in time, or a container of the
     # server it does not track could not be ended or ruled out (issues #3673,
-    # #3678): nothing was applied, and unlike BUSY no other command holds the id,
-    # so a retry is backed off rather than sent at once.
+    # #3678): the command did not complete successfully (a start the bound cut
+    # short may still have run its container, which the Worker then removes or
+    # records as a leftover), and unlike BUSY no other command holds the id, so a
+    # retry is backed off rather than sent at once.
     UNAVAILABLE = "unavailable"
 
 

@@ -730,6 +730,10 @@ func (d *Driver) removeUnremoved(ctx context.Context, spec execution.InstanceSpe
 			continue
 		}
 		d.unremoved.add(spec.ServerID, id)
+		// Marked unavailable whatever cut the removal short, the caller's own
+		// cancellation included, unlike the bounded calls: the container stays
+		// recorded and may still be running, which is leftover trouble either way,
+		// and a cancelled caller reads no answer.
 		if err != nil && refusal == nil {
 			refusal = unavailable(fmt.Errorf("container %s, which a failed start may have left running, is not removed: %w", id, err))
 		}
@@ -773,6 +777,9 @@ func (d *Driver) Busy(ctx context.Context, serverID string) error {
 			continue
 		}
 		d.unremoved.add(serverID, id)
+		// Marked unavailable whatever cut the inspect short, the caller's own
+		// cancellation included, as in removeUnremoved: the record stays and the
+		// container may be running.
 		if busy == nil {
 			busy = fmt.Errorf("container %s, which a failed start may have left running, is not removed", id)
 			if err != nil {

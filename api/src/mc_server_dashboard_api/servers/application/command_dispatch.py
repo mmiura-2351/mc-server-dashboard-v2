@@ -60,7 +60,9 @@ _LOG = logging.getLogger(__name__)
 # ``worker_unavailable`` (issues #3673, #3678): the Worker answered, but its
 # execution backend did not -- a start's container create or start timed out, a
 # container a failed start left behind could not be removed, or the daemon could
-# not list or inspect the server's containers -- so it applied nothing. It is the
+# not list or inspect the server's containers -- so the command did not complete
+# successfully (a start the bound cut short may still have run its container,
+# which the Worker then removes or records as a leftover). It is the
 # reason a Worker that did not answer at all gets (``WorkerUnavailableError``),
 # and the edge renders it 503 the same way: a transient condition the client
 # retries. Unlike ``worker_busy`` no other command holds the id, so nothing

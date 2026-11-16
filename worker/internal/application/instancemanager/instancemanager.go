@@ -1139,7 +1139,10 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	// or that the driver cannot rule out, refuses the hydrate as UNAVAILABLE, not
 	// BUSY: no other command holds the id, so the API backs its retries off rather
 	// than send one every tick, each of which may wait out another graceful stop
-	// (issue #3678).
+	// (issue #3678). A guard error the command's own cancellation or transfer
+	// deadline caused is UNAVAILABLE too, deliberately: the leftover is still not
+	// ruled out, which is all the refusal claims, and a cancelled command's answer
+	// goes to a session that is gone, so no caller reads it as anything else.
 	if err := m.endLeftovers(transferCtx, cmd.ServerID, workingDir); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "hydrate", err))
 	}
@@ -1486,7 +1489,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
 		// the driver cannot rule one out. It does not end the container: the
 		// snapshot is no precondition of the start that does, and what it packed
-		// would be that container's shutdown save.
+		// would be that container's shutdown save. A guard error the command's own
+		// cancellation caused is UNAVAILABLE too, as in handleHydrate: nothing was
+		// ruled out, and the answer reaches no caller.
 		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
 			m.release(cmd.ServerID)
 			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))

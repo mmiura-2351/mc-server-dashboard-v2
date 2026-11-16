@@ -195,6 +195,33 @@ func TestStoppedSnapshotRefusedUnavailableWhileAnUntrackedContainerMayRun(t *tes
 	}
 }
 
+// A guard answer the command's own cancellation cut short still refuses the
+// hydrate and the stopped snapshot UNAVAILABLE (issue #3678): nothing was ruled
+// out, and the answer of a cancelled command reaches no caller, so it is not
+// worth a code of its own.
+func TestGuardRefusalOnCallerCancelIsStillUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  session.Command
+	}{
+		{"hydrate", hydrateCmd()},
+		{"stopped snapshot", snapshotCmd()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _ := newGuardedManager(t)
+			seedScratch(t, m, s1)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			res := m.Handle(ctx, tc.cmd)
+			if res.Success || res.ErrorCode != session.CommandErrorUnavailable ||
+				!strings.Contains(res.ErrorMessage, context.Canceled.Error()) {
+				t.Fatalf("%s = %+v, want UNAVAILABLE carrying the cancellation", tc.name, res)
+			}
+		})
+	}
+}
+
 // The running-server paths ask the guard nothing: a running instance already
 // refuses the hydrate, and a running snapshot quiesces with its save-off
 // bracket, so neither pays a daemon round-trip (issue #3672).
