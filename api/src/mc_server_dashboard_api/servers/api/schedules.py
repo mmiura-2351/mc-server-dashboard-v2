@@ -53,6 +53,7 @@ from mc_server_dashboard_api.dependencies import (
     require_deferred_authz,
     require_permission,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.api.console_line import (
@@ -90,7 +91,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
 

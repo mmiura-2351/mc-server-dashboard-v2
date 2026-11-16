@@ -23,8 +23,9 @@ from mc_server_dashboard_api.dependencies import (
     get_control_plane_readiness,
     get_database_ping,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class ReadinessResponse(BaseModel):

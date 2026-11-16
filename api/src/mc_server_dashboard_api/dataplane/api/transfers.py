@@ -59,7 +59,10 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
-from mc_server_dashboard_api.http_body_limit import request_body_limit
+from mc_server_dashboard_api.http_body_limit import (
+    RequestBodyLimitRoute,
+    request_body_limit,
+)
 from mc_server_dashboard_api.http_problem import problem, validation_problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
@@ -108,7 +111,7 @@ _BASE_GENERATION_HEADER = "X-Working-Set-Base-Generation"
 # (datatransfer.go).
 _WORKER_ID_HEADER = "X-Worker-Id"
 
-router = APIRouter(prefix="/data-plane")
+router = APIRouter(prefix="/data-plane", route_class=RequestBodyLimitRoute)
 
 _logger = logging.getLogger(__name__)
 

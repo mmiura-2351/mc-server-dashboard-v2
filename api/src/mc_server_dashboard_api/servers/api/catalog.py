@@ -25,6 +25,7 @@ from mc_server_dashboard_api.dependencies import (
     get_search_catalog,
     require_permission,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.servers.api.plugins import PluginResponse
 from mc_server_dashboard_api.servers.application.catalog import (
@@ -61,7 +62,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
 

@@ -35,9 +35,10 @@ from mc_server_dashboard_api.dependencies import (
     require_permission,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 # Pagination bounds: a sane page size, capped so a single query cannot scan the
 # whole append-only trail (proportionate to NFR-SCALE-1).

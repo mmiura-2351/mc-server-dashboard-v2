@@ -21,13 +21,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
 import uvicorn
 from fastapi import FastAPI, Request, UploadFile
-from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 from starlette.types import Message
@@ -47,9 +47,10 @@ from mc_server_dashboard_api.http_body_limit import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     EARLY_ANSWER_DISCARD_BYTES,
     MULTIPART_OVERHEAD_BYTES,
+    STATE_ATTRIBUTE,
     RequestBodyLimitMiddleware,
+    RequestBodyLimitRoute,
     request_body_limit,
-    request_body_limit_of,
 )
 from mc_server_dashboard_api.http_problem import install_problem_handlers
 from mc_server_dashboard_api.servers.api.files import (
@@ -76,6 +77,8 @@ class _Result:
         self.body = b""
         # Body bytes the app pulled out of ``receive`` -- what it could have held.
         self.consumed = 0
+        # The request scope, as the app left it.
+        self.scope: dict[str, Any] = {}
 
     def json(self) -> Any:
         return json.loads(self.body)
@@ -132,6 +135,7 @@ async def _request(
             result.body += message.get("body", b"")
 
     await app(scope, receive, send)
+    result.scope = scope
     return result
 
 
@@ -181,6 +185,7 @@ async def _credentialled(_request: Request) -> bool:
 
 def _small_app() -> FastAPI:
     app = FastAPI()
+    app.router.route_class = RequestBodyLimitRoute
     install_problem_handlers(app)
     app.add_middleware(RequestBodyLimitMiddleware, credentialled=_credentialled)
 
@@ -862,21 +867,41 @@ _EXPECTED_OVERRIDES: dict[tuple[str, str], tuple[int, str]] = {
 }
 
 
-def test_every_route_has_the_limit_the_inventory_says(shared_app: FastAPI) -> None:
-    overrides: dict[tuple[str, str], tuple[int, str]] = {}
-    for route in shared_app.routes:
-        if not isinstance(route, APIRoute):
-            continue
-        limit = request_body_limit_of(route.endpoint)
-        if (limit.max_bytes, limit.reason) == (
-            DEFAULT_MAX_REQUEST_BODY_BYTES,
-            "request_too_large",
-        ):
-            continue
-        assert route.methods is not None
-        for method in route.methods:
-            overrides[(method, route.path)] = (limit.max_bytes, limit.reason)
+async def test_every_route_has_the_limit_the_inventory_says(
+    shared_app: FastAPI,
+) -> None:
+    # Every operation the app publishes (``app.openapi()``: public, and the same
+    # on every FastAPI version) that a body is read for is sent once, and the
+    # limit its route handed the middleware on ``request.state`` is read back.
+    # So a route whose router lacks ``RequestBodyLimitRoute`` -- whose declared
+    # limit would never apply -- fails here too. The request carries no
+    # credential and declares more than the anonymous limit: a route that reads
+    # its body first is refused 413 before a byte is read, and every other one
+    # is answered 401 by its own authentication.
+    limits: dict[tuple[str, str], tuple[int, str] | None] = {}
+    async with shared_app.router.lifespan_context(shared_app):
+        for path, operations in shared_app.openapi()["paths"].items():
+            for method in operations.keys() & {"post", "put", "patch", "delete"}:
+                result = await _request(
+                    shared_app,
+                    method.upper(),
+                    re.sub(r"\{[^}]+\}", "00000000-0000-0000-0000-000000000001", path),
+                    iter(()),
+                    headers={
+                        "content-length": str(ANONYMOUS_MAX_REQUEST_BODY_BYTES + 1)
+                    },
+                )
+                limit = getattr(Request(result.scope).state, STATE_ATTRIBUTE, None)
+                limits[(method.upper(), path)] = (
+                    None if limit is None else (limit.max_bytes, limit.reason)
+                )
 
+    assert [operation for operation, limit in limits.items() if limit is None] == []
+    overrides = {
+        operation: limit
+        for operation, limit in limits.items()
+        if limit != (DEFAULT_MAX_REQUEST_BODY_BYTES, "request_too_large")
+    }
     assert overrides == _EXPECTED_OVERRIDES
 
 

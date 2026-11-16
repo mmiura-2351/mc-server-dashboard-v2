@@ -69,6 +69,7 @@ from mc_server_dashboard_api.http_body_limit import (
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     EARLY_ANSWER_DISCARD_BYTES,
     RequestBodyLimitMiddleware,
+    RequestBodyLimitRoute,
     request_body_limit,
 )
 from mc_server_dashboard_api.http_problem import (
@@ -184,6 +185,7 @@ def _small_app(*, limited: bool = True) -> FastAPI:
     """
 
     app = FastAPI()
+    app.router.route_class = RequestBodyLimitRoute
     install_problem_handlers(app)
     if limited:
         app.add_middleware(RequestBodyLimitMiddleware, credentialled=_credentialled)

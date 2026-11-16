@@ -122,6 +122,7 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     RealTimeEvent,
     RealTimeEvents,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import serialize_utc
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     Authentication,
@@ -136,7 +137,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
 _SERVER_READ = Permission("server:read")

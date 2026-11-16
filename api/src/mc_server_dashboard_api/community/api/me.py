@@ -42,10 +42,11 @@ from mc_server_dashboard_api.dependencies import (
     get_membership_visibility,
     get_read_my_effective_permissions,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.identity.domain.entities import User
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class GrantPermissionsResponse(BaseModel):

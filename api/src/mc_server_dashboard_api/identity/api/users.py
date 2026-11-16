@@ -31,6 +31,7 @@ from mc_server_dashboard_api.dependencies import (
     get_revoke_session,
     get_update_profile,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
@@ -61,7 +62,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
 )
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class RegisterUserRequest(BaseModel):
