@@ -630,16 +630,27 @@ func (d *Driver) removeCreated(ctx context.Context, serverID, id string, startEr
 }
 
 // startBounded is a docker start of a created container under a bound of its
-// own (issue #3650). A start the bound cuts short fails as a timeout; the caller's
-// own cancellation or deadline keeps its error.
+// own (issue #3650). A start the bound cuts short fails as a timeout, which is
+// the backend's unavailability (unavailable, issue #3673); the caller's own
+// cancellation or deadline keeps its error.
 func (d *Driver) startBounded(ctx context.Context, id, what string, timeout time.Duration) error {
 	startCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	err := d.docker.Start(startCtx, id)
 	if err != nil && ctx.Err() == nil && startCtx.Err() != nil {
-		return fmt.Errorf("%s timed out after %s: %w", what, timeout, err)
+		return unavailable(fmt.Errorf("%s timed out after %s: %w", what, timeout, err))
 	}
 	return err
+}
+
+// unavailable marks err as execution.ErrBackendUnavailable (issue #3673): the
+// daemon did not answer a bounded call in time, or a container of the server
+// that no instance tracks could not be removed or ruled out. The instance
+// manager answers such a failure with a retryable code the API backs off,
+// rather than the generic internal one. The caller's own cancellation is never
+// marked.
+func unavailable(err error) error {
+	return fmt.Errorf("%w: %w", execution.ErrBackendUnavailable, err)
 }
 
 // unremovedStarts records, per server, the containers a docker start the daemon
@@ -719,7 +730,7 @@ func (d *Driver) removeUnremoved(ctx context.Context, spec execution.InstanceSpe
 		}
 		d.unremoved.add(spec.ServerID, id)
 		if err != nil && refusal == nil {
-			refusal = fmt.Errorf("container %s, which a failed start may have left running, is not removed: %w", id, err)
+			refusal = unavailable(fmt.Errorf("container %s, which a failed start may have left running, is not removed: %w", id, err))
 		}
 	}
 	return refusal
@@ -762,10 +773,11 @@ func (d *Driver) Busy(ctx context.Context, serverID string) error {
 		}
 		d.unremoved.add(serverID, id)
 		if busy == nil {
-			busy = fmt.Errorf("containerdriver: container %s, which a failed start may have left running, is not removed", id)
+			busy = fmt.Errorf("container %s, which a failed start may have left running, is not removed", id)
 			if err != nil {
 				busy = fmt.Errorf("%w: inspect: %w", busy, err)
 			}
+			busy = fmt.Errorf("containerdriver: %w", unavailable(busy))
 		}
 	}
 	if busy != nil {
@@ -1064,7 +1076,8 @@ func isImageMissing(err error) bool {
 // Each create runs under a bound of its own (initialCreateTimeout,
 // postPullCreateTimeout), started right before it, so a stalled daemon cannot
 // hold the start indefinitely while the pull keeps its separate budget (issue
-// #3643). A create the bound cuts short fails as a timeout; the caller's own
+// #3643). A create the bound cuts short fails as a timeout, which is the
+// backend's unavailability (unavailable, issue #3673); the caller's own
 // cancellation or deadline keeps its error.
 func (d *Driver) createPullingOnMiss(ctx context.Context, create CreateSpec) (string, error) {
 	bounded := func(what string, timeout time.Duration) (string, error) {
@@ -1072,7 +1085,7 @@ func (d *Driver) createPullingOnMiss(ctx context.Context, create CreateSpec) (st
 		defer cancel()
 		id, err := d.docker.Create(createCtx, create)
 		if err != nil && ctx.Err() == nil && createCtx.Err() != nil {
-			return "", fmt.Errorf("%s timed out after %s: %w", what, timeout, err)
+			return "", unavailable(fmt.Errorf("%s timed out after %s: %w", what, timeout, err))
 		}
 		return id, err
 	}
@@ -1185,7 +1198,7 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 			if ctx.Err() != nil {
 				return "", fmt.Errorf("conflict resolution cancelled (%s): %w", lastReason, ctx.Err())
 			}
-			return "", fmt.Errorf("conflict resolution timed out (%s): %w", lastReason, conflict)
+			return "", unavailable(fmt.Errorf("conflict resolution timed out (%s): %w", lastReason, conflict))
 		case <-poll.C:
 		}
 	}
