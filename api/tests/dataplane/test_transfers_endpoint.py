@@ -184,6 +184,29 @@ def test_snapshot_rejects_missing_credential(tmp_path: Path) -> None:
     assert resp.status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("method", "suffix"), [("GET", "working-set"), ("POST", "snapshot")]
+)
+def test_non_ascii_credential_is_rejected_as_401(
+    tmp_path: Path, method: str, suffix: str
+) -> None:
+    # Issue #3690: the header arrives as raw bytes the server decodes latin-1, so
+    # a non-ASCII byte makes a non-ASCII str, which a str compare_digest refuses
+    # with TypeError (a 500). It is a wrong credential like any other: 401.
+    client, _ = _setup(tmp_path)
+    community, server = _scope()
+    with client:
+        resp = client.request(
+            method,
+            _url(community, server, suffix),
+            headers={b"Authorization": f"Bearer {_CREDENTIAL}é".encode()},
+            content=b"x" if method == "POST" else None,
+        )
+    assert resp.status_code == 401
+    assert resp.json()["reason"] == "worker_credential_rejected"
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+
 def test_hydrate_round_trips_the_published_working_set(tmp_path: Path) -> None:
     import asyncio
 

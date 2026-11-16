@@ -188,14 +188,16 @@ async def require_worker_credential(
     so a test can substitute it through ``dependency_overrides`` (issue #1753). A
     missing/wrong credential is a uniform 401. The credential is required to mount
     the data plane, enforced at app startup (the app factory fails fast); it is
-    non-None here.
+    non-None here. The compare is over the UTF-8 bytes, as ``has_body_credential``
+    compares (issue #3690): ``compare_digest`` refuses a non-ASCII ``str``, and a
+    header value is one whenever it carries a non-ASCII byte.
     """
 
     presented = _bearer(authorization)
     if (
         expected is None
         or presented is None
-        or not hmac.compare_digest(presented, expected)
+        or not hmac.compare_digest(presented.encode(), expected.encode())
     ):
         raise problem(
             status.HTTP_401_UNAUTHORIZED,
