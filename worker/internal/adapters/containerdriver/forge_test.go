@@ -48,6 +48,9 @@ type forgeFakeDocker struct {
 	// succeeds. Tests use it to inject side effects (e.g., writing files) when
 	// a specific container is created.
 	onCreateHook func(spec CreateSpec)
+	// onStopOrRemove, when non-nil, is called with "stop" or "remove" and the id
+	// as a Stop or Remove begins, before it acts on the container.
+	onStopOrRemove func(call, id string)
 	// stopNoExitIDs prevents Stop from releasing Wait for the named containers,
 	// so the Stop falls through to the kill escalation (mirroring fakeDocker's
 	// stopNoExit for install-phase survived-kill tests).
@@ -148,7 +151,11 @@ func (f *forgeFakeDocker) Start(ctx context.Context, id string) error {
 func (f *forgeFakeDocker) Stop(_ context.Context, id string, _ time.Duration) error {
 	f.mu.Lock()
 	suppress := f.stopNoExitIDs[id]
+	hook := f.onStopOrRemove
 	f.mu.Unlock()
+	if hook != nil {
+		hook("stop", id)
+	}
 	if !suppress {
 		f.exit(id, 0, nil)
 	}
@@ -198,7 +205,11 @@ func (f *forgeFakeDocker) Remove(ctx context.Context, id string) error {
 	f.removed = append(f.removed, id)
 	stall := f.removeStallIDs[id]
 	removeErr := f.removeErrIDs[id]
+	hook := f.onStopOrRemove
 	f.mu.Unlock()
+	if hook != nil {
+		hook("remove", id)
+	}
 	if stall {
 		<-ctx.Done()
 		return ctx.Err()
