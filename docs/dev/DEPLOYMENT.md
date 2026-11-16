@@ -928,7 +928,7 @@ The exposition is served on its own HTTP listener and is **off by default**
 port that serves `GET /metrics`; the API's HTTP port serves no exposition at
 all. The content is aggregates only, but it is operational signal — server and
 worker counts, per-route request volume including login success/failure rates,
-process start timestamps, control-plane liveness (SECURITY.md Section 5).
+control-plane liveness (SECURITY.md Section 5).
 
 **Compose (whichever of the three options above you run).** Enable it in `.env`:
 

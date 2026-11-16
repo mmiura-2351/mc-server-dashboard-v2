@@ -345,13 +345,17 @@ metrics endpoint (RELAY.md Section 13).
 
 The content is aggregates only — no names, ids, emails or IPs, and the label
 sets are structurally bounded (route *templates*, a fixed observed-state tuple,
-the `WorkerStatus` enum). But it is operational signal an external party has no
-need to see: server and worker counts, per-route request volume (whose `route`
-and `status` labels make login success/failure rates derivable:
-`http_requests_total{route="/api/auth/login"}` split by `status`, 200 against
-401 — a live oracle for anyone probing the FR-AUTH-4 brute-force behaviour),
-scanning activity as `<unmatched>` 404s, process start timestamps, control-plane
-liveness, and latency histograms.
+the `WorkerStatus` enum). The HTTP request metrics are FastAPI's native
+OpenTelemetry ones, under the semantic-convention names: `http_route` is the
+full route or mount template and is empty when no route matched, and
+`http_request_method` is `_OTHER` for any method outside the known set. But it
+is operational signal an external party has no need to see: server and worker
+counts, per-route request volume (whose `http_route` and
+`http_response_status_code` labels make login success/failure rates derivable:
+`http_server_request_duration_seconds_count{http_route="/api/auth/login"}`
+split by `http_response_status_code`, 200 against 401 — a live oracle for anyone
+probing the FR-AUTH-4 brute-force behaviour), scanning activity as 404s with an
+empty `http_route`, control-plane liveness, and latency histograms.
 
 **The bind address is not the control, and which control applies depends on the
 topology.** The listener binds `0.0.0.0` by default, because the API's canonical

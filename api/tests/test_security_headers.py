@@ -11,6 +11,7 @@ from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 
@@ -82,7 +83,11 @@ def test_docs_path_names_a_live_route(shared_app: FastAPI, path: str) -> None:
     against the route table is what reddens on the rename.
     """
 
-    declared = {route.path for route in shared_app.routes if isinstance(route, Route)}
+    declared = {
+        context.path
+        for context in iter_route_contexts(shared_app.routes)
+        if isinstance(context.original_route, Route)
+    }
     assert path in declared, (
         f"{path} is in _DOCS_PATHS but no route declares it -- a renamed docs "
         "page is back under the strict CSP, which blocks its init script"
