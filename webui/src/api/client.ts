@@ -14,8 +14,9 @@
  *
  * On top of that it carries the session plumbing (WEBUI_SPEC.md 7.1): it
  * attaches the in-memory access token as a Bearer credential and, on a 401 from
- * a non-auth endpoint, transparently performs a single-flight refresh and
- * retries the request once. The refresh itself is owned by the session layer
+ * a non-auth endpoint -- or the 413 `credential_required_for_body` the API
+ * answers a large body sent without a valid credential -- transparently
+ * performs a single-flight refresh and retries the request once. The refresh itself is owned by the session layer
  * and registered here, so the client does not depend on it.
  */
 
@@ -140,6 +141,42 @@ function isJsonContentTypeHeader(contentType: string | null): boolean {
   return /\bapplication\/(problem\+)?json\b/i.test(contentType ?? "");
 }
 
+/**
+ * The `reason` of the 413 the API answers a body past 64 KiB that carries no
+ * valid credential (SECURITY.md Section 5): an expired access token, as far as
+ * this client is concerned. The route's own cap is a different reason
+ * (`request_too_large`, `file_too_large`, ...) and is not retried.
+ */
+const CREDENTIAL_REQUIRED_FOR_BODY = "credential_required_for_body";
+
+/**
+ * Whether an answer means the access token must be refreshed: a 401, or the
+ * 413 {@link CREDENTIAL_REQUIRED_FOR_BODY}, read from its problem `body`.
+ * Either is retried once after a refresh. Every body this client sends can be
+ * sent again -- a JSON string or a FormData -- so the retry needs nothing but
+ * the original request.
+ */
+function asksForRefresh(
+  status: number,
+  contentType: string | null,
+  body: string,
+): boolean {
+  if (status === 401) {
+    return true;
+  }
+  if (status !== 413 || !isJsonContentTypeHeader(contentType)) {
+    return false;
+  }
+  try {
+    return (
+      readProblemString(JSON.parse(body), "reason") ===
+      CREDENTIAL_REQUIRED_FOR_BODY
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isJsonContentType(response: Response): boolean {
   return isJsonContentTypeHeader(response.headers.get("content-type"));
 }
@@ -180,12 +217,22 @@ async function request<P extends keyof paths, M extends string>(
   const epoch = getAuthEpoch();
   let response = await rawRequest(httpMethod, url, init);
 
-  // Transparent refresh: a 401 from a non-auth endpoint means the access token
-  // expired. Run the shared single-flight refresh and retry once. The
-  // /api/auth/* endpoints surface their own 401s untouched (no refresh on the
-  // refresh). The retry happens only while the request's session is still
-  // current, so a request never replays under a different user (#3224).
-  if (response.status === 401 && refresher !== null && !isAuthPath(url)) {
+  // Transparent refresh: a 401 from a non-auth endpoint, or a large body
+  // refused for want of a credential, means the access token expired. Run the
+  // shared single-flight refresh and retry once. The /api/auth/* endpoints
+  // surface their own answers untouched (no refresh on the refresh). The retry
+  // happens only while the request's session is still current, so a request
+  // never replays under a different user (#3224).
+  if (
+    refresher !== null &&
+    !isAuthPath(url) &&
+    asksForRefresh(
+      response.status,
+      response.headers.get("content-type"),
+      // Only a 413 is read here; a clone leaves the body for the parse below.
+      response.status === 413 ? await response.clone().text() : "",
+    )
+  ) {
     const refreshed = await refresher(epoch);
     if (refreshed && epoch === getAuthEpoch()) {
       response = await rawRequest(httpMethod, url, init);
@@ -294,7 +341,7 @@ function sendForm(
 /**
  * Multipart POST with real-time upload progress (issue #1207). XHR is the
  * pragmatic choice: fetch cannot surface bytes-uploaded progress. It runs the
- * FormData body through the same auth, single-flight 401 refresh, and typed
+ * FormData body through the same auth, single-flight refresh, and typed
  * error/JSON handling as {@link request}, adding the `onProgress` feedback.
  */
 export async function postFormWithProgress<P extends PathsWith<"post">>(
@@ -307,10 +354,19 @@ export async function postFormWithProgress<P extends PathsWith<"post">>(
   const epoch = getAuthEpoch();
   let xhr = await sendForm(url, body, onProgress, signal);
 
-  // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint
-  // means the access token expired — refresh once and retry the upload, only
-  // while the upload's session is still current.
-  if (xhr.status === 401 && refresher !== null && !isAuthPath(url)) {
+  // Transparent refresh, mirroring `request`: a 401 from a non-auth endpoint,
+  // or an upload refused for want of a credential, means the access token
+  // expired — refresh once and retry the upload (a FormData is sent again
+  // whole), only while the upload's session is still current.
+  if (
+    refresher !== null &&
+    !isAuthPath(url) &&
+    asksForRefresh(
+      xhr.status,
+      xhr.getResponseHeader("content-type"),
+      xhr.responseText,
+    )
+  ) {
     const refreshed = await refresher(epoch);
     if (refreshed && epoch === getAuthEpoch()) {
       xhr = await sendForm(url, body, onProgress, signal);

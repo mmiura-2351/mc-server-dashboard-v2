@@ -64,6 +64,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_body_limit import (
     ANONYMOUS_MAX_REQUEST_BODY_BYTES,
+    ANONYMOUS_REASON,
     DEFAULT_MAX_REQUEST_BODY_BYTES,
     EARLY_ANSWER_DISCARD_BYTES,
     RequestBodyLimitMiddleware,
@@ -123,7 +124,7 @@ _INVALID_TOKEN = (
     b'"status":401,"reason":"invalid_token"}'
 )
 
-_TOO_LARGE = _problem("request_too_large")
+_CREDENTIAL_REQUIRED = _problem(ANONYMOUS_REASON)
 
 
 def _json_of(size: int) -> bytes:
@@ -257,7 +258,7 @@ async def test_an_anonymous_body_declared_past_the_limit_is_refused_unread(
     )
 
     assert result.status == 413
-    assert result.json() == _TOO_LARGE
+    assert result.json() == _CREDENTIAL_REQUIRED
     assert result.consumed == 0
     assert result.headers["connection"] == "close"
 
@@ -277,7 +278,7 @@ async def test_an_anonymous_body_declared_one_byte_past_the_limit_is_refused(
     )
 
     assert result.status == 413
-    assert result.json() == _TOO_LARGE
+    assert result.json() == _CREDENTIAL_REQUIRED
 
 
 @pytest.mark.parametrize("path", ["/json", "/upload", "/public"])
@@ -299,7 +300,7 @@ async def test_an_anonymous_body_streamed_past_the_limit_is_cut_off_at_it(
     )
 
     assert result.status == 413
-    assert result.json() == _TOO_LARGE
+    assert result.json() == _CREDENTIAL_REQUIRED
     assert _ANONYMOUS < result.consumed <= _ANONYMOUS + _TRICKLE
 
 
@@ -527,7 +528,7 @@ async def test_a_client_that_closes_after_its_request_receives_the_413() -> None
 
     head, _, body = response.partition(b"\r\n\r\n")
     assert head.startswith(b"HTTP/1.1 413 ")
-    assert json.loads(body) == _TOO_LARGE
+    assert json.loads(body) == _CREDENTIAL_REQUIRED
 
 
 async def test_a_chunked_anonymous_body_with_a_length_beside_it_closes() -> None:
@@ -546,7 +547,7 @@ async def test_a_chunked_anonymous_body_with_a_length_beside_it_closes() -> None
 
     assert head.startswith(b"HTTP/1.1 413 ")
     assert b"\r\nconnection: close" in head.lower()
-    assert json.loads(body) == _TOO_LARGE
+    assert json.loads(body) == _CREDENTIAL_REQUIRED
 
 
 # --- every shape a route's check can take -------------------------------------
@@ -767,7 +768,7 @@ async def test_the_real_check_counts_no_invalid_credential(
 
     # Held to the anonymous limit, though the route (signed in by overrides)
     # would take the caller: no database lookup was needed to tell.
-    assert await _file_write(live_app, credential) == _TOO_LARGE
+    assert await _file_write(live_app, credential) == _CREDENTIAL_REQUIRED
 
 
 @pytest.mark.parametrize("kind", ["none", "nonsense", "expired"])
@@ -934,7 +935,7 @@ async def test_a_user_lookup_that_fails(
 
     refusal = await _file_write(live_app, _bearer(token))
 
-    assert refusal == (_ROUTE_LIMIT if keeps_the_route_limit else _TOO_LARGE)
+    assert refusal == (_ROUTE_LIMIT if keeps_the_route_limit else _CREDENTIAL_REQUIRED)
 
 
 async def test_the_worker_credential_keeps_the_routes_limit(
@@ -943,7 +944,7 @@ async def test_the_worker_credential_keeps_the_routes_limit(
     monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: "w-secret")
 
     assert await _file_write(live_app, _bearer("w-secret")) == _ROUTE_LIMIT
-    assert await _file_write(live_app, _bearer("w-secreT")) == _TOO_LARGE
+    assert await _file_write(live_app, _bearer("w-secreT")) == _CREDENTIAL_REQUIRED
 
 
 # --- the wiring: every route ----------------------------------------------------
@@ -1117,7 +1118,7 @@ async def test_an_upload_without_a_valid_credential_is_refused_unread(
     result = await _request(live_app, "POST", _concrete(path), chunks, headers=headers)
 
     assert result.status == 413
-    assert result.json() == _TOO_LARGE
+    assert result.json() == _CREDENTIAL_REQUIRED
     assert result.consumed == 0
     # Nor is the upload read and dropped afterwards: the connection closes.
     assert result.headers["connection"] == "close"
@@ -1136,7 +1137,7 @@ async def test_a_json_write_without_a_valid_credential_is_cut_off_at_the_limit(
     )
 
     assert result.status == 413
-    assert result.json() == _TOO_LARGE
+    assert result.json() == _CREDENTIAL_REQUIRED
     assert result.consumed <= _ANONYMOUS + _TRICKLE
 
 

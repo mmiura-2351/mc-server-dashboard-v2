@@ -2,8 +2,14 @@
 // DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  refreshForRetry,
+  resetForTesting as resetSession,
+  setHardLogoutHandler,
+} from "../auth/session.ts";
+import {
   advanceAuthEpoch,
   clearAccessToken,
+  getAccessToken,
   getAuthEpoch,
   setAccessToken,
 } from "../auth/tokenStore.ts";
@@ -328,6 +334,80 @@ describe("transparent 401 refresh", () => {
   });
 });
 
+// The API holds a body past 64 KiB that carries no valid credential -- an
+// expired access token among them -- to a 413 with this reason, in place of the
+// route's 401 (SECURITY.md Section 5). The client treats it as the 401 it
+// stands for.
+const CREDENTIAL_REQUIRED = { reason: "credential_required_for_body" };
+
+function problemResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/problem+json" },
+  });
+}
+
+describe("transparent refresh on a body refused for want of a credential", () => {
+  const largeBody = JSON.stringify({ name: "x".repeat(70 * 1024) });
+
+  it("refreshes once and sends the same body again", async () => {
+    setAccessToken("stale");
+    fetchMock
+      .mockResolvedValueOnce(problemResponse(413, CREDENTIAL_REQUIRED))
+      .mockResolvedValueOnce(jsonResponse(201, { id: "c1" }));
+    const refresher = vi.fn(async () => {
+      setAccessToken("fresh");
+      return true;
+    });
+    setRefresher(refresher);
+
+    const result = await api.post("/api/communities", { body: largeBody });
+
+    expect(result).toEqual({ id: "c1" });
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, retried] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(retried.body).toBe(largeBody);
+    expect((retried.headers as Record<string, string>).authorization).toBe(
+      "Bearer fresh",
+    );
+  });
+
+  it("retries only once: the same refusal after a refresh surfaces", async () => {
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(problemResponse(413, CREDENTIAL_REQUIRED)),
+    );
+    const refresher = vi.fn(() => Promise.resolve(true));
+    setRefresher(refresher);
+
+    const error = await api
+      .post("/api/communities", { body: largeBody })
+      .catch((e) => e);
+
+    expect(refresher).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.status).toBe(413);
+    expect(error.reason).toBe("credential_required_for_body");
+  });
+
+  it("does not refresh on a body past the route's own cap", async () => {
+    fetchMock.mockResolvedValue(
+      problemResponse(413, { reason: "request_too_large" }),
+    );
+    const refresher = vi.fn(() => Promise.resolve(true));
+    setRefresher(refresher);
+
+    const error = await api
+      .post("/api/communities", { body: largeBody })
+      .catch((e) => e);
+
+    expect(refresher).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(error.reason).toBe("request_too_large");
+  });
+});
+
 // A minimal XMLHttpRequest test double: progress feedback needs the real upload
 // progress events, which fetch cannot surface, so postFormWithProgress is built
 // on XHR (issue #1207). The double records each constructed instance, captures
@@ -590,6 +670,95 @@ describe("postFormWithProgress", () => {
     expect(isUploadAbortError(error)).toBe(true);
     // No XHR should have been constructed.
     expect(MockXHR.instances).toHaveLength(0);
+  });
+});
+
+describe("postFormWithProgress on an upload refused for want of a credential", () => {
+  beforeEach(() => {
+    MockXHR.instances = [];
+    vi.stubGlobal("XMLHttpRequest", MockXHR);
+  });
+
+  afterEach(() => {
+    resetSession();
+  });
+
+  function largeUpload(): FormData {
+    const form = new FormData();
+    form.append("file", new Blob(["x".repeat(70 * 1024)]));
+    return form;
+  }
+
+  it("refreshes an expired token and sends the upload again", async () => {
+    setAccessToken("expired");
+    setRefresher(async () => {
+      setAccessToken("fresh");
+      return true;
+    });
+    const form = largeUpload();
+
+    const promise = postFormWithProgress("/api/resource-packs", form);
+    MockXHR.last().respond(
+      413,
+      CREDENTIAL_REQUIRED,
+      "application/problem+json",
+    );
+    await vi.waitFor(() => expect(MockXHR.instances).toHaveLength(2));
+    const retried = MockXHR.last();
+    retried.respond(201, { id: "rp1" });
+
+    await expect(promise).resolves.toEqual({ id: "rp1" });
+    expect(retried.body).toBe(form);
+    expect(retried.reqHeaders().authorization).toBe("Bearer fresh");
+  });
+
+  it("logs out when the refresh is refused, without sending it again", async () => {
+    // The real session refresher: the refresh cookie is rejected too.
+    setAccessToken("expired");
+    const onLogout = vi.fn();
+    setHardLogoutHandler(onLogout);
+    setRefresher(refreshForRetry);
+    fetchMock.mockResolvedValue(new Response("", { status: 401 }));
+
+    const promise = postFormWithProgress(
+      "/api/resource-packs",
+      largeUpload(),
+    ).catch((e) => e);
+    MockXHR.last().respond(
+      413,
+      CREDENTIAL_REQUIRED,
+      "application/problem+json",
+    );
+    const error = await promise;
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/auth/refresh",
+      expect.anything(),
+    );
+    expect(onLogout).toHaveBeenCalledWith("expired");
+    expect(getAccessToken()).toBeNull();
+    expect(MockXHR.instances).toHaveLength(1);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.reason).toBe("credential_required_for_body");
+  });
+
+  it("does not refresh on an upload past the route's own cap", async () => {
+    const refresher = vi.fn(() => Promise.resolve(true));
+    setRefresher(refresher);
+
+    const promise = postFormWithProgress(
+      "/api/resource-packs",
+      largeUpload(),
+    ).catch((e) => e);
+    MockXHR.last().respond(
+      413,
+      { reason: "too_large" },
+      "application/problem+json",
+    );
+
+    const error = await promise;
+    expect(refresher).not.toHaveBeenCalled();
+    expect(error.reason).toBe("too_large");
   });
 });
 

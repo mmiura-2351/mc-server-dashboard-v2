@@ -963,5 +963,5 @@ async def test_the_real_app_refuses_an_endless_anonymous_json_body(
     )
 
     assert result.status == 413
-    assert result.json() == _problem("request_too_large")
+    assert result.json() == _problem("credential_required_for_body")
     assert result.consumed <= ANONYMOUS_MAX_REQUEST_BODY_BYTES + _CHUNK

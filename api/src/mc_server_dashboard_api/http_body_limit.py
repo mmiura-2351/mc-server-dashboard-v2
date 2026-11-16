@@ -43,8 +43,9 @@ carries a valid credential, from its headers alone (in the app,
 :func:`mc_server_dashboard_api.dependencies.has_body_credential`: a valid user
 access token or the Worker credential). A request that does keeps its route's
 limit; one that does not is held to :data:`ANONYMOUS_MAX_REQUEST_BODY_BYTES`, or
-the route's limit if that is smaller, and refused past it with the 413 above (by
-``Content-Length`` before a byte is read, or by running count). Within that, its
+the route's limit if that is smaller, and refused past it with a 413 whose
+``reason`` is :data:`ANONYMOUS_REASON` (by ``Content-Length`` before a byte is
+read, or by running count). Within that, its
 body is read and the route answers it as it always has -- the 401, and any 403
 or 404, come from the route's dependencies after the read. So a caller without
 a credential cannot make the API read more than the anonymous limit, and no
@@ -107,6 +108,10 @@ DEFAULT_REASON = "request_too_large"
 # login is 24,608 bytes; a refresh or a logout carries a 43-character token.
 # This limit is now also the bound on those uncapped fields for such a caller.
 ANONYMOUS_MAX_REQUEST_BODY_BYTES = 64 * 1024
+# The 413 ``reason`` past it: not the route's own cap (``request_too_large``)
+# but the want of a credential, so a client whose access token has expired can
+# tell the two apart, refresh, and send the body again -- as it does on a 401.
+ANONYMOUS_REASON = "credential_required_for_body"
 
 # What a multipart upload route allows on top of its file cap for the envelope:
 # the boundaries, the part headers and the route's few short text fields. It keeps
@@ -141,7 +146,7 @@ class RequestBodyLimit:
 
 
 _DEFAULT = RequestBodyLimit(DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_REASON)
-_ANONYMOUS = RequestBodyLimit(ANONYMOUS_MAX_REQUEST_BODY_BYTES, DEFAULT_REASON)
+_ANONYMOUS = RequestBodyLimit(ANONYMOUS_MAX_REQUEST_BODY_BYTES, ANONYMOUS_REASON)
 
 # Whether a request carries a valid credential, judged from its headers alone
 # (module docstring). It answers, and never raises.

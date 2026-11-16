@@ -406,7 +406,10 @@ make it read (issues #3365, #3561):
   is sized for the routes that take a body from such a caller: registration,
   login, refresh and logout. `tests/test_http_body_credential.py` derives that
   set from the route table and pins each route's largest legitimate body.
-- A body past that limit is refused with a 413 `request_too_large`. When the
+- A body past that limit is refused with a 413 whose reason is
+  `credential_required_for_body`. It is distinct from `request_too_large`,
+  which stays the reason for a body past the route's own cap, so a client can
+  refresh an expired token and send the body again. When the
   declared `Content-Length` is too large, the request is refused before a byte
   is read; otherwise it is refused once the running count passes the limit.
   Within the limit the body is read, and the route answers as it always has. Its
@@ -424,8 +427,9 @@ receives its request.
 The accepted costs (#3560):
 
 - A request without a valid credential that declares more than the limit gets
-  413, not 401. That includes an upload sent with an expired token. A client
-  that refreshes on 401 sees the 413 first.
+  413, not 401. That includes an upload sent with an expired token. The Web UI
+  client treats `credential_required_for_body` as a 401: it refreshes once and
+  retries once (WEBUI_SPEC.md Section 7.1).
 - A route decides 403 and 404 after it has read the body, within its own limit.
   This affects only callers with a valid credential.
 - While the database is unavailable, a token whose signature and expiry verify
