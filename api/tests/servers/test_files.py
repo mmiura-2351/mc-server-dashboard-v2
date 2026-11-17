@@ -3571,6 +3571,32 @@ async def test_upload_extract_over_size_cap_is_too_large() -> None:
         )
 
 
+async def test_upload_extract_tar_over_size_cap_is_too_large() -> None:
+    # The tar.gz twin of the zip test above: each member alone is under the
+    # injected cap, so only the running total across members trips it (#3760).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    cap = 1024 * 1024
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=cap,
+    )
+
+    member = cap // 4
+    archive = _tar_gz_bytes({f"f{i}.bin": b"\x00" * member for i in range(6)})
+    assert len(archive) <= cap  # raw upload is under the cap
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="bomb.tar.gz",
+            content=archive,
+            extract=True,
+        )
+
+
 async def test_upload_extract_single_entry_bomb_aborts_mid_decompression() -> None:
     # One zip member that inflates far past the cap. With the per-member streamed
     # read, the cap trips during decompression — the full member is never
