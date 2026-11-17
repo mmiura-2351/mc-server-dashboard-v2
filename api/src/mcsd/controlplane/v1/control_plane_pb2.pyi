@@ -1372,9 +1372,9 @@ class ReclaimDeletedServer(_message.Message):
     the scratch dir, and keeps .displaced-<id>. The reclaim runs in the
     background, one at a time per Worker, and the Worker answers once the id is
     queued for it (a Worker shutting down answers COMMAND_ERROR_CODE_INTERNAL).
-    The reclaim is best-effort. An id it skips keeps its working set or its
-    recorded container, so the next registration offers it again; a Worker
-    restart drops that record, and the boot's sweep removes the container.
+    The reclaim is best-effort. The next registration offers an id it skips
+    again while the id still holds a working set or a recorded container; a
+    Worker restart drops that record, and the boot's sweep removes the container.
     """
 
     DESCRIPTOR: _descriptor.Descriptor

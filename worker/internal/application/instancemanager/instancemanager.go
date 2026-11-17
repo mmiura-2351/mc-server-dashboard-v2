@@ -3340,10 +3340,10 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // pass. The spawn decision and the flag are taken in one critical section with the
 // WaitGroup Add, as recordOrphan does, so a report either is queued for a reclaim
 // Close will wait for or, on a closed manager, is refused. The answer therefore
-// says only that the reclaim will run. An id the reclaim skips keeps its working
-// set or its recorded leftover, and with it the listing that offers the id again
-// at the next registration; a Worker restart drops the record, and the boot's
-// sweep removes the container.
+// says only that the reclaim will run. The next registration offers an id the
+// reclaim skips again while the id still holds a working set or a recorded
+// leftover; a Worker restart drops the record, and the boot's sweep removes the
+// container.
 func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.CommandResult {
 	if !hasWorkingSet(filepath.Join(m.scratchDir, cmd.ServerID)) && !m.recordsLeftovers(cmd.ServerID) {
 		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
@@ -3439,9 +3439,9 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// sweep (issue #3672). It is ended here, with the working set still in place
 		// for its graceful stop to watch, under the shutdown context, so a Close
 		// abandons that stop rather than waits it out. While a container may still be
-		// running, nothing is removed: the scratch would be pulled from under it. What
-		// stays, the working set or the recorded leftover, keeps the id listed, so the
-		// next registration offers it again, and the boot's sweep is the backstop.
+		// running, nothing is removed: the scratch would be pulled from under it. The
+		// next registration offers the id again while it still holds a working set or
+		// a recorded leftover, and the boot's sweep is the backstop.
 		if err := m.endLeftovers(m.shutdown, id, dir); err != nil {
 			m.logger.Warn("not reclaiming deleted-server scratch: a container the Worker does not track may be running against it",
 				"server_id", id, "dir", dir, "error", err)
