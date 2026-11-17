@@ -553,7 +553,7 @@ directories named this way.
 | `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |
 | `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no Worker-side config). | none | RELAY.md Section 5 |
 | `OpenBedrockTunnel` | Open a Bedrock relay tunnel for a server that reached running state. Carries `relay_endpoint`, `bedrock_port`, a `token` valid for the tunnel's whole lifetime (relay-validated against the API, not matched locally), and optional `tls_ca_pem`. Dispatched once per running transition, not per player. The Worker dials the relay's Bedrock QUIC tunnel listener, handshakes, and forwards RakNet datagrams to the container's Geyser port, reconnecting with backoff while the tunnel drops; a repeated Open with the same credential is idempotent. | none | BEDROCK_TUNNEL.md |
-| `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. The Worker also closes the tunnel locally on a confirmed StopServer, without waiting for this command. | none | BEDROCK_TUNNEL.md |
+| `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. The Worker also closes the tunnel locally on a confirmed StopServer and when the instance crashes, without waiting for this command. | none | BEDROCK_TUNNEL.md |
 
 Notes:
 
