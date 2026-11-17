@@ -3795,18 +3795,21 @@ async def test_upload_extract_unknown_archive_type_is_invalid_path() -> None:
 _PAYLOAD = bytes(random.Random(3769).choices(b"abcdefgh", k=64 * 1024))
 
 
-def _deflated_zip() -> bytes:
+def _compressed_zip(
+    members: dict[str, bytes], compression: int = zipfile.ZIP_DEFLATED
+) -> bytes:
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("a.txt", b"A")
-        zf.writestr("b.txt", _PAYLOAD)
+    with zipfile.ZipFile(buf, mode="w", compression=compression) as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
     return buf.getvalue()
 
 
-def _with_a_damaged_member(archive: bytes, name: str) -> bytes:
-    """``archive`` with ``name``'s deflate stream opening on block type 3.
+def _with_a_damaged_member(archive: bytes, name: str, *, at: int = 0) -> bytes:
+    """``archive`` with the byte ``at`` into ``name``'s compressed data set to 0xFF.
 
-    Deflate reserves that block type, so the stream fails on its first byte.
+    At the start of a deflate stream that is block type 3, which deflate
+    reserves, so the stream fails on its first byte.
     """
 
     damaged = bytearray(archive)
@@ -3814,7 +3817,7 @@ def _with_a_damaged_member(archive: bytes, name: str) -> bytes:
         header = zf.getinfo(name).header_offset
     # The local file header is 30 fixed bytes, then the name and the extra field.
     name_len, extra_len = struct.unpack_from("<HH", damaged, header + 26)
-    damaged[header + 30 + name_len + extra_len] = 0xFF  # BFINAL=1, BTYPE=0b11
+    damaged[header + 30 + name_len + extra_len + at] = 0xFF
     return bytes(damaged)
 
 
@@ -3844,7 +3847,7 @@ def _zip_with_an_offset_no_seek_reaches() -> bytes:
     return archive[:entry] + central + bytes(record)
 
 
-_ZIP = _deflated_zip()
+_ZIP = _compressed_zip({"a.txt": b"A", "b.txt": _PAYLOAD})
 _TAR_GZ = _tar_gz_bytes({"a.txt": b"A", "b.txt": _PAYLOAD})
 _GARBAGE = b"not an archive " * 256
 

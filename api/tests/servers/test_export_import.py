@@ -72,6 +72,7 @@ from tests.servers.fakes import (
     FakeVersionValidator,
 )
 from tests.servers.test_files import (
+    _compressed_zip,
     _with_a_damaged_member,
     _with_its_last_member_encrypted,
 )
@@ -420,14 +421,6 @@ async def test_import_clears_the_archives_resource_pack_keys() -> None:
 # --- import validation -----------------------------------------------------
 
 
-def _deflated_export(members: dict[str, bytes]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, content in members.items():
-            zf.writestr(name, content)
-    return buf.getvalue()
-
-
 # Exports whose bytes do not read back as a zip (issue #3769). A body that is not
 # a zip at all fails as the metadata is read; a damaged or encrypted metadata
 # member fails there too, and a damaged working-set member fails in the
@@ -437,7 +430,7 @@ _UNREADABLE_IMPORTS = [
     pytest.param(b"not a zip", id="not-a-zip"),
     pytest.param(
         _with_a_damaged_member(
-            _deflated_export(
+            _compressed_zip(
                 {EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"L" * 64}
             ),
             "world/level.dat",
@@ -446,7 +439,7 @@ _UNREADABLE_IMPORTS = [
     ),
     pytest.param(
         _with_a_damaged_member(
-            _deflated_export({EXPORT_METADATA_FILENAME: _metadata()}),
+            _compressed_zip({EXPORT_METADATA_FILENAME: _metadata()}),
             EXPORT_METADATA_FILENAME,
         ),
         id="damaged-metadata",
@@ -454,7 +447,7 @@ _UNREADABLE_IMPORTS = [
     pytest.param(
         # The metadata is written last: the helper encrypts the last member.
         _with_its_last_member_encrypted(
-            _deflated_export(
+            _compressed_zip(
                 {"world/level.dat": b"L" * 64, EXPORT_METADATA_FILENAME: _metadata()}
             )
         ),
