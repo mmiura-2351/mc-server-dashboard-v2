@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
@@ -382,6 +384,63 @@ func TestReclaimDeletedServerCommandReclaimsWithoutReconnecting(t *testing.T) {
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 		t.Fatalf("hydrate leftover not reclaimed: stat err = %v", err)
 	}
+}
+
+// The delete report's reclaim is the manager's background work, not the lane's
+// (issue #3679): the command answers at once, and Close joins the reclaim it
+// started, as it joins a registration's (issue #2878). A session lane is joined
+// by nothing, so a reclaim run on it could be cut off between its scratch removal
+// and its reservation release.
+func TestReclaimDeletedServerCommandAnswersAtOnceAndCloseJoinsItsReclaim(t *testing.T) {
+	awaitManagerGoroutines(t, 0)
+	h := newBlockingReclaimLogger()
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	// Registered AFTER newManager's Close, so cleanups run it FIRST (see
+	// TestCloseJoinsAnInFlightReclaim).
+	t.Cleanup(h.unpark)
+	dir := seedScratch(t, m, s1)
+
+	answered := make(chan session.CommandResult, 1)
+	go func() {
+		answered <- m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	}()
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaim never reached its removal; the log record this test parks on has changed")
+	}
+	select {
+	case res := <-answered:
+		if !res.Success {
+			t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReclaimDeletedServer did not answer while its reclaim was still running; it ran the reclaim on the lane")
+	}
+	// The status dispatcher and the reclaim.
+	awaitManagerGoroutines(t, 2)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	// The dispatcher is gone, so Close is inside its Wait (see
+	// TestCloseJoinsAnInFlightReclaim).
+	awaitManagerGoroutines(t, 1)
+	select {
+	case <-closed:
+		t.Fatal("Close returned with the reported delete's reclaim parked between its scratch removal and its reservation release")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	h.unpark()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the reclaim it joined had finished")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the joined reclaim did not remove the scratch dir: stat err = %v", err)
+	}
+	awaitManagerGoroutines(t, 0)
 }
 
 // A deleted server whose working set may still be in use keeps its scratch:
