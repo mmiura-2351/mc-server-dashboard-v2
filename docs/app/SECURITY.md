@@ -448,8 +448,6 @@ The accepted costs (#3560):
   signature that has not expired keeps its route's limit, even a deactivated
   account's. Only the holder of a token this API signed gets that far, and the
   route's own authentication still decides, meeting the outage after the read.
-- Usernames and emails have no cap of their own. For a caller without a
-  credential, the anonymous limit is now their cap on registration and login.
 
 ---
 

@@ -58,6 +58,8 @@ from mc_server_dashboard_api.identity.domain.errors import (
     UserNotFoundError,
 )
 from mc_server_dashboard_api.identity.domain.value_objects import (
+    EMAIL_MAX_LENGTH,
+    USERNAME_MAX_LENGTH,
     RefreshTokenId,
     UserId,
 )
@@ -66,10 +68,12 @@ router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class RegisterUserRequest(BaseModel):
-    username: str = Field(min_length=1)
+    # The length caps mirror the value objects' write caps (issue #3689), which
+    # the use case enforces as well.
+    username: str = Field(min_length=1, max_length=USERNAME_MAX_LENGTH)
     # Structural email validation lives in the EmailAddress value object; the
     # router maps its InvalidEmailError to 422. Avoids an extra validator dep.
-    email: str = Field(min_length=1)
+    email: str = Field(min_length=1, max_length=EMAIL_MAX_LENGTH)
     # Cheap DoS guard so an oversized body is rejected before the password policy
     # runs; the policy enforces the real (configurable, far tighter) bounds.
     password: str = Field(min_length=1, max_length=1024)
@@ -173,7 +177,8 @@ async def read_current_user(
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(min_length=1)
+    # A cheap DoS guard only (issue #3689), at the cap a new password has.
+    current_password: str = Field(min_length=1, max_length=1024)
     # Cheap DoS guard so an oversized body is rejected before the policy runs; the
     # policy enforces the real (configurable) bounds, as on registration.
     new_password: str = Field(min_length=1, max_length=1024)
@@ -182,15 +187,20 @@ class ChangePasswordRequest(BaseModel):
 class DeleteAccountRequest(BaseModel):
     # Re-authentication for this destructive self-service action (issue #420):
     # the caller's current password, verified before deletion. Mirrors
-    # ChangePasswordRequest; the same min_length=1 makes a blank password a 422.
-    password: str = Field(min_length=1)
+    # ChangePasswordRequest; the same min_length=1 makes a blank password a 422,
+    # and the same max_length=1024 bounds it.
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class UpdateProfileRequest(BaseModel):
     # Both optional: a self-service edit may change either field or both. Structural
     # validation lives in the value objects; the router maps their errors to 422.
-    username: str | None = Field(default=None, min_length=1)
-    email: str | None = Field(default=None, min_length=1)
+    # The 1024 bound is a DoS guard only: the write caps (64 / 254) apply in the
+    # use case to a changed value, so a client that resubmits a value stored
+    # before those caps -- as the Web UI's profile form does -- is not refused
+    # for it (issue #3689).
+    username: str | None = Field(default=None, min_length=1, max_length=1024)
+    email: str | None = Field(default=None, min_length=1, max_length=1024)
 
 
 @router.put("/users/me/password", status_code=status.HTTP_204_NO_CONTENT)

@@ -992,17 +992,22 @@ def _largest_bodies() -> dict[tuple[str, str], bytes]:
     """The largest legitimate body of every route that takes an anonymous body.
 
     Strings are at their worst on the wire: an astral code point JSON-escaped as
-    a surrogate pair (``ensure_ascii``), 12 bytes. A password is capped at 1024
-    code points (``RegisterUserRequest``); a username and an email have no cap
-    of their own and are taken at the same 1024 (an email address is at most 254
-    octets, RFC 5321). A refresh token is ``token_urlsafe(32)``: 43 characters.
+    a surrogate pair (``ensure_ascii``), 12 bytes. Each field is at its cap in
+    code points: a registration's username at 64 and email at 254
+    (``RegisterUserRequest``), and every password, and a login's username, at
+    1024. A refresh token is ``token_urlsafe(32)``: 43 characters.
     """
 
-    long = "\U0001f600" * 1024
+    astral = "\U0001f600"
+    long = astral * 1024
     refresh = {"refresh_token": "A" * 43}
     return {
         ("POST", "/api/users"): json.dumps(
-            {"username": long, "email": long + "@example.com", "password": long}
+            {
+                "username": astral * 64,
+                "email": astral * (254 - len("@example.com")) + "@example.com",
+                "password": long,
+            }
         ).encode(),
         ("POST", "/api/auth/login"): json.dumps(
             {"username": long, "password": long}
@@ -1041,7 +1046,7 @@ def test_every_route_that_takes_an_anonymous_body_fits_the_limit(
     for route, body in largest.items():
         assert len(body) <= _ANONYMOUS, route
     # The figure the limit's comment (``http_body_limit.py``) is derived from.
-    assert max(len(body) for body in largest.values()) == 36_921
+    assert max(len(body) for body in largest.values()) == 24_608
 
 
 def test_the_web_ui_holds_the_same_anonymous_limit() -> None:

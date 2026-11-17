@@ -180,7 +180,9 @@ async def persist_new_user(
     """
 
     name = Username(username)
+    name.ensure_writable()
     address = EmailAddress(email)
+    address.ensure_writable()
     policy.validate(password, username=name, email=address)
 
     # Hash before the bootstrap-locked transaction, exactly as before: the argon2

@@ -104,14 +104,13 @@ DEFAULT_REASON = "request_too_large"
 # for the routes that take a body from such a caller, as the route table has
 # them: registration, login, refresh and logout (``POST /api/auth/session``
 # takes none). ``test_http_body_credential.py`` derives that set from the table
-# and pins each route's largest legitimate body. The largest is a registration
-# of 36,921 bytes: a password at its 1024-code-point cap
-# (``RegisterUserRequest``), at worst 12 bytes each on the wire (an astral code
-# point JSON-escaped as a surrogate pair), and a username and an email, which
-# have no cap of their own, taken at the same 1024 code points -- far past any
-# real login name or address (RFC 5321 bounds an address at 254 octets). A
-# login is 24,608 bytes; a refresh or a logout carries a 43-character token.
-# This limit is now also the bound on those uncapped fields for such a caller.
+# and pins each route's largest legitimate body, every field at its cap in code
+# points and each code point at its worst on the wire, 12 bytes (an astral code
+# point JSON-escaped as a surrogate pair). The largest is a login of 24,608
+# bytes: a username and a password at their 1024 caps (``LoginRequest``; the
+# username's is a DoS bound, not the 64-character write cap, issue #3689). A
+# registration is 16,017 bytes: a 1024 password, a 64 username and a 254 email
+# (``RegisterUserRequest``); a refresh or a logout carries a 43-character token.
 ANONYMOUS_MAX_REQUEST_BODY_BYTES = 64 * 1024
 # The 413 ``reason`` past it: not the route's own cap (``request_too_large``)
 # but the want of a credential, so a client whose access token has expired can

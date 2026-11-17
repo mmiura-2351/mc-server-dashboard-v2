@@ -76,7 +76,9 @@ class AddMemberRequest(BaseModel):
     """
 
     user_id: str | None = Field(default=None, min_length=1)
-    username: str | None = Field(default=None, min_length=1)
+    # A lookup, so a DoS guard only (issue #3689): not the 64-character write
+    # cap, so an account whose name was stored before it can still be named.
+    username: str | None = Field(default=None, min_length=1, max_length=1024)
 
     @model_validator(mode="after")
     def _exactly_one_identifier(self) -> "AddMemberRequest":

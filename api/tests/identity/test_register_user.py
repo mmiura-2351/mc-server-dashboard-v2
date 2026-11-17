@@ -17,6 +17,8 @@ from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
+    InvalidEmailError,
+    InvalidUsernameError,
     PasswordPolicyError,
     RegistrationDisabledError,
     RegistrationThrottledError,
@@ -633,3 +635,44 @@ async def test_ip_limit_disabled_skips_counter() -> None:
     )
 
     assert attempts.attempts == []
+
+
+# --- Write caps (issue #3689) ------------------------------------------------
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+async def test_registers_a_username_at_64_characters() -> None:
+    users = _FakeUserRepository()
+    user = await _register(users)(
+        username="a" * 64, email="alice@example.com", password=_VALID_PASSWORD
+    )
+    assert user.username.value == "a" * 64
+
+
+async def test_rejects_a_username_past_64_characters() -> None:
+    users = _FakeUserRepository()
+    with pytest.raises(InvalidUsernameError):
+        await _register(users)(
+            username="a" * 65, email="alice@example.com", password=_VALID_PASSWORD
+        )
+    assert users.added == []
+
+
+async def test_registers_an_email_at_254_characters() -> None:
+    users = _FakeUserRepository()
+    user = await _register(users)(
+        username="alice", email=_email(254), password=_VALID_PASSWORD
+    )
+    assert user.email.value == _email(254)
+
+
+async def test_rejects_an_email_past_254_characters() -> None:
+    users = _FakeUserRepository()
+    with pytest.raises(InvalidEmailError):
+        await _register(users)(
+            username="alice", email=_email(255), password=_VALID_PASSWORD
+        )
+    assert users.added == []

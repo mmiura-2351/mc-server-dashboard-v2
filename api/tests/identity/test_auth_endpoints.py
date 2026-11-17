@@ -516,3 +516,34 @@ def test_me_with_invalid_token_returns_401() -> None:
     resp = client.get("/api/users/me", headers={"Authorization": "Bearer bad"})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"
+
+
+# --- Request-size caps on login (issue #3689) ---------------------------------
+#
+# A DoS bound only: 1024, not the 64-character username write cap, so a username
+# stored before that cap can still sign in.
+
+
+@pytest.mark.parametrize("field", ["username", "password"])
+def test_login_accepts_a_field_at_the_cap(field: str) -> None:
+    fake = _Fake(error=InvalidCredentialsError())
+    client = _client(login=fake)
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "pw", field: "x" * 1024},
+    )
+    assert resp.status_code == 401
+    assert fake.calls[0][field] == "x" * 1024
+
+
+@pytest.mark.parametrize("field", ["username", "password"])
+def test_login_rejects_a_field_past_the_cap(field: str) -> None:
+    fake = _Fake(error=InvalidCredentialsError())
+    client = _client(login=fake)
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "pw", field: "x" * 1025},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []

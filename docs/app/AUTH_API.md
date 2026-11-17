@@ -149,7 +149,7 @@ Reason codes the `/auth/*` endpoints emit:
 | Status | `reason` | When |
 |---|---|---|
 | `401` | `invalid_credentials` | login failure, every refresh failure (missing / unknown / expired / revoked / reused token), **and** every session-restore failure (missing / unknown / expired / revoked cookie) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh from restore |
-| `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password`, or a present-but-empty `refresh_token`) |
+| `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password` or one past 1024 characters, or a present-but-empty `refresh_token`) |
 
 Note the refresh failure path deliberately reuses the `invalid_credentials`
 reason rather than a token-specific code: the contract leaks no signal that would

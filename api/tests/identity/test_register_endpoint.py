@@ -272,3 +272,49 @@ def test_register_missing_field_returns_422(missing: str) -> None:
     del payload[missing]
     resp = client.post("/api/users", json=payload)
     assert resp.status_code == 422
+
+
+# --- Field caps (issue #3689) ------------------------------------------------
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+@pytest.mark.parametrize(
+    ("field", "at_cap"),
+    [("username", "a" * 64), ("email", _email(254))],
+    ids=["username", "email"],
+)
+def test_register_accepts_a_field_at_its_cap(field: str, at_cap: str) -> None:
+    fake = _FakeRegisterUser(result=_user())
+    client = _client(fake)
+    payload = {
+        "username": "alice",
+        "email": "alice@example.com",
+        "password": _VALID_PASSWORD,
+        field: at_cap,
+    }
+    resp = client.post("/api/users", json=payload)
+    assert resp.status_code == 201
+    assert fake.calls[0][field] == at_cap
+
+
+@pytest.mark.parametrize(
+    ("field", "past_cap"),
+    [("username", "a" * 65), ("email", _email(255))],
+    ids=["username", "email"],
+)
+def test_register_rejects_a_field_past_its_cap(field: str, past_cap: str) -> None:
+    fake = _FakeRegisterUser(result=_user())
+    client = _client(fake)
+    payload = {
+        "username": "alice",
+        "email": "alice@example.com",
+        "password": _VALID_PASSWORD,
+        field: past_cap,
+    }
+    resp = client.post("/api/users", json=payload)
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []

@@ -93,8 +93,11 @@ def _clear_refresh_cookie(response: Response, token_cfg: TokenSettings) -> None:
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    # DoS guards only (issue #3689). The username bound is not the 64-character
+    # write cap, so an account whose name was stored before it can still sign in;
+    # the password bound is the one a new password has.
+    username: str = Field(min_length=1, max_length=1024)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class RefreshRequest(BaseModel):

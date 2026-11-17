@@ -226,6 +226,31 @@ def test_add_member_by_username_passes_username_to_use_case() -> None:
     assert use_case.calls[0]["user_id"] is None
 
 
+def test_add_member_by_username_at_the_request_cap() -> None:
+    # A lookup-only username: capped at 1024 as a DoS bound, not at the
+    # 64-character write cap, so an account stored before it can be named
+    # (issue #3689).
+    community = CommunityId.new()
+    use_case = _FakeUseCase(result=_membership(community, UserId(uuid.uuid4())))
+    client = _client(_app(member=True, allow=True, add_uc=use_case))
+    resp = client.post(
+        f"/api/communities/{community.value}/members", json={"username": "a" * 1024}
+    )
+    assert resp.status_code == 201
+    assert use_case.calls[0]["username"] == "a" * 1024
+
+
+def test_add_member_by_username_past_the_request_cap_returns_422() -> None:
+    use_case = _FakeUseCase()
+    client = _client(_app(member=True, allow=True, add_uc=use_case))
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/members", json={"username": "a" * 1025}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert use_case.calls == []
+
+
 def test_add_member_unknown_username_returns_422_same_shape_as_unknown_id() -> None:
     # No-match on username is rejected exactly like an unknown user_id (issue #355).
     app = _app(

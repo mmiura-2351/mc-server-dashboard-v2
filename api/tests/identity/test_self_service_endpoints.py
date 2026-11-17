@@ -303,3 +303,91 @@ def test_delete_account_user_gone_returns_401_invalid_token() -> None:
     resp = client.request("DELETE", "/api/users/me", json={"password": _VALID_PASSWORD})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"
+
+
+# --- Request-size caps (issue #3689) ------------------------------------------
+#
+# A password field, and the profile fields on PATCH, are capped at 1024
+# characters as a cheap DoS bound. The profile's real caps (64 / 254) apply to a
+# changed value in the use case, so a stored longer value can be resubmitted.
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+@pytest.mark.parametrize(
+    ("field", "at_cap"),
+    [("username", "a" * 1024), ("email", _email(1024))],
+    ids=["username", "email"],
+)
+def test_update_profile_accepts_a_field_at_the_request_cap(
+    field: str, at_cap: str
+) -> None:
+    user = make_user()
+    fake = _Fake(result=user)
+    client = _client(user, update_profile=fake)
+    resp = client.patch("/api/users/me", json={field: at_cap})
+    assert resp.status_code == 200
+    assert fake.calls[0][field] == at_cap
+
+
+@pytest.mark.parametrize(
+    ("field", "past_cap"),
+    [("username", "a" * 1025), ("email", _email(1025))],
+    ids=["username", "email"],
+)
+def test_update_profile_rejects_a_field_past_the_request_cap(
+    field: str, past_cap: str
+) -> None:
+    user = make_user()
+    fake = _Fake(result=user)
+    client = _client(user, update_profile=fake)
+    resp = client.patch("/api/users/me", json={field: past_cap})
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []
+
+
+def test_change_password_accepts_a_current_password_at_the_cap() -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = _client(user, change_password=fake)
+    resp = client.put(
+        "/api/users/me/password",
+        json={"current_password": "x" * 1024, "new_password": _VALID_PASSWORD},
+    )
+    assert resp.status_code == 204
+    assert fake.calls[0]["current_password"] == "x" * 1024
+
+
+def test_change_password_rejects_a_current_password_past_the_cap() -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = _client(user, change_password=fake)
+    resp = client.put(
+        "/api/users/me/password",
+        json={"current_password": "x" * 1025, "new_password": _VALID_PASSWORD},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []
+
+
+def test_delete_account_accepts_a_password_at_the_cap() -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = _client(user, delete_account=fake)
+    resp = client.request("DELETE", "/api/users/me", json={"password": "x" * 1024})
+    assert resp.status_code == 204
+    assert fake.calls[0]["password"] == "x" * 1024
+
+
+def test_delete_account_rejects_a_password_past_the_cap() -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = _client(user, delete_account=fake)
+    resp = client.request("DELETE", "/api/users/me", json={"password": "x" * 1025})
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []

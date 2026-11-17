@@ -60,7 +60,11 @@ from mc_server_dashboard_api.identity.domain.errors import (
     UsernameAlreadyExistsError,
     UserNotFoundError,
 )
-from mc_server_dashboard_api.identity.domain.value_objects import UserId
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    EMAIL_MAX_LENGTH,
+    USERNAME_MAX_LENGTH,
+    UserId,
+)
 
 router = APIRouter(route_class=RequestBodyLimitRoute)
 
@@ -102,8 +106,8 @@ class AdminCreateUserRequest(BaseModel):
     # Same input contract as open registration (username, email, password); the
     # structural bounds mirror ``RegisterUserRequest`` so the admin path and the
     # open path validate identically before the password policy runs.
-    username: str = Field(min_length=1)
-    email: str = Field(min_length=1)
+    username: str = Field(min_length=1, max_length=USERNAME_MAX_LENGTH)
+    email: str = Field(min_length=1, max_length=EMAIL_MAX_LENGTH)
     password: str = Field(min_length=1, max_length=1024)
 
 
