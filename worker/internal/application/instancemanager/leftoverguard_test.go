@@ -790,6 +790,28 @@ func TestReclaimDeletedServerCommandRemovesAnUnheldScratchWithNoLeftover(t *test
 	}
 }
 
+// A delete report ends a recorded leftover even when the server's scratch dir is
+// gone (issue #3794): the record alone admits the id, and the reclaim then has no
+// dir to remove.
+func TestReclaimDeletedServerCommandEndsALeftoverWithNoScratchDir(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	g.recordLeftover(s1)
+	dir := filepath.Join(m.scratchDir, s1)
+
+	if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"}); !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	want := []string{"end " + s1 + " " + dir, "busy " + s1}
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Equal(g.callLog(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // Widening the report's gate to any scratch dir does not widen what the reclaim
 // touches (issue #3794): a running id and a reserved one, each with a marker-only
 // dir, are queued but skipped at reserve(), before the leftover check, and keep
