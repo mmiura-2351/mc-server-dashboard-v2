@@ -357,7 +357,8 @@ CRC32 and ISIZE must match, and only another gzip member or zero padding may
 follow the gzip stream. So the gate refuses a header past the first that does
 not read, which restore takes for the end and so cuts the member list short, a
 missing or cut marker, a second tar after the first and bytes after the gzip
-stream, all of which restore and the probe accept today (issue #3798). Each member is first read without the conventional
+stream, all of which restore and the probe accept today (issue #3798). Each
+member is first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
 every other member, so `./world/level.dat` is judged, restored and checked

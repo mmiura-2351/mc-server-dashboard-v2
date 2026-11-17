@@ -97,12 +97,13 @@ def _by_gnu_tar(*options: str) -> Callable[[Path], bytes]:
 
 
 def _walk(
-    archive: bytes, *, gzipped: bool, read_data: bool = True
+    archive: bytes, *, gzipped: bool, data: str = "read"
 ) -> tuple[list[str], int]:
     """The member names, and the bytes read past the end-of-archive marker.
 
-    Without ``read_data`` the walk skips each member's data, as ``tarfile`` does
-    by seeking over it.
+    ``data`` is how much of each member's data the caller reads: all of it
+    (``read``), none, so ``tarfile`` seeks over it (``skipped``), or one byte
+    (``partly``).
     """
 
     body = io.BytesIO(gzip.compress(archive) if gzipped else archive)
@@ -111,9 +112,9 @@ def _walk(
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         for member in stream.members(tar):
             names.append(member.name)
-            data = tar.extractfile(member) if read_data else None
-            if data is not None:
-                data.read()
+            reader = None if data == "skipped" else tar.extractfile(member)
+            if reader is not None:
+                reader.read(-1 if data == "read" else 1)
     return names, sum(len(chunk) for chunk in stream.read_past_end_marker())
 
 
@@ -122,6 +123,7 @@ def _names(stream: EndCheckedReader, tar: tarfile.TarFile) -> list[str]:
 
 
 _both = pytest.mark.parametrize("gzipped", [False, True], ids=["tar", "tar.gz"])
+_each_data_read = pytest.mark.parametrize("data", ["read", "skipped", "partly"])
 
 _LONG = "d/" + "n" * 120  # over ustar's 100 characters
 
@@ -173,16 +175,16 @@ _ACCEPTED: list[object] = [
 
 
 @_both
-@pytest.mark.parametrize("read_data", [True, False], ids=["read", "skipped"])
+@_each_data_read
 @pytest.mark.parametrize(("produce", "names"), _ACCEPTED)
 def test_an_archive_that_ends_at_its_marker_reads_whole(
     produce: Callable[[Path], bytes],
     names: list[str],
     gzipped: bool,
-    read_data: bool,
+    data: str,
     tmp_path: Path,
 ) -> None:
-    walk = _walk(produce(tmp_path), gzipped=gzipped, read_data=read_data)
+    walk = _walk(produce(tmp_path), gzipped=gzipped, data=data)
 
     assert walk[0] == names
 
@@ -209,16 +211,26 @@ def _header(
     typ: bytes = b"0",
     size: int = 0,
     size_field: bytes | None = None,
+    sparse: tuple[tuple[int, int], ...] = (),
     isextended: bool = False,
+    realsize: int = 0,
 ) -> bytes:
-    """One header block built by hand, its checksum valid."""
+    """One header block built by hand, its checksum valid.
+
+    ``sparse``, ``isextended`` and ``realsize`` are an old-GNU sparse header's
+    map (offset and size of each data region), extension flag and real size.
+    """
 
     block = bytearray(512)
     block[: len(name)] = name.encode()
     block[124:136] = size_field or b"%011o\0" % size
     block[156:157] = typ
     block[257:265] = b"ustar  \0"
+    for i, (offset, length) in enumerate(sparse):
+        block[386 + 24 * i : 410 + 24 * i] = b"%011o\0%011o\0" % (offset, length)
     block[482] = isextended  # an old-GNU sparse extension block follows
+    if realsize:
+        block[483:495] = b"%011o\0" % realsize
     block[148:156] = b" " * 8
     block[148:156] = b"%06o\0 " % sum(block)
     return bytes(block)
@@ -294,6 +306,23 @@ _REFUSED: list[object] = [
     ),
     # No marker, after member data that ends in a block of zeros.
     pytest.param(lambda _: _tar({"z.bin": bytes(512)})[:1024], id="zero-block-data"),
+    # A marker one byte short. The sparse member's data is read as 1 byte, then
+    # 512 zeros; after it the walk reads 1 byte, then the 511 left: 512 in all,
+    # so only the last read, 511 bytes, shows the marker is cut.
+    pytest.param(
+        lambda _: (
+            _header(
+                "s.bin",
+                typ=b"S",
+                size=513,
+                sparse=((0, 1), (1000, 512)),
+                realsize=4096,
+            )
+            + b"X".ljust(1024, b"\0")
+            + bytes(511)
+        ),
+        id="cut-marker-after-sparse-data",
+    ),
     # Headers built with a valid checksum that tarfile gives up on only after
     # reading a block of zeros: its last read alone looks like the marker.
     pytest.param(lambda _: _A + _SPARSE_NEGATIVE + _ZEROS, id="sparse-negative-size"),
@@ -336,12 +365,13 @@ _REFUSED: list[object] = [
 
 
 @_both
+@_each_data_read
 @pytest.mark.parametrize("produce", _REFUSED)
 def test_an_archive_that_does_not_end_at_its_marker_is_refused(
-    produce: Callable[[Path], bytes], gzipped: bool, tmp_path: Path
+    produce: Callable[[Path], bytes], gzipped: bool, data: str, tmp_path: Path
 ) -> None:
     with pytest.raises(tarfile.ReadError):
-        _walk(produce(tmp_path), gzipped=gzipped)
+        _walk(produce(tmp_path), gzipped=gzipped, data=data)
 
 
 @_both
