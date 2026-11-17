@@ -881,8 +881,7 @@ def _read_capped(reader: IO[bytes], total: int, max_bytes: int) -> bytes:
     delivers more than the member's parsed size. ``tarfile`` stops at
     ``member.size`` (for a GNU sparse member, the declared real size, not the
     header's size field). ``zipfile`` stops at the central directory's
-    ``file_size`` and never reads the local header's sizes; an under-reported
-    ``file_size`` truncates the member and fails its CRC check.
+    ``file_size`` and ignores the local header's sizes.
     """
 
     out = bytearray()
