@@ -109,7 +109,8 @@ worker to see what ran before it. A test that hangs until pytest-timeout's
 120 s limit still gets a line (`failed`, or `error` when it hung in a fixture),
 and the timeout's traceback dump is in `api.log`. Only a run killed from
 outside leaves the tests still running without a line; the last line of each
-worker then shows where it stopped.
+worker then shows where it stopped. `argon2-canary.log` there is the argon2
+canary's, which runs beside the api chain ([`AGENTS.md`](AGENTS.md) Section 3).
 
 ### Per-module commands
 
