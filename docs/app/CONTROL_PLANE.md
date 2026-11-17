@@ -633,11 +633,21 @@ Notes:
   then stops the start until the reconciler acts on the Worker's report, and a
   stop retried before that report only releases the server. Whether a
   cancelled commit can raise before its flip is visible is also open. Both
-  are tracked in issue #3766. A failed start's revert also adds to the count,
-  but it sends no stop. A start that was already queued when such a revert
-  landed is still not caught (issue #3741). The count lives in the API
-  process. This holds because the API runs as a single instance
-  (REQUIREMENTS.md NFR-SCALE-1).
+  are tracked in issue #3766. The count also tells a failed start's revert
+  whether the intent is still its own (issue #3741). The revert undoes the
+  intent only if the count is still the one the start read and the server is
+  still `desired=running` on the start's Worker. Otherwise a newer stop or
+  start owns the server, and the revert leaves it, and its placement count,
+  alone. The revert makes that check and its write under a per-server lock in
+  the API process, which every start also holds from reading the count to
+  committing its intent. It is not the lifecycle lock: backup uploads and
+  deletes, prunes and the integrity sweep hold that lock across Storage I/O,
+  and a revert waiting behind them would give up. A revert adds to the count,
+  also when its commit raises, so a re-sent start of the same intent that is
+  not yet queued is not sent. It sends no stop, so a re-sent start already
+  queued when the revert lands still runs.
+  The count lives in the API process. This holds because the API runs as a
+  single instance (REQUIREMENTS.md NFR-SCALE-1).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
