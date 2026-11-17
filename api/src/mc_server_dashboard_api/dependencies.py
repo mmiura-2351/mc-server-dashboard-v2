@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import hmac
 import logging
 import time
 import uuid
@@ -125,6 +124,7 @@ from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
 from mc_server_dashboard_api.fleet.adapters.clock import (
     SystemClock as FleetSystemClock,
 )
+from mc_server_dashboard_api.fleet.adapters.credential import credential_matches
 from mc_server_dashboard_api.fleet.adapters.drain_store import (
     SqlAlchemyWorkerDrainStore,
 )
@@ -1180,8 +1180,8 @@ async def has_body_credential(request: Request) -> bool:
         return False
     try:
         worker_credential = get_worker_credential(request)
-        if worker_credential is not None and hmac.compare_digest(
-            credentials.credentials.encode(), worker_credential.encode()
+        if worker_credential is not None and credential_matches(
+            credentials.credentials, worker_credential
         ):
             return True
         authentication = await _authenticate_body_token(

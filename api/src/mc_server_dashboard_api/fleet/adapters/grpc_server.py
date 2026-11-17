@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import hmac
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -51,6 +50,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     MAX_MESSAGE_BYTES,
     ControlPlaneState,
 )
+from mc_server_dashboard_api.fleet.adapters.credential import credential_matches
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import WorkerNotConnectedError
 from mc_server_dashboard_api.fleet.domain.entities import Worker, WorkerStatus
@@ -723,7 +723,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         context: aio.ServicerContext,
     ) -> None:
         presented = self._credential_from_metadata(context)
-        if presented is None or not hmac.compare_digest(presented, self._credential):
+        if presented is None or not credential_matches(presented, self._credential):
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "worker credential rejected"
             )
