@@ -84,6 +84,7 @@ from tests.servers.fakes import (
     FakeFileStore,
     FakeJarProvisioner,
     FakeServerNotifier,
+    FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
 )
@@ -1693,6 +1694,121 @@ async def test_a_start_the_worker_refused_failed() -> None:
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
 
 
+class _ReadsFail(FakeServerRepository):
+    """A server store whose reads raise once ``failing`` is set, as in an outage."""
+
+    failing = False
+
+    async def get_by_id(self, server_id: ServerId) -> Server | None:
+        if self.failing:
+            raise ConnectionError("database unavailable")
+        return await super().get_by_id(server_id)
+
+
+class _BusyStartThenReadsFail(FakeControlPlane):
+    """Answers the start ``BUSY``, then fails every later server read."""
+
+    def __init__(self, servers: _ReadsFail) -> None:
+        super().__init__(
+            place_to=_WORKER,
+            outcomes={"start": CommandOutcome(status=CommandStatus.BUSY)},
+        )
+        self._servers = servers
+
+    async def _record(
+        self, kind: str, worker_id: WorkerId, server_id: ServerId
+    ) -> CommandOutcome:
+        outcome = await super()._record(kind, worker_id, server_id)
+        if kind == "start":
+            self._servers.failing = True
+        return outcome
+
+
+async def test_a_start_whose_outcome_check_raised_fails_and_advances() -> None:
+    # The start's row re-read decides unknown from failure. When it raises, the
+    # occurrence is still recorded and advanced, or it would re-execute every tick
+    # (issue #3799).
+    servers = _ReadsFail()
+    env = _env(control_plane=_BusyStartThenReadsFail(servers))
+    env.uow.servers = servers
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["outcome check failed"]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+
+
+async def test_a_stop_the_worker_answered_busy_is_unknown() -> None:
+    # BUSY refuses this stop command, but StopServer never reverts its intent:
+    # desired=stopped stands, which the reconciler converges (issue #3799).
+    env = _env(
+        control_plane=FakeControlPlane(
+            outcomes={"stop": CommandOutcome(status=CommandStatus.BUSY)}
+        )
+    )
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.STOPPED
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == ["worker_busy"]
+
+
+@pytest.mark.parametrize(
+    ("action", "command", "status", "detail"),
+    [
+        (ScheduleAction.STOP, None, CommandStatus.INTERNAL, "dispatch failed"),
+        (ScheduleAction.STOP, None, CommandStatus.EXPIRED, "command_expired"),
+        (ScheduleAction.RESTART, None, CommandStatus.BUSY, "worker_busy"),
+        (ScheduleAction.COMMAND, "say hi", CommandStatus.BUSY, "worker_busy"),
+    ],
+    ids=["stop-internal", "stop-expired", "restart-busy", "command-busy"],
+)
+async def test_a_refusal_other_than_a_busy_stop_still_fails(
+    action: ScheduleAction, command: str | None, status: CommandStatus, detail: str
+) -> None:
+    # Only a busy stop leaves a refused action owed: nothing re-sends a refused
+    # restart or command, and a stop the Worker refused otherwise is a settled
+    # failure the run history names (issue #3799).
+    env = _env(
+        control_plane=FakeControlPlane(
+            outcomes={action.value: CommandOutcome(status=status)}
+        )
+    )
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=action,
+        command=command,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == [detail]
+
+
 def _titles(env: _Env) -> list[str]:
     return [title for _server_id, _kind, title, _detail in env.notifier.notifications]
 
@@ -1700,7 +1816,8 @@ def _titles(env: _Env) -> list[str]:
 async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
     # The incident escalates from "may have run" to "failed", which the operator
     # must hear about. Within each level #2269's suppression still holds: a
-    # repeated unknown or failure is silent, and one success recovers.
+    # repeated unknown or failure is silent, and one success recovers, ending the
+    # incident: the next failure is a new one and notifies again.
     control_plane = _TimesOut("command")
     env = _env(control_plane=control_plane)
     server = _running_server()
@@ -1726,6 +1843,9 @@ async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
     control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.OK)
     env.clock.set(_NOW + dt.timedelta(minutes=4))
     await env.runner.tick()  # success
+    control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.INTERNAL)
+    env.clock.set(_NOW + dt.timedelta(minutes=5))
+    await env.runner.tick()  # failure: a new incident
 
     assert _runs(env, schedule) == [
         ScheduleRunOutcome.UNKNOWN,
@@ -1733,11 +1853,13 @@ async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SUCCESS,
+        ScheduleRunOutcome.FAILURE,
     ]
     assert _titles(env) == [
         "Scheduled command: outcome unknown",
         "Scheduled command failed",
         "Scheduled command recovered",
+        "Scheduled command failed",
     ]
 
 
@@ -1772,6 +1894,105 @@ async def test_an_unknown_outcome_after_a_failure_stays_silent() -> None:
         ScheduleRunOutcome.FAILURE,
     ]
     assert _titles(env) == ["Scheduled command failed"]
+
+
+async def test_a_failing_schedule_stays_silent_across_ticks_it_is_not_due() -> None:
+    # The incident lasts until a success, not until the next tick: a failing
+    # schedule that is not due on a tick is still failing, and its next failure
+    # is the same incident's (#2269).
+    refuse = FakeControlPlane(
+        outcomes={"command": CommandOutcome(status=CommandStatus.INTERNAL)}
+    )
+    env = _env(control_plane=refuse)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # failure
+    later = _NOW + dt.timedelta(minutes=30)
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], later
+    )
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()  # not due
+    env.clock.set(later)
+    await env.runner.tick()  # failure again
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+    assert _titles(env) == ["Scheduled command failed"]
+
+
+async def test_a_schedule_deleted_between_ticks_leaves_no_toast_state() -> None:
+    # A schedule deleted while it was failing never reaches the claim or the
+    # record that would forget it; the next tick drops its toast state, or the
+    # entry would stay until the API restarts (issue #3799).
+    refuse = FakeControlPlane(
+        outcomes={"command": CommandOutcome(status=CommandStatus.INTERNAL)}
+    )
+    env = _env(control_plane=refuse)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # failure
+    assert schedule.id in env.runner._notifying
+
+    await env.uow.schedules.delete(schedule.id)
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()
+
+    assert schedule.id not in env.runner._notifying
+
+
+async def test_a_deleted_schedules_pending_retry_still_logs_the_delete(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The toast-state prune leaves a pending backup retry alone: the retry still
+    # reaches its claim, which logs the delete once and dispatches nothing
+    # (issue #3799, as test_schedule_runner_delete_races pins against Postgres).
+    caplog.set_level(logging.INFO)
+    env = _env(control_plane=FakeControlPlane(unavailable_kinds={"snapshot"}))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # failure: arms the retry and the toast state
+    dispatched = list(env.control_plane.dispatched)
+    await env.uow.schedules.delete(schedule.id)
+    caplog.clear()
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert env.control_plane.dispatched == dispatched
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and str(schedule.id.value) in record.getMessage()
+    ] == [
+        f"schedule {schedule.id.value} was deleted before its backup retry; "
+        "not dispatched"
+    ]
 
 
 class _UnknownExecute(ExecuteScheduleAction):
