@@ -151,8 +151,15 @@ _Patch = Callable[[pytest.MonkeyPatch, _Held, str], None]
 _Run = Callable[[Path], Awaitable[object]]
 
 
+# Built before any test patches ``tarfile.open``, which ``tar_bytes`` calls.
+_PLAIN_TAR = tar_bytes({"a.txt": b"A"})
+
+
 async def _member_parts(spool: Path) -> object:
-    return await _archive_member_parts(spool, "a.txt", "r:*").__anext__()
+    # The snapshot ingest reads a plain tar, so this site gets one beside the spool.
+    plain = spool.with_name("spool.tar")
+    plain.write_bytes(_PLAIN_TAR)
+    return await _archive_member_parts(plain, "a.txt", "r:").__anext__()
 
 
 async def _file_first_part(spool: Path) -> object:

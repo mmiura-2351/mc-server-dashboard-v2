@@ -2210,11 +2210,11 @@ export interface paths {
          *
          *     The "proven complete" gate: a missing Content-Length is 411, an oversized one
          *     is 413, a streamed-byte count that does not match Content-Length is 400 (as is
-         *     a Worker that disconnects mid-upload), a body that does not read as a tar is
-         *     422 ``invalid_archive``, and a body that stages zero files (an empty working
-         *     set) is 400 ``empty_snapshot`` — in every reject path the staged transfer is
-         *     aborted, so ``current/`` keeps the prior authoritative copy (FR-DATA-6,
-         *     STORAGE.md Section 4.1).
+         *     a Worker that disconnects mid-upload), a body that does not read as a plain,
+         *     uncompressed tar is 422 ``invalid_archive``, and a body that stages zero files
+         *     (an empty working set) is 400 ``empty_snapshot`` — in every reject path the
+         *     staged transfer is aborted, so ``current/`` keeps the prior authoritative copy
+         *     (FR-DATA-6, STORAGE.md Section 4.1).
          *
          *     The cap and the declared length are both enforced *during* streaming, not only
          *     against the header: an under-declaring client (small Content-Length, longer

@@ -146,6 +146,39 @@ def tar_with_link_member(
     return buf.getvalue()
 
 
+# A non-numeric GNU sparse field, one per place CPython's ``tarfile`` converts it
+# with a bare ``int()`` while it reads a header, and so raises ``ValueError``
+# (issue #3790): the PAX header fields, and the format 1.0 map, which opens the
+# member's data. Each maps to the member's PAX headers and data.
+BAD_SPARSE_FIELDS: dict[str, tuple[dict[str, str], bytes]] = {
+    "size": ({"GNU.sparse.size": "x"}, b"A"),
+    "realsize": ({"GNU.sparse.realsize": "x"}, b"A"),
+    "map": ({"GNU.sparse.map": "x"}, b"A"),
+    "1.0-map": ({"GNU.sparse.major": "1", "GNU.sparse.minor": "0"}, b"x\n"),
+}
+
+
+def tar_with_a_bad_sparse_field(field: str, *, after: dict[str, bytes]) -> bytes:
+    """A PAX tar of the ``after`` members, then one whose sparse ``field`` is bad.
+
+    ``field`` is a :data:`BAD_SPARSE_FIELDS` key. With no ``after`` members the
+    bad header is the first one, which ``tarfile.open`` itself reads.
+    """
+
+    pax_headers, data = BAD_SPARSE_FIELDS[field]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tar:
+        for rel, content in after.items():
+            info = tarfile.TarInfo(name=rel)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+        info = tarfile.TarInfo(name="world/sparse.dat")
+        info.size = len(data)
+        info.pax_headers = pax_headers
+        tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
 def bomb_targz(*, decompressed: int = 4096) -> bytes:
     """A self-contained ``tar.gz`` whose single member inflates to ``decompressed``.
 

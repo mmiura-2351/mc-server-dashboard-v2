@@ -102,6 +102,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     is_version_ring_member,
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
+    HeaderCheckedTarInfo,
     archive_read_errors_as_unreadable,
     refuse_unrestorable_member,
 )
@@ -3908,14 +3909,18 @@ def _plain_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
 
 
 def _extract_tar_into(spool: Path, dest: Path) -> None:
-    """Stream-extract the tar at ``spool`` into ``dest``, sandboxed.
+    """Stream-extract the plain tar at ``spool`` into ``dest``, sandboxed.
 
-    Stream mode (``r|*``) reads the spool incrementally so the whole archive is
-    never held in memory at once. :func:`_plain_member_filter` refuses unsafe and
-    link members.
+    Stream mode (``r|``) reads the spool incrementally so the whole archive is
+    never held in memory at once. A snapshot is a plain tar, so a compressed one
+    does not read as a tar at all (issue #3786). :func:`_plain_member_filter`
+    refuses unsafe and link members.
     """
 
-    with open(spool, "rb") as fileobj, tarfile.open(fileobj=fileobj, mode="r|*") as tar:
+    with (
+        open(spool, "rb") as fileobj,
+        tarfile.open(fileobj=fileobj, mode="r|", tarinfo=HeaderCheckedTarInfo) as tar,
+    ):
         tar.extractall(dest, filter=_ingest_member_filter)
 
 
@@ -3996,7 +4001,7 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     try:
         with (
             archive_read_errors_as_unreadable(),
-            tarfile.open(archive, mode="r:gz") as tar,
+            tarfile.open(archive, mode="r:gz", tarinfo=HeaderCheckedTarInfo) as tar,
         ):
             for read in tar:
                 # Read without the tar root prefix, judged and filtered, then
