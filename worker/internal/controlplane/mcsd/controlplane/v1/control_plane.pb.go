@@ -2260,9 +2260,9 @@ func (x *CloseBedrockTunnel) GetServerId() string {
 // ReclaimDeletedServer reports that the API has deleted the server named by
 // ApiCommand.server_id (issue #3679). The API sends it to every connected
 // Worker once the delete has committed, without waiting for the result. A
-// Worker that holds no working set for the id does nothing. One that does
-// reclaims it as it does an id listed in RegisterAck.unknown_held_server_ids,
-// which the Worker likewise acts on only for ids it holds: it ends a container
+// Worker that holds no working set for the id, and records no container a
+// failed start of it left behind, does nothing. Otherwise it reclaims the id as
+// it does one listed in RegisterAck.unknown_held_server_ids: it ends a container
 // a failed start left behind, then removes the .hydrate-<id>-* leftovers and
 // the scratch dir, and keeps .displaced-<id>. The reclaim runs in the
 // background, one at a time per Worker, and the Worker answers once the id is

@@ -26,6 +26,9 @@ type fakeGuard struct {
 	endErr  error
 	busyErr error
 	calls   []string
+	// leftovers are the server ids the driver records a leftover for. Asking is a
+	// plain query, so it is not logged in calls.
+	leftovers map[string]bool
 	// onEnd, when set, runs inside EndLeftovers, so a test can look at the
 	// working set at the moment the leftover is ended.
 	onEnd func()
@@ -52,6 +55,21 @@ func (g *fakeGuard) Busy(ctx context.Context, serverID string) error {
 		return err
 	}
 	return g.busyErr
+}
+
+func (g *fakeGuard) HasLeftovers(serverID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.leftovers[serverID]
+}
+
+func (g *fakeGuard) recordLeftover(serverID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.leftovers == nil {
+		g.leftovers = map[string]bool{}
+	}
+	g.leftovers[serverID] = true
 }
 
 func (g *fakeGuard) set(endErr, busyErr error) {
@@ -472,6 +490,90 @@ func TestReclaimDeletedServerReportsDuringAReclaimJoinItsNextPass(t *testing.T) 
 	}
 	if passes := logged(h, slog.LevelDebug, reclaimPassMsg); passes != 2 {
 		t.Fatalf("the reclaim made %d passes over the reported ids, want 2", passes)
+	}
+}
+
+// A report that arrives after the Worker's previous reclaim has ended starts a
+// new one (issue #3679). The single-flight flag is released when a reclaim ends;
+// one left set would queue every later report's id for a reclaim that never runs,
+// which is this issue's symptom again for every delete after the first burst.
+func TestReclaimDeletedServerReportAfterAReclaimEndedStartsAnother(t *testing.T) {
+	m, _, _ := newGuardedManager(t)
+	first := seedScratch(t, m, s1)
+	second := seedScratch(t, m, s2)
+	report := func(id string) {
+		t.Helper()
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	report(s1)
+	// Wait for the reclaim to end, not only for s1's scratch to go: a report that
+	// lands before the reclaim's last, empty pass is taken by the same reclaim.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.Lock()
+		running := m.reclaimingReported
+		m.mu.Unlock()
+		_, err := os.Stat(first)
+		if !running && os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the first reclaim never ended: still running = %v, scratch stat err = %v", running, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	report(s2)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(second)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the scratch reported after the first reclaim ended was never reclaimed: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A server that never published anything hydrates to a scratch holding only its
+// generation marker, which the launch guard accepts, so a start the daemon did not
+// answer can leave a container recorded for an id whose scratch holds no working
+// set (issue #3679). A delete report still ends that container and removes the
+// dir: the report reclaims an id the driver records a leftover for, as well as a
+// held one.
+func TestReclaimDeletedServerCommandEndsALeftoverOfAnUnheldScratch(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := filepath.Join(m.scratchDir, s1)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	g.recordLeftover(s1)
+
+	if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"}); !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(dir)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim never removed the marker-only scratch: stat err = %v; guard calls = %v", err, g.callLog())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s1 + " " + dir, "busy " + s1}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
 	}
 }
 

@@ -686,6 +686,13 @@ func (u *unremovedStarts) add(serverID, id string) {
 	u.ids[serverID] = append(u.ids[serverID], id)
 }
 
+// has reports whether any container is recorded for serverID.
+func (u *unremovedStarts) has(serverID string) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return len(u.ids[serverID]) > 0
+}
+
 // take returns the containers recorded for serverID and drops them from the
 // record.
 func (u *unremovedStarts) take(serverID string) []string {
@@ -751,6 +758,13 @@ func (d *Driver) EndLeftovers(ctx context.Context, serverID, workingDir string) 
 		return fmt.Errorf("containerdriver: %w", err)
 	}
 	return nil
+}
+
+// HasLeftovers implements execution.LeftoverGuard (issue #3679): whether a
+// container a failed start left behind is recorded for serverID. It reads the
+// record only.
+func (d *Driver) HasLeftovers(serverID string) bool {
+	return d.unremoved.has(serverID)
 }
 
 // Busy implements execution.LeftoverGuard (issue #3672). A recorded leftover

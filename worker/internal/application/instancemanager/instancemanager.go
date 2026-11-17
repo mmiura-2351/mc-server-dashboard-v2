@@ -3320,10 +3320,14 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // (issue #3679). Before it, a Worker that stayed connected kept a deleted server's
 // leftover container and scratch until it next registered.
 //
-// It acts only for an id this Worker holds a working set for: the set HeldServers
-// advertises, and so the only ids a registration's reclaim is ever offered (the
-// session intersects the ack with it). The API reports a delete to every connected
-// Worker, and one that holds nothing for the id answers without asking the driver.
+// It acts only for an id this Worker holds a working set for, or one its driver
+// records a leftover container for. The first is the set HeldServers advertises,
+// and so the only ids a registration's reclaim is ever offered (the session
+// intersects the ack with it). The second covers a server that never published
+// anything: its scratch holds only the generation marker, which the launch guard
+// accepts, so a start the daemon did not answer can leave a container recorded for
+// an id that is not held. The API reports a delete to every connected Worker, and
+// one with neither for the id answers without asking the backend anything.
 //
 // A held id is queued for the reclaim, which runs as background work Close joins,
 // so the per-id body keeps the join it relies on (issue #2878), and the command
@@ -3335,7 +3339,7 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // says only that the reclaim will run. An id the reclaim skips keeps its scratch,
 // and with it the advertisement that offers the id again at the next registration.
 func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.CommandResult {
-	if !hasWorkingSet(filepath.Join(m.scratchDir, cmd.ServerID)) {
+	if !hasWorkingSet(filepath.Join(m.scratchDir, cmd.ServerID)) && !m.recordsLeftovers(cmd.ServerID) {
 		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 	}
 	m.mu.Lock()
@@ -3357,6 +3361,17 @@ func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.Comman
 		m.reclaimReportedDeletes()
 	}()
 	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// recordsLeftovers reports whether any LeftoverGuard driver records a leftover
+// for serverID. It asks the backend nothing.
+func (m *Manager) recordsLeftovers(serverID string) bool {
+	for _, d := range m.drivers {
+		if g, ok := d.(execution.LeftoverGuard); ok && g.HasLeftovers(serverID) {
+			return true
+		}
+	}
+	return false
 }
 
 // reclaimPassMsg is the DEBUG record each pass of reclaimReportedDeletes emits.
