@@ -210,3 +210,44 @@ func TestStopServerWithoutBedrockTunnelerConfigured(t *testing.T) {
 		t.Fatalf("StopServer = %+v, want success", res)
 	}
 }
+
+// A stale OpenBedrockTunnel whose session has dropped (its context cancelled)
+// does not reopen the tunnel a newer session's Close took down (issue #3658):
+// the handler opens nothing on a done context.
+func TestStaleOpenBedrockTunnelDoesNotReopenClosedTunnel(t *testing.T) {
+	bt := &fakeBedrockTunneler{}
+	m := newManager(t, &fakeDriver{}, nil).WithBedrockTunneler(bt)
+	startRunning(t, m)
+
+	if res := m.Handle(context.Background(), closeBedrockCmd()); !res.Success {
+		t.Fatalf("CloseBedrockTunnel = %+v, want success", res)
+	}
+	dropped, cancel := context.WithCancel(context.Background())
+	cancel()
+	if res := m.Handle(dropped, openBedrockCmd()); res.Success {
+		t.Fatalf("OpenBedrockTunnel on a dropped session = success, want failure")
+	}
+	if _, calls := bt.lastOpen(); calls != 0 {
+		t.Fatalf("Open called %d times on a dropped session, want 0", calls)
+	}
+}
+
+// A stale CloseBedrockTunnel whose session has dropped does not take down the
+// tunnel a newer session opened (issue #3658).
+func TestStaleCloseBedrockTunnelDoesNotCloseReopenedTunnel(t *testing.T) {
+	bt := &fakeBedrockTunneler{}
+	m := newManager(t, &fakeDriver{}, nil).WithBedrockTunneler(bt)
+	startRunning(t, m)
+
+	if res := m.Handle(context.Background(), openBedrockCmd()); !res.Success {
+		t.Fatalf("OpenBedrockTunnel = %+v, want success", res)
+	}
+	dropped, cancel := context.WithCancel(context.Background())
+	cancel()
+	if res := m.Handle(dropped, closeBedrockCmd()); res.Success {
+		t.Fatalf("CloseBedrockTunnel on a dropped session = success, want failure")
+	}
+	if calls := bt.closeCalls(); len(calls) != 0 {
+		t.Fatalf("Close calls = %v on a dropped session, want none", calls)
+	}
+}
