@@ -86,7 +86,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import make_worker
-from tests.servers.contract_table import worker_status
+from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -111,7 +111,9 @@ class _Repository(FakeServerRepository):
     ``after_next_read`` runs once, inside the next ``get_by_id``, after the row
     value has been taken: a write it makes is one the reader did not see.
     ``pause_next_flip`` holds the next ``update_lifecycle`` at its entry, so a stop
-    that has read the row waits there, just before its write.
+    that has read the row waits there, just before its write. While
+    ``stage_flips`` is set, an ``update_lifecycle`` that matches is held back
+    instead of written, until ``land_staged``: a commit that has not landed yet.
     """
 
     def __init__(self) -> None:
@@ -119,6 +121,8 @@ class _Repository(FakeServerRepository):
         self.after_next_read: Hook | None = None
         self.pause_next_flip: asyncio.Event | None = None
         self.flip_paused = asyncio.Event()
+        self.stage_flips = False
+        self._staged: list[tuple[Server, DesiredState, bool]] = []
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         loaded = await super().get_by_id(server_id)
@@ -138,9 +142,27 @@ class _Repository(FakeServerRepository):
         if gate is not None:
             self.flip_paused.set()
             await gate.wait()
+        if self.stage_flips:
+            current = self.by_id.get(server.id)
+            if current is None or current.desired_state is not expected_from:
+                return False
+            if require_unassigned and current.assigned_worker_id is not None:
+                return False
+            self._staged.append((server, expected_from, require_unassigned))
+            return True
         return await super().update_lifecycle(
             server, expected_from=expected_from, require_unassigned=require_unassigned
         )
+
+    async def land_staged(self) -> None:
+        self.stage_flips = False
+        staged, self._staged = self._staged, []
+        for server, expected_from, require_unassigned in staged:
+            assert await super().update_lifecycle(
+                server,
+                expected_from=expected_from,
+                require_unassigned=require_unassigned,
+            )
 
 
 class _CommitRunsHook(FakeUnitOfWork):
@@ -157,6 +179,51 @@ class _CommitRunsHook(FakeUnitOfWork):
             await hook()
 
 
+class _ExitRunsHook(FakeUnitOfWork):
+    """A unit of work that runs ``on_next_exit`` once, as its next block closes."""
+
+    def __init__(self, *, servers: FakeServerRepository) -> None:
+        super().__init__(servers=servers)
+        self.on_next_exit: Hook | None = None
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        hook, self.on_next_exit = self.on_next_exit, None
+        if hook is not None:
+            await hook()
+
+
+class _CommitLandsLater(FakeUnitOfWork):
+    """A unit of work whose commit lands its staged writes only once ``land`` is set."""
+
+    def __init__(self, *, servers: _Repository) -> None:
+        super().__init__(servers=servers)
+        self._repo = servers
+        self.entered = asyncio.Event()
+        self.land = asyncio.Event()
+
+    async def commit(self) -> None:
+        self.entered.set()
+        await self.land.wait()
+        await self._repo.land_staged()
+        await super().commit()
+
+
+class _CommitLandsThenRaises(FakeUnitOfWork):
+    """A unit of work whose commit lands, then raises ``error`` (an ambiguous commit).
+
+    A lost response raises a database error; a client disconnect cancels the
+    request task at the same await.
+    """
+
+    def __init__(self, *, servers: FakeServerRepository, error: BaseException) -> None:
+        super().__init__(servers=servers)
+        self._error = error
+
+    async def commit(self) -> None:
+        await super().commit()
+        raise self._error
+
+
 class _Worker(FakeControlPlane):
     """One Worker, as far as these races need it.
 
@@ -164,12 +231,18 @@ class _Worker(FakeControlPlane):
     one that is not live answers ``SERVER_NOT_FOUND`` (instancemanager
     handleStop). Each hydrate takes the next entry of ``hydrate_hooks``, if any:
     it runs before the hydrate answers, and a returned outcome replaces the answer.
+    Each start takes the next entry of ``start_hooks`` the same way; a start whose
+    answer is replaced launches nothing. ``stop_sent`` is set once a stop has run
+    on the Worker; while ``hold_stop_answer`` is set, its answer waits for it.
     """
 
     def __init__(self, *, place_to: WorkerId | None = None) -> None:
         super().__init__(place_to=place_to)
         self.live: set[ServerId] = set()
         self.hydrate_hooks: list[Callable[[], Awaitable[CommandOutcome | None]]] = []
+        self.start_hooks: list[Callable[[], Awaitable[CommandOutcome | None]]] = []
+        self.stop_sent = asyncio.Event()
+        self.hold_stop_answer: asyncio.Event | None = None
 
     async def hydrate(
         self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
@@ -203,6 +276,10 @@ class _Worker(FakeControlPlane):
             memory_limit_bytes=memory_limit_bytes,
             cpu_millis=cpu_millis,
         )
+        if self.start_hooks:
+            replaced = await self.start_hooks.pop(0)()
+            if replaced is not None:
+                return replaced
         self.live.add(server_id)
         return outcome
 
@@ -210,13 +287,18 @@ class _Worker(FakeControlPlane):
         self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
     ) -> CommandOutcome:
         await super().stop(worker_id=worker_id, server_id=server_id, force=force)
-        if server_id not in self.live:
-            return CommandOutcome(
+        if server_id in self.live:
+            self.live.discard(server_id)
+            outcome = CommandOutcome(status=CommandStatus.OK)
+        else:
+            outcome = CommandOutcome(
                 status=worker_status("StopServer", "instance_stopped"),
                 message="instancemanager: server not running",
             )
-        self.live.discard(server_id)
-        return CommandOutcome(status=CommandStatus.OK)
+        self.stop_sent.set()
+        if self.hold_stop_answer is not None:
+            await self.hold_stop_answer.wait()
+        return outcome
 
 
 class _World:
@@ -288,6 +370,13 @@ class _World:
             community_id=self.community, server_id=server_id or self.server_id
         )
 
+    async def drain(self, uow: FakeUnitOfWork | None = None) -> list[ServerId]:
+        return await StopServersAssignedToWorker(
+            uow=uow or FakeUnitOfWork(servers=self.repo),
+            clock=FakeClock(_NOW),
+            stop_intents=self.intents,
+        )(worker_id=self.worker)
+
     def after_hydrate_and_next_read(self, hook: Hook) -> None:
         """Run ``hook`` inside the read that follows the next hydrate: the re-read."""
 
@@ -310,11 +399,11 @@ class _World:
         return row.desired_state, row.assigned_worker_id
 
 
-async def test_a_stop_that_lands_after_the_re_read_keeps_the_start_unsent() -> None:
-    # The window #3737 left open: the stop commits after the start's re-read and
-    # is sent first. The Worker answers it SERVER_NOT_FOUND and the stop releases
-    # the row, so a start sent now would run under (stopped, unassigned). The
-    # start sees the bump instead and sends nothing.
+async def test_a_stop_that_lands_during_the_re_read_keeps_the_start_unsent() -> None:
+    # The window #3737 left open: the stop commits once the start's re-read has
+    # taken the row, and is sent first. The Worker answers it SERVER_NOT_FOUND and
+    # the stop releases the row, so a start sent now would run under (stopped,
+    # unassigned). The start sees the bump instead and sends nothing.
     world = _World()
 
     async def stop() -> None:
@@ -381,6 +470,205 @@ async def test_a_re_sent_start_reads_the_counter_before_it_finds_the_intent() ->
     # hydrate (the newer one's left the Worker holding the store's generation)
     # and sends nothing.
     assert world.kinds() == ["stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+
+
+async def test_a_stop_that_lands_as_the_re_read_closes_keeps_the_start_unsent() -> None:
+    # The re-read's unit of work awaits as it closes. A stop that commits there
+    # was not seen by the re-read, so the count must be compared after the block
+    # has closed, not inside it.
+    world = _World()
+    uow = _ExitRunsHook(servers=world.repo)
+
+    async def stop() -> None:
+        await world.stop()
+
+    async def arm() -> None:
+        uow.on_next_exit = stop
+
+    world.after_hydrate(arm)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server(uow)(
+            community_id=world.community, server_id=world.server_id
+        )
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+
+
+async def test_a_stop_runnable_at_the_compare_is_sent_after_the_start() -> None:
+    # The other branch: the stop is ready to run when the start compares, but it
+    # has not run yet. Nothing between the compare and the enqueue may await, so
+    # the start goes out first, and the stop behind it is a real stop.
+    world = _World()
+    uow = _ExitRunsHook(servers=world.repo)
+    stops: list[asyncio.Task[Server]] = []
+
+    async def schedule_stop() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+
+    async def arm() -> None:
+        uow.on_next_exit = schedule_stop
+
+    world.after_hydrate(arm)
+
+    await world.start_server(uow)(
+        community_id=world.community, server_id=world.server_id
+    )
+    await stops[0]
+
+    assert world.kinds() == ["hydrate", "start", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+
+
+async def test_a_stop_still_waiting_on_the_worker_has_already_bumped() -> None:
+    # The stop is on the Worker, which has answered nothing yet, when the start
+    # compares. It must have bumped before it was sent: a stop that bumped only on
+    # the answer would let the start follow it out.
+    world = _World()
+    answer = asyncio.Event()
+    world.cp.hold_stop_answer = answer
+    stops: list[asyncio.Task[Server]] = []
+
+    async def stop_is_sent() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+        await world.cp.stop_sent.wait()
+
+    world.after_hydrate_and_next_read(stop_is_sent)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+    answer.set()
+    await stops[0]
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionError("commit landed, response lost"), asyncio.CancelledError()],
+    ids=["lost-response", "cancelled"],
+)
+async def test_a_stop_whose_commit_landed_but_raised_keeps_the_start_unsent(
+    error: BaseException,
+) -> None:
+    # An ambiguous commit: the flip lands, then the await raises, and no stop is
+    # sent. The flip still bumps. Otherwise the start would go out under the
+    # stopped row, and an operator who retried the stop before the Worker's first
+    # report would release the row under it: the retry takes the final snapshot
+    # and clears the assignment, and sends no stop.
+    world = _World()
+
+    async def ambiguous_stop() -> None:
+        stop = StopServer(
+            uow=_CommitLandsThenRaises(servers=world.repo, error=error),
+            control_plane=world.cp,
+            clock=FakeClock(_NOW),
+            stop_intents=world.intents,
+        )
+        with pytest.raises(type(error)):
+            await stop(community_id=world.community, server_id=world.server_id)
+
+    world.after_hydrate_and_next_read(ambiguous_stop)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+    assert world.kinds() == ["hydrate"]
+    assert world.stored() == (DesiredState.STOPPED, world.worker)
+
+    await world.stop()
+
+    assert world.kinds() == ["hydrate", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionError("commit landed, response lost"), asyncio.CancelledError()],
+    ids=["lost-response", "cancelled"],
+)
+async def test_a_drain_whose_commit_landed_but_raised_keeps_the_start_unsent(
+    error: BaseException,
+) -> None:
+    world = _World()
+
+    async def ambiguous_drain() -> None:
+        with pytest.raises(type(error)):
+            await world.drain(_CommitLandsThenRaises(servers=world.repo, error=error))
+
+    world.after_hydrate_and_next_read(ambiguous_drain)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    assert world.kinds() == ["hydrate"]
+    assert world.stored() == (DesiredState.STOPPED, world.worker)
+    assert world.cp.live == set()
+
+
+async def test_a_re_sent_start_sees_a_drain_that_was_waiting_on_its_commit() -> None:
+    # The drain's form of the stop test above: its commit is in flight while a
+    # re-send reads the count and the row, and lands while the re-send re-reads. A
+    # drain that bumped before its commit would have bumped before the re-send
+    # read the count, and the start would go out under the drained row.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    world.repo.stage_flips = True
+    uow = _CommitLandsLater(servers=world.repo)
+    drain = asyncio.create_task(world.drain(uow))
+    await uow.entered.wait()
+
+    async def drain_lands() -> None:
+        uow.land.set()
+        assert await drain == [world.server_id]
+
+    world.after_hydrate_and_next_read(drain_lands)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server().redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+
+    assert world.kinds() == ["hydrate"]
+    assert world.stored() == (DesiredState.STOPPED, world.worker)
+    assert world.cp.live == set()
+
+
+async def test_the_working_set_replay_compares_the_count_its_start_read() -> None:
+    # The #2499 replay: the Worker refuses a skip-hydrate start because the working
+    # set is gone, and the start is re-sent with a hydrate. A stop and a newer
+    # start on the same Worker land while the refused start is out. The replay
+    # must compare the count the start read at first, not one read at the replay.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    world.cp.record_held_generation(
+        worker_id=world.worker, server_id=world.server_id, generation=0
+    )
+
+    async def stop_and_restart_then_refuse() -> CommandOutcome:
+        await world.stop()
+        await world.start()
+        return CommandOutcome(
+            status=worker_status("StartServer", "working_set_absent"),
+            message=worker_message("working_set_absent.launch")
+            % "/var/lib/mcsd/scratch/s",
+        )
+
+    world.cp.start_hooks.append(stop_and_restart_then_refuse)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server().redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+
+    # The refused start, the stop and its release, the newer start, then the
+    # replay's hydrate. The replay sends no start.
+    assert world.kinds() == ["start", "stop", "snapshot", "start", "hydrate"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -463,12 +751,7 @@ async def test_a_drain_that_lands_after_the_re_read_keeps_the_start_unsent() -> 
     world = _World()
 
     async def drain() -> None:
-        drained = await StopServersAssignedToWorker(
-            uow=FakeUnitOfWork(servers=world.repo),
-            clock=FakeClock(_NOW),
-            stop_intents=world.intents,
-        )(worker_id=world.worker)
-        assert drained == [world.server_id]
+        assert await world.drain() == [world.server_id]
 
     world.after_hydrate_and_next_read(drain)
 
