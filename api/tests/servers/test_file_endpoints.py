@@ -22,6 +22,7 @@ import datetime as dt
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
+from typing import cast
 from urllib.parse import quote
 
 import httpx2
@@ -89,6 +90,7 @@ from mc_server_dashboard_api.servers.application.files import (
     DirListing,
     DownloadFile,
     SearchResult,
+    UploadFile,
     WriteFile,
     file_download_grant_resource,
 )
@@ -106,6 +108,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnreadableArchiveError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -127,7 +130,8 @@ from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import FakeClock, make_user
 from tests.identity.fakes import FakeUnitOfWork as IdentityFakeUnitOfWork
-from tests.servers.fakes import FakeUnitOfWork
+from tests.servers.fakes import FakeFileStore, FakeUnitOfWork
+from tests.servers.test_files import _UNREADABLE_ARCHIVES
 from tests.storage.fake_s3 import FakeS3Store
 from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 
@@ -1119,6 +1123,48 @@ def test_upload_over_cap_is_413() -> None:
     )
     assert resp.status_code == 413
     assert resp.json()["reason"] == "file_too_large"
+
+
+def test_upload_unreadable_archive_is_422_invalid_archive() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        upload=_FakeUpload(error=UnreadableArchiveError("pack.zip")),
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": ".", "extract": "true"},
+        files={"file": ("pack.zip", b"x", "application/zip")},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+
+
+@pytest.mark.parametrize(("filename", "content"), _UNREADABLE_ARCHIVES)
+def test_upload_extract_of_an_unreadable_archive_is_422_and_writes_nothing(
+    filename: str, content: bytes
+) -> None:
+    # The real UploadFile behind the route (issue #3769): the archive reader's
+    # own exception used to escape as a 500 internal_error.
+    community, server = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_stopped_server(community, server))
+    store = FakeFileStore()
+    upload = UploadFile(uow=uow, file_store=store)
+    app = _app(member=True, allow=True)
+    cast(FastAPI, app).dependency_overrides[get_upload_file] = lambda: upload
+    client = _client(app)
+
+    resp = client.post(
+        _url(community, server, "/upload"),
+        params={"path": ".", "extract": "true"},
+        files={"file": (filename, content, "application/octet-stream")},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert store.writes == []
 
 
 # --- download --------------------------------------------------------------

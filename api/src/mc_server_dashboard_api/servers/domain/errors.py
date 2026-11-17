@@ -378,6 +378,19 @@ class FileTooLargeError(ServerError):
     """
 
 
+class UnreadableArchiveError(ServerError):
+    """An uploaded archive does not read back as the zip / tar.gz it names (#3769).
+
+    The archive reader itself failed: the body is truncated, is not an archive at
+    all, or carries damaged compressed data, an encrypted member or a compression
+    method the reader does not support. That is a verdict about the upload, unlike
+    a readable archive whose member is refused (:class:`InvalidFilePathError`) or
+    whose size breaches a cap (:class:`FileTooLargeError`), and resending the same
+    bytes cannot succeed. The edge maps this to 422 ``invalid_archive``, the reason
+    a backup upload gives a body that does not read as its archive.
+    """
+
+
 class FileAlreadyExistsError(ServerError):
     """A rename targeted a destination path that already exists (issue #259).
 
@@ -534,9 +547,11 @@ class InvalidExportMetadataError(ServerError):
 
     The import (issue #274) reads the descriptor from the uploaded zip's root and
     validates its ``format`` version and required fields before creating anything.
-    A non-zip body, a missing/unreadable metadata member, malformed JSON, an
-    unsupported format version (legacy incompatibility is loud, not silent), or a
-    missing field is rejected; the edge maps this to 422. The ``server_type`` /
+    A missing or oversized metadata member, malformed JSON, an unsupported format
+    version (legacy incompatibility is loud, not silent), or a missing field is
+    rejected; the edge maps this to 422. A body or member the zip reader cannot
+    read is :class:`UnreadableArchiveError` instead (issue #3769). The
+    ``server_type`` /
     ``mc_version`` themselves are validated downstream by the shared create path
     (the version validator), which yields its own distinct 422 reasons.
     """

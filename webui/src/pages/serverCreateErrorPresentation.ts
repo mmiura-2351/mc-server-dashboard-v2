@@ -59,6 +59,9 @@ const CREATE_ERROR_FIELD: Record<string, "name" | "slug"> = {
 // Import-only reasons, consulted before the shared create reasons.
 const IMPORT_ERROR_KEY: Record<string, TranslationKey> = {
   invalid_export_metadata: "serverCreate.import.error.invalid_export_metadata",
+  // A body the zip reader cannot read: not a zip, truncated, or a damaged or
+  // encrypted member (issue #3769). Refused before the row is created.
+  invalid_archive: "serverCreate.import.error.invalid_archive",
   // An archive member stored under the root server.properties path, refused
   // before the row is created (issue #2869): publishing it would stand a
   // directory where the platform keeps a file. Import gets its own string

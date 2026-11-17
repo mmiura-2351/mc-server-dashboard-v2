@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     PortAlreadyTakenError,
     ServerFilesUnsettledError,
+    UnreadableArchiveError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.plugin import (
@@ -69,6 +70,11 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeUnitOfWork,
     FakeVersionValidator,
+)
+from tests.servers.test_files import (
+    _compressed_zip,
+    _with_a_damaged_member,
+    _with_its_last_member_encrypted,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -415,17 +421,55 @@ async def test_import_clears_the_archives_resource_pack_keys() -> None:
 # --- import validation -----------------------------------------------------
 
 
-async def test_import_rejects_non_zip_body() -> None:
+# Exports whose bytes do not read back as a zip (issue #3769). A body that is not
+# a zip at all fails as the metadata is read; a damaged or encrypted metadata
+# member fails there too, and a damaged working-set member fails in the
+# validate-first pass over the whole archive. Each is refused before the row is
+# created.
+_UNREADABLE_IMPORTS = [
+    pytest.param(b"not a zip", id="not-a-zip"),
+    pytest.param(
+        _with_a_damaged_member(
+            _compressed_zip(
+                {EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"L" * 64}
+            ),
+            "world/level.dat",
+        ),
+        id="damaged-member",
+    ),
+    pytest.param(
+        _with_a_damaged_member(
+            _compressed_zip({EXPORT_METADATA_FILENAME: _metadata()}),
+            EXPORT_METADATA_FILENAME,
+        ),
+        id="damaged-metadata",
+    ),
+    pytest.param(
+        # The metadata is written last: the helper encrypts the last member.
+        _with_its_last_member_encrypted(
+            _compressed_zip(
+                {"world/level.dat": b"L" * 64, EXPORT_METADATA_FILENAME: _metadata()}
+            )
+        ),
+        id="encrypted-metadata",
+    ),
+]
+
+
+@pytest.mark.parametrize("content", _UNREADABLE_IMPORTS)
+async def test_import_of_an_unreadable_archive_creates_nothing(content: bytes) -> None:
     dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
     imp = ImportServer(
         create_server=_create_server(dst_uow, dst_store), file_store=dst_store
     )
-    with pytest.raises(InvalidExportMetadataError):
+    with pytest.raises(UnreadableArchiveError):
         await imp(
             community_id=CommunityId(uuid.uuid4()),
             name="x",
-            content=b"not a zip",
+            content=content,
         )
+    assert len(dst_uow.servers.by_id) == 0
+    assert dst_store.files == {}
 
 
 async def test_import_rejects_missing_metadata() -> None:

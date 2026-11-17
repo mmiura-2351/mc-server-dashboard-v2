@@ -19,10 +19,13 @@ import datetime as dt
 import gzip
 import io
 import logging
+import random
+import struct
 import tarfile
 import threading
 import uuid
 import zipfile
+import zlib
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import replace
 
@@ -70,6 +73,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnreadableArchiveError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import (
     FileEntry,
@@ -3777,6 +3781,258 @@ async def test_upload_extract_unknown_archive_type_is_invalid_path() -> None:
             dir_path=".",
             filename="not-an-archive.bin",
             content=b"x",
+            extract=True,
+        )
+
+
+# --- an archive that does not read back (issue #3769) -----------------------
+#
+# Each fixture's bytes do not read back as the archive its filename names. Where
+# the reader gets past a first member before it fails, that member is intact, so
+# "nothing written" is not vacuous: an extraction that wrote as it read would
+# have landed ``a.txt``. The payload is seeded (the same bytes on every run) and
+# compressible, so ``b.txt`` is a real deflate stream.
+
+_PAYLOAD = bytes(random.Random(3769).choices(b"abcdefgh", k=64 * 1024))
+
+
+def _compressed_zip(
+    members: dict[str, bytes], compression: int = zipfile.ZIP_DEFLATED
+) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=compression) as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _with_a_damaged_member(archive: bytes, name: str, *, at: int = 0) -> bytes:
+    """``archive`` with the byte ``at`` into ``name``'s compressed data set to 0xFF.
+
+    At the start of a deflate stream that is block type 3, which deflate
+    reserves, so the stream fails on its first byte.
+    """
+
+    damaged = bytearray(archive)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        header = zf.getinfo(name).header_offset
+    # The local file header is 30 fixed bytes, then the name and the extra field.
+    name_len, extra_len = struct.unpack_from("<HH", damaged, header + 26)
+    damaged[header + 30 + name_len + extra_len + at] = 0xFF
+    return bytes(damaged)
+
+
+def _with_its_last_member_encrypted(archive: bytes) -> bytes:
+    """``archive`` with its last member flagged encrypted: no read opens it."""
+
+    damaged = bytearray(archive)
+    entry = damaged.rfind(b"PK\x01\x02")  # the last central directory entry
+    damaged[entry + 8] |= 0x01  # general-purpose flag bit 0: encrypted
+    return bytes(damaged)
+
+
+def _zip_with_an_offset_no_seek_reaches() -> bytes:
+    """``a.txt``'s zip64 local-header offset is 2**63, past any seekable position."""
+
+    archive = _zip_bytes({"a.txt": b"A"})
+    entry = archive.find(b"PK\x01\x02")
+    end = archive.rfind(b"PK\x05\x06")
+    name_len, extra_len = struct.unpack_from("<HH", archive, entry + 28)
+    zip64 = struct.pack("<HHQ", 0x0001, 8, 2**63)  # header id 1: the zip64 field
+    head = bytearray(archive[entry : entry + 46 + name_len])
+    struct.pack_into("<H", head, 30, extra_len + len(zip64))
+    struct.pack_into("<I", head, 42, 0xFFFFFFFF)  # the offset is in the zip64 field
+    central = bytes(head) + zip64 + archive[entry + 46 + name_len : end]
+    record = bytearray(archive[end:])
+    struct.pack_into("<I", record, 12, len(central))  # the central directory size
+    return archive[:entry] + central + bytes(record)
+
+
+def _zip_whose_data_starts_past_its_end() -> bytes:
+    """``a.txt``'s data starts past the end of the body, so its read comes up short.
+
+    Its local header claims a 0xFFFF-byte extra field. ``b.txt``'s central entry
+    points far past the body too, or ``zipfile`` would refuse ``a.txt`` as
+    overlapping the next member before it reads a byte.
+    """
+
+    archive = bytearray(
+        _compressed_zip({"a.txt": b"A" * 10, "b.txt": b"B" * 10}, zipfile.ZIP_STORED)
+    )
+    struct.pack_into("<H", archive, 28, 0xFFFF)  # a.txt's local extra length
+    second = archive.find(b"PK\x01\x02", archive.find(b"PK\x01\x02") + 4)
+    struct.pack_into("<I", archive, second + 42, 0x7FFFFFFF)  # b.txt's offset
+    return bytes(archive)
+
+
+def _zip_with_a_name_that_is_not_utf8() -> bytes:
+    """``a.txt``'s central entry is flagged UTF-8 but its name is not UTF-8."""
+
+    archive = bytearray(_zip_bytes({"a.txt": b"A"}))
+    entry = archive.find(b"PK\x01\x02")
+    (flags,) = struct.unpack_from("<H", archive, entry + 8)
+    struct.pack_into("<H", archive, entry + 8, flags | 0x800)  # bit 11: UTF-8 name
+    archive[entry + 46] = 0xFF  # the name's first byte
+    return bytes(archive)
+
+
+def _pax_tar_bytes(members: dict[str, bytes], **pax_headers: str) -> bytes:
+    """An uncompressed PAX tar of ``members``, each carrying ``pax_headers``."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.pax_headers = pax_headers
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _tar_gz_with_a_bad_sparse_field() -> bytes:
+    """A gzip tar whose PAX ``GNU.sparse.size`` (a GNU sparse field) is not a number.
+
+    ``tarfile`` converts it with a bare ``int()``, so it fails as ``ValueError``.
+    """
+
+    return gzip.compress(_pax_tar_bytes({"a.txt": b"A"}, **{"GNU.sparse.size": "x"}))
+
+
+def _tar_gz_damaged_deep_inside_a_member() -> bytes:
+    """A gzip tar whose deflate stream turns invalid 384 KiB into ``a.bin``'s data.
+
+    ``tarfile`` wraps a ``zlib.error`` met while it reads a header, but not one
+    met while a member's data is read; the damage lies past what the gzip reader
+    reads ahead of the header, so it is met in the data.
+    """
+
+    raw = _pax_tar_bytes({"a.bin": b"\x00" * (512 * 1024)})
+    stream = zlib.compressobj(wbits=31)  # gzip framing
+    head = stream.compress(raw[: 384 * 1024]) + stream.flush(zlib.Z_FULL_FLUSH)
+    return head + b"\xff" * 16  # a deflate block of the type deflate reserves
+
+
+def _tar_gz_followed_by_a_bad_gzip_member() -> bytes:
+    """A gzip tar whose gzip member ends after ``a.txt``; what follows is not gzip.
+
+    The reader goes on to ``b.txt``'s header, which should be in the next member.
+    """
+
+    raw = _pax_tar_bytes({"a.txt": b"A", "b.txt": b"B"})
+    b_txt = raw.find(b"b.txt") // 512 * 512  # where b.txt's records begin
+    return gzip.compress(raw[:b_txt]) + b"not a gzip member"
+
+
+_ZIP = _compressed_zip({"a.txt": b"A", "b.txt": _PAYLOAD})
+_TAR_GZ = _tar_gz_bytes({"a.txt": b"A", "b.txt": _PAYLOAD})
+_GARBAGE = b"not an archive " * 256
+
+_UNREADABLE_ARCHIVES = [
+    pytest.param("pack.zip", _ZIP[: len(_ZIP) // 2], id="truncated-zip"),
+    pytest.param("pack.zip", _GARBAGE, id="garbage-zip"),
+    pytest.param("pack.zip", _with_a_damaged_member(_ZIP, "b.txt"), id="damaged-zip"),
+    pytest.param("pack.zip", _with_its_last_member_encrypted(_ZIP), id="encrypted-zip"),
+    pytest.param("pack.zip", _zip_with_an_offset_no_seek_reaches(), id="zip64-offset"),
+    pytest.param(
+        "pack.zip",
+        _with_a_damaged_member(
+            _compressed_zip({"a.txt": b"A", "b.txt": _PAYLOAD}, zipfile.ZIP_BZIP2),
+            "b.txt",
+        ),  # the bzip2 stream no longer opens on its BZh magic
+        id="damaged-bzip2-zip",
+    ),
+    pytest.param(
+        "pack.zip",
+        _with_a_damaged_member(
+            _compressed_zip({"a.txt": b"A", "b.txt": _PAYLOAD}, zipfile.ZIP_LZMA),
+            "b.txt",
+            at=9,  # past zipfile's 4-byte lzma header and 5 property bytes
+        ),
+        id="damaged-lzma-zip",
+    ),
+    pytest.param("pack.zip", _zip_whose_data_starts_past_its_end(), id="short-zip"),
+    pytest.param("pack.zip", _zip_with_a_name_that_is_not_utf8(), id="non-utf8-zip"),
+    # Cut inside b.txt's data, past an intact a.txt.
+    pytest.param("pack.tar.gz", _TAR_GZ[: len(_TAR_GZ) // 2], id="truncated-tar-gz"),
+    pytest.param("pack.tar.gz", _GARBAGE, id="garbage-tar-gz"),
+    pytest.param(
+        "pack.tar.gz", _tar_gz_damaged_deep_inside_a_member(), id="damaged-tar-gz"
+    ),
+    pytest.param(
+        "pack.tar.gz", _tar_gz_followed_by_a_bad_gzip_member(), id="bad-gzip-member"
+    ),
+    pytest.param(
+        "pack.tar.gz", _tar_gz_with_a_bad_sparse_field(), id="bad-sparse-tar-gz"
+    ),
+]
+
+
+@pytest.mark.parametrize(("filename", "content"), _UNREADABLE_ARCHIVES)
+async def test_upload_extract_of_an_unreadable_archive_writes_nothing(
+    filename: str, content: bytes
+) -> None:
+    # The archive reader's own failure is a verdict about the upload, not a
+    # server fault. It fires in the validate-first pass, so nothing is written,
+    # not even a member read before it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename=filename,
+            content=content,
+            extract=True,
+        )
+    assert store.writes == []
+
+
+# A first member over this cap, then damage the reader reaches only after it.
+_CAP = 128 * 1024
+_OVER_CAP_TAR_GZ = _tar_gz_bytes({"a.txt": b"\x00" * (2 * _CAP), "b.txt": _PAYLOAD})
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        pytest.param(
+            "pack.tar.gz",
+            _OVER_CAP_TAR_GZ[: len(_OVER_CAP_TAR_GZ) // 2],  # cut inside b.txt
+            id="tar-gz",
+        ),
+        pytest.param(
+            "pack.zip",
+            _with_a_damaged_member(
+                _compressed_zip({"a.txt": b"\x00" * (2 * _CAP), "b.txt": _PAYLOAD}),
+                "b.txt",
+            ),
+            id="zip",
+        ),
+    ],
+)
+async def test_upload_extract_cap_breach_before_the_damage_stays_too_large(
+    filename: str, content: bytes
+) -> None:
+    # The archive is read in order, so a member that breaches the cap before the
+    # reader reaches the damage is still the size refusal.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=FakeFileStore(),
+        max_bytes=_CAP,
+    )
+
+    assert len(content) <= _CAP  # the body itself is under the cap
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename=filename,
+            content=content,
             extract=True,
         )
 

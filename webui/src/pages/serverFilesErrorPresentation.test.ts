@@ -108,6 +108,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.reservedName" },
     ],
     [
+      "maps an archive that does not read back (#3769)",
+      new ApiError(422, { reason: "invalid_archive" }),
+      { key: "files.error.invalidArchive" },
+    ],
+    [
       "maps an otherwise invalid input",
       new ApiError(422, { reason: "unknown_validation_reason" }),
       { key: "files.error.invalidInput" },

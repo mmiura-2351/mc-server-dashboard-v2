@@ -575,6 +575,11 @@ export interface paths {
          *     caps -> 413 / 422). A publish failure after the row commits is 503
          *     ``seed_failed`` (the row is repairable via the files API).
          *
+         *     **An archive that does not read (issue #3769).** A body the zip reader fails
+         *     on — not a zip at all, cut short, damage the reader detects in a member, or an
+         *     encrypted member, the metadata included — is 422 ``invalid_archive``, refused
+         *     before the row is created, so nothing is left behind.
+         *
          *     **No directory may stand at the root ``server.properties`` path (issue
          *     #2869).** A member named ``server.properties/…`` would publish that name as a
          *     directory, which the platform's own writes cannot survive; it is 422
@@ -1571,6 +1576,14 @@ export interface paths {
          *     reusing the unsettled posture other bulk at-rest ops take. With
          *     ``extract=true`` a zip / tar.gz is expanded under ``path`` with per-entry
          *     traversal validation (zip-slip defence) and a total-extracted-size cap.
+         *
+         *     **An archive that does not read (issue #3769).** With ``extract=true``, a body
+         *     the zip / tar.gz reader fails on (not an archive at all, cut short, damage the
+         *     reader detects, an encrypted member or an unsupported compression method) is
+         *     422 ``invalid_archive``. The whole archive is read before the first write, so
+         *     nothing is written. A tar.gz is read only up to its end-of-archive marker and
+         *     its gzip CRC is not checked, so damage the reader never reaches goes
+         *     undetected and the archive extracts (issue #3778).
          *
          *     **Platform-managed keys (issue #2809).** An upload landing on the root
          *     ``server.properties`` — directly, or as an archive member — may not change
