@@ -5,6 +5,11 @@ generated primary key, DATABASE.md Section 2). ``Username`` and ``EmailAddress``
 enforce the minimal invariants the schema relies on and carry the
 case-insensitive uniqueness rule (DATABASE.md Section 4) into the domain so two
 spellings of the same identity compare equal.
+
+Each also carries a length cap (issue #3689) that applies to a value being
+written -- created, or changed to -- and is checked by ``ensure_writable``, not
+by the constructor: the constructor also builds lookups and rows stored before
+the caps existed, which may be longer and must keep working.
 """
 
 from __future__ import annotations
@@ -16,6 +21,12 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidEmailError,
     InvalidUsernameError,
 )
+
+# The longest username a write accepts, in characters after trimming.
+USERNAME_MAX_LENGTH = 64
+# The longest email address a write accepts, in characters after normalizing:
+# RFC 5321's 256-octet path less its angle brackets.
+EMAIL_MAX_LENGTH = 254
 
 
 @dataclass(frozen=True)
@@ -90,6 +101,14 @@ class Username:
 
         return self._key
 
+    def ensure_writable(self) -> None:
+        """Raise :class:`InvalidUsernameError` if this name is too long to write."""
+
+        if len(self.value) > USERNAME_MAX_LENGTH:
+            raise InvalidUsernameError(
+                f"username must be at most {USERNAME_MAX_LENGTH} characters"
+            )
+
 
 @dataclass(frozen=True)
 class EmailAddress:
@@ -108,3 +127,11 @@ class EmailAddress:
         if not local or not domain or "@" in domain:
             raise InvalidEmailError("email must be of the form local@domain")
         object.__setattr__(self, "value", normalized)
+
+    def ensure_writable(self) -> None:
+        """Raise :class:`InvalidEmailError` if this address is too long to write."""
+
+        if len(self.value) > EMAIL_MAX_LENGTH:
+            raise InvalidEmailError(
+                f"email must be at most {EMAIL_MAX_LENGTH} characters"
+            )

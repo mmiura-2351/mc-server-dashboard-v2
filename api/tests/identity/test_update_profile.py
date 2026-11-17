@@ -18,6 +18,8 @@ from mc_server_dashboard_api.identity.application.update_profile import UpdatePr
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
+    InvalidEmailError,
+    InvalidUsernameError,
     UsernameAlreadyExistsError,
     UserNotFoundError,
 )
@@ -173,4 +175,95 @@ async def test_update_of_user_deleted_after_the_read_raises() -> None:
 
     with pytest.raises(UserNotFoundError):
         await _use_case(uow)(user_id=user.id, username="alice2", email=None)
+    assert uow.commits == 0
+
+
+# --- Write caps (issue #3689) ------------------------------------------------
+#
+# A changed username or email is held to its cap. Rows stored before the caps
+# may be longer: resubmitting one's own current value is not a change, so it is
+# not refused, and the other field can still be edited beside it.
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+async def test_update_username_to_64_characters() -> None:
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    updated = await _use_case(uow)(user_id=user.id, username="a" * 64, email=None)
+
+    assert updated.username.value == "a" * 64
+
+
+async def test_update_username_past_64_characters_raises() -> None:
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    with pytest.raises(InvalidUsernameError):
+        await _use_case(uow)(user_id=user.id, username="a" * 65, email=None)
+    assert uow.commits == 0
+
+
+async def test_update_email_to_254_characters() -> None:
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    updated = await _use_case(uow)(user_id=user.id, username=None, email=_email(254))
+
+    assert updated.email.value == _email(254)
+
+
+async def test_update_email_past_254_characters_raises() -> None:
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    with pytest.raises(InvalidEmailError):
+        await _use_case(uow)(user_id=user.id, username=None, email=_email(255))
+    assert uow.commits == 0
+
+
+async def test_legacy_long_username_resubmitted_beside_a_new_email() -> None:
+    # The Web UI sends both fields on every profile save.
+    legacy = "a" * 100
+    user = make_user(username=legacy, now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    updated = await _use_case(uow)(
+        user_id=user.id, username=legacy, email="new@example.com"
+    )
+
+    assert updated.username.value == legacy
+    assert updated.email.value == "new@example.com"
+    assert uow.commits == 1
+
+
+async def test_legacy_long_email_resubmitted_beside_a_new_username() -> None:
+    legacy = _email(300)
+    user = make_user(email=legacy, now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    updated = await _use_case(uow)(user_id=user.id, username="bob", email=legacy)
+
+    assert updated.username.value == "bob"
+    assert updated.email.value == legacy
+    assert uow.commits == 1
+
+
+async def test_legacy_long_username_recased_is_a_change_and_raises() -> None:
+    # Equality is case-insensitive, but a new spelling is a new value written.
+    user = make_user(username="a" * 100, now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    with pytest.raises(InvalidUsernameError):
+        await _use_case(uow)(user_id=user.id, username="A" * 100, email=None)
     assert uow.commits == 0

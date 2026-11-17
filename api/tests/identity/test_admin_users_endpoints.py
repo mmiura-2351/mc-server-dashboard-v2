@@ -381,3 +381,37 @@ def test_admin_create_duplicate_username_returns_409() -> None:
     resp = client.post("/api/admin/users", json=_create_payload())
     assert resp.status_code == 409
     assert resp.json()["reason"] == "username_taken"
+
+
+# --- Field caps on POST /admin/users (issue #3689) ---------------------------
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+@pytest.mark.parametrize(
+    ("field", "at_cap"),
+    [("username", "a" * 64), ("email", _email(254))],
+    ids=["username", "email"],
+)
+def test_admin_create_accepts_a_field_at_its_cap(field: str, at_cap: str) -> None:
+    fake = _Fake(result=make_user(username="bob", email="bob@example.com"))
+    client = _client(admin_create_user=fake)
+    resp = client.post("/api/admin/users", json={**_create_payload(), field: at_cap})
+    assert resp.status_code == 201
+    assert fake.calls[0][field] == at_cap
+
+
+@pytest.mark.parametrize(
+    ("field", "past_cap"),
+    [("username", "a" * 65), ("email", _email(255))],
+    ids=["username", "email"],
+)
+def test_admin_create_rejects_a_field_past_its_cap(field: str, past_cap: str) -> None:
+    fake = _Fake(result=make_user())
+    client = _client(admin_create_user=fake)
+    resp = client.post("/api/admin/users", json={**_create_payload(), field: past_cap})
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []

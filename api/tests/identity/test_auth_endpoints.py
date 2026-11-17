@@ -27,6 +27,7 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
     BcryptPasswordHasher,
     build_dummy_password_hash,
 )
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.login import Login, LoginResult
 from mc_server_dashboard_api.identity.application.restore_session import RestoreResult
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
@@ -516,3 +517,78 @@ def test_me_with_invalid_token_returns_401() -> None:
     resp = client.get("/api/users/me", headers={"Authorization": "Bearer bad"})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_token"
+
+
+# --- Request-size caps on login (issue #3689) ---------------------------------
+#
+# A DoS bound only: 1024, not the 64-character username write cap, so a username
+# stored before that cap can still sign in.
+
+
+@pytest.mark.parametrize("field", ["username", "password"])
+def test_login_accepts_a_field_at_the_cap(field: str) -> None:
+    fake = _Fake(error=InvalidCredentialsError())
+    client = _client(login=fake)
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "pw", field: "x" * 1024},
+    )
+    assert resp.status_code == 401
+    assert fake.calls[0][field] == "x" * 1024
+
+
+@pytest.mark.parametrize("field", ["username", "password"])
+def test_login_rejects_a_field_past_the_cap(field: str) -> None:
+    fake = _Fake(error=InvalidCredentialsError())
+    client = _client(login=fake)
+    resp = client.post(
+        "/api/auth/login",
+        json={"username": "alice", "password": "pw", field: "x" * 1025},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []
+
+
+# --- Request-size caps on refresh and logout ----------------------------------
+#
+# A DoS bound of 256 characters on the body's refresh token; a real one is 43.
+
+
+def _real_refresh_token() -> str:
+    """A refresh secret exactly as the adapter issues it."""
+
+    hour = dt.timedelta(hours=1)
+    service = JwtTokenService(
+        signing_key="0123456789abcdef0123456789abcdef",
+        algorithm="HS256",
+        access_ttl=hour,
+        download_grant_ttl=hour,
+        download_cookie_ttl=hour,
+        clock=FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)),
+    )
+    return service.issue_refresh_token().secret
+
+
+@pytest.mark.parametrize("route", ["refresh", "logout"])
+@pytest.mark.parametrize(
+    "token", [_real_refresh_token(), "A" * 256], ids=["real", "at-cap"]
+)
+def test_refresh_and_logout_accept_a_token_within_the_cap(
+    route: str, token: str
+) -> None:
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = _client(**{route: fake})
+    resp = client.post(f"/api/auth/{route}", json={"refresh_token": token})
+    assert resp.status_code in (200, 204)
+    assert fake.calls[0]["refresh_token"] == token
+
+
+@pytest.mark.parametrize("route", ["refresh", "logout"])
+def test_refresh_and_logout_reject_a_token_past_the_cap(route: str) -> None:
+    fake = _Fake(result=TokenPair(access_token="acc2", refresh_token="ref2"))
+    client = _client(**{route: fake})
+    resp = client.post(f"/api/auth/{route}", json={"refresh_token": "A" * 257})
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []

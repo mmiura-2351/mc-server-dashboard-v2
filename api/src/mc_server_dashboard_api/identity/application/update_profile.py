@@ -1,7 +1,8 @@
 """UpdateProfile use case: the authenticated user edits their username / email.
 
 Either field is optional; an omitted field is left unchanged. Each supplied value
-is validated by its value object (blank/structural rules) and pre-checked for
+is validated by its value object (blank/structural rules, and its length cap when
+it changes the stored value) and pre-checked for
 case-insensitive uniqueness against *other* users, mirroring registration and
 raising the same :class:`UsernameAlreadyExistsError` / :class:`EmailAlreadyExistsError`
 the edge maps to 409. The pre-check is not authoritative — the database's unique
@@ -52,6 +53,14 @@ class UpdateProfile:
             # profile without committing, so updated_at is not bumped on no change.
             if new_name is None and new_email is None:
                 return user
+
+            # Only a changed value is held to its length cap, so one stored
+            # before the caps can be resubmitted beside an edit to the other
+            # field (issue #3689). A new spelling of the same name is a change.
+            if new_name is not None and new_name.value != user.username.value:
+                new_name.ensure_writable()
+            if new_email is not None and new_email.value != user.email.value:
+                new_email.ensure_writable()
 
             if new_name is not None and new_name != user.username:
                 if await self.uow.users.get_by_username(new_name) is not None:

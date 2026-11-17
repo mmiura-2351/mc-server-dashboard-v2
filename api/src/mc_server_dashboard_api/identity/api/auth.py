@@ -93,18 +93,24 @@ def _clear_refresh_cookie(response: Response, token_cfg: TokenSettings) -> None:
 
 
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
+    # DoS guards only (issue #3689). The username bound is not the 64-character
+    # write cap, so an account whose name was stored before it can still sign in;
+    # the password bound is the one a new password has.
+    username: str = Field(min_length=1, max_length=1024)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 class RefreshRequest(BaseModel):
     # Optional so cookie clients can POST an empty body; the cookie supplies the
-    # token in that case (issue #363).
-    refresh_token: str | None = Field(default=None, min_length=1)
+    # token in that case (issue #363). The 256 bound is a DoS guard only (issue
+    # #3689): an issued token is ``token_urlsafe(32)``, 43 characters, and the
+    # bound leaves room for a longer secret without tracking its exact length.
+    refresh_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str | None = Field(default=None, min_length=1)
+    # The same DoS bound as ``RefreshRequest``.
+    refresh_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class TokenResponse(BaseModel):

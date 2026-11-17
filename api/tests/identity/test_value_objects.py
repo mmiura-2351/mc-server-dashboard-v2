@@ -45,3 +45,48 @@ def test_email_is_normalized_to_lowercase() -> None:
 
 def test_email_equality_ignores_case() -> None:
     assert EmailAddress("Alice@Example.com") == EmailAddress("alice@example.com")
+
+
+# --- Write caps (issue #3689) ------------------------------------------------
+#
+# The caps apply when a value is written (created or changed), not when one is
+# constructed: the constructor also builds lookups and rows stored before the
+# caps existed, which may be longer.
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+def test_username_at_64_characters_is_writable() -> None:
+    Username("a" * 64).ensure_writable()
+
+
+def test_username_past_64_characters_is_not_writable() -> None:
+    with pytest.raises(InvalidUsernameError):
+        Username("a" * 65).ensure_writable()
+
+
+def test_username_cap_counts_the_trimmed_name() -> None:
+    Username("  " + "a" * 64 + "  ").ensure_writable()
+
+
+def test_username_past_the_cap_still_constructs() -> None:
+    assert Username("a" * 65).value == "a" * 65
+
+
+def test_email_at_254_characters_is_writable() -> None:
+    EmailAddress(_email(254)).ensure_writable()
+
+
+def test_email_past_254_characters_is_not_writable() -> None:
+    with pytest.raises(InvalidEmailError):
+        EmailAddress(_email(255)).ensure_writable()
+
+
+def test_email_cap_counts_the_trimmed_address() -> None:
+    EmailAddress("  " + _email(254) + "  ").ensure_writable()
+
+
+def test_email_past_the_cap_still_constructs() -> None:
+    assert EmailAddress(_email(255)).value == _email(255)

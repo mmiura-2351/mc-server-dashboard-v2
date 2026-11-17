@@ -537,3 +537,18 @@ async def test_ip_throttle_checked_before_username_lockout() -> None:
 
     # IP window (300s) wins over lockout duration (600s) — IP checked first.
     assert exc_info.value.retry_after == 300
+
+
+async def test_a_username_stored_past_the_write_cap_still_logs_in() -> None:
+    # The 64-character cap (issue #3689) applies to writes only: a row stored
+    # before it keeps working.
+    legacy = "a" * 100
+    user = make_user(username=legacy, password=_PASSWORD)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+
+    result = await _login(uow, RecordingFailureDelay())(
+        username=legacy, password=_PASSWORD
+    )
+
+    assert result.user_id == user.id.value
