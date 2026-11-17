@@ -513,9 +513,13 @@ Section 5.1), which is set comfortably above the interval (FR-WRK-2).
 ### 4.4 Disconnect and reconnect
 
 A stream ends on a clean close, a transport error, or a missed-heartbeat
-timeout. On disconnect the API marks the Worker's servers accordingly
-(FR-WRK-4); those servers can be (re)started on another eligible Worker after a
-hydrate from authoritative storage. The Worker is responsible for reconnecting:
+timeout. On disconnect the API marks the Worker's servers `unknown` and keeps
+their assignment (FR-WRK-4), and the reconciler does not restart a
+`desired=running` one until the Worker reconnects. If it does not come back, an
+operator stop and then a start moves each server to another eligible Worker
+after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an
+automatic recovery is the open issue #3809). The Worker is responsible for
+reconnecting:
 it opens a fresh `Session` and re-`Register`s from scratch, re-advertising its
 capabilities. The control plane keeps **no** cross-stream session state —
 each connect is a clean registration, matching the stateless, replaceable nature

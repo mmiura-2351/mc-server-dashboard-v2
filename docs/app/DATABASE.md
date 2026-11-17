@@ -401,7 +401,7 @@ assigned Worker.
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
-| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; cleared by the API on Worker disconnect (FR-WRK-4) |
+| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; kept when the Worker disconnects, and cleared when a stop releases the server (FR-WRK-4) |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
@@ -462,20 +462,27 @@ reports observed state). The values (`starting` / `running` / `stopping` /
 two producers: the API infers it when the owning Worker disconnects,
 and a Worker reports it when it cannot currently confirm an instance's fate.
 `desired=running` with `observed=crashed` or `unknown` is closed by the
-reconciler restarting the server ([`CONFIGURATION.md`](CONFIGURATION.md)
-Section 5.6). A stop of a crashed server leaves `observed=crashed`. The Worker no
+reconciler restarting the server on its assigned Worker while that Worker is
+connected. It skips the server while the Worker is disconnected
+([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). A stop of a crashed
+server leaves `observed=crashed`. The Worker no
 longer holds the instance, so it reports nothing more, and the crash stays
 recorded as why the server is down. `(stopped, crashed)` with no assigned Worker is at rest and
 startable.
 
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,
-set on placement (FR-WRK-3), and cleared by the API if its Worker
-disconnects/decommissions so the server can be re-placed after hydrate (FR-WRK-4).
+set on placement (FR-WRK-3), and cleared when a stop releases the server, so it
+can be re-placed after hydrate (FR-WRK-4). A Worker disconnect does not clear it:
+the API marks the Worker's servers `observed=unknown` and they stay assigned to
+it. A server whose Worker never comes back is released by an operator stop and
+re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
+"A Worker that never reconnects"; whether the API should do it on its own is
+issue #3809).
 The server row survives the Worker; the Worker holds no authoritative state. The
 column is a **plain nullable uuid with no foreign key**: there is no durable `worker`
-table to reference (Section 7), so clearing on disconnect is done by the API
-against the in-memory fleet registry, not by a DB `ON DELETE SET NULL`. Should a
+table to reference (Section 7), so the API clears it on the stop path, not a DB
+`ON DELETE SET NULL`. Should a
 later design add a `worker` table, the FK (with `ON DELETE SET NULL`) can be
 introduced alongside it without changing this column's semantics.
 
