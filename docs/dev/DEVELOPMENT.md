@@ -91,6 +91,18 @@ With the hooks installed (Section 2) there is no need to run the full
 `make check` by hand before pushing — pre-push runs it. Iterate with the
 targeted subset instead ([`AGENTS.md`](AGENTS.md) Section 5).
 
+`make check` writes one log per chain (`api.log`, `webui.log`, ...) to
+`check-logs/` in the checkout's git dir (`git rev-parse --absolute-git-dir`),
+so each worktree has its own. A new run moves the previous run's logs to
+`check-logs.prev/` first, so re-running a red gate keeps the failing run's
+logs; only that one previous run is kept. The api tests also write
+`api-run-order.tsv` there: one tab-separated line per test, written as it
+finishes — `worker` (`gw0`, ...), `outcome` (`passed`, `failed`, `skipped`,
+`error` for a failed setup or teardown, `crashed` when the worker died),
+`duration` (seconds) and the node id. A worker's lines are in the order it ran its tests, which the dots-only console
+output does not show. After a flaky failure, filter the file by the failing
+test's worker to see what ran before it.
+
 ### Per-module commands
 
 When you are working inside one module, its README has the full command list

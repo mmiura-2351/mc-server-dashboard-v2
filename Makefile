@@ -221,8 +221,13 @@ api-format: api-env-check
 # rebalances the queue so a slow file can't strand an idle worker (#1729). The
 # scratch-DB fixtures are worker-safe (per-worker `<dbname>_<uuid>`, #1146).
 # Coverage stays CI-only (#325) -- not added here.
+#
+# Under the gate, which exports MCSD_CHECK_LOGDIR, the run also records each
+# test's worker, outcome and duration in run order to api-run-order.tsv there
+# (api/tests/run_order_log.py, #3750): the console shows only dots, so this is
+# what says which tests ran before a flaky one on the same worker.
 api-test: api-benchmark-collection-check
-	cd api && uv run pytest -n auto --dist worksteal $(API_TEST_SELECTOR) $(API_TEST_EXTRA_ARGS)
+	cd api && uv run pytest -n auto --dist worksteal $(API_TEST_SELECTOR) $(if $(MCSD_CHECK_LOGDIR),--run-order-log="$(MCSD_CHECK_LOGDIR)/api-run-order.tsv") $(API_TEST_EXTRA_ARGS)
 
 # ---------------------------------------------------------------------------
 # worker/ (Go)
@@ -537,6 +542,7 @@ scripts-test-cheap:
 	bash scripts/test_shell_pipefail.sh
 	bash scripts/test_check_parallel_identity.sh
 	bash scripts/test_check_parallel_lock.sh
+	bash scripts/test_check_parallel_logs.sh
 	bash scripts/test_golangci_pin.sh
 	bash scripts/test_protoc_plugin_pins.sh
 
