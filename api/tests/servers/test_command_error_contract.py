@@ -41,6 +41,11 @@ class-qualified, so ``StartServer.__call__`` and ``StopServer.__call__`` are
 distinct. Only ``servers/application/`` is scanned: ``servers/adapters/
 control_plane.py`` also names every ``CommandStatus``, but that is the wire
 translation building the outcome, not a match on one.
+
+A site can also match a status by the reason ``dispatch_failure`` gives it, as
+the reconciler matches a busy start on ``WORKER_BUSY_REASON`` (issue #3808). So a
+read of a ``command_dispatch`` reason constant counts as a reference to the
+status ``_SANITIZED_REASONS`` maps to it.
 """
 
 from __future__ import annotations
@@ -50,7 +55,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mc_server_dashboard_api.servers.application import lifecycle
+from mc_server_dashboard_api.servers.application import command_dispatch, lifecycle
 from mc_server_dashboard_api.servers.domain.control_plane import CommandStatus
 
 # Repo root: tests/servers/<file> -> api/ -> repo root.
@@ -128,16 +133,49 @@ def _modules() -> list[tuple[str, ast.Module]]:
     ]
 
 
-def _status_names(node: ast.AST) -> list[str]:
-    """Every ``CommandStatus.<NAME>`` referenced anywhere under ``node``."""
+def _reason_constants() -> dict[str, str]:
+    """Each ``command_dispatch`` reason constant, mapped to the status it names.
 
-    return [
-        child.attr
-        for child in ast.walk(node)
-        if isinstance(child, ast.Attribute)
-        and isinstance(child.value, ast.Name)
-        and child.value.id == "CommandStatus"
-    ]
+    Derived from ``_SANITIZED_REASONS``, so a new constant for a sanitized reason
+    is scanned without an edit here.
+    """
+
+    status_by_reason = {
+        reason: status.name
+        for status, reason in command_dispatch._SANITIZED_REASONS.items()
+    }
+    return {
+        name: status_by_reason[value]
+        for name, value in vars(command_dispatch).items()
+        if isinstance(value, str) and value in status_by_reason
+    }
+
+
+_REASON_CONSTANTS = _reason_constants()
+
+
+def _status_names(node: ast.AST) -> list[str]:
+    """Every status referenced anywhere under ``node``.
+
+    A ``CommandStatus.<NAME>``, or a read of a reason constant (a ``Load``, so the
+    constant's own definition is not a match site).
+    """
+
+    names: list[str] = []
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Attribute)
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "CommandStatus"
+        ):
+            names.append(child.attr)
+        elif (
+            isinstance(child, ast.Name)
+            and isinstance(child.ctx, ast.Load)
+            and child.id in _REASON_CONSTANTS
+        ):
+            names.append(_REASON_CONSTANTS[child.id])
+    return names
 
 
 def _assigned_name(stmt: ast.stmt) -> str | None:

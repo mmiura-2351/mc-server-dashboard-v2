@@ -1106,9 +1106,11 @@ Table-driven tests hold both sides to it:
   are green;
 - the API test (`api/tests/servers/test_command_error_contract.py`) derives its
   expectations from the rows' API column: the sites the table declares must be
-  exactly the `CommandStatus` matches an `ast` scan finds under
-  `api/src/mc_server_dashboard_api/servers/application/`, so an API match on a
-  code the Worker never produces has no row to live on, and
+  exactly the matches an `ast` scan finds under
+  `api/src/mc_server_dashboard_api/servers/application/`. A match is a
+  `CommandStatus` reference or a read of a reason constant such as
+  `WORKER_BUSY_REASON`, which is how the reconciler matches a busy start. So
+  an API match on a code the Worker never produces has no row to live on, and
   a site added or removed in source fails the API suite;
 - for the declared messages, the Worker test also asserts the driven emission is
   the text the row's `message` names (and that no declared message goes
