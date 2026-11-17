@@ -40,6 +40,7 @@ retry.
 from __future__ import annotations
 
 import datetime as dt
+import gzip
 import hashlib
 import io
 import logging
@@ -51,8 +52,7 @@ from pathlib import PurePosixPath
 from typing import IO
 
 from mc_server_dashboard_api.archive_member import (
-    EndCheckedTarInfo,
-    read_past_end_marker,
+    EndCheckedReader,
     unrestorable_reason,
     without_tar_root_prefix,
 )
@@ -1491,14 +1491,13 @@ def _validate_backup_archive(
     cannot slip past. Raises :class:`InvalidBackupArchiveError` (422) on any
     violation.
 
-    The archive must also read to its end (issue #3778). Only the tar
-    end-of-archive marker may end the member walk (:class:`EndCheckedTarInfo`),
-    so a damaged header past the first is refused rather than cutting the member
-    list short. The stream is then read on to the gzip end
-    (:func:`read_past_end_marker`): only zeros may follow the marker, the gzip
-    CRC32 and ISIZE must match, and only another gzip member or zero padding may
-    follow the gzip stream. The zeros read there count toward
-    ``max_decompressed_bytes`` too.
+    The archive must also read to its end (issue #3778). The tar is walked
+    through :class:`EndCheckedReader` over ``gzip.GzipFile``: the walk must stop
+    at the end-of-archive marker, so a damaged header past the first is refused
+    rather than cutting the member list short, and the stream is then read on to
+    the gzip end. Only zeros may follow the marker, the gzip CRC32 and ISIZE must
+    match, and only another gzip member or zero padding may follow the gzip
+    stream. The zeros read there count toward ``max_decompressed_bytes`` too.
 
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
@@ -1515,9 +1514,10 @@ def _validate_backup_archive(
     """
 
     try:
-        with tarfile.open(
-            fileobj=io.BytesIO(content), mode="r:gz", tarinfo=EndCheckedTarInfo
-        ) as tar:
+        with (
+            gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+            tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tar,
+        ):
             count = 0
             total = 0
             for read in tar:
@@ -1555,7 +1555,7 @@ def _validate_backup_archive(
                     handle = tar.extractfile(member)
                     if handle is not None:
                         total = _drain_capped(handle, total, max_decompressed_bytes)
-            for chunk in read_past_end_marker(tar):
+            for chunk in stream.read_past_end_marker():
                 total += len(chunk)
                 if total > max_decompressed_bytes:
                     raise InvalidBackupArchiveError("decompressed size exceeds cap")
