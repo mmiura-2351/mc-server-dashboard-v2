@@ -91,6 +91,24 @@ With the hooks installed (Section 2) there is no need to run the full
 `make check` by hand before pushing — pre-push runs it. Iterate with the
 targeted subset instead ([`AGENTS.md`](AGENTS.md) Section 5).
 
+`make check` writes one log per chain (`api.log`, `webui.log`, ...) to
+`check-logs/` in the checkout's git dir (`git rev-parse --absolute-git-dir`),
+so each worktree has its own. A new run moves the previous run's logs to
+`check-logs.prev/` first, so re-running a red gate keeps the failing run's
+logs; only that one previous run is kept. The api tests also write
+`api-run-order.tsv` there: one tab-separated line per test, written as it
+finishes — `worker` (`gw0`, ...), `outcome`, `duration` (seconds, setup, call
+and teardown together) and the node id. The outcome is `passed`, `failed` or
+`skipped` as the test's call reported it (so an xfailed test is `skipped` and
+an xpassed one `passed`), `error` for a failed setup or teardown, or `crashed`
+when the worker died mid-test. A crashed line counts only the phases that
+finished, and its worker is `?` when the crash came during setup. A worker's
+lines are in the order it ran its tests, which the dots-only console output
+does not show. After a flaky failure, filter the file by the failing test's
+worker to see what ran before it. Only finished tests have a line: for a hang,
+the last line of each worker shows where it stopped, and pytest-timeout's
+traceback dump in `api.log` shows the test that hung.
+
 ### Per-module commands
 
 When you are working inside one module, its README has the full command list

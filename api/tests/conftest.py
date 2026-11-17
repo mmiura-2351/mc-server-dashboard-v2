@@ -29,6 +29,9 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 from tests.client_utils import bind_exit_stack
 from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
 
+# ``--run-order-log``, which the gate's api run passes (issue #3750).
+pytest_plugins = ["tests.run_order_log"]
+
 _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
 
