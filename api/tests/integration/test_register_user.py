@@ -9,11 +9,13 @@ translation to domain errors on the race path — are exercised end-to-end.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import argon2
 import pytest
 import pytest_asyncio
 from alembic import command
@@ -226,22 +228,46 @@ async def test_admin_created_account_can_log_in(engine: AsyncEngine) -> None:
     assert result.pair.access_token
 
 
-async def test_a_refused_login_fails_with_the_argon2_report(
+async def test_a_refused_login_reports_the_hash_read_back_from_the_database(
     engine: AsyncEngine,
 ) -> None:
     # The report an intermittent correct-password refusal fails with (#3748)
-    # reads the stored hash back from the database; a wrong password stands in
-    # for the refusal, so that read runs before the day it is needed.
+    # probes the stored hash read back from the database, and says whether it
+    # still equals the one the test produced. The test's copy differs here, so
+    # only the read-back can put the stored one in the report; a wrong password
+    # stands in for the refusal.
     created = await _admin_create(engine)(
         username="bob", email="bob@example.com", password=_VALID_PASSWORD
     )
+    produced = dataclasses.replace(
+        created, password_hash=argon2.PasswordHasher().hash(_VALID_PASSWORD)
+    )
 
     with pytest.raises(AssertionError) as failure:
-        await log_in_seeded(_login(engine), engine, created, "Np4@xZ#Lq9wR")
+        await log_in_seeded(_login(engine), engine, produced, "Np4@xZ#Lq9wR")
 
     assert isinstance(failure.value.__cause__, InvalidCredentialsError)
     assert f"value: {created.password_hash!r}" in str(failure.value)
-    assert "equals the hash the test produced: True" in str(failure.value)
+    assert "equals the hash the test produced: False" in str(failure.value)
+
+
+async def test_a_refused_login_whose_hash_cannot_be_read_back_still_reports(
+    engine: AsyncEngine,
+) -> None:
+    # A user missing from the database fails the read-back; the report says so
+    # and probes the hash the test produced instead of masking the refusal.
+    created = await _admin_create(engine)(
+        username="bob", email="bob@example.com", password=_VALID_PASSWORD
+    )
+    stranger = dataclasses.replace(created, username=Username("carol"))
+
+    with pytest.raises(AssertionError) as failure:
+        await log_in_seeded(_login(engine), engine, stranger, _VALID_PASSWORD)
+
+    assert isinstance(failure.value.__cause__, InvalidCredentialsError)
+    assert "Reading the stored hash back failed (LookupError(" in str(failure.value)
+    assert f"value: {created.password_hash!r}" in str(failure.value)
+    assert "equals the hash the test produced: not available" in str(failure.value)
 
 
 async def test_duplicate_username_case_insensitive_raises(engine: AsyncEngine) -> None:

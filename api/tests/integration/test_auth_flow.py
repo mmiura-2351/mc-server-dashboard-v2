@@ -353,6 +353,38 @@ async def test_restore_with_revoked_token_does_not_revoke_family(
     )
 
 
+async def test_a_locked_out_login_is_not_reported_as_the_argon2_flake(
+    engine: AsyncEngine,
+) -> None:
+    # A lockout raises the same InvalidCredentialsError as the intermittent
+    # argon2 refusal of #3748. Its report must say it is a lockout, so a real
+    # lockout regression is not filed as that flake.
+    user = await _seed_user(engine)
+    factory = create_session_factory(engine)
+    login = Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(username_threshold=1),
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
+        tokens=_tokens(),
+        clock=SystemClock(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
+        refresh_ttl=_REFRESH_TTL,
+    )
+    with pytest.raises(InvalidCredentialsError):
+        await login(username="alice", password="wrong")
+
+    with pytest.raises(AssertionError) as failure:
+        await log_in_seeded(login, engine, user, _PASSWORD)
+
+    assert str(failure.value).startswith(
+        "Login refused by a lockout or throttle (retry_after="
+    )
+
+
 async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> None:
     """End-to-end on Postgres: lockout after N failures, then exponential growth.
 

@@ -14,6 +14,7 @@ Nothing here runs on a passing test except the append to
 
 from __future__ import annotations
 
+import datetime as dt
 import functools
 import hashlib
 import importlib.metadata
@@ -36,7 +37,10 @@ RECENT_NODE_IDS: deque[str] = deque(maxlen=40)
 """The last tests this process started, oldest first; ``tests/conftest.py``
 appends each one from ``pytest_runtest_logstart``."""
 
-_EXECUTOR_TIMEOUT_S = 30.0
+_EXECUTOR_TIMEOUT_S = 5.0
+"""How long a probe waits for the KDF executor. The first timeout skips the
+probes after it, so even a wedged pool keeps the report far inside the suite's
+120 s test timeout, whose ``Failed`` no ``except Exception`` here would catch."""
 
 
 def _verify(password: str, stored_hash: str) -> bool:
@@ -57,12 +61,24 @@ def _probe(call: Callable[[], bool]) -> str:
     return f"{outcome} [{threading.current_thread().name}]"
 
 
-def _probe_on_kdf_executor(call: Callable[[], bool]) -> str:
+class _KdfExecutorProbes:
     """:func:`_probe` on the hasher's own KDF thread pool, as production runs it."""
-    try:
-        return _KDF_EXECUTOR.submit(_probe, call).result(timeout=_EXECUTOR_TIMEOUT_S)
-    except Exception as exc:  # a wedged or shut-down pool is itself a finding
-        return f"{exc!r} [KDF executor]"
+
+    def __init__(self) -> None:
+        self._timed_out = False
+
+    def __call__(self, call: Callable[[], bool]) -> str:
+        if self._timed_out:
+            return "skipped: the KDF executor timed out above"
+        future = _KDF_EXECUTOR.submit(_probe, call)
+        try:
+            return future.result(timeout=_EXECUTOR_TIMEOUT_S)
+        except TimeoutError:
+            future.cancel()
+            self._timed_out = True
+            return f"TimeoutError: no result within {_EXECUTOR_TIMEOUT_S} s"
+        except Exception as exc:  # a shut-down pool is itself a finding
+            return f"{exc!r} [KDF executor]"
 
 
 def _bindings_wheel_tags() -> str:
@@ -75,6 +91,19 @@ def _bindings_wheel_tags() -> str:
     return ", ".join(tags) or "unknown"
 
 
+def _build_info() -> list[str]:
+    version = importlib.metadata.version
+    try:
+        return [
+            f"argon2-cffi {version('argon2-cffi')}",
+            f"argon2-cffi-bindings {version('argon2-cffi-bindings')}"
+            f" ({_bindings_wheel_tags()})",
+            f"Argon2 algorithm version: {argon2.low_level.ARGON2_VERSION}",
+        ]
+    except Exception as exc:  # a report that raised would replace the failure
+        return [f"unavailable: {exc!r}"]
+
+
 def argon2_mismatch_report(
     *, password: str, stored_hash: str, produced_hash: str | None = None
 ) -> str:
@@ -84,14 +113,15 @@ def argon2_mismatch_report(
     back. The probes run in the failing test, so it fails as before, only
     slower and with this report.
     """
+    taken_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
     verify = functools.partial(_verify, password, stored_hash)
     round_trip = functools.partial(_round_trip, password)
+    on_executor = _KdfExecutorProbes()
     same = "not available" if produced_hash is None else produced_hash == stored_hash
-    version = importlib.metadata.version
     return "\n".join(
         [
-            "argon2 refused a correct password (issue #3748); how to read this:",
-            "docs/dev/AGENTS.md Section 3.",
+            f"argon2 mismatch diagnostics (issue #3748), taken at {taken_at};",
+            "how to read them: docs/dev/AGENTS.md Section 3.",
             "--- stored hash ---",
             f"value: {stored_hash!r}",
             f"length: {len(stored_hash)}",
@@ -100,11 +130,11 @@ def argon2_mismatch_report(
             "--- stored hash verified 5x on this thread ---",
             *(_probe(verify) for _ in range(5)),
             "--- stored hash verified 3x on the KDF executor ---",
-            *(_probe_on_kdf_executor(verify) for _ in range(3)),
+            *(on_executor(verify) for _ in range(3)),
             "--- fresh hash+verify round trips 3x on this thread ---",
             *(_probe(round_trip) for _ in range(3)),
             "--- fresh hash+verify round trips 3x on the KDF executor ---",
-            *(_probe_on_kdf_executor(round_trip) for _ in range(3)),
+            *(on_executor(round_trip) for _ in range(3)),
             "--- process ---",
             f"pid: {os.getpid()}",
             f"xdist worker: {os.environ.get('PYTEST_XDIST_WORKER', 'none')}",
@@ -112,10 +142,7 @@ def argon2_mismatch_report(
             "--- tests this process started, oldest first ---",
             *RECENT_NODE_IDS,
             "--- argon2 build ---",
-            f"argon2-cffi {version('argon2-cffi')}",
-            f"argon2-cffi-bindings {version('argon2-cffi-bindings')}"
-            f" ({_bindings_wheel_tags()})",
-            f"Argon2 algorithm version: {argon2.low_level.ARGON2_VERSION}",
+            *_build_info(),
         ]
     )
 
@@ -156,6 +183,12 @@ async def log_in_seeded(
             stored_hash=stored,
             produced_hash=None if note else user.password_hash,
         )
-        raise AssertionError(
-            f"Login refused the correct password of a seeded user.\n{note}{report}"
-        ) from exc
+        if exc.retry_after is None:
+            headline = "Login refused the correct password of a seeded user."
+        else:
+            # Only a lockout or an IP throttle sets it (login.py), never argon2.
+            headline = (
+                f"Login refused by a lockout or throttle (retry_after="
+                f"{exc.retry_after}), not by argon2: this is not the #3748 flake."
+            )
+        raise AssertionError(f"{headline}\n{note}{report}") from exc
