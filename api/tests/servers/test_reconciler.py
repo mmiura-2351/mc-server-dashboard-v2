@@ -1656,6 +1656,29 @@ async def test_start_overtaken_by_a_stop_intent_is_skipped_quietly(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
+async def test_placed_start_overtaken_by_a_stop_intent_is_skipped_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The same race on the orphan placement path (issue #3737): the row is placed,
+    # and a stop commits while the placed start hydrates.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = _StopLandsDuringHydrate(uow=uow, place_to=_WORKER)
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    assert server.id not in reconciler._attempts
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
 async def test_backoff_grows_exponentially() -> None:
     uow = FakeUnitOfWork()
     server = _server(

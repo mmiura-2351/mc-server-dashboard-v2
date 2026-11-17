@@ -4658,7 +4658,8 @@ def _stop_intent_lands(uow: FakeUnitOfWork, server_id: uuid.UUID) -> Callable[[]
 def _assert_stop_intent_kept(
     uow: FakeUnitOfWork, cp: FakeControlPlane, server_id: uuid.UUID, worker: uuid.UUID
 ) -> None:
-    assert "start" not in [k for k, _, _ in cp.dispatched]
+    # Each caller pins its exact dispatch list itself: the #2499 replay sends one
+    # refused start before the hydrate the stop lands in.
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.assigned_worker_id == WorkerId(worker)
@@ -4750,6 +4751,79 @@ async def test_start_does_not_dispatch_when_the_server_was_re_placed_elsewhere()
     assert cp.decremented == []
 
 
+async def test_start_does_not_dispatch_when_the_server_was_deleted() -> None:
+    # A stop released the row and a delete removed it while the redispatched
+    # start hydrated. There is nothing left to start for, and nothing to revert.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+
+    def deleted() -> None:
+        del uow.servers.by_id[ServerId(server_id)]
+
+    cp = _HydrateRunsHookControlPlane(during_hydrate=deleted)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    assert ServerId(server_id) not in uow.servers.by_id
+    assert cp.decremented == []
+
+
+class _RepositoryFailingOneRead(FakeServerRepository):
+    """A repository whose next ``get_by_id`` raises once ``fail_next_read`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_read = False
+
+    async def get_by_id(self, server_id: ServerId) -> Server | None:
+        if self.fail_next_read:
+            self.fail_next_read = False
+            raise RuntimeError("database unavailable")
+        return await super().get_by_id(server_id)
+
+
+async def test_start_does_not_compensate_when_the_re_read_fails() -> None:
+    # The re-read before the start raises (a database error). Nothing says this
+    # start still owns the row, and _compensate reverts without checking (issue
+    # #3741), so the error propagates as is: no start, no revert, and the row stays
+    # desired=running and assigned for the reconciler to redispatch.
+    community, server_id, worker = _ids()
+    repo = _RepositoryFailingOneRead()
+    uow = FakeUnitOfWork(servers=repo)
+    repo.seed(_server(community_id=community, server_id=server_id))
+
+    def read_fails() -> None:
+        repo.fail_next_read = True
+
+    cp = _HydrateRunsHookControlPlane(
+        place_to=WorkerId(worker), during_hydrate=read_fails
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    stored = repo.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+
+
 async def test_place_and_start_does_not_dispatch_when_stop_intent_lands() -> None:
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -4822,6 +4896,7 @@ async def test_start_replay_does_not_dispatch_when_stop_intent_lands() -> None:
 
     # The refused skip-hydrate start, then the replay's hydrate, and no second start.
     assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate"]
+    _assert_stop_intent_kept(uow, cp, server_id, worker)
 
 
 class _LaneWorker(FakeControlPlane):

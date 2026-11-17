@@ -994,6 +994,13 @@ class StartServer:
         # unassigned here, because the stop owns the placement decrement and the
         # release. A row re-placed on another Worker meanwhile is refused the same
         # way. What is left is the window between this read and the start.
+        #
+        # A read that raises (a database error) propagates uncompensated too, unlike
+        # the failed generation read above (issue #2001). The row could not be read,
+        # so nothing says this start still owns it, and ``_compensate`` would revert
+        # whatever it finds without checking (issue #3741). Left alone, the row
+        # stays consistent: desired=running and assigned, with no start sent, which
+        # the reconciler redispatches once its grace lapses.
         async with self.uow:
             current = await self.uow.servers.get_by_id(server_id)
         if (
