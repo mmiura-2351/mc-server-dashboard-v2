@@ -610,14 +610,17 @@ Notes:
   just before it queues `StartServer`, with nothing in between that waits. If
   the count moved, the start is not sent. Otherwise any later stop is queued
   behind the start, and the Worker's per-server lane runs it as a real stop.
-  Two cases remain. A stop whose commit is still in flight when the start
-  compares does not hold the start back. If that commit then lands but
-  raises, or the write was a drain, nothing stops the start until the
-  reconciler acts on the Worker's report. A stop retried before that report
-  only releases the server (issue #3766). A failed start's revert also adds
-  to the count, but it sends no stop. A start that was already queued when
-  such a revert landed is still not caught (issue #3741). The count lives in
-  the API process. This holds because the API runs as a single instance
+  A commit that truly failed still adds one, so an in-flight start of the
+  still-running intent is refused and waits for the reconciler's re-send.
+  Not covered: a stop intent that sends no stop and lands after the start
+  compares, such as a stop commit that lands but raises, or any drain. Nothing
+  then stops the start until the reconciler acts on the Worker's report, and a
+  stop retried before that report only releases the server. Whether a
+  cancelled commit can raise before its flip is visible is also open. Both
+  are tracked in issue #3766. A failed start's revert also adds to the count,
+  but it sends no stop. A start that was already queued when such a revert
+  landed is still not caught (issue #3741). The count lives in the API
+  process. This holds because the API runs as a single instance
   (REQUIREMENTS.md NFR-SCALE-1).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker

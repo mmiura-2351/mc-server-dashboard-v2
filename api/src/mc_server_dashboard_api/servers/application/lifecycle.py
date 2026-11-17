@@ -1441,7 +1441,9 @@ class StopServer:
                 # await (issue #3739). A start of this intent that has not sent yet
                 # sees it; one that has is ahead of the stop sent below. Bump when
                 # the commit raises too: it may have landed, and then no stop is
-                # sent at all.
+                # sent at all. The cost: a commit that truly failed refuses an
+                # in-flight start of the still-running intent, which then waits for
+                # the reconciler's re-send.
                 try:
                     await self.uow.commit()
                 finally:
@@ -2446,7 +2448,8 @@ class StopServersAssignedToWorker:
             # Withdrawn, as in ``StopServer`` (issue #3739): a start of one of these
             # intents that has not sent yet sees it, and one that has is ahead of
             # the stop the reconciler sends. A commit that raises may have landed,
-            # so it bumps too.
+            # so it bumps too, at the same cost: if it truly failed, an in-flight
+            # start is refused and waits for the reconciler's re-send.
             try:
                 await self.uow.commit()
             finally:

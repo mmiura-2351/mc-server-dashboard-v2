@@ -26,15 +26,22 @@ be past its own read and waiting on its write. A bump made before that write
 would land before the start read the count, and the stop could then be enqueued
 ahead of the start unseen. A stop or drain bumps when its commit raises, too: the
 commit may have landed (a lost response, or a client disconnect cancelling the
-request at that await), and then no stop is sent at all.
+request at that await), and then no stop is sent at all. The cost is a commit
+that truly failed: the intent is still running, but an in-flight start of it is
+refused and waits for the reconciler's re-send.
 
-What this does not cover is a commit still in flight when a start compares. The
-start goes out, and the bump comes after it. If the commit then returns, the stop
-is sent behind the start and stops it for real. If the commit lands but raises,
-or the write was a drain, no stop follows the start. The reconciler sends one
-once the Worker reports the server running. A stop retried before that report
-finds ``observed`` still at rest, so it only releases the row, and that release
-happens under the instance that is launching (issue #3766).
+What this does not cover is a withdrawal that sends no stop and lands after a
+start compares: a stop commit that was still in flight and then lands but
+raises, or any drain, including one that begins after the start was sent. The
+start goes out, and nothing follows it. (A stop commit that lands after the
+compare and returns is fine: its stop is sent behind the start and is a real
+stop.) The reconciler sends a stop once the Worker reports the server running.
+A stop retried before that report finds ``observed`` still at rest, so it only
+releases the row, under the instance that is launching (issue #3766). Also open,
+and recorded there: whether a cancelled commit can raise before its flip is
+visible to other sessions. The bump would then come first, the pre-write shape
+argued against above, and a re-send that read the count in that gap would not be
+held back.
 
 The writes that bump: a stop's and a drain's ``running -> stopped`` flip, and a
 failed start's or placement's revert (``_compensate``, ``_unassign``). A revert
