@@ -7,13 +7,15 @@ directory with room, or at ``MCSD_TEST_TMPDIR`` when that is set, and otherwise
 keeps the default tmp dir.
 
 Each test runs the selection against its own default, candidate tmpfs and
-override directories, so the session's own root, ``--basetemp`` and
-``PYTEST_DEBUG_TEMPROOT`` do not affect the outcome.
+override directories, or in an inner pytest session, so the outer session's
+own root, ``--basetemp`` and ``PYTEST_DEBUG_TEMPROOT`` do not affect the
+outcome.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +24,8 @@ import pytest
 
 from tests import conftest
 from tests.conftest import _TMP_ROOT_ENV, _select_tmp_root
+
+pytest_plugins = ["pytester"]
 
 
 @dataclass(frozen=True)
@@ -100,12 +104,30 @@ def test_an_override_that_is_not_a_directory_is_refused(
         _select_tmp_root()
 
 
-def test_pytests_default_basetemp_follows_the_selected_root(
-    roots: _Roots, monkeypatch: pytest.MonkeyPatch
+def test_a_session_without_basetemp_puts_tmp_path_under_the_selected_root(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """An inner pytest session that loads this conftest, with no ``--basetemp``
+    (which ``runpytest_subprocess`` would add) and no ``PYTEST_DEBUG_TEMPROOT``
+    (which ``pytester`` sets), roots its ``tmp_path`` at the selected dir."""
+    root = pytester.mkdir("root").resolve()
     monkeypatch.delenv("PYTEST_DEBUG_TEMPROOT", raising=False)
+    # The inner session must not create a scratch database of its own.
+    monkeypatch.delenv("MCD_TEST_DATABASE_URL", raising=False)
+    monkeypatch.delenv("MCD_TEST_DATABASE_URL_BASE", raising=False)
+    monkeypatch.setenv(_TMP_ROOT_ENV, str(root))
+    monkeypatch.setenv("PYTHONPATH", str(Path(conftest.__file__).parents[1]))
+    pytester.makepyfile(
+        f"""
+        from pathlib import Path
 
-    _select_tmp_root()
-    factory = pytest.TempPathFactory(None, 3, "all", lambda *_: None, _ispytest=True)
+        def test_tmp_path(tmp_path):
+            assert tmp_path.is_relative_to(Path({str(root)!r}))
+        """
+    )
 
-    assert factory.getbasetemp().is_relative_to(roots.candidate.resolve())
+    result = pytester.run(
+        sys.executable, "-m", "pytest", "-p", "tests.conftest", "-p", "no:cacheprovider"
+    )
+
+    result.assert_outcomes(passed=1)
