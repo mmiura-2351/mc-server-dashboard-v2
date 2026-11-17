@@ -687,6 +687,25 @@ func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 	}
 }
 
+// dockerSocket is the fake Engine's socket, bound and dialled by this name relative to
+// the test's own temp dir: a unix socket path holds at most 107 bytes, so the absolute
+// path under a long tmp root would not bind (issue #3805).
+const dockerSocket = "docker.sock"
+
+// listenDockerSocket makes the test's working directory a fresh temp dir and binds
+// dockerSocket in it. It closes the listener before the working directory is
+// restored, so the close unlinks this test's socket and no other file.
+func listenDockerSocket(t *testing.T) net.Listener {
+	t.Helper()
+	t.Chdir(t.TempDir())
+	l, err := net.Listen("unix", dockerSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l
+}
+
 // fakeDockerSocket serves the one Engine call a no-container orphan sweep makes — the
 // labelled container list — over a unix socket, so cd.Sweep SUCCEEDS and boot's quiescence
 // premise holds for real rather than by assumption. Anything else the sweep might call is
@@ -694,11 +713,7 @@ func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 // the sweep it is imitating.
 func fakeDockerSocket(t *testing.T) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "docker.sock")
-	l, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := listenDockerSocket(t)
 	srv := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -714,18 +729,14 @@ func fakeDockerSocket(t *testing.T) string {
 	}
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return "unix://" + sock
+	return "unix://" + dockerSocket
 }
 
 // sweptDockerSocket serves the Engine calls a sweep of one exited orphan makes: the
 // labelled container list, naming one exited container of serverID, and its remove.
 func sweptDockerSocket(t *testing.T, serverID string) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "docker.sock")
-	l, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := listenDockerSocket(t)
 	srv := &http.Server{
 		ReadHeaderTimeout: 5 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -744,7 +755,7 @@ func sweptDockerSocket(t *testing.T, serverID string) string {
 	}
 	go func() { _ = srv.Serve(l) }()
 	t.Cleanup(func() { _ = srv.Close() })
-	return "unix://" + sock
+	return "unix://" + dockerSocket
 }
 
 // cancelOnFirstDial returns a control-plane endpoint whose first inbound connection
