@@ -9,9 +9,11 @@ dummy URL is never dialed (NFR-TEST-1).
 from __future__ import annotations
 
 import os
+import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +31,54 @@ from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
 
 _SCRATCH_DB_URL: str | None = None
 """The per-run scratch database created for this session, if any (issue #379)."""
+
+_TMP_ROOT_ENV = "MCSD_TEST_TMPDIR"
+"""Names the suite's tmp root explicitly; it wins over the tmpfs (issue #3722)."""
+
+_TMPFS = Path("/dev/shm")
+_TMPFS_MIN_FREE = 1 << 30
+"""Room ``/dev/shm`` needs before the suite uses it. A container's 64 MiB
+default would run out mid-suite; the default tmp dir is used instead."""
+
+
+def _tmpfs_or_default(tmpfs: Path, min_free: int) -> str:
+    """``tmpfs`` when it is a writable directory with ``min_free`` bytes free,
+    otherwise the default tmp dir."""
+    try:
+        stats = os.statvfs(tmpfs)
+    except OSError:
+        return tempfile.gettempdir()
+    if (
+        os.access(tmpfs, os.W_OK | os.X_OK)
+        and stats.f_bavail * stats.f_frsize >= min_free
+    ):
+        return str(tmpfs)
+    return tempfile.gettempdir()
+
+
+def _select_tmp_root() -> None:
+    """Point ``TMPDIR`` and with it pytest's basetemp at a tmpfs (issue #3722).
+
+    The fs-backed storage tests fsync for real, and on disk under host I/O load
+    a single fsync has blocked for over 120 s. On a tmpfs an fsync does not
+    wait on the disk. Tests that check fsync ordering patch ``os.fsync``, so
+    they hold on any filesystem.
+
+    pytest roots its numbered ``pytest-of-<user>/pytest-N`` basetemp, and
+    its retention of the last three, at ``tempfile.gettempdir()``; xdist
+    workers get a directory under the controller's. The choice is exported, so
+    the workers, which inherit the controller's environment, use the same root.
+    """
+    root = os.environ.get(_TMP_ROOT_ENV) or _tmpfs_or_default(_TMPFS, _TMPFS_MIN_FREE)
+    if not os.path.isdir(root):
+        raise pytest.UsageError(f"{_TMP_ROOT_ENV}={root} is not a directory")
+    os.environ[_TMP_ROOT_ENV] = root
+    os.environ["TMPDIR"] = root
+    tempfile.tempdir = root
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    return f"tmp root: {os.environ[_TMP_ROOT_ENV]} (override: {_TMP_ROOT_ENV})"
 
 
 def _is_xdist_controller(config: pytest.Config) -> bool:
@@ -61,8 +111,11 @@ def pytest_configure(config: pytest.Config) -> None:
     agent worktrees sharing one Postgres) disjoint, so they can no longer race
     on the schema or leave orphan tables behind. Runs before collection, so the
     test modules import the per-run URL.
+
+    It first selects the suite's tmp root (:func:`_select_tmp_root`).
     """
     global _SCRATCH_DB_URL
+    _select_tmp_root()
     base_url = os.environ.get("MCD_TEST_DATABASE_URL_BASE") or os.environ.get(
         "MCD_TEST_DATABASE_URL"
     )
