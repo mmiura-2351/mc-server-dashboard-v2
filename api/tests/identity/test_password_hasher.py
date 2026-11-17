@@ -24,6 +24,7 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
 from mc_server_dashboard_api.identity.domain.errors import (
     PasswordVerificationUnavailableError,
 )
+from tests.argon2_diagnostics import argon2_mismatch_report
 
 
 async def test_argon2_hash_is_not_plaintext_and_verifies() -> None:
@@ -253,7 +254,11 @@ async def test_hash_and_verify_run_off_the_event_loop_thread() -> None:
     hasher = _ThreadProbeHasher()
 
     hashed = await hasher.hash("Wm7!qz#Lp2vT")
-    assert await hasher.verify("Wm7!qz#Lp2vT", hashed) is True
+    verified = await hasher.verify("Wm7!qz#Lp2vT", hashed)
+    # The report runs only on a failure, the intermittent refusal of #3748.
+    assert verified is True, argon2_mismatch_report(
+        password="Wm7!qz#Lp2vT", stored_hash=hashed
+    )
 
     assert hasher.hash_thread is not None
     assert hasher.verify_thread is not None

@@ -47,6 +47,7 @@ from mc_server_dashboard_api.identity.domain.brute_force import BruteForceConfig
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
+    InvalidCredentialsError,
     UsernameAlreadyExistsError,
 )
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
@@ -55,6 +56,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
+from tests.argon2_diagnostics import log_in_seeded
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 _VALID_PASSWORD = "Wm7!qz#Lp2vT"
@@ -219,9 +221,27 @@ async def test_admin_created_account_can_log_in(engine: AsyncEngine) -> None:
     created = await _admin_create(engine)(
         username="bob", email="bob@example.com", password=_VALID_PASSWORD
     )
-    result = await _login(engine)(username="bob", password=_VALID_PASSWORD)
+    result = await log_in_seeded(_login(engine), engine, created, _VALID_PASSWORD)
     assert result.user_id == created.id.value
     assert result.pair.access_token
+
+
+async def test_a_refused_login_fails_with_the_argon2_report(
+    engine: AsyncEngine,
+) -> None:
+    # The report an intermittent correct-password refusal fails with (#3748)
+    # reads the stored hash back from the database; a wrong password stands in
+    # for the refusal, so that read runs before the day it is needed.
+    created = await _admin_create(engine)(
+        username="bob", email="bob@example.com", password=_VALID_PASSWORD
+    )
+
+    with pytest.raises(AssertionError) as failure:
+        await log_in_seeded(_login(engine), engine, created, "Np4@xZ#Lq9wR")
+
+    assert isinstance(failure.value.__cause__, InvalidCredentialsError)
+    assert f"value: {created.password_hash!r}" in str(failure.value)
+    assert "equals the hash the test produced: True" in str(failure.value)
 
 
 async def test_duplicate_username_case_insensitive_raises(engine: AsyncEngine) -> None:
