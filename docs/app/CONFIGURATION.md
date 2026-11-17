@@ -446,14 +446,19 @@ by hand:
    snapshot, by the reconciler once `grace_seconds` lapses, or at once by a
    second `stop` (for a stopped intent whose Worker is disconnected,
    `stopped_intent_action` selects `clear_stale_assignment`).
-2. **Start it.** The start places the server on a connected Worker and hydrates
-   it from authoritative Storage. Progress since the server's last published
-   snapshot was only on the lost Worker, so it is gone.
+2. **Start it.** The start places the server on another Worker (placement
+   offers only online ones, `InMemoryWorkerRegistry.candidates_for_placement`)
+   and starts it from the last published snapshot, hydrating it unless that
+   Worker already holds that generation. Progress since that snapshot was only
+   on the lost Worker, so it is gone. With no other Worker online the start
+   answers `503 no_eligible_worker`.
 
 A drain of the lost Worker does the first step for all of its servers at once,
 without the `503`, but only until the API restarts: the drain endpoints answer
 `404` for a Worker that has not registered with the running API
-(`SetWorkerDrain.__call__` looks it up in the in-memory registry).
+(`SetWorkerDrain.__call__` looks it up in the in-memory registry). The drain is
+recorded, so if that Worker does come back it registers `draining` and takes no
+placement until the drain is cleared.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -664,7 +669,7 @@ can run**, and **where its scratch space is**.
 | `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
 | `api.tls.client_cert_file` | — | | **Reserved; not implemented.** Path to the Worker's client certificate for an mTLS control channel. The API does not verify client certificates (server-side TLS only; `api.credential` authenticates the Worker), so this key is reserved, unused; it is documented so the config shape admits mTLS without renaming. Must be set together with `api.tls.client_key_file` (or neither); a half-configured pair fails config validation, naming the missing half. |
 | `api.tls.client_key_file` | — | secret | **Reserved; not implemented.** Path to the Worker's client private key (mTLS). Reserved, unused (see `api.tls.client_cert_file`). |
-| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). The API accepts any spelling Python's `uuid.UUID` parses (uppercase, no hyphens, braces, a `urn:uuid:` prefix) and canonicalises it to the lowercase-hyphenated form at registration, so the Worker still matches its stored assignments and drain (issue #3542); the shipped Worker itself accepts an explicit `worker.id` only in the 36-character hyphenated form (either case). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker. Rows still assigned to the old id stay assigned to a Worker that never reconnects: the disconnect marks them `unknown`, and nothing re-places them. Move each with a stop and then a start (Section 5.6, "A Worker that never reconnects"); the start hydrates it on a connected Worker. |
+| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). The API accepts any spelling Python's `uuid.UUID` parses (uppercase, no hyphens, braces, a `urn:uuid:` prefix) and canonicalises it to the lowercase-hyphenated form at registration, so the Worker still matches its stored assignments and drain (issue #3542); the shipped Worker itself accepts an explicit `worker.id` only in the 36-character hyphenated form (either case). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker. Rows still assigned to the old id stay assigned to a Worker that never reconnects: the disconnect marks them `unknown`, and nothing re-places them. Move each with a stop and then a start (Section 5.6, "A Worker that never reconnects"); the start places it on another Worker. |
 
 ¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`; a blank value
 counts as unset (the secret-blank rule of Section 3, which the Worker applies to

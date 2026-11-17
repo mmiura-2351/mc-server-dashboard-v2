@@ -254,7 +254,7 @@ def test_declared_api_sites_match_the_source() -> None:
 
     undeclared = sorted(scanned - set(declared))
     assert not undeclared, (
-        "these CommandStatus match sites are in servers/application/ but no "
+        "these status match sites are in servers/application/ but no "
         f"contract row declares them: {undeclared}. Add the site to the 'api' "
         "column of the row for the (kind, code) it matches in "
         "proto/contract/command_error_contract.json -- and if there is no such "
@@ -265,7 +265,7 @@ def test_declared_api_sites_match_the_source() -> None:
     stale = sorted(triple for triple in declared if triple not in scanned)
     assert not stale, (
         "the contract table declares these API match sites, but the source has "
-        f"no such CommandStatus reference: {stale}. They were renamed, moved or "
+        f"no such status match: {stale}. They were renamed, moved or "
         "removed -- update the 'api' column of the rows that name them (kinds: "
         f"{ {t: sorted(declared[t]) for t in stale} })."
     )
