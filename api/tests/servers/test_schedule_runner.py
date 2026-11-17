@@ -1589,6 +1589,27 @@ async def test_a_dispatch_whose_session_ended_records_an_unknown_outcome(
     assert _run_details(env, schedule) == ["worker disconnected"]
 
 
+async def test_a_backup_whose_session_ended_at_the_snapshot_still_fails() -> None:
+    # The snapshot may have run before the disconnect, but CreateBackup archives
+    # only after it returns, so no backup exists: a failure, named for its cause.
+    env = _env(control_plane=_SessionEnds("snapshot"))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["worker disconnected"]
+    assert env.uow.backups.by_id == {}
+
+
 async def test_a_start_the_worker_answered_busy_is_unknown() -> None:
     # BUSY refuses this start command but leaves the intent and the assignment
     # standing, and the reconciler starts the server once the Worker settles.

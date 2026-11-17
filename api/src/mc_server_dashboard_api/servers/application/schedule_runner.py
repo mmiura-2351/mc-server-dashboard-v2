@@ -28,17 +28,18 @@ Outcome taxonomy (owner-confirmed):
   it did not answer in time, or its session ended while the command awaited the
   answer. Neither proves the command left the API, since one dropped unsent from
   the outbound queue looks the same, so both err toward unknown. A start whose
-  intent still stands after the error: a lost answer or a ``BUSY`` refusal at the
-  start command, after which the reconciler starts the server. Audited and
+  intent still stands after the error: an unreachable Worker, a lost answer or a
+  ``BUSY`` refusal at the start command, after which the reconciler starts the
+  server. Audited and
   notified like a failure, under its own title, and never retried. It shares the
   failing edge, but a failure after an unknown notifies once more as an
   escalation; an unknown after a failure stays silent.
 
-  An error that leaves the action definitely undone stays a failure: a Worker
-  not connected at dispatch, a refusal the Worker answered, a start whose intent
-  was reverted (its hydrate failed or timed out, or it was refused and
-  compensated), and a backup whose snapshot failed or went unanswered (the
-  archive is written only after the snapshot returns, so no backup exists).
+  Every other error stays a failure: a command, stop or restart whose Worker was
+  not connected at dispatch or refused it, a start whose intent was reverted (its
+  hydrate failed or went unanswered, or it was refused and compensated), and a
+  backup whose snapshot failed or went unanswered (the archive is written only
+  after the snapshot returns, so no backup exists).
   ``COMMAND_DROPPED`` stays a failure too, though whether the command ran is
   uncertain (CONTROL_PLANE.md Section 7): the Worker answered, its usual cause is
   a packet the game server dropped without running it, and the run history shows
@@ -440,9 +441,10 @@ class ExecuteScheduleAction:
         A start can exactly while its intent stands, whatever the error. Before
         the start command, or on a refusal :class:`StartServer` compensates, the
         intent is reverted and the start will not happen. Once the start command
-        is reached, a lost answer (a timeout or a disconnect) or a ``BUSY``
-        refusal leaves the intent and assignment standing, and the reconciler
-        starts the server. The row tells these apart.
+        is reached, an unreachable Worker, a lost answer (a timeout or a
+        disconnect) or a ``BUSY`` refusal leaves the intent and assignment
+        standing, and the reconciler starts the server. The row tells these
+        apart.
 
         A command, stop or restart can only when the Worker left its command
         unanswered: it did not answer in time (``upload_may_be_live``) or its
@@ -450,8 +452,9 @@ class ExecuteScheduleAction:
         (``session_ended_in_flight``). Either way the command may have reached
         the Worker and run, or it may never have left the API: the flags cover a
         command dropped unsent from the outbound queue too, and the API cannot
-        tell. A refusal, or a Worker that was not connected at dispatch, never
-        ran it.
+        tell. A Worker that was not connected at dispatch never ran it, and an
+        answered refusal stays a failure (``COMMAND_DROPPED`` too: see the module
+        docstring).
         """
 
         if action is ScheduleAction.BACKUP:
