@@ -105,9 +105,11 @@ when the worker died mid-test. A crashed line counts only the phases that
 finished, and its worker is `?` when the crash came during setup. A worker's
 lines are in the order it ran its tests, which the dots-only console output
 does not show. After a flaky failure, filter the file by the failing test's
-worker to see what ran before it. Only finished tests have a line: for a hang,
-the last line of each worker shows where it stopped, and pytest-timeout's
-traceback dump in `api.log` shows the test that hung.
+worker to see what ran before it. A test that hangs until pytest-timeout's
+120 s limit still gets a line (`failed`, or `error` when it hung in a fixture),
+and the timeout's traceback dump is in `api.log`. Only a run killed from
+outside leaves the tests still running without a line; the last line of each
+worker then shows where it stopped.
 
 ### Per-module commands
 
