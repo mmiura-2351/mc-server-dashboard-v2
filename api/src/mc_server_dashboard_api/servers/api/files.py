@@ -167,6 +167,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnreadableArchiveError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -696,6 +697,12 @@ async def upload_file(
     ``extract=true`` a zip / tar.gz is expanded under ``path`` with per-entry
     traversal validation (zip-slip defence) and a total-extracted-size cap.
 
+    **An archive that does not read (issue #3769).** With ``extract=true``, a body
+    that does not read back as the zip / tar.gz its filename names (truncated, not
+    an archive at all, damaged, an encrypted member or an unsupported compression
+    method) is 422 ``invalid_archive``. The whole archive is read before the first
+    write, so nothing is written.
+
     **Platform-managed keys (issue #2809).** An upload landing on the root
     ``server.properties`` — directly, or as an archive member — may not change
     the keys the platform owns; such an upload is 422 ``platform_managed_key``
@@ -736,6 +743,10 @@ async def upload_file(
         # same reason its make-dir and rename siblings carry. A genuine traversal
         # keeps the default invalid_path.
         raise _unprocessable(exc.reason) from exc
+    except UnreadableArchiveError as exc:
+        # The archive reader failed on the body's own bytes (issue #3769): the
+        # reason a backup upload gives a body that does not read as its archive.
+        raise _unprocessable("invalid_archive") from exc
     except PlatformManagedKeyError as exc:
         raise _platform_managed_key(exc) from exc
     except FileTooLargeError as exc:

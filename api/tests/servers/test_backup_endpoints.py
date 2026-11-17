@@ -21,6 +21,7 @@ import errno
 import io
 import logging
 import os
+import random
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
@@ -3116,6 +3117,27 @@ def test_upload_of_a_member_restore_refuses_is_422_and_stores_nothing(
     content: bytes,
 ) -> None:
     resp, store, backups, _ = _upload_through_the_route(content)
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert store.stored == []
+    assert backups.by_id == {}
+
+
+def test_upload_of_an_archive_cut_inside_a_member_is_422_and_stores_nothing() -> None:
+    # The cut lands in the member's data, which the gzip layer reports as an
+    # EOFError rather than a tarfile error, so it used to escape as a 500
+    # (issue #3769). The payload is seeded and compressible, so the cut is in
+    # the deflate stream on every run.
+    payload = bytes(random.Random(3769).choices(b"abcdefgh", k=64 * 1024))
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        info = tarfile.TarInfo(name="world/level.dat")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+    archive = buf.getvalue()
+
+    resp, store, backups, _ = _upload_through_the_route(archive[: len(archive) // 2])
 
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_archive"

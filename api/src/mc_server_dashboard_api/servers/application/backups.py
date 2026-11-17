@@ -61,6 +61,7 @@ from mc_server_dashboard_api.audit.domain.operations import (
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.servers.application.files import (
+    _TAR_GZ_READ_ERRORS,
     MAX_ARCHIVE_ENTRIES,
     MAX_DECOMPRESSED_BYTES,
     MAX_UPLOAD_BYTES,
@@ -1541,7 +1542,9 @@ def _validate_backup_archive(
                     handle = tar.extractfile(member)
                     if handle is not None:
                         total = _drain_capped(handle, total, max_decompressed_bytes)
-    except tarfile.TarError as exc:
+    except _TAR_GZ_READ_ERRORS as exc:
+        # Not ``tarfile.TarError`` alone: a cut or damage inside a member's data
+        # surfaces from the gzip layer as ``EOFError`` / ``zlib.error`` (#3769).
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 

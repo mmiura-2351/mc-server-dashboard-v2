@@ -19,6 +19,8 @@ import datetime as dt
 import gzip
 import io
 import logging
+import random
+import struct
 import tarfile
 import threading
 import uuid
@@ -70,6 +72,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnreadableArchiveError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import (
     FileEntry,
@@ -3777,6 +3780,107 @@ async def test_upload_extract_unknown_archive_type_is_invalid_path() -> None:
             dir_path=".",
             filename="not-an-archive.bin",
             content=b"x",
+            extract=True,
+        )
+
+
+# --- an archive that does not read back (issue #3769) -----------------------
+#
+# Each fixture's bytes do not read back as the archive its filename names. Where
+# the reader gets past a first member before it fails, that member is intact, so
+# "nothing written" is not vacuous: an extraction that wrote as it read would
+# have landed ``a.txt``. The payload is seeded (the same bytes on every run) and
+# compressible, so ``b.txt`` is a real deflate stream.
+
+_PAYLOAD = bytes(random.Random(3769).choices(b"abcdefgh", k=64 * 1024))
+
+
+def _deflated_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("a.txt", b"A")
+        zf.writestr("b.txt", _PAYLOAD)
+    return buf.getvalue()
+
+
+def _zip_with_a_damaged_member() -> bytes:
+    """``b.txt``'s deflate stream opens with block type 3, which deflate reserves."""
+
+    archive = bytearray(_deflated_zip())
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        header = zf.getinfo("b.txt").header_offset
+    # The local file header is 30 fixed bytes, then the name and the extra field.
+    name_len, extra_len = struct.unpack_from("<HH", archive, header + 26)
+    archive[header + 30 + name_len + extra_len] = 0xFF  # BFINAL=1, BTYPE=0b11
+    return bytes(archive)
+
+
+def _zip_with_an_encrypted_member() -> bytes:
+    """``b.txt`` is flagged encrypted, so no read without its password opens it."""
+
+    archive = bytearray(_deflated_zip())
+    entry = archive.rfind(b"PK\x01\x02")  # the last central entry: b.txt
+    archive[entry + 8] |= 0x01  # general-purpose flag bit 0: encrypted
+    return bytes(archive)
+
+
+_ZIP = _deflated_zip()
+_TAR_GZ = _tar_gz_bytes({"a.txt": b"A", "b.txt": _PAYLOAD})
+_GARBAGE = b"not an archive " * 256
+
+_UNREADABLE_ARCHIVES = [
+    pytest.param("pack.zip", _ZIP[: len(_ZIP) // 2], id="truncated-zip"),
+    pytest.param("pack.zip", _GARBAGE, id="garbage-zip"),
+    pytest.param("pack.zip", _zip_with_a_damaged_member(), id="damaged-zip-member"),
+    pytest.param("pack.zip", _zip_with_an_encrypted_member(), id="encrypted-zip"),
+    # Cut inside b.txt's data, past an intact a.txt.
+    pytest.param("pack.tar.gz", _TAR_GZ[: len(_TAR_GZ) // 2], id="truncated-tar-gz"),
+    pytest.param("pack.tar.gz", _GARBAGE, id="garbage-tar-gz"),
+]
+
+
+@pytest.mark.parametrize(("filename", "content"), _UNREADABLE_ARCHIVES)
+async def test_upload_extract_of_an_unreadable_archive_writes_nothing(
+    filename: str, content: bytes
+) -> None:
+    # The archive reader's own failure is a verdict about the upload, not a
+    # server fault. It fires in the validate-first pass, so nothing is written,
+    # not even a member read before it.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename=filename,
+            content=content,
+            extract=True,
+        )
+    assert store.writes == []
+
+
+async def test_upload_extract_cap_breach_before_the_damage_stays_too_large() -> None:
+    # The archive is read in order, so a member that breaches the cap before the
+    # reader reaches the damage is still the size refusal.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    cap = 128 * 1024
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=FakeFileStore(),
+        max_bytes=cap,
+    )
+
+    archive = _tar_gz_bytes({"a.txt": b"\x00" * (2 * cap), "b.txt": _PAYLOAD})
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=archive[: len(archive) // 2],  # cut inside b.txt
             extract=True,
         )
 

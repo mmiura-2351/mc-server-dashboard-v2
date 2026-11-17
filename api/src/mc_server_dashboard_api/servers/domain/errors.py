@@ -378,6 +378,19 @@ class FileTooLargeError(ServerError):
     """
 
 
+class UnreadableArchiveError(ServerError):
+    """An uploaded archive does not read back as the zip / tar.gz it names (#3769).
+
+    The archive reader itself failed: the body is truncated, is not an archive at
+    all, or carries damaged compressed data, an encrypted member or a compression
+    method the reader does not support. That is a verdict about the upload, unlike
+    a readable archive whose member is refused (:class:`InvalidFilePathError`) or
+    whose size breaches a cap (:class:`FileTooLargeError`), and resending the same
+    bytes cannot succeed. The edge maps this to 422 ``invalid_archive``, the reason
+    a backup upload gives a body that does not read as its archive.
+    """
+
+
 class FileAlreadyExistsError(ServerError):
     """A rename targeted a destination path that already exists (issue #259).
 
