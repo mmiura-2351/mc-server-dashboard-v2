@@ -1341,6 +1341,36 @@ async def test_a_timed_out_dispatch_records_an_unknown_outcome(
     assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
+@pytest.mark.parametrize(
+    ("action", "command"),
+    [
+        (ScheduleAction.COMMAND, "say hi"),
+        (ScheduleAction.STOP, None),
+        (ScheduleAction.RESTART, None),
+    ],
+)
+async def test_a_disconnected_worker_still_records_a_failure(
+    action: ScheduleAction, command: str | None
+) -> None:
+    # Not a timeout: the adapter leaves ``upload_may_be_live`` unset for a Worker
+    # with no live session, and the failure stays what it was.
+    env = _env(control_plane=FakeControlPlane(unavailable_kinds={action.value}))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=action,
+        command=command,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["worker unavailable"]
+
+
 async def test_an_unknown_outcome_is_audited_as_an_error_and_not_called_failed() -> (
     None
 ):
