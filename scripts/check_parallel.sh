@@ -29,8 +29,9 @@
 #   Skipped entirely if Phase 1 already failed (no point running generators
 #   on a known-broken tree).
 #
-# Bounded parallelism: 11 background jobs on a 4-core host. The heavy chains
-# (A, B) are CPU-bound; the lighter ones (C-K) finish quickly and free cores.
+# Bounded parallelism: 11 background chains on a 4-core host, plus the argon2
+# canary below at nice 19, 12 jobs in all. The heavy chains (A, B) are
+# CPU-bound; the lighter ones (C-K) finish quickly and free cores.
 # golangci-lint is capped at --concurrency=2 by the Makefile, and pytest-xdist
 # uses -n auto (4 workers). Oversubscription is transient and tolerable.
 #
@@ -178,27 +179,44 @@ trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 # scripts/argon2_canary.py is that process: fixed Argon2id answers and a 64 MiB
 # memory control, rechecked for as long as the api chain runs, into
 # argon2-canary.log beside the chain logs (docs/dev/AGENTS.md Section 3 says how
-# to read it). It runs at nice 19, one check every ~2 s, and it can never fail
-# the run: its exit status is ignored, and it does not inherit fd 9, so it never
-# holds the gate lock. It is stopped as the api chain ends, and by the EXIT trap
-# on every other way out of this script; a SIGKILL runs no trap, so the canary
-# also stops on its own once this script is gone.
+# to read it). It runs at nice 19, a check every ~4 s under a gate, and it can
+# never fail the run: its exit status is ignored, and it does not inherit fd 9,
+# so it never holds the gate lock. It is stopped as the api chain ends, and by
+# the EXIT trap on every other way out of this script; a canary that ignores the
+# TERM is killed after 5 s. A SIGKILL runs no trap, so the canary also stops on
+# its own once this script, whose pid it is given, is no longer its parent.
+#
+# A hit says nothing to a run that passes, and most runs pass, so the stop
+# reads the log: a MISMATCH or ERROR line is announced on stderr and the log
+# copied to argon2-canary-hits/ in the git common dir, which neither the log
+# rotation nor a worktree removal reaches. The run's verdict stays its own.
 canary_pid=
 start_argon2_canary() {
-    local python=api/.venv/bin/python log="$LOGDIR/argon2-canary.log"
-    if [ ! -x "$python" ]; then
-        echo "argon2 canary not started: no $python (make bootstrap)" >"$log"
-        return 0
-    fi
-    nice -n 19 "$python" -I scripts/argon2_canary.py </dev/null >"$log" 2>&1 9>&- &
+    nice -n 19 api/.venv/bin/python -I scripts/argon2_canary.py --parent "$$" \
+        </dev/null >"$LOGDIR/argon2-canary.log" 2>&1 9>&- &
     canary_pid=$!
 }
 stop_argon2_canary() {
-    if [ -n "$canary_pid" ]; then
-        kill -TERM "$canary_pid" 2>/dev/null
-        wait "$canary_pid" 2>/dev/null
-        canary_pid=
-    fi
+    local log="$LOGDIR/argon2-canary.log" kept hits_dir
+    [ -n "$canary_pid" ] || return 0
+    kill -TERM "$canary_pid" 2>/dev/null
+    for _ in $(seq 1 50); do
+        kill -0 "$canary_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -0 "$canary_pid" 2>/dev/null && kill -KILL "$canary_pid" 2>/dev/null
+    wait "$canary_pid" 2>/dev/null
+    canary_pid=
+    grep -qE ' (MISMATCH|ERROR) ' "$log" 2>/dev/null || return 0
+    hits_dir="$(git rev-parse --path-format=absolute --git-common-dir)/argon2-canary-hits" &&
+        kept="$hits_dir/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$worktree").log" &&
+        mkdir -p "$hits_dir" && cp "$log" "$kept" ||
+        kept="nowhere (the copy failed); it is still $log"
+    {
+        echo "!!! argon2 canary: a MISMATCH or ERROR during this run (#3748) !!!"
+        grep -E ' (MISMATCH|ERROR) ' "$log" | head -n 5
+        echo "!!! its log is kept at $kept: paste it into #3748 (docs/dev/AGENTS.md Section 3)"
+    } >&2
 }
 trap stop_argon2_canary EXIT
 
