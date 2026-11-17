@@ -170,16 +170,19 @@ _ARCHIVE_READ_ERRORS = (
 
 
 class HeaderCheckedTarInfo(tarfile.TarInfo):
-    """A ``TarInfo`` whose header read reports a bad number as ``ReadError``.
+    """A ``TarInfo`` whose header read reports a ``ValueError`` as ``ReadError``.
 
     CPython's ``tarfile`` converts the PAX ``GNU.sparse.size``,
     ``GNU.sparse.realsize`` and ``GNU.sparse.map`` fields, and the sparse format
     1.0 map, with a bare ``int()``, so a non-numeric one raises ``ValueError``
     (issue #3790). Opening an archive with ``tarinfo=HeaderCheckedTarInfo``
     reports it as the ``ReadError`` that the restore walk and the snapshot edge
-    already refuse. Only the header read is covered, so a ``ValueError`` from the
-    caller's own code is never mistaken for one. Not ``InvalidHeaderError``:
-    ``TarFile.next`` takes that, past the first header, for the end of the archive.
+    already refuse. Both hooks are public: the library reference documents the
+    ``tarinfo`` argument as replacing the default ``TarInfo`` class, and
+    ``TarInfo.fromtarfile`` as the classmethod that reads the next member. Only
+    the header read is covered, so a ``ValueError`` from the caller's own code is
+    never mistaken for one. Not ``InvalidHeaderError``: ``TarFile.next`` takes
+    that, past the first header, for the end of the archive.
     """
 
     @classmethod
@@ -187,7 +190,7 @@ class HeaderCheckedTarInfo(tarfile.TarInfo):
         try:
             return super().fromtarfile(archive)
         except ValueError as exc:
-            raise tarfile.ReadError(f"bad number in a member header: {exc}") from exc
+            raise tarfile.ReadError(f"unreadable member header: {exc}") from exc
 
 
 @contextlib.contextmanager
