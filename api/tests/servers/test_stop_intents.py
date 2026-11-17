@@ -22,12 +22,29 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import pytest
+from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import create_async_engine
+from starlette.requests import Request
 
+from mc_server_dashboard_api.dependencies import (
+    get_set_worker_drain,
+    get_start_server,
+    get_stop_server,
+)
+from mc_server_dashboard_api.fleet.adapters.assigned_server_stopper import (
+    ServersAssignedServerStopper,
+)
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
     GrpcControlPlane,
 )
+from mc_server_dashboard_api.fleet.adapters.real_time_events import (
+    InProcessRealTimeEvents,
+)
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.application.set_worker_drain import (
+    WorkerDrainLocks,
+)
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
@@ -37,8 +54,17 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
     StopServersAssignedToWorker,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
+from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
+    StopDispatchRefusals,
+)
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
+)
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -585,3 +611,38 @@ async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends(
         assert queue.get_nowait().api_command.WhichOneof("command") == "start"
     finally:
         dispatch.close()
+
+
+async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
+    # The counter only works if the start and the stops bump and read the same
+    # instance; a construction site left on its private default fails silently.
+    app = FastAPI()
+    app.state.stop_intents = StopIntentCounter()
+    app.state.engine = create_async_engine("postgresql+asyncpg://u:p@h/db")
+    app.state.storage = object()
+    app.state.real_time_events = InProcessRealTimeEvents()
+    app.state.stop_dispatch_refusals = StopDispatchRefusals()
+    app.state.unrecorded_stops = UnrecordedStops()
+    app.state.stop_convergence = StopConvergenceGuard()
+    app.state.worker_drain_locks = WorkerDrainLocks()
+    request = Request(scope={"type": "http", "app": app})
+    registry = InMemoryWorkerRegistry(
+        clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
+    )
+
+    try:
+        start = get_start_server(
+            request,
+            control_plane=FakeControlPlane(),
+            ensure_jar=object(),  # type: ignore[arg-type]
+            file_store=FakeFileStore(),
+        )
+        stop = get_stop_server(request, control_plane=FakeControlPlane())
+        drain = get_set_worker_drain(request, registry=registry)
+    finally:
+        await app.state.engine.dispose()
+
+    assert start.stop_intents is app.state.stop_intents
+    assert stop.stop_intents is app.state.stop_intents
+    assert isinstance(drain.stopper, ServersAssignedServerStopper)
+    assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents
