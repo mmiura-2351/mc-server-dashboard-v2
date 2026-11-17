@@ -297,7 +297,12 @@ export const en = {
   // 503 worker_unavailable on stop / restart (issue #2440): the dispatch timed
   // out or its session dropped AFTER the intent was committed, so nothing was
   // undone and the outcome is simply unknown — a graceful stop outliving the
-  // dispatch deadline is the commonest case. Distinct from the *Pending pair
+  // dispatch deadline is the commonest case. The Worker can also answer
+  // UNAVAILABLE itself, when its container backend did not cooperate (issue
+  // #3673). A start refused that way is compensated back to stopped, which is
+  // why start stays on workerUnavailable above; a restart whose relaunch was
+  // refused shares restartUnconfirmed, since the reconciler starts the server if
+  // it stays down. Distinct from the *Pending pair
   // above, which can say the server did not move; these can only say the
   // result is unconfirmed. What still stands differs by verb: the stop intent
   // is re-driven (the reconciler keeps retrying it), while restart keeps only
