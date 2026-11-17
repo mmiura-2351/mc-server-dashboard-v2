@@ -1068,8 +1068,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   short wait, even though the host reports the server still running at about the
   same time. The wait is the full reconcile wait (about 11 minutes by default)
   instead if the API restarts in between, a newer intent commit lands, or the
-  host then reports the server in another state. The message still asks for a retry rather than taking the stop
-  message below, since trying again replays the stop at once;
+  host then reports the server in another state. The message still asks for a
+  retry rather than taking the stop message below, since trying again replays
+  the stop at once;
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
   the server's state — a failed start is compensated back, but a failed stop or

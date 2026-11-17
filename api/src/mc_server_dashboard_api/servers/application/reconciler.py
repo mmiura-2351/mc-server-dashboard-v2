@@ -527,12 +527,12 @@ class RunReconcilerTick:
 
     async def _grace_for(self, server: Server, action: str) -> _GraceDecision:
         # A ``redispatch_stop`` whose previous stop dispatch the Worker RETURNED a
-        # refusal for, with nothing learned about the row since (issue #2478), or
-        # only a ``running`` report after an EXPIRED one (issue #3682). The
-        # only thing the full grace protects on this path is the #930 floor — never
-        # re-send a stop whose first dispatch may still be running — and a returned
-        # result is the end of that round trip, so the floor is satisfied by the
-        # answer instead of by waiting. The other two terms of the boot-time floor
+        # refusal for, with nothing learned about the row since (issue #2478), or an
+        # EXPIRED one on a row still observed ``running`` with no newer intent commit
+        # (issue #3682). The only thing the full grace protects on this path is the #930
+        # floor — never re-send a stop whose first dispatch may still be running — and a
+        # returned result is the end of that round trip, so the floor is satisfied by
+        # the answer instead of by waiting. The other two terms of the boot-time floor
         # belong elsewhere: #822 to the hydrating start paths, #847 to
         # ``clear_stale_assignment``. Neither reaches here.
         if action == "redispatch_stop" and self._previous_stop_refused(server):
