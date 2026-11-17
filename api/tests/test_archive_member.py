@@ -1,13 +1,16 @@
 """The end-of-archive check, :class:`EndCheckedReader` (issue #3778).
 
 Each archive is walked as the upload gates walk one: ``tarfile.open(mode="r:")``
-over the reader, every member's data read, then the read past the marker. Every
-case runs over the plain tar and over ``gzip.GzipFile``.
+over the reader, the members through ``members()`` with their data read, then
+the read past the marker. Every case runs over the plain tar and over
+``gzip.GzipFile``.
 
 This module imports only the standard library, pytest and ``archive_member``,
-so it also runs outside the project environment under another interpreter
-(``--noconftest``). CPython changes ``tarfile`` internals in patch releases, and
-the check must not depend on them.
+so it also runs outside the project environment under another interpreter:
+``uv run --no-project --python 3.14 --with pytest python -m pytest --noconftest
+-o addopts="" tests/test_archive_member.py`` from ``api/`` with ``PYTHONPATH=src``
+(the ini's ``addopts`` name plugins a bare environment lacks). CPython changes
+``tarfile`` internals in patch releases, and the check must not depend on them.
 """
 
 from __future__ import annotations
@@ -93,19 +96,29 @@ def _by_gnu_tar(*options: str) -> Callable[[Path], bytes]:
     return produce
 
 
-def _walk(archive: bytes, *, gzipped: bool) -> tuple[list[str], int]:
-    """The member names, and the bytes read past the end-of-archive marker."""
+def _walk(
+    archive: bytes, *, gzipped: bool, read_data: bool = True
+) -> tuple[list[str], int]:
+    """The member names, and the bytes read past the end-of-archive marker.
+
+    Without ``read_data`` the walk skips each member's data, as ``tarfile`` does
+    by seeking over it.
+    """
 
     body = io.BytesIO(gzip.compress(archive) if gzipped else archive)
     stream = EndCheckedReader(gzip.GzipFile(fileobj=body) if gzipped else body)
     names: list[str] = []
     with tarfile.open(fileobj=stream, mode="r:") as tar:
-        for member in tar:
+        for member in stream.members(tar):
             names.append(member.name)
-            data = tar.extractfile(member)
+            data = tar.extractfile(member) if read_data else None
             if data is not None:
                 data.read()
     return names, sum(len(chunk) for chunk in stream.read_past_end_marker())
+
+
+def _names(stream: EndCheckedReader, tar: tarfile.TarFile) -> list[str]:
+    return [member.name for member in stream.members(tar)]
 
 
 _both = pytest.mark.parametrize("gzipped", [False, True], ids=["tar", "tar.gz"])
@@ -160,11 +173,18 @@ _ACCEPTED: list[object] = [
 
 
 @_both
+@pytest.mark.parametrize("read_data", [True, False], ids=["read", "skipped"])
 @pytest.mark.parametrize(("produce", "names"), _ACCEPTED)
 def test_an_archive_that_ends_at_its_marker_reads_whole(
-    produce: Callable[[Path], bytes], names: list[str], gzipped: bool, tmp_path: Path
+    produce: Callable[[Path], bytes],
+    names: list[str],
+    gzipped: bool,
+    read_data: bool,
+    tmp_path: Path,
 ) -> None:
-    assert _walk(produce(tmp_path), gzipped=gzipped)[0] == names
+    walk = _walk(produce(tmp_path), gzipped=gzipped, read_data=read_data)
+
+    assert walk[0] == names
 
 
 def _with_a_malformed_pax_record() -> bytes:
@@ -181,6 +201,60 @@ def _with_a_bad_sparse_extension(tmp_path: Path) -> bytes:
 
 _PAX_B = _tar({"a.txt": b"A", _LONG: b"B"})
 _GNU_B = _tar({"a.txt": b"A", _LONG: b"B"}, fmt=tarfile.GNU_FORMAT)
+
+
+def _header(
+    name: str,
+    *,
+    typ: bytes = b"0",
+    size: int = 0,
+    size_field: bytes | None = None,
+    isextended: bool = False,
+) -> bytes:
+    """One header block built by hand, its checksum valid."""
+
+    block = bytearray(512)
+    block[: len(name)] = name.encode()
+    block[124:136] = size_field or b"%011o\0" % size
+    block[156:157] = typ
+    block[257:265] = b"ustar  \0"
+    block[482] = isextended  # an old-GNU sparse extension block follows
+    block[148:156] = b" " * 8
+    block[148:156] = b"%06o\0 " % sum(block)
+    return bytes(block)
+
+
+def _record(key: str, value: str) -> bytes:
+    """One PAX record, ``<length> <key>=<value>\\n``, its length counting itself."""
+
+    body = f" {key}={value}\n".encode()
+    length = len(body) + 1
+    while len(str(length)) + len(body) != length:
+        length = len(str(length)) + len(body)
+    return str(length).encode() + body
+
+
+def _pax(records: dict[str, str]) -> bytes:
+    data = b"".join(_record(key, value) for key, value in records.items())
+    return _header("PaxHeader", typ=b"x", size=len(data)) + data.ljust(512, b"\0")
+
+
+_A = _header("a.txt", size=1) + b"A".ljust(512, b"\0")
+_ZEROS = bytes(4 * 512)
+_MIB = 1024 * 1024
+# A negative size, in base-256. tarfile reads the sparse extension blocks first
+# and only then refuses it.
+_SPARSE_NEGATIVE = _header(
+    "s.bin", typ=b"S", size_field=b"\xff" * 11 + b"\0", isextended=True
+)
+_SPARSE = _header("s.bin", typ=b"S", isextended=True)
+# One sparse region, and another extension block after this one.
+_EXTENSION = (b"%011o\0%011o\0" % (512, 512)).ljust(504, b"\0") + b"\x01".ljust(
+    8, b"\0"
+)
+# Over 1 MiB, which newer CPython reads in 1 MiB parts: a malformed first record,
+# and a last part of 512 zeros.
+_LARGE_PAX_DATA = b"xx comment=hi\n".ljust(_MIB, b"j") + bytes(512)
 
 _REFUSED: list[object] = [
     # tarfile reads a header that does not parse, past the first, as the end.
@@ -217,6 +291,46 @@ _REFUSED: list[object] = [
     ),
     pytest.param(
         _with_a_bad_sparse_extension, id="bad-sparse-extension", marks=_needs_gnu_tar
+    ),
+    # No marker, after member data that ends in a block of zeros.
+    pytest.param(lambda _: _tar({"z.bin": bytes(512)})[:1024], id="zero-block-data"),
+    # Headers built with a valid checksum that tarfile gives up on only after
+    # reading a block of zeros: its last read alone looks like the marker.
+    pytest.param(lambda _: _A + _SPARSE_NEGATIVE + _ZEROS, id="sparse-negative-size"),
+    pytest.param(
+        lambda _: _A + _SPARSE_NEGATIVE + _EXTENSION + _ZEROS,
+        id="sparse-negative-size-after-extension",
+    ),
+    pytest.param(
+        lambda _: (
+            _A
+            + _pax({"GNU.sparse.size": "1", "GNU.sparse.offset": "x"})
+            + _SPARSE
+            + _ZEROS
+        ),
+        id="pax-bad-sparse-offset-then-sparse",
+    ),
+    pytest.param(
+        lambda _: _A + _pax({"size": "-5"}) + _SPARSE + _ZEROS,
+        id="pax-negative-size-then-sparse",
+    ),
+    pytest.param(
+        lambda _: (
+            _A
+            + _header("PaxHeader", typ=b"x", size=len(_LARGE_PAX_DATA))
+            + _LARGE_PAX_DATA
+            + _ZEROS
+        ),
+        id="large-pax-malformed",
+    ),
+    pytest.param(
+        lambda _: (
+            _A
+            + _header("GlobalHead", typ=b"g", size=len(_LARGE_PAX_DATA))
+            + _LARGE_PAX_DATA
+            + _ZEROS
+        ),
+        id="large-global-pax-malformed",
     ),
 ]
 
@@ -256,7 +370,7 @@ def test_reading_past_the_marker_checks_the_gzip_trailer(
 ) -> None:
     stream = EndCheckedReader(gzip.GzipFile(fileobj=io.BytesIO(body)))
     with tarfile.open(fileobj=stream, mode="r:") as tar:
-        assert tar.getnames() == ["a.txt", "b.txt"]
+        assert _names(stream, tar) == ["a.txt", "b.txt"]
         with pytest.raises(error):
             for _chunk in stream.read_past_end_marker():
                 pass
@@ -274,5 +388,5 @@ def test_reading_past_the_marker_checks_the_gzip_trailer(
 def test_a_gzip_stream_gzip_itself_reads_is_accepted(body: bytes) -> None:
     stream = EndCheckedReader(gzip.GzipFile(fileobj=io.BytesIO(body)))
     with tarfile.open(fileobj=stream, mode="r:") as tar:
-        assert tar.getnames() == ["a.txt", "b.txt"]
+        assert _names(stream, tar) == ["a.txt", "b.txt"]
         assert sum(len(chunk) for chunk in stream.read_past_end_marker()) > 0

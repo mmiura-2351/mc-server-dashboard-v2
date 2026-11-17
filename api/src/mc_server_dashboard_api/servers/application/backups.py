@@ -1520,7 +1520,7 @@ def _validate_backup_archive(
         ):
             count = 0
             total = 0
-            for read in tar:
+            for read in stream.members(tar):
                 count += 1
                 if count > max_entries:
                     raise InvalidBackupArchiveError("too many entries")

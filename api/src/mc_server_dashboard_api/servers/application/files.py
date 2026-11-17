@@ -982,7 +982,7 @@ def _tar_gz_entries(
         gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
         tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tf,
     ):
-        for member in tf:
+        for member in stream.members(tf):
             if member.isdir():
                 continue
             # Only regular files are materialized; a symlink/hardlink/device/fifo
