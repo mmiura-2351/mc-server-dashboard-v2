@@ -12,6 +12,8 @@ real RelayService client, so the relay-to-API contract is exercised end to end
   worker carrying the registered endpoint/CA;
 - ReportSessions persists start/end events through the SessionSink (issue #957);
 - Register closes orphaned sessions absent from the active set (issue #957).
+- a non-ASCII presented credential or token, or a configured credential with no
+  UTF-8 encoding, is rejected rather than raised (issue #3695).
 """
 
 from __future__ import annotations
@@ -29,7 +31,10 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import (
     GrpcControlPlane,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.adapters.relay_server import register_relay_service
+from mc_server_dashboard_api.fleet.adapters.relay_server import (
+    RelayServicer,
+    register_relay_service,
+)
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
     BedrockTunnelTable,
     JoinTokenTable,
@@ -105,7 +110,9 @@ class _Harness:
         token_table: JoinTokenTable | None = None,
         bedrock_tunnel_table: BedrockTunnelTable | None = None,
         session_sink: SessionSink | None = None,
+        credential: str = _CREDENTIAL,
     ) -> None:
+        self.credential = credential
         self.resolver = resolver
         self.registry = registry
         self.control_plane = control_plane
@@ -121,7 +128,7 @@ class _Harness:
         server = aio.server()
         register_relay_service(
             server,
-            credential=_CREDENTIAL,
+            credential=self.credential,
             base_domain=_BASE_DOMAIN,
             registration=self.registration,
             token_table=self.token_table,
@@ -176,6 +183,7 @@ async def _make_harness(
     token_table: JoinTokenTable | None = None,
     bedrock_tunnel_table: BedrockTunnelTable | None = None,
     session_sink: SessionSink | None = None,
+    credential: str = _CREDENTIAL,
 ) -> tuple[_Harness, RelayServiceStub]:
     harness = _Harness(
         resolver=resolver,
@@ -185,6 +193,7 @@ async def _make_harness(
         token_table=token_table,
         bedrock_tunnel_table=bedrock_tunnel_table,
         session_sink=session_sink,
+        credential=credential,
     )
     stub = await harness.start()
     return harness, stub
@@ -215,6 +224,80 @@ async def test_register_rejects_wrong_credential(
         assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
     finally:
         await harness.stop()
+
+
+async def test_register_rejects_unencodable_configured_credential(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # A configured credential with no UTF-8 encoding (a lone surrogate, as an
+    # undecodable environment byte becomes) matches nothing: the call is
+    # rejected as unauthenticated rather than raised (issue #3695).
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, credential="\udcff"
+    )
+    try:
+        with pytest.raises(aio.AioRpcError) as exc:
+            await stub.Register(
+                pb.RegisterRequest(tunnel_endpoint="r:1"), metadata=_auth()
+            )
+        assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+        assert exc.value.details() == "relay credential rejected"
+    finally:
+        await harness.stop()
+
+
+class _Aborted(Exception):
+    """Raised by :class:`_FakeContext.abort`, as the real ``abort`` raises."""
+
+
+class _FakeContext:
+    """A servicer context presenting ``metadata``; records the abort it gets.
+
+    grpcio's client refuses a non-ASCII value under a non-``-bin`` key, but the
+    server hands one through to ``invocation_metadata()`` from any other client
+    (UTF-8, falling back to Latin-1), so the servicer is driven directly here.
+    """
+
+    def __init__(self, metadata: list[tuple[str, str]]) -> None:
+        self._metadata = metadata
+        self.aborted: tuple[grpc.StatusCode, str] | None = None
+
+    def invocation_metadata(self) -> list[tuple[str, str]]:
+        return self._metadata
+
+    async def abort(self, code: grpc.StatusCode, details: str = "") -> None:
+        self.aborted = (code, details)
+        raise _Aborted
+
+
+async def test_register_rejects_non_ascii_presented_credential(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    servicer = RelayServicer(
+        credential=_CREDENTIAL,
+        base_domain=_BASE_DOMAIN,
+        registration=RelayRegistration(),
+        token_table=JoinTokenTable(),
+        bedrock_tunnel_table=BedrockTunnelTable(),
+        resolver=FakeResolver(),
+        registry=registry,
+        control_plane=GrpcControlPlane(
+            ControlPlaneState(),
+            clock=FakeClock(_T0),
+            timeout_seconds=_TIMEOUT.total_seconds(),
+        ),
+        session_sink=_RecordingSessionSink(),
+        clock=FakeClock(_T0),
+    )
+    context = _FakeContext([("authorization", "Bearer \u00e9")])
+
+    with pytest.raises(_Aborted):
+        await servicer.Register(pb.RegisterRequest(tunnel_endpoint="r:1"), context)
+
+    assert context.aborted == (
+        grpc.StatusCode.UNAUTHENTICATED,
+        "relay credential rejected",
+    )
 
 
 async def test_resolve_join_rejects_missing_credential(
@@ -652,6 +735,28 @@ async def test_validate_bedrock_tunnel_rejects_wrong_token(
         resp = await stub.ValidateBedrockTunnel(
             pb.ValidateBedrockTunnelRequest(
                 server_id=_SERVER_ID, bedrock_port=19132, token="wrong"
+            ),
+            metadata=_auth(),
+        )
+        assert resp.valid is False
+    finally:
+        await harness.stop()
+
+
+async def test_validate_bedrock_tunnel_rejects_non_ascii_token(
+    registry: InMemoryWorkerRegistry,
+) -> None:
+    # The token is a proto string, so any UTF-8 reaches the compare; a non-ASCII
+    # one answers valid=false rather than failing the call (issue #3695).
+    table = BedrockTunnelTable()
+    table.open(server_id=_SERVER_ID, bedrock_port=19132)
+    harness, stub = await _make_harness(
+        resolver=FakeResolver(), registry=registry, bedrock_tunnel_table=table
+    )
+    try:
+        resp = await stub.ValidateBedrockTunnel(
+            pb.ValidateBedrockTunnelRequest(
+                server_id=_SERVER_ID, bedrock_port=19132, token="\u00e9"
             ),
             metadata=_auth(),
         )
