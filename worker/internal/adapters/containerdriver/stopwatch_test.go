@@ -256,9 +256,12 @@ func TestSignalPhaseWaitsWhileTheWorldIsWritten(t *testing.T) {
 	}
 
 	docker.exit(143, nil) // the save completes and the JVM exits
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after the server exited")
-	}
+	// Stop sees the exit only once the supervisor has closed the instance's
+	// exited channel, and under load it can take the next poll and park again
+	// first, which step would report as still waiting (issue #3685, as #3657). So
+	// advance one poll, as before, and wait for the return itself.
+	r.clock.advance(testPoll)
+	r.awaitReturn()
 	if r.err != nil || docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want a clean stop with no kill", r.err, docker.killWasCalled())
 	}
@@ -597,9 +600,12 @@ func TestInstanceStopSignalsWithoutDockerStop(t *testing.T) {
 	docker := newFakeDocker()
 	world := &fakeWorld{}
 	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after SIGTERM ended the server")
-	}
+	// SIGTERM ends the server, but Stop sees the exit only once the supervisor
+	// has closed the instance's exited channel, and under load it can take a poll
+	// and park again first (issue #3685, as #3657). So advance one poll, as
+	// before, and wait for the return itself.
+	r.clock.advance(testPoll)
+	r.awaitReturn()
 	if r.err != nil {
 		t.Fatalf("Stop: %v", r.err)
 	}
@@ -636,9 +642,10 @@ func TestShutdownMidStopHandsTheKillToTheDaemon(t *testing.T) {
 
 	// The Worker's own stop keeps running while the process does.
 	docker.exit(143, nil)
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after the server exited")
-	}
+	// As in TestSignalPhaseWaitsWhileTheWorldIsWritten, Stop can take its next
+	// poll before it sees the exit (issue #3685), so wait for the return itself.
+	r.clock.advance(testPoll)
+	r.awaitReturn()
 	if r.err != nil || docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
 	}
