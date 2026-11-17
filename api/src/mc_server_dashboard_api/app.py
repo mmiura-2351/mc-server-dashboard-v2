@@ -824,9 +824,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         )
         # Process-wide count of withdrawn start intents (issue #3739): every
-        # StartServer reads it, and every StopServer and the drain bump it, so a
-        # stop of an intent is either seen by its start before the start is sent
-        # or enqueued after that start.
+        # StartServer reads it, and the HTTP and schedule-runner StopServers and
+        # the drain bump it, so a stop of an intent is either seen by its start
+        # before the start is sent or enqueued after that start. The reconciler's
+        # StopServer gets it too, but never flips a row, so it never bumps. The
+        # late-snapshot sink's StopServer keeps a private one by design: its
+        # release neither bumps nor reads it.
         app.state.stop_intents = StopIntentCounter()
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
