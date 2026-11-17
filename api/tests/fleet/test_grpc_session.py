@@ -28,7 +28,10 @@ import pytest
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters import grpc_server
-from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
+from mc_server_dashboard_api.fleet.adapters.control_plane import (
+    ControlPlaneState,
+    GrpcControlPlane,
+)
 from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _MAX_CONSECUTIVE_HANDLER_FAILURES,
     _STATE_BY_PROTO,
@@ -36,6 +39,9 @@ from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _keepalive_options,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ReclaimDeletedServerCommand,
+)
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
@@ -1367,6 +1373,64 @@ async def test_register_ack_unparseable_held_id_treated_as_existing() -> None:
         # "not-a-uuid" is unparseable so it must be treated as existing (safe),
         # not classified as deleted.
         assert list(response.register_ack.unknown_held_server_ids) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_delete_reported_during_the_held_lookup_reaches_the_worker() -> None:
+    """A delete that commits while a registration looks up the held servers is
+    still reported to that Worker (issue #3679).
+
+    The lookup read the server before the delete committed, so the ack does not
+    list it as deleted. The delete's report to the connected Workers is then the
+    only thing that reaches this one before its next registration, and it can
+    only if the session already takes commands while the lookup runs.
+    """
+
+    lookup_read = asyncio.Event()
+    delete_reported = asyncio.Event()
+
+    class _DeleteDuringLookupSink(FakeServerStateSink):
+        async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+            existing = await super().existing_server_ids(server_ids=server_ids)
+            lookup_read.set()
+            await delete_reported.wait()
+            return existing
+
+    state = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_DeleteDuringLookupSink(known_server_ids={_SERVER_A}),
+        control_plane=state,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
+        await asyncio.wait_for(lookup_read.wait(), timeout=5)
+
+        await GrpcControlPlane(
+            state, clock=FakeClock(_T0), timeout_seconds=5.0
+        ).dispatch_fire_and_forget(
+            worker_id=WorkerId(_WORKER_ID),
+            server_id=_SERVER_A,
+            command=ReclaimDeletedServerCommand(),
+        )
+        delete_reported.set()
+
+        ack = await call.read()
+        assert list(ack.register_ack.unknown_held_server_ids) == []
+        msg = await asyncio.wait_for(call.read(), timeout=5)
+        assert msg.api_command.WhichOneof("command") == "reclaim_deleted_server"
+        assert msg.api_command.server_id == _SERVER_A
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
         await call.done_writing()
     finally:
         await h.stop()

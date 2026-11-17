@@ -48,6 +48,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ListFilesCommand,
     OpenBedrockTunnelCommand,
     ReadFileCommand,
+    ReclaimDeletedServerCommand,
     ServerCommandCommand,
     SnapshotCommand,
     StartServerCommand,
@@ -1680,7 +1681,8 @@ async def test_a_fire_and_forget_command_carries_no_expiry(
     harness: _Harness,
 ) -> None:
     # Nothing waits for a fire-and-forget result, so there is no budget to stamp: a
-    # TunnelDial, an OpenBedrockTunnel or a CloseBedrockTunnel never expires.
+    # TunnelDial, an OpenBedrockTunnel, a CloseBedrockTunnel or a
+    # ReclaimDeletedServer (issue #3679) never expires.
     stub = await harness.start()
     call = await _registered_call(harness, stub)
     commands: list[Command] = [
@@ -1689,6 +1691,7 @@ async def test_a_fire_and_forget_command_carries_no_expiry(
             relay_endpoint="relay:2", bedrock_port=19132, token="t", tls_ca_pem=""
         ),
         CloseBedrockTunnelCommand(),
+        ReclaimDeletedServerCommand(),
     ]
 
     sent = []
@@ -1706,7 +1709,12 @@ async def test_a_fire_and_forget_command_carries_no_expiry(
             )
         )
 
-    assert sent == ["tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel"]
+    assert sent == [
+        "tunnel_dial",
+        "open_bedrock_tunnel",
+        "close_bedrock_tunnel",
+        "reclaim_deleted_server",
+    ]
     await call.done_writing()
 
 
