@@ -462,7 +462,7 @@ async def test_sweep_removes_stale_backup_tmp(tmp_path: Path) -> None:
 async def test_sweep_spares_young_backup_tmp(tmp_path: Path) -> None:
     # Age threshold (issue #903): a ``.backup.*.tmp`` younger than the threshold may
     # belong to a live write still filling it, so the sweep must leave it alone. This
-    # keeps the spool sweep safe if sweep() ever runs outside startup.
+    # keeps the spool sweep safe now that it also runs on an interval (issue #2252).
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     handle = await storage.begin_snapshot(community, server)
