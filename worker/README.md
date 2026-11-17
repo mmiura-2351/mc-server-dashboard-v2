@@ -97,21 +97,32 @@ see that section).
 
 ### Test tmp dir
 
-The `internal/application/instancemanager` tests put every `t.TempDir()` on
-`/dev/shm` when that is a writable tmpfs with at least 1 GiB free (issue #3783),
-as the api suite does ([`../api/README.md`](../api/README.md), Test tmp dir).
-They fsync for real, and on a disk under load one fsync can stall for seconds;
-on a tmpfs it does not wait on the disk. Without such a `/dev/shm` the default
-tmp dir is kept. `MCSD_TEST_TMPDIR=<dir>` overrides both, e.g.
-`MCSD_TEST_TMPDIR=/tmp` to run on disk; without it, a `GOTMPDIR` you set is kept
-as the root. The package points both `TMPDIR` and `GOTMPDIR` at the root, since
-`t.TempDir()` uses `GOTMPDIR` when it is set, and prints the root in use
-(`tmp root: ...`), which `go test` shows with `-v` or when the package fails.
+The tests of `internal/application/instancemanager` (issue #3783),
+`internal/adapters/datatransfer`, `internal/domain/scratchformat` and
+`cmd/worker` (issue #3805) put every `t.TempDir()` on `/dev/shm` when that is a
+writable tmpfs with at least 1 GiB free, as the api suite does
+([`../api/README.md`](../api/README.md), Test tmp dir). They fsync for real, and
+on a disk under load one fsync can stall for seconds; on a tmpfs it does not
+wait on the disk. Without such a `/dev/shm` the default tmp dir is kept.
+`MCSD_TEST_TMPDIR=<dir>` overrides both, e.g. `MCSD_TEST_TMPDIR=/tmp` to run on
+disk; without it, a `GOTMPDIR` you set is kept as the root.
 
-A run peaks at about 120 MiB, while one test writes 30,000 small files. Each
-test's temp dir is removed when the test ends, so a run leaves nothing in
-`/dev/shm`, except when the test binary is killed, for example by the
-`go test` timeout.
+Each of these packages' `TestMain` calls `tmproot.Use`
+(`internal/testsupport/tmproot`). It points both `TMPDIR` and `GOTMPDIR` at the
+root, since `t.TempDir()` uses `GOTMPDIR` when it is set, and prints the root in
+use (`tmp root: ...`), which `go test` shows with `-v` or when the package
+fails. A package opts in the same way, plus a test that calls
+`tmproot.RequireTempDirUnderRoot` to pin the wiring. Only `_test.go` files may
+import `internal/testsupport`; a depguard rule in `.golangci.yml` refuses it
+anywhere else. A test that binds a unix socket under a temp dir binds it by a
+short relative name: a socket path holds at most 107 bytes, and the root can be
+long.
+
+An instancemanager run peaks at about 120 MiB, while one test writes 30,000
+small files. The other three packages run their tests one at a time, and the
+largest file any of them writes is 4 MiB. Each test's temp dir is removed when
+the test ends, so a run leaves nothing in `/dev/shm`, except when the test
+binary is killed, for example by the `go test` timeout.
 
 ## Cross-language data-plane e2e
 

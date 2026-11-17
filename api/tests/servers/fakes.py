@@ -885,22 +885,29 @@ class FakeServerRepository(ServerRepository):
         server: Server,
         *,
         expected_from: DesiredState,
-        require_unassigned: bool = False,
+        expected_assigned_worker_id: WorkerId | None,
+        write_config: bool = False,
     ) -> bool:
         self.events.append((server.id, "flip"))
         current = self.by_id.get(server.id)
-        if current is None or current.desired_state is not expected_from:
-            return False
-        if require_unassigned and current.assigned_worker_id is not None:
+        # Mirror the real adapter's compare-and-set (issue #3792): the desired
+        # state and the assignment the caller read, an expected ``None`` matching
+        # an unassigned row only.
+        if (
+            current is None
+            or current.desired_state is not expected_from
+            or current.assigned_worker_id != expected_assigned_worker_id
+        ):
             return False
         # Mirror the real adapter's narrow column set (issue #2520): the UPDATE
-        # names ``desired_state``, ``assigned_worker_id``, ``config`` and
-        # ``updated_at`` only. This is where the wholesale write bit hardest --
-        # the convergence paths call it holding an entity whose ``observed_*``
-        # they loaded a transaction ago.
+        # names ``desired_state``, ``assigned_worker_id`` and ``updated_at``, and
+        # ``config`` only with ``write_config``. This is where the wholesale write
+        # bit hardest -- the convergence paths call it holding an entity whose
+        # ``observed_*`` they loaded a transaction ago.
         current.desired_state = server.desired_state
         current.assigned_worker_id = server.assigned_worker_id
-        current.config = deepcopy(server.config)
+        if write_config:
+            current.config = deepcopy(server.config)
         current.updated_at = server.updated_at
         return True
 

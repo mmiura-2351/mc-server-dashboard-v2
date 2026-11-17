@@ -149,23 +149,35 @@ class ServerRepository(abc.ABC):
         server: Server,
         *,
         expected_from: DesiredState,
-        require_unassigned: bool = False,
+        expected_assigned_worker_id: WorkerId | None,
+        write_config: bool = False,
     ) -> bool:
         """Compare-and-set a server's lifecycle fields (desired state + Worker).
 
         Distinct from :meth:`update` (name/config edits): the lifecycle ops set
         ``desired_state``, ``assigned_worker_id`` and ``updated_at`` and must not
-        touch name/config. Observed state is written separately via
+        touch the name. Observed state is written separately via
         :meth:`record_observed_state` from the control-plane event path.
+        ``config`` is written only with ``write_config``, which a start sets to
+        record the JAR it resolved in the same write (issue #118). Every other
+        transition leaves it as the row holds it, so a config edit that committed
+        after the caller read the row is kept (issue #3792).
 
         The write is guarded so two concurrent transitions that both passed the
-        in-memory check cannot both apply: the UPDATE matches only when the row's
-        ``desired_state`` still equals ``expected_from`` (and, when
-        ``require_unassigned`` is set for a start, ``assigned_worker_id IS NULL``).
+        in-memory check cannot both apply: the UPDATE matches only while the
+        row's ``desired_state`` still equals ``expected_from`` and its
+        ``assigned_worker_id`` still equals ``expected_assigned_worker_id``
+        (``None`` matches an unassigned row only). Both are the values the caller
+        read, so the two columns are written back unchanged unless the transition
+        changes them, and never from a stale read (issue #3792). The expected
+        assignment has no default, so no caller can leave it out.
+
         Returns ``True`` when exactly one row was updated, ``False`` when the
-        precondition no longer held (a lost race); the caller turns ``False`` into
-        a :class:`LifecycleTransitionConflictError` and does **not** dispatch or
-        adjust placement-load counts.
+        precondition no longer held (a lost race). On ``False`` the caller does
+        **not** dispatch, bump the stop-intent count or adjust placement-load
+        counts: a start, a stop or a restart raises
+        :class:`LifecycleTransitionConflictError`, a drain skips the server, and
+        a failed start's revert leaves the row to the write that moved it.
         """
 
     @abc.abstractmethod
@@ -187,7 +199,7 @@ class ServerRepository(abc.ABC):
         It is set only on a CONFIRMED stop (a graceful stop the Worker reports
         complete, or a SERVER_NOT_FOUND convergence) where no live instance can
         remain: clearing the assignment then lets a later start re-place under
-        ``require_unassigned`` (issue #206). Crash/disconnect paths leave the
+        the unassigned-only CAS (issue #206). Crash/disconnect paths leave the
         assignment intact (the stickiness invariant), so they do not set it.
 
         ``expected_worker`` makes the ownership check part of the guarded write
@@ -222,7 +234,7 @@ class ServerRepository(abc.ABC):
 
         The graceful/redispatch stop records ``observed=stopped`` first but DELAYS
         the unassign until the final snapshot settles: holding the assignment across
-        the snapshot keeps a racing start's ``require_unassigned`` compare-and-set
+        the snapshot keeps a racing start's unassigned-only compare-and-set
         failing, so an immediate start cannot re-place the server on a DIFFERENT
         worker whose hydrate would pull store generation N while the final (would-be
         N+1) snapshot is still uploading.
@@ -230,7 +242,7 @@ class ServerRepository(abc.ABC):
         Guarded so it only clears OUR held assignment: the UPDATE matches only when
         the row is still ``desired_state=stopped`` AND ``assigned_worker_id`` still
         equals ``worker_id``. A start cannot have re-placed during the snapshot
-        window (its ``require_unassigned`` CAS saw the held assignment and 409'd), so
+        window (its unassigned-only CAS saw the held assignment and 409'd), so
         in practice the guard always matches; it exists to make the late clear a
         no-op rather than a clobber if the row moved out from under us by any other
         path. Returns ``True`` when the assignment was cleared, ``False`` when the
