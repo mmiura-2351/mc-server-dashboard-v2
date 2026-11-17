@@ -547,9 +547,11 @@ class InvalidExportMetadataError(ServerError):
 
     The import (issue #274) reads the descriptor from the uploaded zip's root and
     validates its ``format`` version and required fields before creating anything.
-    A non-zip body, a missing/unreadable metadata member, malformed JSON, an
-    unsupported format version (legacy incompatibility is loud, not silent), or a
-    missing field is rejected; the edge maps this to 422. The ``server_type`` /
+    A missing or oversized metadata member, malformed JSON, an unsupported format
+    version (legacy incompatibility is loud, not silent), or a missing field is
+    rejected; the edge maps this to 422. A body or member the zip reader cannot
+    read is :class:`UnreadableArchiveError` instead (issue #3769). The
+    ``server_type`` /
     ``mc_version`` themselves are validated downstream by the shared create path
     (the version validator), which yields its own distinct 422 reasons.
     """

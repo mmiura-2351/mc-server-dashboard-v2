@@ -147,6 +147,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     SlugAlreadyTakenError,
     SlugExhaustedError,
     UnknownServerTypeError,
+    UnreadableArchiveError,
     UnsupportedEditionError,
     WorkingSetSeedFailedError,
 )
@@ -552,6 +553,11 @@ async def import_server(
     caps -> 413 / 422). A publish failure after the row commits is 503
     ``seed_failed`` (the row is repairable via the files API).
 
+    **An archive that does not read (issue #3769).** A body the zip reader cannot
+    read — not a zip at all, truncated, or a damaged or encrypted member, the
+    metadata included — is 422 ``invalid_archive``, refused before the row is
+    created, so nothing is left behind.
+
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A member named ``server.properties/…`` would publish that name as a
     directory, which the platform's own writes cannot survive; it is 422
@@ -580,6 +586,10 @@ async def import_server(
         )
     except InvalidExportMetadataError as exc:
         raise _unprocessable("invalid_export_metadata") from exc
+    except UnreadableArchiveError as exc:
+        # The zip reader failed on the body's own bytes (issue #3769): the reason
+        # the files upload gives the same verdict.
+        raise _unprocessable("invalid_archive") from exc
     except UnsupportedEditionError as exc:
         raise _unprocessable("unsupported_edition") from exc
     except UnknownServerTypeError as exc:
