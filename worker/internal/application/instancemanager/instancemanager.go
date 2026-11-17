@@ -136,7 +136,9 @@ type TunnelSpec struct {
 // while it drops; Close tears it down gracefully (CONNECTION_CLOSE plus every
 // per-flow socket). Both run off the caller: Open returns once the tunnel is
 // registered, not once the handshake completes, and Close only signals
-// teardown, so neither blocks the calling command.
+// teardown, so neither blocks the calling command. A crash calls Close with the
+// Manager's mu held (forwardStatus, issue #3729), so Close must not call back
+// into the Manager.
 type BedrockTunneler interface {
 	Open(spec BedrockTunnelSpec) error
 	Close(serverID string)
@@ -4717,12 +4719,26 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 // A crash is itself a handoff: it releases serverID if inst still holds it, and a
 // replacement can claim the id at once. So the release shares the section, under
 // mu as well, and the crash is queued ahead of whatever the replacement reports.
+//
+// A crash that releases the id also closes the server's Bedrock relay tunnel
+// (issue #3729), as a confirmed stop does in attemptStop: the API's
+// CloseBedrockTunnel for the crash is lost if the session drops first, and
+// nothing re-sends it. Only the release closes it: a crash that comes after a
+// stop or restart took inst over leaves the tunnel to that stop, and to the
+// relaunch that may have reopened it since. The close stays under mu, so an
+// OpenBedrockTunnel whose running check, under mu, comes after the release sees
+// the release, or opens for a replacement only after the close. An Open that
+// passed its running check before the crash can still reopen the tunnel after
+// this close, since the handler calls the tunneler once mu is released (tracked
+// in issue #3729).
 func (m *Manager) forwardStatus(serverID string, inst execution.Instance, ev execution.StatusEvent) {
 	crashed := ev.State == execution.StateCrashed
 	if crashed {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		m.forgetIfLocked(serverID, inst)
+		if m.forgetIfLocked(serverID, inst) && m.bedrock != nil {
+			m.bedrock.Close(serverID)
+		}
 	}
 	m.statusMu.Lock()
 	defer m.statusMu.Unlock()
@@ -5167,13 +5183,15 @@ func mapLogStream(s execution.LogStream) session.LogStream {
 }
 
 // forgetIfLocked removes serverID's instance only if it is still the given inst,
-// so a crash event does not evict a freshly restarted instance. The caller holds
-// mu.
-func (m *Manager) forgetIfLocked(serverID string, inst execution.Instance) {
-	if m.instances[serverID] == inst {
-		delete(m.instances, serverID)
-		delete(m.startCmds, serverID)
+// so a crash event does not evict a freshly restarted instance. It reports
+// whether it removed it. The caller holds mu.
+func (m *Manager) forgetIfLocked(serverID string, inst execution.Instance) bool {
+	if m.instances[serverID] != inst {
+		return false
 	}
+	delete(m.instances, serverID)
+	delete(m.startCmds, serverID)
+	return true
 }
 
 // launchModeFor maps the command's wire launch-mode name to the execution

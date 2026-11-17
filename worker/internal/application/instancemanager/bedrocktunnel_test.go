@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
 
@@ -249,5 +250,56 @@ func TestStaleCloseBedrockTunnelDoesNotCloseReopenedTunnel(t *testing.T) {
 	}
 	if calls := bt.closeCalls(); len(calls) != 0 {
 		t.Fatalf("Close calls = %v on a dropped session, want none", calls)
+	}
+}
+
+// An instance that crashes closes its server's Bedrock tunnel (issue #3729):
+// nothing else is sure to, since the API's CloseBedrockTunnel for the crash is
+// lost if the session drops first. The close shares the section, under mu,
+// that releases the id, and comes before the crash is queued:
+// beforeCrashReport runs in that section, after the release and before the
+// queueing, so the close must already be recorded when the hook runs.
+func TestCrashClosesBedrockTunnel(t *testing.T) {
+	d := &fakeDriver{}
+	bt := &fakeBedrockTunneler{}
+	m := newManager(t, d, nil).WithBedrockTunneler(bt)
+	var atReport []string
+	m.beforeCrashReport = func(string) { atReport = bt.closeCalls() }
+	startRunning(t, m)
+	if res := m.Handle(context.Background(), openBedrockCmd()); !res.Success {
+		t.Fatalf("OpenBedrockTunnel = %+v, want success", res)
+	}
+
+	d.inst.end(classifiedCrash)
+	collectUntil(t, m, execution.StateCrashed.String())
+
+	if len(atReport) != 1 || atReport[0] != s1 {
+		t.Fatalf("Close calls when the crash was queued = %v, want [s1]", atReport)
+	}
+}
+
+// A crash the pump forwards only after a restart has taken the id over closes
+// nothing (issue #3729): the tunnel is the relaunch's by then, opened for it
+// after the restart's stop leg closed the old one.
+func TestLateCrashKeepsRelaunchsBedrockTunnel(t *testing.T) {
+	d := &fakeDriver{}
+	bt := &fakeBedrockTunneler{}
+	m := newManager(t, d, nil).WithBedrockTunneler(bt)
+	h := holdFirst(t, m, execution.StateCrashed)
+	startRunning(t, m)
+	old := d.inst
+
+	old.end(classifiedCrash)
+	awaitEnter(t, h.held)
+	if res := m.Handle(context.Background(), session.Command{CommandID: "r", ServerID: s1, Kind: "RestartServer"}); !res.Success {
+		t.Fatalf("RestartServer = %+v, want success", res)
+	}
+	if res := m.Handle(context.Background(), openBedrockCmd()); !res.Success {
+		t.Fatalf("OpenBedrockTunnel for the relaunch = %+v, want success", res)
+	}
+	h.finish(t, old.events)
+
+	if calls := bt.closeCalls(); len(calls) != 1 || calls[0] != s1 {
+		t.Fatalf("Close calls = %v, want only the stop leg's [s1]", calls)
 	}
 }
