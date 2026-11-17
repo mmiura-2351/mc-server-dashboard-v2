@@ -432,6 +432,11 @@ class StartServer:
                 config[JAR_SOURCE_CONFIG_FIELD] = provisioned.source
             server.config = config
             server.updated_at = self.clock.now()
+            # Read before this start's intent exists (issue #3739): a stop can only
+            # withdraw the intent after the compare-and-set below lands, so its
+            # bump always comes after this read. Read after the commit, a stop and
+            # a newer start on the same Worker could both fit in before it.
+            stop_intent_count = self.stop_intents.current(server_id)
             # Any failure across the CAS+commit window — a raising update_lifecycle or
             # commit, the lost-race abort, or this request task being cancelled at an
             # await (a client disconnect cancels the HTTP task) — must release the
@@ -534,6 +539,7 @@ class StartServer:
                 worker_id,
                 dispatch,
                 skip_hydrate=skip_hydrate,
+                stop_intent_count=stop_intent_count,
             )
         except WorkerUnavailableError as exc:
             # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
@@ -681,6 +687,9 @@ class StartServer:
                 config[JAR_SOURCE_CONFIG_FIELD] = provisioned.source
             server.config = config
             server.updated_at = self.clock.now()
+            # Read before this placement's intent exists, as ``__call__`` does
+            # (issue #3739).
+            stop_intent_count = self.stop_intents.current(server_id)
             # Release the placement reservation on any failure across the CAS+commit
             # window — a raising update_lifecycle or commit, the lost-race abort, or a
             # task cancellation at an await — so the tentatively-taken slot (#778) does
@@ -722,7 +731,12 @@ class StartServer:
         dispatch = _Dispatch()
         try:
             outcome = await self._launch(
-                server, community_id, server_id, worker_id, dispatch
+                server,
+                community_id,
+                server_id,
+                worker_id,
+                dispatch,
+                stop_intent_count=stop_intent_count,
             )
         except WorkerUnavailableError as exc:
             # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
@@ -794,6 +808,11 @@ class StartServer:
         ``BUSY``, handled by the arm below.
         """
 
+        # Read before the read that finds the intent (issue #3739). Another start
+        # committed it, so a stop of it may already be past its own read; its bump
+        # follows its commit, and a commit this read did not precede is one the
+        # read below sees.
+        stop_intent_count = self.stop_intents.current(server_id)
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (
@@ -838,7 +857,12 @@ class StartServer:
             held_generation is not None and held_generation >= store_generation
         )
         outcome = await self._launch(
-            server, community_id, server_id, worker_id, skip_hydrate=skip_hydrate
+            server,
+            community_id,
+            server_id,
+            worker_id,
+            skip_hydrate=skip_hydrate,
+            stop_intent_count=stop_intent_count,
         )
         if outcome.success:
             return server
@@ -897,6 +921,7 @@ class StartServer:
         dispatch: _Dispatch | None = None,
         *,
         skip_hydrate: bool = False,
+        stop_intent_count: int,
     ) -> CommandOutcome:
         """Hydrate the working set then dispatch the launch; return the outcome.
 
@@ -920,10 +945,13 @@ class StartServer:
         reconciler's re-dispatch paths can each react differently to a failure.
 
         Just before the start is sent, the server row is re-read in its own unit of
-        work (issue #3737). If a stop intent committed meanwhile, or the row now
-        names another Worker, this raises :class:`LifecycleTransitionConflictError`
-        without sending the start. Every caller lets it propagate as is: the stop
-        owns the decrement and the release, so nothing is compensated.
+        work (issue #3737), and ``stop_intent_count`` is compared with the server's
+        count now (issue #3739, ``stop_intents.py``). The caller read that count
+        before the intent this launch serves existed. If a stop intent committed
+        meanwhile, the row now names another Worker, or the count moved, this raises
+        :class:`LifecycleTransitionConflictError` without sending the start. Every
+        caller lets it propagate as is: the write that withdrew the intent owns the
+        decrement and the release, so nothing is compensated.
 
         ``skip_hydrate`` SKIPS the hydrate and goes straight to start (issue #696).
         Both ``__call__`` and ``redispatch_start`` perform a generation-gated check
@@ -1001,7 +1029,16 @@ class StartServer:
         # wins: answer the conflict and send nothing. Nothing is compensated or
         # unassigned here, because the stop owns the placement decrement and the
         # release. A row re-placed on another Worker meanwhile is refused the same
-        # way. What is left is the window between this read and the start.
+        # way.
+        #
+        # The re-read cannot see two things (issue #3739): a stop that commits after
+        # it, and a stop followed by a newer start on this same Worker, which leaves
+        # the row looking exactly as this start left it. The stop-intent count
+        # covers both: any write that withdrew this start's intent has bumped it.
+        # The compare runs after the re-read's unit of work has closed, and nothing
+        # from it to the enqueue in ``control_plane.start`` awaits, so a stop that
+        # has not bumped by then is enqueued after this start, and the Worker's
+        # per-server lane runs it as a real stop.
         #
         # A read that raises (a database error) propagates uncompensated too, unlike
         # the failed generation read above (issue #2001). The row could not be read,
@@ -1015,8 +1052,10 @@ class StartServer:
             current is None
             or current.desired_state is not DesiredState.RUNNING
             or current.assigned_worker_id != worker_id
+            or self.stop_intents.current(server_id) != stop_intent_count
         ):
             raise LifecycleTransitionConflictError(str(server_id.value))
+        # No await from here to the enqueue (see above).
         if dispatch is not None:
             dispatch.attempted = True
         # Source the per-server memory limit from the config blob (#705 helper) and
@@ -1089,6 +1128,7 @@ class StartServer:
                 worker_id,
                 dispatch,
                 skip_hydrate=False,
+                stop_intent_count=stop_intent_count,
             )
         return outcome
 
@@ -1209,6 +1249,12 @@ class StartServer:
                         server, expected_from=DesiredState.RUNNING
                     )
                     await self.uow.commit()
+                    # The revert withdraws whatever intent the row held, possibly a
+                    # newer start's (issue #3741), so it bumps like a stop (issue
+                    # #3739). It sends no stop, so a start of that intent that has
+                    # already sent is not caught: only #3741's check closes that.
+                    if reverted:
+                        self.stop_intents.bump(server_id)
         except Exception as compensation_error:
             _LOG.error(
                 "failed to compensate start intent after a failed dispatch; "
@@ -1268,6 +1314,11 @@ class StartServer:
                         server, expected_from=DesiredState.RUNNING
                     )
                     await self.uow.commit()
+                    # Released, possibly from a newer start on this same Worker, so
+                    # it bumps like ``_compensate`` does, with the same limit
+                    # (issue #3739).
+                    if reverted:
+                        self.stop_intents.bump(server_id)
         except Exception as compensation_error:
             _LOG.error(
                 "failed to undo orphan re-placement after a failed dispatch; the "
@@ -1387,6 +1438,10 @@ class StopServer:
                     # lost race does not double-decrement the count (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
                 await self.uow.commit()
+                # Withdrawn: bump before anything can await (issue #3739). A start
+                # of this intent that has not sent yet sees it; one that has is
+                # ahead of the stop sent below.
+                self.stop_intents.bump(server_id)
 
         if owed == "redispatch_stop":
             # The same replay the reconciler sends, with the operator's ``force``.
@@ -2385,6 +2440,11 @@ class StopServersAssignedToWorker:
                 if await _mark_stopped(self.uow, server, at=self.clock.now()):
                     stopped.append(server.id)
             await self.uow.commit()
+            # Withdrawn, as in ``StopServer`` (issue #3739): a start of one of these
+            # intents that has not sent yet sees it, and one that has is ahead of
+            # the stop the reconciler sends.
+            for server_id in stopped:
+                self.stop_intents.bump(server_id)
         return stopped
 
 
