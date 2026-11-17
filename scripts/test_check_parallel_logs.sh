@@ -195,15 +195,18 @@ canary_logdir="$canary_worktree/.git/check-logs"
 # The stand-in canary: it records its pid, niceness, arguments and whether it
 # holds fd 9 -- the gate lock's descriptor -- then idles until a SIGTERM, which
 # it takes a moment over, as the real one does to write its last line: a run
-# that did not wait for it would end with the canary still there.
+# that did not wait for it would end with the canary still there. The trap and
+# the output come before the record, and the record appears whole, so a run
+# that stops the canary as soon as it reads the record finds both in place.
 mkdir -p "$canary_worktree/api/.venv/bin"
 cat > "$canary_worktree/api/.venv/bin/python" << 'STUB'
 #!/usr/bin/env bash
+trap 'sleep 0.3; echo TERM > "$CANARY_RECORD.stopped"; exit 0' TERM
+echo "stand-in canary output"
 fd9=closed
 [ -e "/proc/$$/fd/9" ] && fd9=open
-echo "pid=$$ nice=$(nice) fd9=$fd9 args=$*" > "$CANARY_RECORD.started"
-echo "stand-in canary output"
-trap 'sleep 0.3; echo TERM > "$CANARY_RECORD.stopped"; exit 0' TERM
+echo "pid=$$ nice=$(nice) fd9=$fd9 args=$*" > "$CANARY_RECORD.started.tmp"
+mv "$CANARY_RECORD.started.tmp" "$CANARY_RECORD.started"
 while :; do sleep 0.1; done
 STUB
 chmod +x "$canary_worktree/api/.venv/bin/python"
@@ -265,8 +268,8 @@ canary_run() {
 	gate_pid=$!
 }
 
-# await_gate: reap the run, or fail and stop it after ~20 s: a `wait` on a run
-# that never ends would hang the gate this suite runs in.
+# await_gate: reap the run into gate_rc, or fail and stop it after ~20 s: a
+# `wait` on a run that never ends would hang the gate this suite runs in.
 await_gate() {
 	local i
 	for i in $(seq 1 200); do
@@ -278,6 +281,7 @@ await_gate() {
 		fail_test "the $1 run did not end within 20 s: $(cat "$canary_stub/$1.out")"
 	fi
 	wait "$gate_pid" 2> /dev/null
+	gate_rc=$?
 }
 
 # check_canary <name>: the canary of run <name> started as the gate starts it,
@@ -308,6 +312,12 @@ check_canary() {
 	canary_run passing
 	await_gate passing
 	check_canary passing
+	# Stopping the canary on the way out leaves the run's verdict alone.
+	if [ "$gate_rc" -eq 0 ]; then
+		ok "a passing run still exits 0"
+	else
+		fail_test "a passing run exited $gate_rc: $(cat "$canary_stub/passing.out")"
+	fi
 	if [ -e "$canary_stub/passing.during-api-test" ]; then
 		ok "the canary runs while the api tests do"
 	else
@@ -327,6 +337,11 @@ check_canary() {
 	canary_run failing CANARY_FAIL_API=1
 	await_gate failing
 	check_canary failing
+	if [ "$gate_rc" -ne 0 ]; then
+		ok "a run whose api chain fails still fails"
+	else
+		fail_test "a run whose api chain failed exited 0"
+	fi
 
 	canary_run stopped CANARY_HOLD_API=1
 	for _ in $(seq 1 200); do
