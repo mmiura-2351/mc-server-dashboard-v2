@@ -91,10 +91,19 @@ class Argon2PasswordHasher(PasswordHasher):
         self._hasher = argon2.PasswordHasher()
 
     async def hash(self, plaintext: str) -> str:
-        return await _run_kdf(self._hasher.hash, plaintext)
+        return await _run_kdf(self._hash, plaintext)
 
     async def verify(self, plaintext: str, password_hash: str) -> bool:
         return await _run_kdf(self._verify, plaintext, password_hash)
+
+    def _hash(self, plaintext: str) -> str:
+        try:
+            return self._hasher.hash(plaintext)
+        except argon2.exceptions.HashingError as exc:
+            # libargon2 ran out of memory or threads: the same server failure as
+            # on verify, so it gets the same error (and the same 503, #3762).
+            _LOG.error("argon2 hash failed: %s", exc)
+            raise PasswordVerificationUnavailableError from exc
 
     def _verify(self, plaintext: str, password_hash: str) -> bool:
         try:

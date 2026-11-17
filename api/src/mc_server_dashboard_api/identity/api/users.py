@@ -131,6 +131,8 @@ async def register_user(
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT, _field_reason(exc)
         ) from exc
+    except PasswordVerificationUnavailableError as exc:
+        raise password_hasher_unavailable() from exc
     # Self-registration: the new user is both the actor and the target (FR-AUD-1).
     await recorder.record(
         AuditEvent(

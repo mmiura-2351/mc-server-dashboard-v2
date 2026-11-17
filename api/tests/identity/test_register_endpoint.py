@@ -20,6 +20,7 @@ from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.identity.domain.errors import (
     EmailAlreadyExistsError,
     PasswordPolicyError,
+    PasswordVerificationUnavailableError,
     RegistrationDisabledError,
     RegistrationThrottledError,
     UsernameAlreadyExistsError,
@@ -182,6 +183,23 @@ def test_register_throttled_returns_429() -> None:
     )
     assert resp.status_code == 429
     assert resp.json()["reason"] == "registration_throttled"
+
+
+def test_register_hasher_failure_returns_503() -> None:
+    # The password could not be hashed (the hasher itself failed, #3762): a
+    # transient server failure, not a generic 500.
+    fake = _FakeRegisterUser(error=PasswordVerificationUnavailableError())
+    client = _client(fake)
+    resp = client.post(
+        "/api/users",
+        json={
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": _VALID_PASSWORD,
+        },
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "password_verification_unavailable"
 
 
 def test_register_weak_password_returns_422_with_reason_no_echo() -> None:
