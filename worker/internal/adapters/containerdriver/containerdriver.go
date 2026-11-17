@@ -2149,6 +2149,10 @@ func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 	return f.scan
 }
 
+// installLogSink is what the follow writes forge-install.log through; a test
+// replaces it to stand in for a write the filesystem fails (issue #3744).
+var installLogSink = func(f *os.File) io.Writer { return f }
+
 // captureInstallOutput follows the install container's log stream and writes it to
 // logs/forge-install.log in the working dir, so an operator can read the install
 // diagnostics via the files API (issue #305). It is best-effort: a failure to open
@@ -2177,7 +2181,7 @@ func (i *instance) captureInstallOutput(ctx context.Context, installID string) *
 		return scan
 	}
 	defer func() { _ = f.Close() }()
-	demuxLogsTo(rc, io.MultiWriter(scan, f))
+	demuxLogsTo(rc, io.MultiWriter(scan, installLogSink(f)))
 	return scan
 }
 
