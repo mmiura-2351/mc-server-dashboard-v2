@@ -595,6 +595,12 @@ func (d *dispatcher) dispatch(q queuedCommand) {
 // A command is checked for expiry immediately before it would start, on both
 // paths: a quick command after the lane reaches it, a capped one after it has
 // also acquired its slot, since the wait for the slot counts too (issue #3305).
+//
+// Once the session's stream has dropped, the lane discards every command still
+// queued, quick ones included, and exits (issue #3658). The lane does not
+// interrupt a command already executing, but its handler sees d.ctx cancelled:
+// a Bedrock tunnel Open or Close that has not yet reached the tunneler does
+// nothing, and a ctx-bound step such as a TunnelDial's dial is cut short.
 func (d *dispatcher) runLane(serverID string, l *lane) {
 	for {
 		d.mu.Lock()
@@ -608,6 +614,16 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 		d.mu.Unlock()
 		cmd := q.cmd
 
+		// A dead-generation lane (stream already dropped) runs nothing more, quick
+		// or capped: the API failed its commands at teardown, no result can reach
+		// it, and a stale one run now would act after a newer session's commands
+		// (issue #3658). Bailing here also keeps it from taking a worker-wide cap
+		// slot (issue #1617).
+		if d.ctx.Err() != nil {
+			d.removeLane(serverID)
+			return
+		}
+
 		if isQuickCommand(cmd.Kind) {
 			if o, ok := d.r.expired(q); ok {
 				d.r.emitResult(d.ctx, d.results, o)
@@ -615,13 +631,6 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 			}
 			d.r.emitResult(d.ctx, d.results, d.r.handle(d.ctx, cmd))
 			continue
-		}
-
-		// A dead-generation lane (stream already dropped) must not consume a
-		// worker-wide cap slot; bail before the blocking acquire (issue #1617).
-		if d.ctx.Err() != nil {
-			d.removeLane(serverID)
-			return
 		}
 
 		select {

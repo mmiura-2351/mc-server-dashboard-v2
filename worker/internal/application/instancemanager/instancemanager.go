@@ -1096,9 +1096,9 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 	case "TunnelDial":
 		return m.handleTunnelDial(ctx, cmd)
 	case "OpenBedrockTunnel":
-		return m.handleOpenBedrockTunnel(cmd)
+		return m.handleOpenBedrockTunnel(ctx, cmd)
 	case "CloseBedrockTunnel":
-		return m.handleCloseBedrockTunnel(cmd)
+		return m.handleCloseBedrockTunnel(ctx, cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -3792,13 +3792,21 @@ func (m *Manager) handleTunnelDial(ctx context.Context, cmd session.Command) ses
 // handshake, datagram pump, and any reconnect-with-backoff run off this
 // command on the tunneler's own long-lived context — a slow or rejected relay
 // dial must not hold up the command result.
-func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandResult {
+//
+// A done ctx means the session that sent the command has dropped, so the Open
+// is stale and opens nothing: run late, it could reopen a tunnel a newer
+// session has closed (issue #3658).
+func (m *Manager) handleOpenBedrockTunnel(ctx context.Context, cmd session.Command) session.CommandResult {
 	if code, msg, refused := m.notRunningRefusal(cmd.ServerID); refused {
 		return fail(cmd.CommandID, code, msg)
 	}
 	if m.bedrock == nil {
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			"instancemanager: bedrock tunneler not configured")
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: bedrock tunnel open: %v; not opened", err))
 	}
 
 	if err := m.bedrock.Open(BedrockTunnelSpec{
@@ -3828,7 +3836,16 @@ func (m *Manager) handleOpenBedrockTunnel(cmd session.Command) session.CommandRe
 // thing — a failed stop leaves the tunnel open (issue #2468) and this closes it.
 // Refusing it for an orphan would remove the only way to take that tunnel down
 // without terminating the process.
-func (m *Manager) handleCloseBedrockTunnel(cmd session.Command) session.CommandResult {
+//
+// Like Open, a Close whose session has dropped (done ctx) is stale and closes
+// nothing: run late, it could take down a tunnel a newer session has opened
+// (issue #3658). The stop path's own teardown calls the tunneler directly and
+// is unaffected.
+func (m *Manager) handleCloseBedrockTunnel(ctx context.Context, cmd session.Command) session.CommandResult {
+	if err := ctx.Err(); err != nil {
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			fmt.Sprintf("instancemanager: bedrock tunnel close: %v; not closed", err))
+	}
 	if m.bedrock != nil {
 		m.bedrock.Close(cmd.ServerID)
 	}
