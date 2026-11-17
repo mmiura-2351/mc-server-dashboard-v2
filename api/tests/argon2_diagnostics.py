@@ -8,8 +8,9 @@ as the message, which tells apart a verify-time transient, a bad stored hash
 and a persistently bad process state. docs/dev/AGENTS.md Section 3 says how to
 read it.
 
-Nothing here runs on a passing test except the append to
-:data:`RECENT_NODE_IDS`.
+On a passing test, nothing here runs except the append to
+:data:`RECENT_NODE_IDS` and the two ``getrusage`` reads of a
+:class:`RusageWindow`.
 """
 
 from __future__ import annotations
@@ -19,9 +20,11 @@ import functools
 import hashlib
 import importlib.metadata
 import os
+import resource
 import threading
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 
 import argon2
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -41,6 +44,84 @@ _EXECUTOR_TIMEOUT_S = 5.0
 """How long a probe waits for the KDF executor. The first timeout skips the
 probes after it, so even a wedged pool keeps the report far inside the suite's
 120 s test timeout, whose ``Failed`` no ``except Exception`` here would catch."""
+
+
+_PROC = Path("/proc")
+"""Where the host section reads the kernel's counters; a test points it away."""
+
+_RUSAGE_FIELDS = ("ru_majflt", "ru_minflt", "ru_nivcsw", "ru_nvcsw")
+
+
+def _rusage_now() -> resource.struct_rusage | OSError:
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF)
+    except OSError as exc:  # never fail the login or verify being measured
+        return exc
+
+
+class RusageWindow:
+    """``getrusage(RUSAGE_SELF)`` before and after the login or verify it wraps.
+
+    Its deltas, for the whole process: page faults (a major one waited for a
+    page from disk or swap) and context switches (an involuntary one was a
+    preemption).
+    """
+
+    before: resource.struct_rusage | OSError | None = None
+    after: resource.struct_rusage | OSError | None = None
+
+    def __enter__(self) -> RusageWindow:
+        self.before = _rusage_now()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.after = _rusage_now()
+
+
+def _rusage_deltas(window: RusageWindow | None) -> str:
+    if window is None:
+        return "not measured"
+    before, after = window.before, window.after
+    if not isinstance(before, resource.struct_rusage):
+        return f"unavailable: {before!r}"
+    if not isinstance(after, resource.struct_rusage):
+        return f"unavailable: {after!r}"
+    return " ".join(
+        f"{field}={getattr(after, field) - getattr(before, field)}"
+        for field in _RUSAGE_FIELDS
+    )
+
+
+def _pressure(kind: str) -> str:
+    return " | ".join((_PROC / "pressure" / kind).read_text().splitlines())
+
+
+def _swap_counts() -> str:
+    counts = {
+        key: value
+        for key, value in (
+            line.split() for line in (_PROC / "vmstat").read_text().splitlines()
+        )
+    }
+    return f"pswpin={counts['pswpin']} pswpout={counts['pswpout']}"
+
+
+def _native_thread_names() -> str:
+    """Every thread of the process, as the kernel names it, native ones too."""
+    names = []
+    for task in sorted((_PROC / "self" / "task").iterdir(), key=lambda t: int(t.name)):
+        try:
+            names.append((task / "comm").read_text().strip())
+        except (FileNotFoundError, ProcessLookupError):  # it ended since the listing
+            continue
+    return ", ".join(names)
+
+
+def _host_line(key: str, read: Callable[[], str]) -> str:
+    try:
+        return f"{key}: {read()}"
+    except Exception as exc:  # a report that raised would replace the failure
+        return f"{key}: unavailable: {exc!r}"
 
 
 def _verify(password: str, stored_hash: str) -> bool:
@@ -70,14 +151,14 @@ class _KdfExecutorProbes:
     def __call__(self, call: Callable[[], bool]) -> str:
         if self._timed_out:
             return "skipped: the KDF executor timed out above"
-        future = _KDF_EXECUTOR.submit(_probe, call)
         try:
+            future = _KDF_EXECUTOR.submit(_probe, call)
             return future.result(timeout=_EXECUTOR_TIMEOUT_S)
         except TimeoutError:
-            future.cancel()
+            future.cancel()  # a probe still queued must not run once the pool frees
             self._timed_out = True
             return f"TimeoutError: no result within {_EXECUTOR_TIMEOUT_S} s"
-        except Exception as exc:  # a shut-down pool is itself a finding
+        except Exception as exc:  # a shut-down pool refuses the submit: a finding
             return f"{exc!r} [KDF executor]"
 
 
@@ -105,18 +186,33 @@ def _build_info() -> list[str]:
 
 
 def argon2_mismatch_report(
-    *, password: str, stored_hash: str, produced_hash: str | None = None
+    *,
+    password: str,
+    stored_hash: str,
+    produced_hash: str | None = None,
+    rusage: RusageWindow | None = None,
+    skip_probes: str | None = None,
 ) -> str:
     """Probe argon2 after it refused ``password`` against ``stored_hash``.
 
     ``produced_hash`` is the hash the test made, when it is not the one read
-    back. The probes run in the failing test, so it fails as before, only
-    slower and with this report.
+    back, and ``rusage`` the window around the refused call. The host is read
+    first, before the probes add load of their own. The probes run in the
+    failing test, so it fails as before, only slower and with this report.
+    ``skip_probes`` says why a refusal argon2 never saw needs none of them.
     """
     taken_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
     verify = functools.partial(_verify, password, stored_hash)
     round_trip = functools.partial(_round_trip, password)
     on_executor = _KdfExecutorProbes()
+
+    def probes(
+        run: Callable[[Callable[[], bool]], str], call: Callable[[], bool], times: int
+    ) -> list[str]:
+        if skip_probes is not None:
+            return [f"skipped: {skip_probes}"]
+        return [run(call) for _ in range(times)]
+
     same = "not available" if produced_hash is None else produced_hash == stored_hash
     return "\n".join(
         [
@@ -127,14 +223,25 @@ def argon2_mismatch_report(
             f"length: {len(stored_hash)}",
             f"sha256: {hashlib.sha256(stored_hash.encode()).hexdigest()}",
             f"equals the hash the test produced: {same}",
+            "--- host ---",
+            *(
+                _host_line(f"pressure {kind}", functools.partial(_pressure, kind))
+                for kind in ("cpu", "memory", "io")
+            ),
+            _host_line("vmstat", _swap_counts),
+            _host_line(
+                "rusage over the refused call",
+                functools.partial(_rusage_deltas, rusage),
+            ),
+            _host_line("native threads", _native_thread_names),
             "--- stored hash verified 5x on this thread ---",
-            *(_probe(verify) for _ in range(5)),
+            *probes(_probe, verify, 5),
             "--- stored hash verified 3x on the KDF executor ---",
-            *(on_executor(verify) for _ in range(3)),
+            *probes(on_executor, verify, 3),
             "--- fresh hash+verify round trips 3x on this thread ---",
-            *(_probe(round_trip) for _ in range(3)),
+            *probes(_probe, round_trip, 3),
             "--- fresh hash+verify round trips 3x on the KDF executor ---",
-            *(on_executor(round_trip) for _ in range(3)),
+            *probes(on_executor, round_trip, 3),
             "--- process ---",
             f"pid: {os.getpid()}",
             f"xdist worker: {os.environ.get('PYTEST_XDIST_WORKER', 'none')}",
@@ -166,8 +273,10 @@ async def log_in_seeded(
     """Log ``user`` in with its correct ``password``; on a refusal, fail with
     :func:`argon2_mismatch_report` over the hash read back from the database."""
     __tracebackhide__ = True  # the failure points at the test's own login line
+    window = RusageWindow()
     try:
-        return await login(username=user.username.value, password=password, ip=ip)
+        with window:
+            return await login(username=user.username.value, password=password, ip=ip)
     except InvalidCredentialsError as exc:
         note = ""
         try:
@@ -178,17 +287,21 @@ async def log_in_seeded(
                 " report probes the hash the test produced instead.\n"
             )
             stored = user.password_hash
-        report = argon2_mismatch_report(
-            password=password,
-            stored_hash=stored,
-            produced_hash=None if note else user.password_hash,
-        )
         if exc.retry_after is None:
             headline = "Login refused the correct password of a seeded user."
+            skip_probes = None
         else:
             # Only a lockout or an IP throttle sets it (login.py), never argon2.
             headline = (
                 f"Login refused by a lockout or throttle (retry_after="
                 f"{exc.retry_after}), not by argon2: this is not the #3748 flake."
             )
+            skip_probes = "a lockout or throttle refused this login, not argon2"
+        report = argon2_mismatch_report(
+            password=password,
+            stored_hash=stored,
+            produced_hash=None if note else user.password_hash,
+            rusage=window,
+            skip_probes=skip_probes,
+        )
         raise AssertionError(f"{headline}\n{note}{report}") from exc
