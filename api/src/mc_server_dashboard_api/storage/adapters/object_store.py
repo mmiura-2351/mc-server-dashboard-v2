@@ -2975,16 +2975,22 @@ class _ObjectWorkingSetView(WorkingSetView):
         if self._snapshot_prefix is None:
             raise NotFoundError(f"file not found: {rel_path.value}")
         sub = self._storage._safe_subkey(rel_path)
-        return self._stream_file(sub, rel_path)
+        return self._stream_file(self._snapshot_prefix, sub, rel_path)
 
-    async def _stream_file(self, sub: str, rel_path: RelPath) -> AsyncIterator[bytes]:
+    async def _stream_file(
+        self, prefix: str, sub: str, rel_path: RelPath
+    ) -> AsyncIterator[bytes]:
         # The stream takes a lease of its own on its first iteration, as the fs
         # view's does (issue #3618): a stream left open past the view's exit would
         # otherwise read a prefix nothing leases (issue #3670). A stream opened
-        # but never iterated holds none. The lease is released after the body and
-        # the client are closed, so nothing this stream opened outlives it (#3655).
-        prefix = self._snapshot_prefix
-        assert prefix is not None
+        # but never iterated holds none. ``prefix`` is bound when the stream is
+        # opened, as fs binds its pinned path. The lease is a bare acquire, taken
+        # while the view's lease still pins ``prefix``, so the first iteration has
+        # to happen inside the view; after the view exits, the prefix may already
+        # be reclaimed and the stream raise ``NotFoundError``. A stream already
+        # started may outlive the view and keeps ``prefix`` leased until it
+        # finishes or is closed. The lease is released after the body and the
+        # client are closed, so nothing this stream opened outlives it (#3655).
         self._storage._acquire_lease(prefix)
         try:
             async with shielded_exit(self._storage._client_factory()) as client:

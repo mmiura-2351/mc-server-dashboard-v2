@@ -1778,6 +1778,91 @@ func TestForgeInstallLogCapturesOutputSentAfterTheExit(t *testing.T) {
 	}
 }
 
+// gatedTrailDocker holds the end of the install's log stream until release
+// closes, then sends trail and ends it, so a test can act while the supervisor
+// drains the log of an installer whose exit it has already observed.
+type gatedTrailDocker struct {
+	*forgeFakeDocker
+	trail   string
+	release chan struct{}
+}
+
+func (d *gatedTrailDocker) Logs(ctx context.Context, id string) (io.ReadCloser, error) {
+	rc, err := d.forgeFakeDocker.Logs(ctx, id)
+	if err != nil || id != forgeInstallID {
+		return rc, err
+	}
+	return io.NopCloser(io.MultiReader(rc, &gatedTrail{ctx: ctx, release: d.release, trail: d.trail})), nil
+}
+
+type gatedTrail struct {
+	ctx     context.Context
+	release <-chan struct{}
+	trail   string
+	sent    bool
+}
+
+func (r *gatedTrail) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	select {
+	case <-r.release:
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	}
+	r.sent = true
+	return copy(p, r.trail), nil
+}
+
+// Observing the installer's exit is the cutoff for stop intent (issue #3667), as
+// in supervise: a Stop that arrives while the supervisor drains the log of an
+// installer it already saw fail does not turn that failure into stopped. The
+// out-of-memory crash the log explains is published, and Stop returns nil.
+func TestForgeStopDuringTheInstallLogDrainKeepsTheExplainedCrash(t *testing.T) {
+	dir := t.TempDir()
+	docker := &gatedTrailDocker{
+		forgeFakeDocker: newForgeFakeDocker(),
+		trail:           string(frame(dockerStreamStderr, "java.lang.OutOfMemoryError: Java heap space\n")),
+		release:         make(chan struct{}),
+	}
+	d := forgeDriver(docker)
+	d.installLogDrainTimeout = time.Minute
+	d.stopTimeout = 30 * time.Second
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	contInst := inst.(*instance)
+	docker.exit(forgeInstallID, 1, nil)
+	awaitCondition(t, "the install exit to be observed", func() bool {
+		contInst.mu.Lock()
+		defer contInst.mu.Unlock()
+		return contInst.exitObserved
+	})
+
+	stopped := make(chan error, 1)
+	go func() { stopped <- inst.Stop(context.Background(), false) }()
+	drainTo(t, inst.Events(), execution.StateStopping)
+	close(docker.release)
+
+	last := awaitStreamClosed(t, inst.Events())
+	if last.State != execution.StateCrashed || last.CrashReason != execution.CrashReasonForgeInstallOutOfMemory {
+		t.Fatalf("last event = %+v, want the out-of-memory install crash", last)
+	}
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop still waiting after the install crash was published")
+	}
+	if got, ok := inst.Terminal(); !ok || got != last {
+		t.Fatalf("Terminal = %+v, %v, want %+v", got, ok, last)
+	}
+}
+
 // drainToEvent collects status events until it sees want, returning the matching
 // event so the caller can inspect its Detail field.
 func drainToEvent(t *testing.T, ch <-chan execution.StatusEvent, want execution.ServerState) execution.StatusEvent {
