@@ -70,13 +70,14 @@ func TestListFilesReportsTheKindOfSpecialEntries(t *testing.T) {
 		"link": session.FileEntryKindSymlink,
 	}
 	plantFifo(t, filepath.Join(root, "fifo"))
-	if sock, err := net.Listen("unix", filepath.Join(root, "sock")); err != nil {
-		// A temp path can exceed a socket address's length limit.
-		t.Logf("no socket planted: %v", err)
-		delete(want, "sock")
-	} else {
-		t.Cleanup(func() { _ = sock.Close() })
+	// A unix socket path is limited to ~100 bytes, which a temp root can exceed, so
+	// bind it by a short relative name.
+	t.Chdir(root)
+	sock, err := net.Listen("unix", "sock")
+	if err != nil {
+		t.Fatalf("planting the socket: %v", err)
 	}
+	t.Cleanup(func() { _ = sock.Close() })
 	if err := os.Symlink("server.properties", filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)
 	}

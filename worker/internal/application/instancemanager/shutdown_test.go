@@ -26,7 +26,13 @@ func awaitManagerGoroutines(t *testing.T, want int) {
 // rather than here so worker/test/e2e — which builds Managers against a real
 // Docker daemon and cannot import this file — asserts the same invariant off the
 // same frame list (issue #2881).
+//
+// Before any test it puts the package's temp dirs on a tmpfs (useTmpRoot).
 func TestMain(m *testing.M) {
+	if err := useTmpRoot(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	os.Exit(goroutineleak.FailIfSurvivors(m.Run()))
 }
 
