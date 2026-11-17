@@ -645,3 +645,148 @@ func TestForgeInstallRetryRefusedByTheGateLeavesArtifactsUntouched(t *testing.T)
 		t.Fatalf("created = %v, want only the first installer", got)
 	}
 }
+
+// A recorded leftover whose removal the daemon answers 409 (a removal already in
+// progress) passes the gate before the cleanup but stays recorded, so the
+// create's own gate removes it again: it is stopped once and removed twice, and
+// what it wrote is still in place at the stop and at the first removal (issue
+// #3680).
+func TestForgeStartRemovesALeftoverAnswered409AgainAtTheCreatesGate(t *testing.T) {
+	dir := t.TempDir()
+	jar := filepath.Join(dir, "forge-1.12.2-14.23.5.2859.jar")
+	plant(t, jar, "x")
+	docker := newForgeFakeDocker()
+	docker.reportsState = true
+	// The installer a failed start left running and recorded (issue #3645).
+	docker.exited[forgeInstallID] = make(chan struct{})
+	docker.present = map[string]bool{forgeInstallID: true}
+	docker.running = map[string]bool{forgeInstallID: true}
+	docker.removeErrIDs = map[string]error{forgeInstallID: errRemovalInProgress}
+	d := stalledCallForgeDriver(docker, &syncBuffer{})
+	d.unremoved.add("s1", forgeInstallID)
+
+	var (
+		mu    sync.Mutex
+		calls []string
+	)
+	record := func(call string) {
+		_, err := os.Lstat(jar)
+		mu.Lock()
+		calls = append(calls, fmt.Sprintf("%s, artifact present: %t", call, err == nil))
+		mu.Unlock()
+	}
+	docker.onStopOrRemove = func(call, id string) {
+		if id != forgeInstallID {
+			return
+		}
+		record(call)
+		if call == "remove" {
+			// Only the first removal is answered 409.
+			docker.mu.Lock()
+			docker.removeErrIDs = nil
+			docker.mu.Unlock()
+		}
+	}
+	docker.onCreateHook = func(spec CreateSpec) {
+		if spec.Name == forgeInstallID {
+			record("create")
+		}
+	}
+
+	inst, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v, want the leftover removed at the create's gate and the install started", err)
+	}
+	mu.Lock()
+	got := slices.Clone(calls)
+	mu.Unlock()
+	want := []string{
+		"stop, artifact present: true",
+		"remove, artifact present: true",
+		"remove, artifact present: false",
+		"create, artifact present: false",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("calls = %q, want %q", got, want)
+	}
+	if got := unremovedOf(d, "s1"); len(got) != 0 {
+		t.Fatalf("recorded = %v, want the record cleared", got)
+	}
+	writeArgsfile(t, dir)
+	docker.exit(forgeInstallID, 0, nil)
+	drainTo(t, inst.Events(), execution.StateRunning)
+	docker.exit("mcsd-s1", 0, nil)
+	awaitStreamClosed(t, inst.Events())
+}
+
+// listHookDocker runs onList as each List begins, and answers a List whose
+// context is done with its error, as the Engine client does.
+type listHookDocker struct {
+	*forgeFakeDocker
+	onList func()
+}
+
+func (h *listHookDocker) List(ctx context.Context, labelKey, labelValue string) ([]Container, error) {
+	if h.onList != nil {
+		h.onList()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return h.forgeFakeDocker.List(ctx, labelKey, labelValue)
+}
+
+// A Stop that arrives while an install retry waits at the leftover/quiescence
+// gate ends the wait: the gate runs under the instance's install context, which
+// the Stop cancels, so the retry cleans nothing, even though the container it
+// waited for exits right after, and the instance reports stopped (issue #3680).
+func TestStopDuringTheInstallRetrysGateWaitLeavesArtifactsUntouched(t *testing.T) {
+	shrinkInstallBackoff(t)
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "forge-1.12.2-14.23.5.2859.jar")
+	const other = "mcsd-s1-other"
+	fake := newForgeFakeDocker()
+	fake.reportsState = true
+	fake.waitGates[forgeInstallID] = make(chan waitResult, 1)
+	docker := &listHookDocker{forgeFakeDocker: fake}
+	d := forgeDriver(docker)
+	// Only the Stop or the container's exit ends the wait, never its window.
+	d.conflictDeadline = time.Minute
+
+	started, err := d.Start(context.Background(), forgeSpec(dir))
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	inst := started.(*instance)
+	plant(t, stale, "x")
+	fake.mu.Lock()
+	fake.running[other] = true
+	fake.mu.Unlock()
+	stopped := make(chan error, 1)
+	lists := 0
+	docker.onList = func() {
+		if lists++; lists != 2 {
+			return
+		}
+		// The retry's gate saw the container running and is waiting. The Stop
+		// arrives, then the container exits.
+		go func() { stopped <- inst.Stop(context.Background(), false) }()
+		<-inst.installCtx.Done()
+		fake.mu.Lock()
+		delete(fake.running, other)
+		fake.mu.Unlock()
+	}
+	fake.waitGates[forgeInstallID] <- waitResult{code: 1}
+
+	last := awaitStreamClosed(t, inst.Events())
+	if err := <-stopped; err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if last.State != execution.StateStopped {
+		t.Fatalf("last event = %+v, want stopped", last)
+	}
+	assertContent(t, stale, "x")
+	if got := docker.names(); !slices.Equal(got, []string{forgeInstallID}) {
+		t.Fatalf("created = %v, want only the first installer", got)
+	}
+}
