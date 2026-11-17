@@ -157,15 +157,19 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # What each archive reader raises when an uploaded archive's own bytes do not read
 # back (issue #3769), found by fuzzing both readers with truncated, garbage and
 # byte-flipped archives. A tar.gz fails in ``tarfile`` (``ReadError``: not gzip,
-# a bad header, damaged deflate data under a header) or, inside a member's data,
-# in the gzip layer (``EOFError`` for a cut, ``zlib.error`` for damaged deflate
-# data, ``BadGzipFile``). ``zipfile`` raises far more than ``BadZipFile``:
+# a bad header, damaged deflate data under a header; ``ValueError`` for a GNU
+# sparse PAX field that is not a number, which it converts with a bare ``int()``)
+# or, inside a member's data, in the gzip layer (``EOFError`` for a cut,
+# ``zlib.error`` for damaged deflate data, ``BadGzipFile``). Only damage a reader
+# reaches is caught: ``tarfile`` stops at the end-of-archive marker and the gzip
+# CRC is never checked, so a tar.gz damaged elsewhere reads "successfully"
+# (issue #3778). ``zipfile`` raises far more than ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
 # (as its ``NotImplementedError`` subclass) for an unsupported compression method,
 # ``ValueError`` (``UnicodeDecodeError`` among them) for a corrupt offset or name,
 # and ``OverflowError`` for a zip64 offset past any seekable position (2**63 and
-# up). Catching those builtins is safe only because the readers run over an
+# up). Catching the builtins is safe only because the readers run over an
 # in-memory ``BytesIO``, so no I/O fault can hide among them, and because the
 # extraction's own refusals are ``ServerError`` s, never one of these.
 _TAR_GZ_READ_ERRORS: tuple[type[Exception], ...] = (
@@ -173,6 +177,7 @@ _TAR_GZ_READ_ERRORS: tuple[type[Exception], ...] = (
     EOFError,
     zlib.error,
     gzip.BadGzipFile,
+    ValueError,
 )
 _ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
     zipfile.BadZipFile,

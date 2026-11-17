@@ -1544,7 +1544,13 @@ def _validate_backup_archive(
                         total = _drain_capped(handle, total, max_decompressed_bytes)
     except _TAR_GZ_READ_ERRORS as exc:
         # Not ``tarfile.TarError`` alone: a cut or damage inside a member's data
-        # surfaces from the gzip layer as ``EOFError`` / ``zlib.error`` (#3769).
+        # surfaces from the gzip layer as ``EOFError`` / ``zlib.error``, and a bad
+        # GNU sparse field as a bare ``ValueError`` (#3769). The tuple guards our
+        # own code in the loop too, and none of it raises one of these: the
+        # helpers it calls (``without_tar_root_prefix``, ``unrestorable_reason``,
+        # ``_echoed_name``, the two ``_refuse_*`` guards, ``_drain_capped``) only
+        # slice, split and build ``PurePosixPath`` s, and refuse with
+        # ``ServerError`` s, none of which subclasses a member of the tuple.
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 

@@ -448,7 +448,7 @@ class ImportServer:
                     rel_path=entry_path,
                     content=data,
                 )
-        except (FileTooLargeError, InvalidFilePathError):
+        except (FileTooLargeError, InvalidFilePathError, UnreadableArchiveError):
             # Defensive: the pre-commit validate pass already rejected these as an
             # archive property (413/422) with no row created, so they should not
             # reach here; re-raise as-is rather than mask them as a seed failure.

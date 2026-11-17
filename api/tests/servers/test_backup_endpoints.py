@@ -164,6 +164,7 @@ from tests.servers.fakes import (
 )
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
+from tests.servers.test_files import _tar_gz_with_a_bad_sparse_field
 from tests.storage.fake_s3 import FakeS3Store
 from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 from tests.storage.helpers import (
@@ -3124,11 +3125,13 @@ def test_upload_of_a_member_restore_refuses_is_422_and_stores_nothing(
     assert backups.by_id == {}
 
 
-def test_upload_of_an_archive_cut_inside_a_member_is_422_and_stores_nothing() -> None:
-    # The cut lands in the member's data, which the gzip layer reports as an
-    # EOFError rather than a tarfile error, so it used to escape as a 500
-    # (issue #3769). The payload is seeded and compressible, so the cut is in
-    # the deflate stream on every run.
+def _cut_inside_a_member() -> bytes:
+    """A gzip tar cut inside its one member's data.
+
+    The payload is seeded and compressible, so the cut is in the deflate stream
+    on every run.
+    """
+
     payload = bytes(random.Random(3769).choices(b"abcdefgh", k=64 * 1024))
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -3136,8 +3139,24 @@ def test_upload_of_an_archive_cut_inside_a_member_is_422_and_stores_nothing() ->
         info.size = len(payload)
         tar.addfile(info, io.BytesIO(payload))
     archive = buf.getvalue()
+    return archive[: len(archive) // 2]
 
-    resp, store, backups, _ = _upload_through_the_route(archive[: len(archive) // 2])
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # The gzip layer reports the cut as an EOFError, not a tarfile error.
+        pytest.param(_cut_inside_a_member(), id="cut-inside-a-member"),
+        # tarfile converts a GNU sparse PAX field with a bare int(): ValueError.
+        pytest.param(_tar_gz_with_a_bad_sparse_field(), id="bad-sparse-field"),
+    ],
+)
+def test_upload_of_an_unreadable_archive_is_422_and_stores_nothing(
+    content: bytes,
+) -> None:
+    # Reader failures that are not tarfile errors used to escape the validator
+    # as a 500 (issue #3769).
+    resp, store, backups, _ = _upload_through_the_route(content)
 
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_archive"
