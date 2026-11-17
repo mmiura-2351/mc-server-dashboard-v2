@@ -163,8 +163,9 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
 # (as its ``NotImplementedError`` subclass) for an unsupported compression method,
-# and ``ValueError`` (``UnicodeDecodeError`` among them) for a corrupt offset or
-# name. Catching those builtins is safe only because the readers run over an
+# ``ValueError`` (``UnicodeDecodeError`` among them) for a corrupt offset or name,
+# and ``OverflowError`` for a zip64 offset past any seekable position (2**63 and
+# up). Catching those builtins is safe only because the readers run over an
 # in-memory ``BytesIO``, so no I/O fault can hide among them, and because the
 # extraction's own refusals are ``ServerError`` s, never one of these.
 _TAR_GZ_READ_ERRORS: tuple[type[Exception], ...] = (
@@ -181,6 +182,7 @@ _ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
     EOFError,
     RuntimeError,
     ValueError,
+    OverflowError,
 )
 
 # The default result cap for a file search. A search walks the whole authoritative

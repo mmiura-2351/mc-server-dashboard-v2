@@ -3824,6 +3824,23 @@ def _zip_with_an_encrypted_member() -> bytes:
     return bytes(archive)
 
 
+def _zip_with_an_offset_no_seek_reaches() -> bytes:
+    """``a.txt``'s zip64 local-header offset is 2**63, past any seekable position."""
+
+    archive = _zip_bytes({"a.txt": b"A"})
+    entry = archive.find(b"PK\x01\x02")
+    end = archive.rfind(b"PK\x05\x06")
+    name_len, extra_len = struct.unpack_from("<HH", archive, entry + 28)
+    zip64 = struct.pack("<HHQ", 0x0001, 8, 2**63)  # header id 1: the zip64 field
+    head = bytearray(archive[entry : entry + 46 + name_len])
+    struct.pack_into("<H", head, 30, extra_len + len(zip64))
+    struct.pack_into("<I", head, 42, 0xFFFFFFFF)  # the offset is in the zip64 field
+    central = bytes(head) + zip64 + archive[entry + 46 + name_len : end]
+    record = bytearray(archive[end:])
+    struct.pack_into("<I", record, 12, len(central))  # the central directory size
+    return archive[:entry] + central + bytes(record)
+
+
 _ZIP = _deflated_zip()
 _TAR_GZ = _tar_gz_bytes({"a.txt": b"A", "b.txt": _PAYLOAD})
 _GARBAGE = b"not an archive " * 256
@@ -3833,6 +3850,7 @@ _UNREADABLE_ARCHIVES = [
     pytest.param("pack.zip", _GARBAGE, id="garbage-zip"),
     pytest.param("pack.zip", _zip_with_a_damaged_member(), id="damaged-zip-member"),
     pytest.param("pack.zip", _zip_with_an_encrypted_member(), id="encrypted-zip"),
+    pytest.param("pack.zip", _zip_with_an_offset_no_seek_reaches(), id="zip64-offset"),
     # Cut inside b.txt's data, past an intact a.txt.
     pytest.param("pack.tar.gz", _TAR_GZ[: len(_TAR_GZ) // 2], id="truncated-tar-gz"),
     pytest.param("pack.tar.gz", _GARBAGE, id="garbage-tar-gz"),
