@@ -1491,6 +1491,15 @@ def _validate_backup_archive(
     cannot slip past. Raises :class:`InvalidBackupArchiveError` (422) on any
     violation.
 
+    The archive must also read to its end (issue #3778). Only the tar
+    end-of-archive marker may end the member walk (:class:`EndCheckedTarInfo`),
+    so a damaged header past the first is refused rather than cutting the member
+    list short. The stream is then read on to the gzip end
+    (:func:`read_past_end_marker`): only zeros may follow the marker, the gzip
+    CRC32 and ISIZE must match, and only another gzip member or zero padding may
+    follow the gzip stream. The zeros read there count toward
+    ``max_decompressed_bytes`` too.
+
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
     ``arcname=child.name``, and :class:`RestoreBackup` republishes the extraction
@@ -1558,7 +1567,10 @@ def _validate_backup_archive(
         # helpers it calls (``without_tar_root_prefix``, ``unrestorable_reason``,
         # ``_echoed_name``, the two ``_refuse_*`` guards, ``_drain_capped``) only
         # slice, split and build ``PurePosixPath`` s, and refuse with
-        # ``ServerError`` s, none of which subclasses a member of the tuple.
+        # ``ServerError`` s, none of which subclasses a member of the tuple. The
+        # read past the end-of-archive marker raises them by design (#3778): a
+        # ``ReadError`` for anything but zeros there, and the gzip layer's own
+        # errors for its trailer.
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 

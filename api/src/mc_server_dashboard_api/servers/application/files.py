@@ -164,10 +164,13 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # a bad header, damaged deflate data under a header; ``ValueError`` for a GNU
 # sparse PAX field that is not a number, which it converts with a bare ``int()``)
 # or, inside a member's data, in the gzip layer (``EOFError`` for a cut,
-# ``zlib.error`` for damaged deflate data, ``BadGzipFile``). Only damage a reader
-# reaches is caught: ``tarfile`` stops at the end-of-archive marker and the gzip
-# CRC is never checked, so a tar.gz damaged elsewhere reads "successfully"
-# (issue #3778). ``zipfile`` raises far more than ``BadZipFile``:
+# ``zlib.error`` for damaged deflate data, ``BadGzipFile``). Both tar.gz readers
+# read through ``EndCheckedTarInfo`` and on past the end-of-archive marker to the
+# gzip end (issue #3778), adding a ``ReadError`` for a damaged header past the
+# first, a missing marker or anything but zeros past it, and a ``BadGzipFile``
+# for a CRC32 or ISIZE that does not match or bytes after the gzip stream that
+# are neither a gzip member nor zero padding. ``zipfile`` raises far more than
+# ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
 # (as its ``NotImplementedError`` subclass) for an unsupported compression method,
