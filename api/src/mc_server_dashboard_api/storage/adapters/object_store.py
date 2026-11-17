@@ -2766,7 +2766,7 @@ async def _archive_member_parts(
 def _open_member(
     spool: Path, name: str, mode: Literal["r:", "r:gz"]
 ) -> tuple[tarfile.TarFile, Any]:
-    tar = tarfile.open(str(spool), mode=mode)
+    tar = tarfile.open(str(spool), mode=mode, tarinfo=HeaderCheckedTarInfo)
     member_file = tar.extractfile(name)
     if member_file is None:  # pragma: no cover - members are pre-filtered to files
         tar.close()

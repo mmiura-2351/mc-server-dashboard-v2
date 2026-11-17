@@ -175,11 +175,11 @@ class HeaderCheckedTarInfo(tarfile.TarInfo):
     CPython's ``tarfile`` converts the PAX ``GNU.sparse.size``,
     ``GNU.sparse.realsize`` and ``GNU.sparse.map`` fields, and the sparse format
     1.0 map, with a bare ``int()``, so a non-numeric one raises ``ValueError``
-    (issue #3790); every other malformed header is a ``ReadError``. Opening an
-    archive with ``tarinfo=HeaderCheckedTarInfo`` makes it one too. Only the
-    header read is covered, so a ``ValueError`` from the caller's own code is
-    never mistaken for one. Not ``InvalidHeaderError``: ``TarFile.next`` takes
-    that, past the first header, for the end of the archive.
+    (issue #3790). Opening an archive with ``tarinfo=HeaderCheckedTarInfo``
+    reports it as the ``ReadError`` that the restore walk and the snapshot edge
+    already refuse. Only the header read is covered, so a ``ValueError`` from the
+    caller's own code is never mistaken for one. Not ``InvalidHeaderError``:
+    ``TarFile.next`` takes that, past the first header, for the end of the archive.
     """
 
     @classmethod
