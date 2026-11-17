@@ -10,6 +10,11 @@ The same count tells a failed start's revert whether the intent on the row is
 still its own (issue #3741). Before, the revert undid whatever intent it found,
 including a newer start's that had already been sent.
 
+A lifecycle write compares the assignment it read as well as the desired state
+(issue #3792). Before, a stop, a drain or a restart that read the row before a
+failed placement released it wrote the released Worker back, and a write that
+does not own the config wrote back the config it read over a later edit.
+
 Each test runs the real use cases, each with its own unit of work over one shared
 repository and one shared ``StopIntentCounter``, as in production. The competing
 write is injected at an exact point: inside the start's re-read once the row
@@ -25,7 +30,8 @@ import contextlib
 import datetime as dt
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -57,6 +63,7 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
+    RestartServer,
     StartServer,
     StopServer,
     StopServersAssignedToWorker,
@@ -485,6 +492,13 @@ class _World:
             clock=FakeClock(_NOW),
             stop_intents=self.intents,
         )(worker_id=self.worker)
+
+    async def restart(self) -> Server:
+        return await RestartServer(
+            uow=FakeUnitOfWork(servers=self.repo),
+            control_plane=self.cp,
+            clock=FakeClock(_NOW),
+        )(community_id=self.community, server_id=self.server_id)
 
     def after_hydrate_and_next_read(self, hook: Hook) -> None:
         """Run ``hook`` inside the read that follows the next hydrate: the re-read."""
@@ -1502,6 +1516,208 @@ async def test_a_start_that_lost_its_intent_answers_the_conflict_untouched() -> 
     assert world.kinds() == ["hydrate"]
     assert world.stored() == (DesiredState.RUNNING, elsewhere)
     assert world.cp.decremented == []
+
+
+# Issue #3792: a stop, a drain or a restart reads the row as a placement left
+# it, (running, W), and waits just before its write. The placement's hydrate then
+# fails and its ``_unassign`` releases W; with ``re-placed``, a newer placement
+# then puts the server on another Worker and starts it there. The write compares
+# the assignment it read, so it matches nothing, and the row, the placement load
+# and the count stay as the later writes left them.
+_LATER_WRITES = pytest.mark.parametrize("then", ["unassigned", "re-placed"])
+
+
+async def _write_straddles_a_failed_placement(
+    world: _World,
+    write: Callable[[], Coroutine[Any, Any, Any]],
+    *,
+    then: str,
+    other: _Worker,
+) -> asyncio.Task[Any]:
+    """Run ``write`` up to its compare-and-set, then fail a placement under it.
+
+    Returns the write's task, released from its wait but not yet awaited.
+    """
+
+    gate = asyncio.Event()
+    task: asyncio.Task[Any] | None = None
+
+    async def write_waits_then_fail() -> CommandOutcome:
+        nonlocal task
+        world.repo.pause_next_flip = gate
+        task = asyncio.create_task(write())
+        await _either(task, world.repo.flip_paused)
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(write_waits_then_fail)
+    await _fails(world, "placement")
+    if then == "re-placed":
+        await world.start_server(control_plane=other).place_and_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    gate.set()
+    assert task is not None
+    return task
+
+
+def _owner_after(then: str, elsewhere: WorkerId) -> WorkerId | None:
+    return None if then == "unassigned" else elsewhere
+
+
+@_LATER_WRITES
+async def test_a_stop_that_read_the_row_before_a_placement_undo_conflicts(
+    then: str,
+) -> None:
+    # On main the stop wrote (stopped, W) over the released row, decremented W a
+    # second time and sent W a stop; with ``re-placed`` it also took the row off
+    # the Worker the server now runs on.
+    world = _seeded("placement")
+    elsewhere = WorkerId(uuid.uuid4())
+    other = _Worker(place_to=elsewhere)
+    stop = await _write_straddles_a_failed_placement(
+        world, world.stop, then=then, other=other
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await stop
+
+    assert world.stored() == (DesiredState.RUNNING, _owner_after(then, elsewhere))
+    assert world.kinds() == ["hydrate"]
+    assert world.cp.decremented == [world.worker]
+    assert other.decremented == []
+    assert world.intents.current(world.server_id) == 1
+
+
+@_LATER_WRITES
+async def test_a_drain_that_read_the_row_before_a_placement_undo_skips_it(
+    then: str,
+) -> None:
+    # The drain reports only the flips it made, and its caller sheds the load of
+    # those alone, so an empty report is no second decrement of W.
+    world = _seeded("placement")
+    elsewhere = WorkerId(uuid.uuid4())
+    other = _Worker(place_to=elsewhere)
+    drain = await _write_straddles_a_failed_placement(
+        world, world.drain, then=then, other=other
+    )
+
+    assert await drain == []
+
+    assert world.stored() == (DesiredState.RUNNING, _owner_after(then, elsewhere))
+    assert world.cp.decremented == [world.worker]
+    assert world.intents.current(world.server_id) == 1
+
+
+@_LATER_WRITES
+async def test_a_restart_that_read_the_row_before_a_placement_undo_conflicts(
+    then: str,
+) -> None:
+    # On main the restart wrote W back onto the released row, with no load entry
+    # and no bump, and restarted a server W does not run.
+    world = _seeded("placement")
+    elsewhere = WorkerId(uuid.uuid4())
+    other = _Worker(place_to=elsewhere)
+    restart = await _write_straddles_a_failed_placement(
+        world, world.restart, then=then, other=other
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await restart
+
+    assert world.stored() == (DesiredState.RUNNING, _owner_after(then, elsewhere))
+    assert world.kinds() == ["hydrate"]
+    assert [k for k, _, _ in other.dispatched] == (
+        [] if then == "unassigned" else ["hydrate", "start"]
+    )
+
+
+@_REVERTS
+async def test_a_revert_leaves_a_row_moved_after_its_check_alone(kind: str) -> None:
+    # One step later than ``..._re_placed_out_of_its_sight_alone``: the row moves
+    # to another Worker after the revert has read and checked it, before its
+    # write. The write compares the Worker it checked, so it matches nothing.
+    world = _seeded(kind)
+    elsewhere = WorkerId(uuid.uuid4())
+
+    async def re_placed_unseen() -> None:
+        world.repo.by_id[world.server_id].assigned_worker_id = elsewhere
+
+    async def fail_then_move_once_the_revert_reads() -> CommandOutcome:
+        world.repo.after_next_read = re_placed_unseen
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail_then_move_once_the_revert_reads)
+
+    await _fails(world, kind)
+
+    assert world.stored() == (DesiredState.RUNNING, elsewhere)
+    assert world.cp.decremented == []
+    assert world.intents.current(world.server_id) == 0
+
+
+# A config edit of safe keys may commit while a server runs (UpdateServer, under
+# the lifecycle lock, which none of these writers take), so it can land between
+# their read and their write. Only a start owns the config: it records the JAR it
+# resolved. Every other lifecycle write leaves the config as the row holds it.
+_EDIT = {"motd": "edited while running"}
+
+
+async def _edit_config(world: _World) -> None:
+    row = world.repo.by_id[world.server_id]
+    await world.repo.update(replace(row, config={**row.config, **_EDIT}))
+
+
+def _kept_the_edit(world: _World) -> bool:
+    return _EDIT.items() <= world.repo.by_id[world.server_id].config.items()
+
+
+@pytest.mark.parametrize("writer", ["stop", "restart"])
+async def test_a_stop_or_restart_keeps_a_config_edit_made_after_its_read(
+    writer: str,
+) -> None:
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+
+    async def edit() -> None:
+        await _edit_config(world)
+
+    world.repo.after_next_read = edit
+
+    await (world.stop() if writer == "stop" else world.restart())
+
+    assert _kept_the_edit(world)
+
+
+async def test_a_drain_keeps_a_config_edit_made_after_its_read() -> None:
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    gate = asyncio.Event()
+    world.repo.pause_next_flip = gate
+    drain = asyncio.create_task(world.drain())
+    await _either(drain, world.repo.flip_paused)
+    await _edit_config(world)
+    gate.set()
+
+    assert await drain == [world.server_id]
+
+    assert _kept_the_edit(world)
+
+
+@_REVERTS
+async def test_a_revert_keeps_a_config_edit_made_after_its_read(kind: str) -> None:
+    world = _seeded(kind)
+
+    async def edit() -> None:
+        await _edit_config(world)
+
+    async def fail_then_edit_once_the_revert_reads() -> CommandOutcome:
+        world.repo.after_next_read = edit
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail_then_edit_once_the_revert_reads)
+
+    await _fails(world, kind)
+
+    assert world.stored()[1] is None
+    assert _kept_the_edit(world)
 
 
 async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends() -> (
