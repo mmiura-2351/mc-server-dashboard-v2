@@ -337,6 +337,68 @@ async def test_a_finished_file_stream_releases_its_lease_once(
     assert release.calls == 1
 
 
+class _ReadHeld:
+    """A file whose read is held by ``pause``, then returns or raises (issue #3654).
+
+    Like a buffered reader, its close waits for an in-flight read to finish. Each
+    finished read and close is appended to ``events``.
+    """
+
+    def __init__(self, pause: _Pause, *, fails: bool) -> None:
+        self.name = "held"
+        self.events: list[str] = []
+        self._pause = pause
+        self._fails = fails
+        self._lock = threading.Lock()
+
+    def read(self, _size: int) -> bytes:
+        with self._lock:
+            self._pause.entered.set()
+            self._pause.resume.wait()
+            self.events.append("read")
+            if self._fails:
+                raise OSError("read failed")
+            return b"late"
+
+    def close(self) -> None:
+        with self._lock:
+            self.events.append("close")
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["read-returns", "read-fault"])
+async def test_a_file_stream_cancelled_mid_read_returns_before_the_read_finishes(
+    fails: bool, pause: _Pause
+) -> None:
+    """The cancel takes effect at once; the read's completion closes and releases.
+
+    The lease covers the read still in flight and the close after it, and is
+    released once, even when that read raises (issue #3654).
+    """
+
+    handle = _ReadHeld(pause, fails=fails)
+    release = _CountedRelease()
+
+    async def _open() -> tuple[Any, Callable[[], None]]:
+        return handle, release
+
+    task = asyncio.ensure_future(anext(fs._leased_file_stream(_open)))
+    assert await asyncio.to_thread(pause.entered.wait, 10)
+
+    task.cancel()
+    # A bound, not a delay: the cancel must not wait for the held read.
+    done, _ = await asyncio.wait({task}, timeout=10)
+    assert task in done
+    assert task.cancelled()
+    assert release.calls == 0
+    assert handle.events == []
+
+    pause.resume.set()
+    # A bound, not a delay: the read's thread can stall on a loaded host.
+    assert await asyncio.to_thread(release.called.wait, 120)
+    assert handle.events == ["read", "close"]
+    assert release.calls == 1
+
+
 class _SweptAtClose:
     """A real file whose close first sweeps and records whether ``snapshot`` survived.
 

@@ -3789,7 +3789,9 @@ def _leased_file_stream(
     but never consumed never pins a snapshot (mirroring :func:`_tar_stream`). The
     lease is released exactly once, once the handle's close has finished: when the
     stream finishes, is closed early, or raises. A caller cancelled during the
-    close leaves the close running, and the lease with it (issue #3618).
+    close leaves the close running, and the lease with it (issue #3618). A caller
+    cancelled during a read returns at once, and the read's completion closes the
+    handle and then releases the lease (issue #3654).
 
     The open IS the existence check (issue #2391, the shape :func:`_file_stream`
     took in #2341): the lease protects the snapshot DIRECTORY, not the files in
@@ -3804,14 +3806,33 @@ def _leased_file_stream(
 
     async def _gen() -> AsyncIterator[bytes]:
         handle, on_close = await open_source()
+        closing = _ClosedThenReleased(handle, on_close)
+        abandoned = False
+        loop = asyncio.get_running_loop()
         try:
             while True:
-                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                reading = loop.run_in_executor(None, handle.read, _CHUNK)
+                try:
+                    chunk = await asyncio.shield(reading)
+                except asyncio.CancelledError:
+                    # The close would wait for the read's thread, which holds the
+                    # reader's lock, so the cancel would wait for the read too. The
+                    # read's completion closes the file instead, and the lease is
+                    # released after that close, as an awaited one releases it.
+                    reading.add_done_callback(
+                        functools.partial(
+                            _release_after_read,
+                            functools.partial(_close_abandoned, closing),
+                        )
+                    )
+                    abandoned = True
+                    raise
                 if not chunk:
                     return
                 yield chunk
         finally:
-            await _close_off_loop(_ClosedThenReleased(handle, on_close))
+            if not abandoned:
+                await _close_off_loop(closing)
 
     return _gen()
 
