@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import gzip
 import io
 import logging
 import tarfile
@@ -3630,9 +3631,9 @@ async def test_upload_extract_single_entry_bomb_aborts_mid_decompression() -> No
     assert store.files == {}  # nothing written before the guard tripped
 
 
-async def test_upload_extract_tar_member_size_header_lie_is_counted() -> None:
-    # A tar member whose header under-reports its size cannot smuggle bytes past
-    # the cap: the count is over actual decompressed bytes, not member.size.
+async def test_upload_extract_tar_single_member_over_cap_is_too_large() -> None:
+    # One tar member alone is over the cap: the cap applies while a member is
+    # read, not only to the total of the members before it.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     use_case = UploadFile(
@@ -3644,8 +3645,8 @@ async def test_upload_extract_tar_member_size_header_lie_is_counted() -> None:
     payload = b"\x00" * (4 * 1024 * 1024)  # 4 MiB, over the 1 MiB cap
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        info = tarfile.TarInfo(name="liar.bin")
-        info.size = len(payload)  # honest header
+        info = tarfile.TarInfo(name="big.bin")
+        info.size = len(payload)
         tf.addfile(info, io.BytesIO(payload))
     archive = buf.getvalue()
 
@@ -3655,6 +3656,41 @@ async def test_upload_extract_tar_member_size_header_lie_is_counted() -> None:
             server_id=ServerId(server_id),
             dir_path=".",
             filename="big.tar.gz",
+            content=archive,
+            extract=True,
+        )
+
+
+async def test_upload_extract_tar_gnu_sparse_bomb_is_too_large() -> None:
+    # An old-GNU sparse member stores one 512-byte data region and declares a
+    # real size of 8 MiB; tarfile fills the hole with zeros on read. So a
+    # sub-100-byte upload expands past the cap. tarfile reads sparse members but
+    # cannot write them, so the sparse fields are patched into a header it built.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    cap = 1024 * 1024
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=cap,
+    )
+
+    info = tarfile.TarInfo(name="sparse.bin")
+    info.type = tarfile.GNUTYPE_SPARSE
+    info.size = 512  # the stored data region
+    header = bytearray(info.tobuf(format=tarfile.GNU_FORMAT))
+    header[386:410] = b"%011o\x00%011o\x00" % (0, 512)  # sparse map: offset, length
+    header[483:495] = b"%011o\x00" % (8 * 1024 * 1024)  # real size
+    checksum = sum(header[:148]) + 8 * ord(" ") + sum(header[156:])
+    header[148:156] = b"%06o\x00 " % checksum
+    archive = gzip.compress(bytes(header) + b"\x00" * 512 + b"\x00" * 1024)
+    assert len(archive) <= cap  # raw upload is under the cap
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="sparse.tar.gz",
             content=archive,
             extract=True,
         )

@@ -191,9 +191,11 @@ class LifecycleTransitionConflictError(ServerError):
 
     A start also raises it from the re-read just before it sends the start (issue
     #3737): the server, read again after the hydrate, is no longer desired-running
-    on this start's Worker, or is gone. The start's own placement count may already
-    be confirmed by then. It is not undone here, because the transition that moved
-    the row owns that count; the start is simply not sent.
+    on this start's Worker, or is gone. It raises it too when a write withdrew the
+    start's intent since the start began, even if the row reads the same again
+    (issue #3739). The start's own placement count may already be confirmed by
+    then. It is not undone here, because the transition that moved the row owns
+    that count; the start is simply not sent.
     """
 
 

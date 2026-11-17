@@ -1603,6 +1603,11 @@ type instance struct {
 	// survived-kill restore must not stomp (issue #392). Nil in production.
 	beforeSurvivedReset func()
 
+	// installLogSink is a test-only hook that wraps the opened forge-install.log
+	// before the install follow writes to it, so a test can stand in for a write
+	// the filesystem fails (issue #3744). Nil in production.
+	installLogSink func(f *os.File) io.Writer
+
 	// metricsMu guards the cached metrics RCON connection reused across player-count
 	// samples (issue #1622). It is a dedicated lock — never i.mu — held only for the
 	// duration of a sample's dial+"list" or the terminal close, so a slow RCON round
@@ -2160,7 +2165,8 @@ func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 // It returns what this attempt's output said about why it might have failed. The
 // log file is appended to across attempts and starts, so the stream — not the
 // file — is what gets scanned (issue #1093); it is scanned whether or not the
-// file could be opened. Cancelling ctx ends the follow.
+// file could be opened, and to its end when a write to the file fails (issue
+// #3744). Cancelling ctx ends the follow.
 func (i *instance) captureInstallOutput(ctx context.Context, installID string) *installOutputScan {
 	scan := &installOutputScan{}
 	rc, err := i.docker.Logs(ctx, installID)
@@ -2177,8 +2183,34 @@ func (i *instance) captureInstallOutput(ctx context.Context, installID string) *
 		return scan
 	}
 	defer func() { _ = f.Close() }()
-	demuxLogsTo(rc, io.MultiWriter(scan, f))
+	var file io.Writer = f
+	if i.installLogSink != nil {
+		file = i.installLogSink(f)
+	}
+	demuxLogsTo(rc, &installLogTee{scan: scan, file: file,
+		logger: i.logger.With("server_id", i.spec.ServerID, "path", execution.ForgeInstallLogRelpath)})
 	return scan
+}
+
+// installLogTee feeds the install output to the scan and to forge-install.log.
+// Unlike io.MultiWriter it never fails: the first failed write to the file (a
+// full or failing filesystem) is logged at WARN and drops the file, and the scan
+// goes on to the end of the stream (issue #3744).
+type installLogTee struct {
+	scan   *installOutputScan
+	file   io.Writer
+	logger *slog.Logger
+}
+
+func (t *installLogTee) Write(p []byte) (int, error) {
+	_, _ = t.scan.Write(p)
+	if t.file != nil {
+		if _, err := t.file.Write(p); err != nil {
+			t.logger.Warn("forge install log write failed; continuing the install without it", "err", err)
+			t.file = nil
+		}
+	}
+	return len(p), nil
 }
 
 // The strings a failed Forge installer leaves in its output for the two failures
