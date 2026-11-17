@@ -49,6 +49,9 @@ from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
+    GNU_SPARSE_FORMATS,
+    INVALID_SPARSE_LAYOUTS,
+    SPARSE_FILES,
     bomb_targz,
     corrupt_region_bytes,
     drain,
@@ -62,6 +65,8 @@ from tests.storage.helpers import (
     tar_bytes,
     tar_stream,
     tar_with_a_bad_sparse_field,
+    tar_with_an_invalid_sparse_layout,
+    tar_with_gnu_tar_sparse_members,
     unaligned_live_region_bytes,
     wait_until_contended,
     watch_lock_contention,
@@ -1526,6 +1531,60 @@ async def test_archive_with_a_non_numeric_sparse_field_is_unreadable(
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == live
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("layout", list(INVALID_SPARSE_LAYOUTS))
+async def test_archive_with_an_invalid_sparse_layout_is_unreadable(
+    harness: StorageHarness, layout: str
+) -> None:
+    """A GNU sparse member whose map cannot describe a file — a negative size,
+    offset or length, an entry past the real size, entries out of order — makes
+    the archive ``ArchiveUnreadableError`` on BOTH backends (issue #3802), for the
+    restore and the health probe, where both used to restore the member. The bad
+    header follows a good member; the live snapshot stays untouched."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    archive = tar_with_an_invalid_sparse_layout(
+        layout, after={"server.properties": b"k=v"}
+    )
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(archive), chunk=8192)
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("sparse_format", GNU_SPARSE_FORMATS)
+async def test_archive_with_gnu_tar_sparse_members_restores_them_expanded(
+    harness: StorageHarness, sparse_format: str
+) -> None:
+    """The maps GNU tar itself writes stay healthy and restore on both backends
+    (issue #3802): a zero-length entry at the real size, and the old header's
+    ``(0, 0)`` padding slots."""
+
+    community, server = new_scope()
+    archive = tar_with_gnu_tar_sparse_members(sparse_format)
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(archive), chunk=8192)
+    )
+
+    assert (await harness.storage.check_backup_health(community, server, key)).healthy
+    await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == SPARSE_FILES
 
 
 # One member per shape the single archive member rule decides (issue #3550): a
