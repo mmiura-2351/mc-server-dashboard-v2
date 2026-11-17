@@ -47,20 +47,20 @@ func useTmpRoot() error {
 
 // selectTmpRoot returns override when it is set, and refuses one that is not a
 // directory. Otherwise it returns tmpfs when that is a writable directory with
-// minFree bytes free, and fallback when it is not.
+// minFree bytes free, and fallback when it is not. The root comes back clean.
 func selectTmpRoot(override, tmpfs, fallback string, minFree uint64) (string, error) {
 	if override != "" {
 		if info, err := os.Stat(override); err != nil || !info.IsDir() {
 			return "", fmt.Errorf("%s=%s is not a directory", tmpRootEnv, override)
 		}
-		return override, nil
+		return filepath.Clean(override), nil
 	}
 	var st unix.Statfs_t
 	if unix.Statfs(tmpfs, &st) == nil && unix.Access(tmpfs, unix.W_OK|unix.X_OK) == nil &&
 		st.Bavail*uint64(st.Bsize) >= minFree {
-		return tmpfs, nil
+		return filepath.Clean(tmpfs), nil
 	}
-	return fallback, nil
+	return filepath.Clean(fallback), nil
 }
 
 // tmpRoots is a distinct fallback, candidate tmpfs and override, all existing.
@@ -131,6 +131,23 @@ func TestAnOverrideThatIsNotADirectoryIsRefused(t *testing.T) {
 
 	if err == nil {
 		t.Fatalf("selectTmpRoot = %q, want an error for an override that is not a directory", got)
+	}
+}
+
+// A root given with a trailing slash, as MCSD_TEST_TMPDIR=/tmp/ or TMPDIR=/tmp/
+// give it, comes back clean: it is exported and compared as a path prefix.
+func TestTheSelectedRootIsClean(t *testing.T) {
+	r := newTmpRoots(t)
+	for name, tc := range map[string]struct{ override, tmpfs, want string }{
+		"override": {override: r.override + "/", tmpfs: r.candidate, want: r.override},
+		"tmpfs":    {tmpfs: r.candidate + "/", want: r.candidate},
+		"fallback": {tmpfs: filepath.Join(r.candidate, "absent"), want: r.fallback},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := selectTmpRoot(tc.override, tc.tmpfs, r.fallback+"/", 1)
+
+			assertTmpRoot(t, got, err, tc.want)
+		})
 	}
 }
 

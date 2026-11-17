@@ -107,7 +107,8 @@ wait on the disk. Without such a `/dev/shm` the default tmp dir is kept.
 disk. The package prints the root in use (`tmp root: ...`), which `go test`
 shows with `-v` or when the package fails.
 
-Each test's temp dir is removed when the test ends, so a run leaves nothing in
+A run peaks at about 120 MiB, while one test writes 30,000 small files. Each
+test's temp dir is removed when the test ends, so a run leaves nothing in
 `/dev/shm`, except when the test binary is killed, for example by the
 `go test` timeout.
 
