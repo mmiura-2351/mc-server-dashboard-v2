@@ -524,8 +524,15 @@ async def test_backup_stream_that_has_begun_survives_a_delete(tmp_path: Path) ->
     community, server = new_scope()
     # Incompressible, and larger than the stream's chunk size, so the archive
     # really does take more than one read — otherwise the first chunk is the whole
-    # body and the delete lands after the last byte, proving nothing.
-    await publish(storage, community, server, {"world/level.dat": os.urandom(2 << 20)})
+    # body and the delete lands after the last byte, proving nothing. Staged with
+    # coarse chunks so the multi-MiB spool write does not dominate (#3751).
+    await publish(
+        storage,
+        community,
+        server,
+        {"world/level.dat": os.urandom(2 << 20)},
+        chunk=1024 * 1024,
+    )
 
     for ranged in (False, True):
         key = await storage.create_backup_from_current(community, server)

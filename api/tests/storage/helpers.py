@@ -33,11 +33,13 @@ async def publish(
     community: CommunityId,
     server: ServerId,
     files: dict[str, bytes],
+    *,
+    chunk: int = 7,
 ) -> None:
     """Stage ``files`` as a snapshot and publish it (the common test arrange step)."""
 
     handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream(files))
+    await storage.write_snapshot(handle, tar_stream(files, chunk=chunk))
     await storage.commit_snapshot(handle)
 
 
