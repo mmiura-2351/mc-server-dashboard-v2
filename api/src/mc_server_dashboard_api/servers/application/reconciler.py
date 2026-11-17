@@ -119,7 +119,14 @@ guard reporting that another mutating command IS in flight for the id (#824) —
 after #2475/#2476 typically its own converger resolving a failed-stop orphan,
 whose cadence is the converger's, not the reconciler's. And it must still be the
 most recent thing known about the row: any newer intent commit or Worker report
-supersedes it and the full grace returns. The other two terms of the boot-time
+supersedes it and the full grace returns. The one exception is an ``EXPIRED``
+refusal (issue #3682). The Worker answers it in time only once the server's lane
+frees, usually as the command ahead of it reports, so a Worker report lands with
+the refusal. ``EXPIRED`` proves the stop was never applied, so a later report that
+the server is still ``running`` does not supersede it; only a newer intent commit
+does, and the short grace still runs from that report. An ``EXPIRED`` answer that
+arrives after the dispatch timed out is dropped like any late result, so that stop
+records nothing and waits the full grace. The other two terms of the boot-time
 floor are untouched, because neither belongs to this path — #822 (duplicate start)
 to ``place_and_start`` / ``redispatch_start``, #847 (stale snapshot) to
 ``clear_stale_assignment``. A stop divergence with NO recorded refusal is the case
@@ -139,9 +146,9 @@ stop's round trip has ended or the process was reported gone (#930), and no fina
 snapshot can still be uploading (#847). Both stop-side floors are therefore met, so
 ``redispatch_stop`` and ``clear_stale_assignment`` both take
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
-The record is dropped before every stop or final-snapshot dispatch, and it is
-superseded like a refusal. It is not persisted, so after an API restart the full
-grace applies again.
+The record is dropped before every stop or final-snapshot dispatch, and any newer
+intent commit or Worker report supersedes it, with no ``EXPIRED`` exception. It is
+not persisted, so after an API restart the full grace applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
@@ -520,11 +527,12 @@ class RunReconcilerTick:
 
     async def _grace_for(self, server: Server, action: str) -> _GraceDecision:
         # A ``redispatch_stop`` whose previous stop dispatch the Worker RETURNED a
-        # refusal for, with nothing learned about the row since (issue #2478). The
-        # only thing the full grace protects on this path is the #930 floor — never
-        # re-send a stop whose first dispatch may still be running — and a returned
-        # result is the end of that round trip, so the floor is satisfied by the
-        # answer instead of by waiting. The other two terms of the boot-time floor
+        # refusal for, with nothing learned about the row since (issue #2478), or an
+        # EXPIRED one on a row still observed ``running`` with no newer intent commit
+        # (issue #3682). The only thing the full grace protects on this path is the #930
+        # floor — never re-send a stop whose first dispatch may still be running — and a
+        # returned result is the end of that round trip, so the floor is satisfied by
+        # the answer instead of by waiting. The other two terms of the boot-time floor
         # belong elsewhere: #822 to the hydrating start paths, #847 to
         # ``clear_stale_assignment``. Neither reaches here.
         if action == "redispatch_stop" and self._previous_stop_refused(server):
@@ -599,14 +607,34 @@ class RunReconcilerTick:
         # as newer: the refusal is recorded strictly after the intent commit it
         # answers, and the two read the same clock, so equal instants are that same
         # stop — never a later event the refusal predates.
+        #
+        # The one exception (issue #3682): an EXPIRED refusal on a row whose CURRENT
+        # observed state is ``running`` is superseded only by a newer intent commit,
+        # whatever reports came in between. The Worker answers EXPIRED in time only
+        # once the server's lane frees, usually as the command ahead of it reports,
+        # so a report lands with the refusal rather than after it. EXPIRED proves
+        # the stop was never applied, so "still running" tells nothing new. Reading
+        # the current state rather than the reports since is safe: both stop
+        # dispatch sites and the clear leg's final snapshot forget the entry first,
+        # so a surviving entry means this process has dispatched no stop and no
+        # final snapshot for the server since the stop that expired. A row observed
+        # in any other state keeps the rule above. The grace itself is still
+        # measured from the latest report (``_since``).
         refused_at = self.stop_refusals.refused_at(server.id)
-        return refused_at is not None and refused_at >= self._since(server)
+        if refused_at is None:
+            return False
+        if (
+            self.stop_refusals.expired(server.id)
+            and server.observed_state is ObservedState.RUNNING
+        ):
+            return refused_at >= server.updated_at
+        return refused_at >= self._since(server)
 
     def _stop_finished_unrecorded(self, server: Server) -> bool:
         # True when a stop finished but its write failed, and that is still the most
         # recent thing known about the row (issue #3441). Superseded, and tied, the
-        # same way as a refusal: the record is made after the intent commit it
-        # follows, on the same clock.
+        # same way as a refusal that is not EXPIRED: the record is made after the
+        # intent commit it follows, on the same clock.
         recorded_at = self.unrecorded_stops.recorded_at(server.id)
         return recorded_at is not None and recorded_at >= self._since(server)
 

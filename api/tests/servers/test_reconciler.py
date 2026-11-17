@@ -1001,6 +1001,178 @@ async def test_timed_out_replay_drops_the_earlier_verdict() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["stop"]
 
 
+# --- an EXPIRED stop keeps the short grace past the lane's report (#3682) ---
+#
+# An in-time EXPIRED is answered when the server's lane frees, which is usually when
+# the command ahead of it reports. So a Worker report lands at about the same time as
+# the refusal and, for a plain refusal, would supersede it. EXPIRED proves the stop
+# was never applied, so a later report that the server still runs says nothing new:
+# only a newer intent commit supersedes it. The short grace is still measured from
+# that report (``_since``).
+
+# The instants the tests below share, commit then refusal then report, a second
+# apart. A tick at ``_NOW`` is past the short grace from the latest of them and well
+# within the full grace from all of them.
+_REPORT = _NOW - dt.timedelta(seconds=_REFUSED_GRACE + 1)
+_REFUSAL = _REPORT - dt.timedelta(seconds=1)
+_COMMIT = _REFUSAL - dt.timedelta(seconds=1)
+
+
+def _expired(server: Server, at: dt.datetime) -> StopDispatchRefusals:
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        server.id, outcome=CommandOutcome(status=CommandStatus.EXPIRED), at=at
+    )
+    return refusals
+
+
+def _reported_after_the_refusal(observed: ObservedState) -> Server:
+    return _server(
+        desired=DesiredState.STOPPED,
+        observed=observed,
+        worker=_WORKER,
+        observed_at=_REPORT,
+        updated_at=_COMMIT,
+    )
+
+
+async def test_expired_stop_replays_on_the_short_grace_past_a_running_report() -> None:
+    uow = FakeUnitOfWork()
+    server = _reported_after_the_refusal(ObservedState.RUNNING)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    assert (_NOW - _COMMIT) < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, stop_refusals=_expired(server, _REFUSAL)).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+
+
+async def test_plain_refusal_is_superseded_by_a_newer_running_report() -> None:
+    # The exemption is EXPIRED-only. Any other refusal says the Worker answered but
+    # not that the stop was never applied, so a later ``running`` report is news
+    # about the row and the full grace returns (#2478). Identical row and timing to
+    # the test above; only the refusal's kind differs.
+    uow = FakeUnitOfWork()
+    server = _reported_after_the_refusal(ObservedState.RUNNING)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=_refused(server, _REFUSAL)).tick()
+    assert cp.dispatched == []
+
+
+async def test_expired_stop_waits_the_short_grace_from_the_newer_report() -> None:
+    uow = FakeUnitOfWork()
+    server = _reported_after_the_refusal(ObservedState.RUNNING)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    # Past the short grace from the refusal and the commit, but not from the report.
+    clock = FakeClock(_REPORT + dt.timedelta(seconds=_REFUSED_GRACE - 1))
+    assert (clock.now() - _REFUSAL) >= dt.timedelta(seconds=_REFUSED_GRACE)
+    await _reconciler(uow, cp, clock, stop_refusals=_expired(server, _REFUSAL)).tick()
+    assert cp.dispatched == []
+
+
+async def test_expired_refusal_older_than_the_last_commit_waits_the_full_grace() -> (
+    None
+):
+    # A newer intent commit still supersedes an EXPIRED refusal: it answered a stop
+    # the row has since moved past.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=_REFUSAL,
+        updated_at=_REPORT,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    refusals = _expired(server, _REFUSAL - dt.timedelta(seconds=1))
+    await _reconciler(uow, cp, clock, stop_refusals=refusals).tick()
+    assert cp.dispatched == []
+
+
+@pytest.mark.parametrize("observed", [ObservedState.STOPPING, ObservedState.UNKNOWN])
+async def test_expired_refusal_is_superseded_by_a_newer_non_running_report(
+    observed: ObservedState,
+) -> None:
+    # The exception covers only a report that the server still runs. A later
+    # stopping/unknown report is news about a stop (another one, or the Worker's own
+    # converger), so it supersedes the refusal and the full grace returns. The
+    # Worker is connected, so the owed action is ``redispatch_stop``.
+    uow = FakeUnitOfWork()
+    server = _reported_after_the_refusal(observed)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=_expired(server, _REFUSAL)).tick()
+    assert cp.dispatched == []
+
+
+async def test_expired_refusal_does_not_shorten_a_stale_assignment_clear() -> None:
+    # A ``stopped`` report owes ``clear_stale_assignment``, which carries the #847
+    # stale-snapshot floor that no stop refusal speaks to: full grace. The refusal
+    # ties the report, so it would count as the latest thing known about the row:
+    # only the action gate in ``_grace_for`` keeps the short grace away.
+    uow = FakeUnitOfWork()
+    server = _reported_after_the_refusal(ObservedState.STOPPED)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=_expired(server, _REPORT)).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+async def test_operator_stop_answered_expired_converges_on_the_short_grace() -> None:
+    # End to end over the SHARED journal: the operator's stop is answered EXPIRED,
+    # the lane's release brings a ``running`` report right after it, and the
+    # reconciler still replays the stop on the short grace from that report instead
+    # of leaving the server running for the full grace.
+    uow = FakeUnitOfWork()
+    long_running = _NOW - dt.timedelta(seconds=3600)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=long_running,
+        updated_at=long_running,
+    )
+    uow.servers.seed(server)
+    refusals = StopDispatchRefusals()
+    clock = FakeClock(_NOW)
+    expiring = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(
+                status=worker_status("StopServer", "command_expired"),
+                message="expired",
+            )
+        }
+    )
+    with pytest.raises(CommandDispatchError):
+        await StopServer(
+            uow=uow, control_plane=expiring, clock=clock, stop_refusals=refusals
+        )(community_id=server.community_id, server_id=server.id)
+
+    report = _NOW + dt.timedelta(seconds=1)
+    assert await uow.servers.record_observed_state(
+        server.id, ObservedState.RUNNING, report
+    )
+
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, clock, stop_refusals=refusals)
+    clock.set(report + dt.timedelta(seconds=_REFUSED_GRACE - 1))
+    await reconciler.tick()
+    assert cp.dispatched == []
+
+    clock.set(report + dt.timedelta(seconds=_REFUSED_GRACE + 1))
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
 # --- short grace for a finished stop whose write failed (issue #3441) -------
 
 

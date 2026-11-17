@@ -1780,8 +1780,11 @@ class StopServer:
         """
 
         # A dispatched snapshot may outlive its caller, so a finished stop recorded
-        # before it no longer means nothing is in flight (issue #3441).
+        # before it no longer means nothing is in flight (issue #3441). A recorded
+        # stop refusal goes for the same reason: it no longer describes the latest
+        # attempt (issue #3682).
         self.unrecorded_stops.forget(server_id)
+        self.stop_refusals.forget(server_id)
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,

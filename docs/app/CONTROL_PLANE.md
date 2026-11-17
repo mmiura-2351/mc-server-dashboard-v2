@@ -653,13 +653,18 @@ Notes:
   Since `EXPIRED` means the command was not applied, it is a refusal. A user
   start that is answered `EXPIRED` is compensated, as any refused start is. An
   expired stop leaves the stop intent standing, and the reconciler replays it
-  after the short refused-stop grace. The commonest case is a start sent during
-  a long restart. Its dispatch times out first, and the Worker answers `EXPIRED`
-  only once the restart has finished. The late answer is dropped, so the start
-  is not run against the restarted server. The reconciler's next redispatch
-  recovers the start. An expired start or hydrate that a reconciler dispatch is
-  still waiting for does not count toward that server's backoff, just as with
-  `BUSY` (CONFIGURATION.md Section 5.6).
+  after the short refused-stop grace when the `EXPIRED` answer arrived in time.
+  That answer comes once the server's lane frees, usually as the command ahead
+  of the stop reports, so a report that the server is still `running` does not
+  cost the stop its short grace (CONFIGURATION.md Section 5.6). An `EXPIRED`
+  answer that arrives after the stop's dispatch timed out is dropped like any
+  late result, so that stop waits the reconciler's full grace. The commonest
+  case is a start sent during a long restart. Its dispatch times out first, and
+  the Worker answers `EXPIRED` only once the restart has finished. The late
+  answer is dropped, so the start is not run against the restarted server. The
+  reconciler's next redispatch recovers the start. An expired start or hydrate
+  that a reconciler dispatch is still waiting for does not count toward that
+  server's backoff, just as with `BUSY` (CONFIGURATION.md Section 5.6).
 - **`TunnelDial` is a quick command and bypasses the slow-lane concurrency cap**
   (like `ServerCommand`) so a player join never queues behind a hydrate. Its
   `CommandResult` reports only that the dial-back + token handshake succeeded and
