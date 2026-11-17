@@ -6,7 +6,10 @@ the :class:`PasswordHasher`, and on success issues an access + refresh pair,
 persisting the refresh row atomically.
 
 Around that it enforces the SECURITY.md Section 2 brute-force algorithm through
-the :class:`LoginAttemptStore`: every attempt is recorded; an account already
+the :class:`LoginAttemptStore`: every attempt is recorded, except one whose
+password the hasher could not check at all (its
+:class:`PasswordVerificationUnavailableError` propagates for a 503, with no
+lockout progress, issue #3749); an account already
 locked, an IP over its sliding-window threshold, an unknown user, a wrong
 password, and a deactivated account are *all* rejected as a single
 :class:`InvalidCredentialsError` after

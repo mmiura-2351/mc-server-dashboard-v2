@@ -95,10 +95,11 @@ class Argon2PasswordHasher(PasswordHasher):
             return self._hasher.verify(password_hash, plaintext)
         except argon2.exceptions.VerifyMismatchError:
             return False
-        except argon2.exceptions.InvalidHashError:
-            # Not an argon2 hash at all: argon2-cffi refuses it before libargon2
-            # sees it. Corrupt stored data is refused like a wrong password (a
-            # uniform 401) and surfaced as a WARNING rather than swallowed.
+        except (argon2.exceptions.InvalidHashError, UnicodeEncodeError):
+            # Not an argon2 hash at all (or not even ASCII): argon2-cffi refuses
+            # it before libargon2 sees it. Corrupt stored data is refused like a
+            # wrong password (a uniform 401) and surfaced as a WARNING rather
+            # than swallowed.
             _LOG.warning("argon2 verify failed on a malformed stored hash")
             return False
         except argon2.exceptions.Argon2Error as exc:
@@ -136,7 +137,14 @@ class BcryptPasswordHasher(PasswordHasher):
             # truncated input, so a >72-byte presentation can never match a
             # legitimate hash; False is the correct, non-oracle answer.
             return False
-        return bcrypt.checkpw(encoded, password_hash.encode("utf-8"))
+        try:
+            return bcrypt.checkpw(encoded, password_hash.encode("utf-8"))
+        except ValueError:
+            # bcrypt cannot parse the stored hash ("Invalid salt"); its other
+            # ValueError, a >72-byte password, is ruled out above. Corrupt
+            # stored data is refused like a wrong password, as under argon2.
+            _LOG.warning("bcrypt verify failed on a malformed stored hash")
+            return False
 
     @staticmethod
     def _encode(plaintext: str) -> bytes:
