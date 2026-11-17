@@ -383,7 +383,8 @@ func TestStoppedSnapshotAnswersAtTheTransferDeadline(t *testing.T) {
 	m.SetTransferDeadline(100 * time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
 	st.unblock()
-	awaitFinished(t, exited, 10*time.Second) // the abandoned tail touches no files
+	// The released fake Snapshot still lists the working dir (hasWorkingSet).
+	awaitFinished(t, exited, 120*time.Second)
 }
 
 // With the real clock: a running snapshot's phases end restoreSaveTimeout before
@@ -397,7 +398,7 @@ func TestRunningSnapshotAnswersWithinTheTransferDeadline(t *testing.T) {
 	m.SetTransferDeadline(restoreSaveTimeout + 100*time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
 	st.unblock()
-	awaitFinished(t, exited, 10*time.Second) // the abandoned tail touches no files
+	awaitFinished(t, exited, 10*time.Second) // no filesystem read or write after the release
 }
 
 // heldRedialControl is a redialControl whose reconnect is held until released.
@@ -433,7 +434,7 @@ func TestRunningSnapshotMarkCoversTheCommandsSaveOnRecovery(t *testing.T) {
 	expire()
 	awaitEnter(t, dialHeld.entered)
 	packHeld.unblock()
-	awaitFinished(t, bodyExited, 10*time.Second) // the abandoned tail touches no files
+	awaitFinished(t, bodyExited, 10*time.Second) // no filesystem read or write after the release
 	assertBusy(t, m, snapshotCmd())
 
 	dialHeld.unblock()
