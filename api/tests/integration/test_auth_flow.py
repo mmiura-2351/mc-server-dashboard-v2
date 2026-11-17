@@ -44,6 +44,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
+from tests.argon2_diagnostics import log_in_seeded
 from tests.identity.fakes import (
     FakeClock,
     RecordingSleeper,
@@ -107,7 +108,7 @@ async def _seed_user(engine: AsyncEngine) -> User:
 
 
 async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
-    await _seed_user(engine)
+    user = await _seed_user(engine)
     factory = create_session_factory(engine)
 
     login = Login(
@@ -123,7 +124,7 @@ async def test_login_then_rotate_then_reuse(engine: AsyncEngine) -> None:
         ),
         refresh_ttl=_REFRESH_TTL,
     )
-    pair = (await login(username="alice", password=_PASSWORD)).pair
+    pair = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
 
     # A controllable clock lets the test step the reuse past the grace window so
     # it exercises the theft path (family revoke) deterministically (issue #369).
@@ -164,7 +165,7 @@ async def test_logout_with_a_rotated_cookie_kills_the_undelivered_successor(
     # response carries must be dead on arrival -- its late Set-Cookie would
     # otherwise sign the browser's next user in as this one -- while the user's
     # other sign-in stays alive.
-    await _seed_user(engine)
+    user = await _seed_user(engine)
     factory = create_session_factory(engine)
     login = Login(
         uow=SqlAlchemyUnitOfWork(factory),
@@ -179,8 +180,8 @@ async def test_logout_with_a_rotated_cookie_kills_the_undelivered_successor(
         ),
         refresh_ttl=_REFRESH_TTL,
     )
-    browser = (await login(username="alice", password=_PASSWORD)).pair
-    other_device = (await login(username="alice", password=_PASSWORD)).pair
+    browser = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
+    other_device = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
     refresh = RefreshSession(
         uow=SqlAlchemyUnitOfWork(factory),
         tokens=_tokens(),
@@ -212,7 +213,7 @@ async def test_both_transports_refresh_revokes_superseded_cookie_token(
     # superseded cookie token. Two logins stand in for the body token and the
     # cookie token; afterwards the cookie token can no longer refresh, while the
     # body token's just-issued successor still rotates (no family-wide revoke).
-    await _seed_user(engine)
+    user = await _seed_user(engine)
     factory = create_session_factory(engine)
 
     login = Login(
@@ -228,8 +229,8 @@ async def test_both_transports_refresh_revokes_superseded_cookie_token(
         ),
         refresh_ttl=_REFRESH_TTL,
     )
-    body = (await login(username="alice", password=_PASSWORD)).pair
-    cookie = (await login(username="alice", password=_PASSWORD)).pair
+    body = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
+    cookie = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
 
     refresh = RefreshSession(
         uow=SqlAlchemyUnitOfWork(factory),
@@ -275,7 +276,7 @@ async def test_restore_yields_access_token_and_leaves_family_intact(
         ),
         refresh_ttl=_REFRESH_TTL,
     )
-    pair = (await login(username="alice", password=_PASSWORD)).pair
+    pair = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
 
     restore = RestoreSession(
         uow=SqlAlchemyUnitOfWork(factory), tokens=_tokens(), clock=SystemClock()
@@ -323,7 +324,7 @@ async def test_restore_with_revoked_token_does_not_revoke_family(
         ),
         refresh_ttl=_REFRESH_TTL,
     )
-    pair = (await login(username="alice", password=_PASSWORD)).pair
+    pair = (await log_in_seeded(login, engine, user, _PASSWORD)).pair
 
     refresh = RefreshSession(
         uow=SqlAlchemyUnitOfWork(factory),
@@ -352,6 +353,38 @@ async def test_restore_with_revoked_token_does_not_revoke_family(
     )
 
 
+async def test_a_locked_out_login_is_not_reported_as_the_argon2_flake(
+    engine: AsyncEngine,
+) -> None:
+    # A lockout raises the same InvalidCredentialsError as the intermittent
+    # argon2 refusal of #3748. Its report must say it is a lockout, so a real
+    # lockout regression is not filed as that flake.
+    user = await _seed_user(engine)
+    factory = create_session_factory(engine)
+    login = Login(
+        uow=SqlAlchemyUnitOfWork(factory),
+        attempts=SqlAlchemyLoginAttemptStore(factory),
+        brute_force=make_brute_force_config(username_threshold=1),
+        hasher=Argon2PasswordHasher(),
+        dummy_password_hash=_DUMMY_HASH,
+        tokens=_tokens(),
+        clock=SystemClock(),
+        failure_delay=FixedLoginFailureDelay(
+            delay=dt.timedelta(), sleeper=RecordingSleeper()
+        ),
+        refresh_ttl=_REFRESH_TTL,
+    )
+    with pytest.raises(InvalidCredentialsError):
+        await login(username="alice", password="wrong")
+
+    with pytest.raises(AssertionError) as failure:
+        await log_in_seeded(login, engine, user, _PASSWORD)
+
+    assert str(failure.value).startswith(
+        "Login refused by a lockout or throttle (retry_after="
+    )
+
+
 async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> None:
     """End-to-end on Postgres: lockout after N failures, then exponential growth.
 
@@ -360,7 +393,7 @@ async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> N
     is the scripted evidence for the FR-AUTH-4 algorithm against the DB.
     """
 
-    await _seed_user(engine)
+    user = await _seed_user(engine)
     factory = create_session_factory(engine)
     clock = FakeClock(dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc))
     store = SqlAlchemyLoginAttemptStore(factory)
@@ -415,5 +448,5 @@ async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> N
 
     # A successful login after the lockout elapses clears the back-off state.
     clock.set(second.locked_until + dt.timedelta(seconds=1))
-    await _login()(username="alice", password=_PASSWORD, ip="198.51.100.5")
+    await log_in_seeded(_login(), engine, user, _PASSWORD, ip="198.51.100.5")
     assert await store.get_lockout("alice") is None

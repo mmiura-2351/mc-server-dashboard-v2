@@ -362,6 +362,10 @@ class ControlPlane(abc.ABC):
 
         ``cpu_millis`` is the per-server CPU allocation in millicores (issue #723);
         0 means unset, so the Worker driver applies its default weight.
+
+        The command is queued for the Worker before the first suspension. The
+        start's last check is synchronous with that enqueue, so a stop sent later
+        is queued behind this start (issue #3739).
         """
 
     @abc.abstractmethod

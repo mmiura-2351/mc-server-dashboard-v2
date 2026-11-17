@@ -711,6 +711,7 @@ def get_set_worker_drain(
                     session_factory, request.app.state.real_time_events
                 ),
                 clock=ServersSystemClock(),
+                stop_intents=request.app.state.stop_intents,
             )
         ),
         drain_store=SqlAlchemyWorkerDrainStore(
@@ -2090,6 +2091,7 @@ def get_start_server(
         file_store=file_store,
         lifecycle_lock=get_lifecycle_lock(request),
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
+        stop_intents=request.app.state.stop_intents,
     )
 
 
@@ -2113,6 +2115,7 @@ def get_stop_server(
         stop_refusals=request.app.state.stop_dispatch_refusals,
         unrecorded_stops=request.app.state.unrecorded_stops,
         stop_convergence=request.app.state.stop_convergence,
+        stop_intents=request.app.state.stop_intents,
     )
 
 
