@@ -27,11 +27,14 @@ The archive format is the stdlib tar stream Storage already produces/consumes
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hmac
 import io
 import logging
+import lzma
 import tarfile
 import uuid
+import zlib
 from collections.abc import AsyncIterator
 from typing import Annotated
 
@@ -128,6 +131,23 @@ _MISSING_REGION_NAME_CAP = 50
 # generous M1 ceiling (a Minecraft working set is well under this); a real-world
 # limit can be made configurable when a deployment needs it.
 _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
+
+# What reading a snapshot body raises when its own bytes do not read back as an
+# archive (issues #3365, #3779): a ``TarError`` (not a tar, a bad header, a member
+# the extraction refuses), or, when the body is compressed and breaks inside a
+# member, the decompressor's own error, which ``tarfile``'s random-access reader
+# (the object backend's) does not translate: ``EOFError`` for a cut stream,
+# ``zlib.error`` for damaged deflate data, ``BadGzipFile`` for a bad gzip trailer and
+# ``LZMAError`` for damaged xz data. A plain ``OSError`` is deliberately not here,
+# though bzip2 reports damaged data as one: the read shares this handler with the
+# staging's disk and object-store I/O, whose faults say nothing about the body.
+_UNREADABLE_SNAPSHOT_ERRORS: tuple[type[Exception], ...] = (
+    tarfile.TarError,
+    EOFError,
+    zlib.error,
+    gzip.BadGzipFile,
+    lzma.LZMAError,
+)
 
 # Per-chunk idle timeout for the snapshot upload stream (issue #1699). If no new
 # chunk arrives within this many seconds, the upload is treated as a silently
@@ -660,10 +680,10 @@ async def publish_snapshot(
                 server_id,
             )
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
-        except tarfile.TarError as exc:
+        except _UNREADABLE_SNAPSHOT_ERRORS as exc:
             # The byte-complete body does not read as a tar, or carries a member
-            # the extraction refuses (issue #3365): the body is at fault, as an
-            # uploaded backup's is (422 ``invalid_archive``), not the API.
+            # the extraction refuses (issues #3365, #3779): the body is at fault, as
+            # an uploaded backup's is (422 ``invalid_archive``), not the API.
             await storage.abort_snapshot(handle)
             _logger.warning(
                 "snapshot publish refused: body is not a readable tar for "
