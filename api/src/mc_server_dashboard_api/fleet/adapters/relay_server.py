@@ -25,7 +25,6 @@ domain stays transport-free (ARCHITECTURE.md Section 2.1).
 from __future__ import annotations
 
 import datetime as dt
-import hmac
 import logging
 
 import grpc
@@ -33,6 +32,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters.control_plane import GrpcControlPlane
+from mc_server_dashboard_api.fleet.adapters.credential import credential_matches
 from mc_server_dashboard_api.fleet.adapters.relay_state import (
     BedrockTunnelTable,
     JoinTokenTable,
@@ -258,7 +258,7 @@ class RelayServicer(RelayServiceServicer):
 
     async def _authenticate(self, context: aio.ServicerContext) -> None:
         presented = self._credential_from_metadata(context)
-        if presented is None or not hmac.compare_digest(presented, self._credential):
+        if presented is None or not credential_matches(presented, self._credential):
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "relay credential rejected"
             )
