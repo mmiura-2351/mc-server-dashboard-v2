@@ -1292,8 +1292,8 @@ class _TimesOut(FakeControlPlane):
     """Times out each dispatch of the given kinds, as the adapter reports it.
 
     The control-plane adapter turns a ``CommandTimedOutError`` into a
-    ``WorkerUnavailableError`` flagged ``upload_may_be_live``: the command was sent
-    on a healthy session and not answered in time, so the Worker may still apply it.
+    ``WorkerUnavailableError`` flagged ``upload_may_be_live``: the command was not
+    answered in time on a healthy session, so the Worker may still apply it.
     """
 
     def __init__(self, *kinds: str, place_to: WorkerId | None = None) -> None:
@@ -1320,8 +1320,8 @@ class _TimesOut(FakeControlPlane):
 async def test_a_timed_out_dispatch_records_an_unknown_outcome(
     action: ScheduleAction, command: str | None
 ) -> None:
-    # The command, stop or restart was sent and not answered in time, so it may
-    # still have run: recorded as unknown, not as a failure.
+    # The command, stop or restart was not answered in time, so it may still have
+    # run: recorded as unknown, not as a failure.
     env = _env(control_plane=_TimesOut(action.value))
     server = _running_server()
     schedule = _schedule(
@@ -1349,11 +1349,12 @@ async def test_a_timed_out_dispatch_records_an_unknown_outcome(
         (ScheduleAction.RESTART, None),
     ],
 )
-async def test_a_disconnected_worker_still_records_a_failure(
+async def test_a_worker_not_connected_at_dispatch_records_a_failure(
     action: ScheduleAction, command: str | None
 ) -> None:
-    # Not a timeout: the adapter leaves ``upload_may_be_live`` unset for a Worker
-    # with no live session, and the failure stays what it was.
+    # Nothing was queued: the adapter leaves both flags unset for a Worker with no
+    # live session, so the command definitely did not run and the failure stays
+    # what it was (issue #3781).
     env = _env(control_plane=FakeControlPlane(unavailable_kinds={action.value}))
     server = _running_server()
     schedule = _schedule(
@@ -1532,6 +1533,224 @@ async def test_an_expired_backup_snapshot_fails_and_retries() -> None:
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.FAILURE,
     ]
+
+
+# --- outcome unknown beyond a timeout (issue #3781) --------------------------
+
+
+class _SessionEnds(FakeControlPlane):
+    """Ends the Worker's session while each dispatch of the given kinds awaits
+    its answer, as the adapter reports it: a ``WorkerUnavailableError`` flagged
+    ``session_ended_in_flight``. The command may have run before the session
+    ended."""
+
+    def __init__(self, *kinds: str, place_to: WorkerId | None = None) -> None:
+        super().__init__(place_to=place_to)
+        self._ending = set(kinds)
+
+    async def _record(
+        self, kind: str, worker_id: WorkerId, server_id: ServerId
+    ) -> CommandOutcome:
+        if kind in self._ending:
+            self.dispatched.append((kind, worker_id, server_id))
+            raise WorkerUnavailableError(
+                str(worker_id.value), session_ended_in_flight=True
+            )
+        return await super()._record(kind, worker_id, server_id)
+
+
+@pytest.mark.parametrize(
+    ("action", "command"),
+    [
+        (ScheduleAction.COMMAND, "say hi"),
+        (ScheduleAction.STOP, None),
+        (ScheduleAction.RESTART, None),
+    ],
+)
+async def test_a_dispatch_whose_session_ended_records_an_unknown_outcome(
+    action: ScheduleAction, command: str | None
+) -> None:
+    # The Worker's session ended while the command awaited its answer: it may
+    # have run before the disconnect, so it is unknown, not a failure.
+    env = _env(control_plane=_SessionEnds(action.value))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=action,
+        command=command,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == ["worker disconnected"]
+
+
+async def test_a_start_the_worker_answered_busy_is_unknown() -> None:
+    # BUSY refuses this start command but leaves the intent and the assignment
+    # standing, and the reconciler starts the server once the Worker settles.
+    env = _env(
+        control_plane=FakeControlPlane(
+            place_to=_WORKER,
+            outcomes={"start": CommandOutcome(status=CommandStatus.BUSY)},
+        )
+    )
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.RUNNING
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == ["worker_busy"]
+
+
+@pytest.mark.parametrize(
+    ("control_plane", "detail"),
+    [
+        (_SessionEnds("start", place_to=_WORKER), "worker disconnected"),
+        (
+            FakeControlPlane(place_to=_WORKER, unavailable_kinds={"start"}),
+            "worker unavailable",
+        ),
+    ],
+    ids=["session-ended", "not-connected"],
+)
+async def test_a_start_whose_worker_dropped_at_the_start_command_is_unknown(
+    control_plane: FakeControlPlane, detail: str
+) -> None:
+    # StartServer keeps the intent and the assignment once it reaches the start
+    # command, whether or not the command left the API, so the reconciler
+    # redispatches it when the Worker is back.
+    env = _env(control_plane=control_plane)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.RUNNING
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == [detail]
+
+
+async def test_a_start_the_worker_refused_failed() -> None:
+    # A refusal StartServer compensates reverts the intent: the start definitely
+    # did not happen and will not.
+    env = _env(
+        control_plane=FakeControlPlane(
+            place_to=_WORKER,
+            outcomes={"start": CommandOutcome(status=CommandStatus.PORT_CONFLICT)},
+        )
+    )
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.STOPPED
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+
+def _titles(env: _Env) -> list[str]:
+    return [title for _server_id, _kind, title, _detail in env.notifier.notifications]
+
+
+async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
+    # The incident escalates from "may have run" to "failed", which the operator
+    # must hear about. Within each level #2269's suppression still holds: a
+    # repeated unknown or failure is silent, and one success recovers.
+    control_plane = _TimesOut("command")
+    env = _env(control_plane=control_plane)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        cadence=Cadence.from_interval(60),
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # unknown
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()  # unknown again
+    control_plane._timing_out.clear()
+    control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.INTERNAL)
+    env.clock.set(_NOW + dt.timedelta(minutes=2))
+    await env.runner.tick()  # failure: an escalation
+    env.clock.set(_NOW + dt.timedelta(minutes=3))
+    await env.runner.tick()  # failure again
+    control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.OK)
+    env.clock.set(_NOW + dt.timedelta(minutes=4))
+    await env.runner.tick()  # success
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.UNKNOWN,
+        ScheduleRunOutcome.UNKNOWN,
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+    assert _titles(env) == [
+        "Scheduled command: outcome unknown",
+        "Scheduled command failed",
+        "Scheduled command recovered",
+    ]
+
+
+async def test_an_unknown_outcome_after_a_failure_stays_silent() -> None:
+    # "May have run" after "failed" is no escalation, and the failure that follows
+    # is the same incident's: one toast until the schedule recovers (#2269).
+    control_plane = _TimesOut()
+    control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.INTERNAL)
+    env = _env(control_plane=control_plane)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        cadence=Cadence.from_interval(60),
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # failure
+    control_plane._timing_out.add("command")
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()  # unknown
+    control_plane._timing_out.clear()
+    env.clock.set(_NOW + dt.timedelta(minutes=2))
+    await env.runner.tick()  # failure
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.UNKNOWN,
+        ScheduleRunOutcome.FAILURE,
+    ]
+    assert _titles(env) == ["Scheduled command failed"]
 
 
 class _UnknownExecute(ExecuteScheduleAction):

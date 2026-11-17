@@ -49,6 +49,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
+    SessionEndedError,
     SnapshotCommand,
     StartServerCommand,
     StopServerCommand,
@@ -788,6 +789,11 @@ class GrpcControlPlane(ControlPlane):
         except TimeoutError as exc:
             self._state.discard_pending(command_id)
             raise CommandTimedOutError(command_id) from exc
+        except WorkerNotConnectedError as exc:
+            # The session ended with this command queued for it (a teardown or a
+            # reconnect retired it): it may have reached the Worker and run, unlike
+            # one dispatched to a Worker with no session (issue #3781).
+            raise SessionEndedError(worker_id.value) from exc
         except asyncio.CancelledError:
             # A cancelled dispatch (the awaiting HTTP-request task died at this
             # await, e.g. a client disconnect during the stop flow's final

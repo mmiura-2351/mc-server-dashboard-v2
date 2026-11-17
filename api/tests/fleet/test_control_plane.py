@@ -49,6 +49,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     OpenBedrockTunnelCommand,
     ReadFileCommand,
     ServerCommandCommand,
+    SessionEndedError,
     SnapshotCommand,
     StartServerCommand,
     TunnelDialCommand,
@@ -573,17 +574,21 @@ async def test_start_defaults_memory_limit_bytes_to_zero(harness: _Harness) -> N
 
 async def test_dispatch_to_unconnected_worker_raises(harness: _Harness) -> None:
     await harness.start()
-    with pytest.raises(WorkerNotConnectedError):
+    with pytest.raises(WorkerNotConnectedError) as excinfo:
         await harness.control_plane.dispatch(
             worker_id=WorkerId("ghost"),
             server_id=str(uuid.uuid4()),
             command=ServerCommandCommand(line="list"),
         )
+    # Nothing was queued, so the command definitely did not run (issue #3781).
+    assert not isinstance(excinfo.value, SessionEndedError)
 
 
 async def test_dispatch_fails_fast_on_worker_disconnect(harness: _Harness) -> None:
-    # A command in flight when the worker's session ends must fail immediately
-    # with WorkerNotConnectedError, not ride out the (long) command timeout.
+    # A command in flight when the worker's session ends must fail immediately,
+    # not ride out the (long) command timeout. It fails as SessionEndedError, a
+    # WorkerNotConnectedError the caller can tell from a Worker that was never
+    # connected: this command may have reached the Worker and run (issue #3781).
     stub = await harness.start()
     call = await _registered_call(harness, stub)
 
@@ -593,7 +598,7 @@ async def test_dispatch_fails_fast_on_worker_disconnect(harness: _Harness) -> No
         await call.done_writing()
 
     dropper = asyncio.ensure_future(disconnect_after_command())
-    with pytest.raises(WorkerNotConnectedError):
+    with pytest.raises(SessionEndedError):
         # The harness command timeout is 5s; failing fast returns well under it.
         await asyncio.wait_for(
             harness.control_plane.dispatch(

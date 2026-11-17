@@ -67,11 +67,25 @@ class WorkerUnavailableError(ServerError):
       so the worker keeps uploading to completion and may publish late. The final
       stop snapshot must therefore HOLD the assignment (issue #847) the same way a
       cancellation does, rather than release the row while the upload is in flight.
+
+    ``session_ended_in_flight`` splits the disconnect case by whether the command
+    could have run (issue #3781). ``True`` means the Worker's session ended while
+    the command awaited its answer: it may have reached the Worker and run, or
+    still sat queued, unsent; the API cannot tell. ``False`` means the Worker was
+    not connected at dispatch, so nothing was queued, or the cause was a timeout.
+    Its upload, if any, died with the session either way, so ``upload_may_be_live``
+    stays ``False`` for it.
     """
 
-    def __init__(self, *args: object, upload_may_be_live: bool = False) -> None:
+    def __init__(
+        self,
+        *args: object,
+        upload_may_be_live: bool = False,
+        session_ended_in_flight: bool = False,
+    ) -> None:
         super().__init__(*args)
         self.upload_may_be_live = upload_may_be_live
+        self.session_ended_in_flight = session_ended_in_flight
 
 
 class CommandStatus(enum.Enum):

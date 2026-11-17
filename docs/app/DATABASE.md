@@ -872,7 +872,7 @@ One row per fired occurrence, written after it completes. History is capped at
 | `id` | uuid PK | |
 | `schedule_id` | uuid FK → `schedule.id` | `ON DELETE CASCADE`; indexed with `started_at` for the newest-first history listing |
 | `started_at` / `finished_at` | timestamptz | |
-| `outcome` | text | `success` / `failure` / `skipped` / `unknown` (CHECK enum); `skipped` records a fired occurrence whose precondition was unmet (e.g. stop while not running); `unknown` records an action the Worker did not answer in time, which may still have run (a command, stop or restart, or a start whose start command was sent). A backup whose snapshot timed out is a `failure`: the archive is written only after the snapshot returns, so no backup exists, and the runner's one retry follows |
+| `outcome` | text | `success` / `failure` / `skipped` / `unknown` (CHECK enum); `skipped` records a fired occurrence whose precondition was unmet (e.g. stop while not running); `unknown` records an action whose result the Worker did not confirm, which may have run or may still take effect: a command, stop or restart the Worker did not answer in time or whose Worker disconnected while it awaited the answer, or a start whose intent still stands after the error (a lost answer or a `BUSY` refusal at the start command), which the reconciler converges. A backup whose snapshot was not answered is a `failure`: the archive is written only after the snapshot returns, so no backup exists, and the runner's one retry follows |
 | `detail` | text nullable | sanitized outcome note (a failure category, a skip reason) — never a raw worker/OS message |
 
 ---

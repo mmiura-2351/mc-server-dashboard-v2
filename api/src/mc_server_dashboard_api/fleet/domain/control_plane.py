@@ -42,6 +42,18 @@ class WorkerNotConnectedError(FleetError):
     """
 
 
+class SessionEndedError(WorkerNotConnectedError):
+    """The Worker's session ended while a dispatched command awaited its answer.
+
+    Raised by :meth:`ControlPlane.dispatch` in place of the plain
+    :class:`WorkerNotConnectedError` once the command was queued for the session
+    (issue #3781). No answer can arrive any more, but the command may have
+    reached the Worker and run before the session ended, unlike one dispatched to
+    a Worker that was not connected, which was never queued. It may also have
+    been still queued, unsent, when the session ended: the API cannot tell.
+    """
+
+
 class CommandTimedOutError(FleetError):
     """A dispatched command was not answered within the deadline.
 
@@ -362,9 +374,10 @@ class ControlPlane(abc.ABC):
         """Send ``command`` for ``server_id`` to ``worker_id`` and await the result.
 
         Raises :class:`WorkerNotConnectedError` if the Worker has no live
-        session, and :class:`CommandTimedOutError` if no correlated result
-        arrives before the deadline. Otherwise returns the :class:`CommandResult`
-        (success or a typed failure).
+        session, its :class:`SessionEndedError` subclass if the session ends
+        while the command awaits its result, and :class:`CommandTimedOutError` if
+        no correlated result arrives before the deadline. Otherwise returns the
+        :class:`CommandResult` (success or a typed failure).
 
         ``timeout_override`` replaces the adapter's default command deadline for
         this one dispatch (issue #822): the hydrate phase of a start gets a longer

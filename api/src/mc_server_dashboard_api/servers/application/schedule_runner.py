@@ -21,16 +21,29 @@ Outcome taxonomy (owner-confirmed):
   Worker was unavailable. Recorded and audited every occurrence; notified only on
   the failing *edge* (issue #2269): a schedule stuck failing every interval emits
   one operator toast for the whole incident, keyed by ``schedule_id`` in the
-  in-memory ``_notifying`` set (no time window), and one recovery toast when the
+  in-memory ``_notifying`` map (no time window), and one recovery toast when the
   next success clears it. Skips leave that state untouched.
-* **unknown** — the action was sent and the Worker did not answer in time, so it
-  may still have run (issue #3660): a command, stop or restart whose own command
-  timed out, or a start whose start command did (its intent stands, and the
-  reconciler converges it). Audited and notified like a failure, under its own
-  title, and never retried. A timeout that leaves the action definitely undone
-  stays a failure: a start whose hydrate timed out (the start was never sent, and
-  its intent is reverted), and a backup whose snapshot timed out (the archive is
-  written only after the snapshot returns, so no backup exists).
+* **unknown** — the action may still take effect, but the run cannot confirm it
+  (issues #3660, #3781). A command, stop or restart the Worker left unanswered:
+  it did not answer in time, or its session ended while the command awaited the
+  answer. Neither proves the command left the API, since one dropped unsent from
+  the outbound queue looks the same, so both err toward unknown. A start whose
+  intent still stands after the error: a lost answer or a ``BUSY`` refusal at the
+  start command, after which the reconciler starts the server. Audited and
+  notified like a failure, under its own title, and never retried. It shares the
+  failing edge, but a failure after an unknown notifies once more as an
+  escalation; an unknown after a failure stays silent.
+
+  An error that leaves the action definitely undone stays a failure: a Worker
+  not connected at dispatch, a refusal the Worker answered, a start whose intent
+  was reverted (its hydrate failed or timed out, or it was refused and
+  compensated), and a backup whose snapshot failed or went unanswered (the
+  archive is written only after the snapshot returns, so no backup exists).
+  ``COMMAND_DROPPED`` stays a failure too, though whether the command ran is
+  uncertain (CONTROL_PLANE.md Section 7): the Worker answered, its usual cause is
+  a packet the game server dropped without running it, and the run history shows
+  the ``command_dropped`` detail for a failure where it would hide it for an
+  unknown.
 * **success** — otherwise. Clears any ``_notifying`` state and fires exactly one
   recovery notification when it ends a run of failures.
 
@@ -266,9 +279,14 @@ def _failure_detail(exc: ServerError) -> str:
     if isinstance(exc, CommandDispatchError):
         return exc.reason or "dispatch failed"
     if isinstance(exc, WorkerUnavailableError):
-        # ``upload_may_be_live`` is set only for a command that was sent and not
-        # answered in time; it is False for a Worker that is not connected.
-        return "worker timed out" if exc.upload_may_be_live else "worker unavailable"
+        # ``upload_may_be_live`` is set only for a command not answered in time,
+        # and ``session_ended_in_flight`` for one whose Worker disconnected while it
+        # awaited its answer; neither is set for a Worker that is not connected.
+        if exc.upload_may_be_live:
+            return "worker timed out"
+        if exc.session_ended_in_flight:
+            return "worker disconnected"
+        return "worker unavailable"
     if isinstance(exc, NoEligibleWorkerError):
         return "no eligible worker"
     if isinstance(exc, BackupCorruptError):
@@ -413,28 +431,38 @@ class ExecuteScheduleAction:
     async def _may_have_run(
         self, server_id: ServerId, action: ScheduleAction, exc: ServerError
     ) -> bool:
-        """Whether a failed action may still take effect (issue #3660).
+        """Whether a failed action may still take effect (issues #3660, #3781).
 
-        Only a command the Worker did not answer in time can: the adapter flags
-        that timeout ``upload_may_be_live``, and a refusal or a Worker that is not
-        connected never ran it. A backup's timeout is its snapshot, which
-        :class:`CreateBackup` awaits before it writes the archive, so no backup
-        exists. A start's timeout is either its hydrate, after which
-        :class:`StartServer` reverts the intent and never sends the start, or the
-        start command itself, after which the intent and assignment stand for the
-        reconciler to converge. The row tells the two apart: the start can still
-        happen exactly while its intent stands.
+        A backup never: its dispatch is the snapshot, which :class:`CreateBackup`
+        awaits before it writes the archive, so whatever the snapshot did, no
+        backup exists.
+
+        A start can exactly while its intent stands, whatever the error. Before
+        the start command, or on a refusal :class:`StartServer` compensates, the
+        intent is reverted and the start will not happen. Once the start command
+        is reached, a lost answer (a timeout or a disconnect) or a ``BUSY``
+        refusal leaves the intent and assignment standing, and the reconciler
+        starts the server. The row tells these apart.
+
+        A command, stop or restart can only when the Worker left its command
+        unanswered: it did not answer in time (``upload_may_be_live``) or its
+        session ended while the command awaited the answer
+        (``session_ended_in_flight``). Either way the command may have reached
+        the Worker and run, or it may never have left the API: the flags cover a
+        command dropped unsent from the outbound queue too, and the API cannot
+        tell. A refusal, or a Worker that was not connected at dispatch, never
+        ran it.
         """
 
-        if not isinstance(exc, WorkerUnavailableError) or not exc.upload_may_be_live:
-            return False
         if action is ScheduleAction.BACKUP:
             return False
         if action is ScheduleAction.START:
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
             return server is not None and server.desired_state is DesiredState.RUNNING
-        return True
+        return isinstance(exc, WorkerUnavailableError) and (
+            exc.upload_may_be_live or exc.session_ended_in_flight
+        )
 
     async def _dispatch(
         self, server: Server, action: ScheduleAction, command: str | None
@@ -493,11 +521,13 @@ class RunScheduleTick:
     # Per-schedule pending backup-retry instant; in-memory (lost on restart).
     _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
     # Schedules currently in a failing state, so a sustained failure notifies once
-    # rather than every occurrence (issue #2269). A FAILURE notifies only when the
-    # id is absent, then records it; the next SUCCESS clears it and fires one
-    # recovery notification. In-memory — same accepted "lost on api restart" trade
-    # as _backup_retry / _warned above (a restart may re-notify one failure).
-    _notifying: set[ScheduleId] = field(default_factory=set)
+    # rather than every occurrence (issue #2269). Each maps to the outcome already
+    # notified for the incident: a FAILURE or UNKNOWN notifies only when the id is
+    # absent, or as the escalation of an UNKNOWN to a FAILURE (issue #3781), then
+    # records it; the next SUCCESS clears it and fires one recovery notification.
+    # In-memory — same accepted "lost on api restart" trade as _backup_retry /
+    # _warned above (a restart may re-notify one failure).
+    _notifying: dict[ScheduleId, ScheduleRunOutcome] = field(default_factory=dict)
     # Warnings already sent this process, keyed by (schedule, occurrence, offset):
     # each step fires once (issue #1839). In-memory — a restart may re-send a step
     # still within its grace window at most once. Pruned as occurrences pass.
@@ -673,7 +703,7 @@ class RunScheduleTick:
     def _forget(self, schedule_id: ScheduleId) -> None:
         """Drop the in-memory state of a schedule that no longer exists."""
 
-        self._notifying.discard(schedule_id)
+        self._notifying.pop(schedule_id, None)
         self._backup_retry.pop(schedule_id, None)
 
     async def _prune_after_backup(
@@ -846,8 +876,7 @@ class RunScheduleTick:
             await self._audit(schedule, result.community_id, Outcome.SUCCESS)
             # A success that ends a run of failures clears the notifying state and
             # fires exactly one recovery notification (issue #2269).
-            if schedule.id in self._notifying:
-                self._notifying.discard(schedule.id)
+            if self._notifying.pop(schedule.id, None) is not None:
                 self.notifier.notify(
                     server_id=schedule.server_id,
                     kind=_NOTIFY_KIND_RECOVERED,
@@ -860,9 +889,15 @@ class RunScheduleTick:
             # failing edge; sustained failures record run rows every occurrence
             # (above) but emit a single toast until the schedule recovers. An
             # unknown outcome is on the same edge, but its title must not say the
-            # action failed: it may have run (issue #3660).
-            if schedule.id not in self._notifying:
-                self._notifying.add(schedule.id)
+            # action failed: it may have run (issue #3660). A failure after an
+            # unknown is an escalation and notifies once more; an unknown after a
+            # failure is not, and stays silent (issue #3781).
+            notified = self._notifying.get(schedule.id)
+            if notified is None or (
+                notified is ScheduleRunOutcome.UNKNOWN
+                and result.outcome is ScheduleRunOutcome.FAILURE
+            ):
+                self._notifying[schedule.id] = result.outcome
                 title = (
                     f"Scheduled {schedule.action.value}: outcome unknown"
                     if result.outcome is ScheduleRunOutcome.UNKNOWN

@@ -757,7 +757,7 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.runs.outcome.skipped": "スキップ",
   "schedules.runs.outcome.unknown": "不明",
   "schedules.runs.unknownDetail":
-    "ホストが時間内に応答しませんでした。操作は実行された可能性があります。",
+    "ホストから結果を確認できませんでした。操作は実行されたか、これから反映される可能性があります。",
 
   // Files tab (WEBUI_SPEC.md 6.6).
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
