@@ -9,6 +9,10 @@ every other site, syntactically: each construction must pass ``stop_intents=``
 from ``app.state``. ``tests/servers/test_stop_intents.py`` checks the request-
 scoped sites at runtime.
 
+The same holds for every ``StartServer``'s ``start_intent_lock=`` (issue #3741):
+a start on a private lock can commit its intent between a failed start's check
+and its revert, and the revert then undoes it.
+
 The scan matches bare-name calls only (``StartServer(...)``). A qualified call
 (``lifecycle.StartServer(...)``), an ``import ... as`` alias, a subclass or a
 ``functools.partial`` escapes it, and nothing checks the lifespan sites at
@@ -42,12 +46,12 @@ def _constructions(path: Path) -> list[tuple[str, ast.Call]]:
     ]
 
 
-def _passes_the_app_counter(call: ast.Call) -> bool:
-    # ``app.state.stop_intents`` or ``request.app.state.stop_intents``.
-    value = next((kw.value for kw in call.keywords if kw.arg == "stop_intents"), None)
+def _passes_app_state(call: ast.Call, name: str) -> bool:
+    # ``name=app.state.<name>`` or ``name=request.app.state.<name>``.
+    value = next((kw.value for kw in call.keywords if kw.arg == name), None)
     return (
         isinstance(value, ast.Attribute)
-        and value.attr == "stop_intents"
+        and value.attr == name
         and isinstance(value.value, ast.Attribute)
         and value.value.attr == "state"
     )
@@ -59,12 +63,26 @@ def test_every_lifecycle_use_case_gets_the_app_stop_intent_count() -> None:
         for path in sorted(_SRC.rglob("*.py"))
         if path.relative_to(_SRC) not in _PRIVATE_BY_DESIGN
         for name, call in _constructions(path)
-        if not _passes_the_app_counter(call)
+        if not _passes_app_state(call, "stop_intents")
     ]
     assert not offenders, (
         "Pass the app's one counter, stop_intents=app.state.stop_intents (or "
         "request.app.state.stop_intents), so these starts and stops see each "
         "other:\n" + "\n".join(offenders)
+    )
+
+
+def test_every_start_gets_the_app_start_intent_lock() -> None:
+    offenders = [
+        f"{path.relative_to(_SRC)}:{call.lineno}: {name}(...)"
+        for path in sorted(_SRC.rglob("*.py"))
+        for name, call in _constructions(path)
+        if name == "StartServer" and not _passes_app_state(call, "start_intent_lock")
+    ]
+    assert not offenders, (
+        "Pass the app's one lock, start_intent_lock=app.state.start_intent_lock "
+        "(or request.app.state.start_intent_lock), so a failed start's revert "
+        "cannot undo another start's intent:\n" + "\n".join(offenders)
     )
 
 

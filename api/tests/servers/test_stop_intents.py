@@ -25,6 +25,7 @@ import contextlib
 import datetime as dt
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -58,6 +59,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
     StopServersAssignedToWorker,
+)
+from mc_server_dashboard_api.servers.application.start_intent_lock import (
+    StartIntentLock,
 )
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
@@ -219,49 +223,83 @@ class _CommitLandsLater(FakeUnitOfWork):
 
 
 class _CommitLandsThenRaises(FakeUnitOfWork):
-    """A unit of work whose commit lands, then raises ``error`` (an ambiguous commit).
+    """A unit of work whose ``at``-th commit lands, then raises ``error``.
 
-    A lost response raises a database error; a client disconnect cancels the
-    request task at the same await.
+    That is an ambiguous commit: a lost response raises a database error, and a
+    client disconnect cancels the request task at the same await.
     """
 
-    def __init__(self, *, servers: FakeServerRepository, error: BaseException) -> None:
+    def __init__(
+        self, *, servers: FakeServerRepository, error: BaseException, at: int = 1
+    ) -> None:
         super().__init__(servers=servers)
         self._error = error
+        self._at = at
 
     async def commit(self) -> None:
         await super().commit()
-        raise self._error
+        if self.commits == self._at:
+            raise self._error
+
+
+class _CommitLandsThenWaits(FakeUnitOfWork):
+    """A unit of work whose ``at``-th commit lands, then returns only on ``returns``."""
+
+    def __init__(self, *, servers: FakeServerRepository, at: int) -> None:
+        super().__init__(servers=servers)
+        self._at = at
+        self.landed = asyncio.Event()
+        self.returns = asyncio.Event()
+
+    async def commit(self) -> None:
+        await super().commit()
+        if self.commits == self._at:
+            self.landed.set()
+            await self.returns.wait()
 
 
 class _ExclusiveLock(LifecycleLock):
     """A lifecycle lock that excludes, as the advisory lock does, for one server.
 
-    ``on_next_hold`` runs once, at the entry of the next ``hold``, before the lock
-    is taken. ``waited`` is set once a ``hold`` finds the lock taken. While
-    ``busy`` is set, ``hold`` gives up at once, as the advisory lock does once its
-    bounded wait runs out. The release awaits, as the advisory unlock does, so a
-    waiter can take the lock and run before the holder goes on.
+    While ``busy`` is set, ``hold`` gives up at once, as the advisory lock does
+    once another holder has kept it past its bounded wait: a backup upload or
+    delete, a prune, the integrity sweep.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
+        self.busy = False
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        if self.busy:
+            raise ServerBusyError(str(server_id.value))
+        async with self._lock:
+            yield
+
+
+class _IntentLock(StartIntentLock):
+    """The real start-intent lock, with two places to watch it.
+
+    ``on_next_hold`` runs once, at the entry of the next ``hold``, before the lock
+    is taken. ``waited`` is set once a ``hold`` finds the lock taken.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
         self.on_next_hold: Hook | None = None
         self.waited = asyncio.Event()
-        self.busy = False
 
     @contextlib.asynccontextmanager
     async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
         hook, self.on_next_hold = self.on_next_hold, None
         if hook is not None:
             await hook()
-        if self.busy:
-            raise ServerBusyError(str(server_id.value))
-        if self._lock.locked():
+        lock = self._locks.get(server_id)
+        if lock is not None and lock.locked():
             self.waited.set()
-        async with self._lock:
+        async with super().hold(server_id):
             yield
-        await asyncio.sleep(0)
 
 
 class _Worker(FakeControlPlane):
@@ -357,9 +395,11 @@ class _World:
         self.repo.seed(self.row(self.server_id, desired=desired, assigned=assigned))
         self.cp = _Worker(place_to=self.worker)
         self.intents = StopIntentCounter()
-        # The starts' lifecycle lock. No exclusion by default: some tests run a
-        # whole start inside another start's commit, which the real lock forbids.
+        # The starts' lifecycle lock and start-intent lock. No exclusion by
+        # default: some tests run a whole start inside another start's commit,
+        # which the real locks forbid. ``None`` gives each use case its own.
         self.lock: LifecycleLock = NullLifecycleLock()
+        self.intent_lock: StartIntentLock | None = None
 
     def row(
         self, server_id: ServerId, *, desired: DesiredState, assigned: bool
@@ -399,6 +439,7 @@ class _World:
             file_store=FakeFileStore(seed_eula=True),
             lifecycle_lock=self.lock,
             stop_intents=self.intents,
+            start_intent_lock=self.intent_lock or StartIntentLock(),
         )
 
     def stop_server(self) -> StopServer:
@@ -841,17 +882,48 @@ def _seeded(kind: str) -> _World:
     """A world for a start (``_compensate``) or a placement (``_unassign``).
 
     A user start sets a stopped row running; the reconciler's placement assigns a
-    desired-running row nobody holds. The starts here hold an excluding lock.
+    desired-running row nobody holds. The starts here share excluding locks.
     """
 
     world = _World(
         desired=DesiredState.STOPPED if kind == "start" else DesiredState.RUNNING
     )
     world.lock = _ExclusiveLock()
+    world.intent_lock = _IntentLock()
     return world
 
 
-async def _either(task: asyncio.Task[Server], event: asyncio.Event) -> None:
+def _intent_lock(world: _World) -> _IntentLock:
+    assert isinstance(world.intent_lock, _IntentLock)
+    return world.intent_lock
+
+
+class _Holder:
+    """Holds a world's start-intent lock, as another start's commit would."""
+
+    def __init__(self, world: _World) -> None:
+        self._lock = _intent_lock(world)
+        self._server_id = world.server_id
+        self._held = asyncio.Event()
+        self._release = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+
+    async def take(self) -> None:
+        self._task = asyncio.create_task(self._hold())
+        await self._held.wait()
+
+    async def _hold(self) -> None:
+        async with self._lock.hold(self._server_id):
+            self._held.set()
+            await self._release.wait()
+
+    async def release(self) -> None:
+        self._release.set()
+        assert self._task is not None
+        await self._task
+
+
+async def _either(task: asyncio.Task[Any], event: asyncio.Event) -> None:
     """Wait for ``event``, or for ``task`` to end first if it never gets there."""
 
     waiter = asyncio.create_task(event.wait())
@@ -859,14 +931,17 @@ async def _either(task: asyncio.Task[Server], event: asyncio.Event) -> None:
     waiter.cancel()
 
 
-async def _fails(world: _World, kind: str) -> None:
+async def _fails(world: _World, kind: str, uow: FakeUnitOfWork | None = None) -> None:
     """Run the start or the placement, whose hydrate fails, and expect that failure."""
 
+    use_case = world.start_server(uow)
     with pytest.raises(CommandDispatchError):
         if kind == "start":
-            await world.start()
+            await use_case(community_id=world.community, server_id=world.server_id)
         else:
-            await world.place()
+            await use_case.place_and_start(
+                community_id=world.community, server_id=world.server_id
+            )
 
 
 @_REVERTS
@@ -911,8 +986,8 @@ async def test_a_failed_revert_leaves_a_newer_start_on_its_worker_alone(
     # puts it back on the same Worker and sends its start. F's hydrate then fails.
     # The row reads desired=running on F's Worker, as F left it; only the count
     # shows the intent is not F's. Undoing it would leave the instance just
-    # started under a stopped or unassigned row, and take the Worker's load down
-    # a second time.
+    # started under a stopped or unassigned row, and F's decrement would drop the
+    # newer start's entry from the Worker's placement load.
     world = _seeded(kind)
 
     async def stop_and_restart_then_fail() -> CommandOutcome:
@@ -936,8 +1011,8 @@ async def test_a_failed_revert_leaves_a_newer_start_on_another_worker_alone(
     kind: str,
 ) -> None:
     # The same, with the newer start placed on another Worker. Undoing it would
-    # also take the load down on F's Worker, which the stop already did, and leave
-    # it up on the other one.
+    # leave the newer start's entry in the other Worker's placement load, for a
+    # row that no longer runs there.
     world = _seeded(kind)
     elsewhere = WorkerId(uuid.uuid4())
     other = _Worker(place_to=elsewhere)
@@ -1011,11 +1086,12 @@ async def test_a_failed_revert_leaves_a_row_re_placed_out_of_its_sight_alone(
 
 @_REVERTS
 async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
-    # The revert holds the lifecycle lock across its check and its write, as every
-    # start does across its commit. Here F's revert has checked, and is about to
-    # write, when a stop releases the row and a newer start begins. The newer start
-    # waits for the lock, and F's write then finds the row stopped and does
-    # nothing. Had the newer start committed first, F's write would undo it.
+    # The revert holds the start-intent lock across its check and its write, as
+    # every start does from its count read to its commit. Here F's revert has
+    # checked, and is about to write, when a stop releases the row and a newer
+    # start begins. The newer start waits for the lock, and F's write then finds
+    # the row stopped and does nothing. Had the newer start committed first, F's
+    # write would undo it.
     world = _seeded(kind)
     write = asyncio.Event()
 
@@ -1028,8 +1104,7 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
     await world.repo.flip_paused.wait()
     await world.stop()
     newer = asyncio.create_task(world.start())
-    assert isinstance(world.lock, _ExclusiveLock)
-    await _either(newer, world.lock.waited)
+    await _either(newer, _intent_lock(world).waited)
     write.set()
     await f
     await newer
@@ -1044,33 +1119,31 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
 async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
     kind: str,
 ) -> None:
-    # A start that asks for the lock while F's revert holds it takes the lock once
-    # the revert is done, and reads the count then. The revert must have bumped by
-    # that point. Otherwise the start reads the count from before the bump, and
-    # its own check before it sends sees the count move and holds it back, though
-    # the intent is its own.
+    # F's revert has written, and its commit has landed but not returned, when a
+    # newer start finds the row free and asks for the start-intent lock. It gets
+    # the lock once the revert is done, and must read the count only then, after
+    # the revert's bump. Read before, the count would move under it, and its own
+    # check before it sends would hold it back, though the intent is its own.
     world = _seeded(kind)
-    lock = world.lock
-    assert isinstance(lock, _ExclusiveLock)
-    write = asyncio.Event()
+    lock = _intent_lock(world)
+    revert = _CommitLandsThenWaits(servers=world.repo, at=2)
     newer_hydrating = asyncio.Event()
     newer_hydrates = asyncio.Event()
 
-    async def fail_and_hold_the_revert_write() -> CommandOutcome:
-        world.repo.pause_next_flip = write
+    async def fail() -> CommandOutcome:
         return _HYDRATE_FAILED
 
     async def newer_hydrate_waits() -> None:
         newer_hydrating.set()
         await newer_hydrates.wait()
 
-    world.cp.hydrate_hooks.append(fail_and_hold_the_revert_write)
+    world.cp.hydrate_hooks.append(fail)
     world.cp.hydrate_hooks.append(newer_hydrate_waits)
-    f = asyncio.create_task(_fails(world, kind))
-    await world.repo.flip_paused.wait()
+    f = asyncio.create_task(_fails(world, kind, revert))
+    await revert.landed.wait()
     newer = asyncio.create_task(world.start() if kind == "start" else world.place())
     await _either(newer, lock.waited)
-    write.set()
+    revert.returns.set()
     await _either(newer, newer_hydrating)
     newer_hydrates.set()
     await f
@@ -1085,11 +1158,11 @@ async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
 
 @_REVERTS
 async def test_a_revert_checks_its_intent_once_it_holds_the_lock(kind: str) -> None:
-    # The stop and the newer start land while F's revert waits for the lock. A
-    # check made before F held the lock would still have found F's intent.
+    # The stop and the newer start land while F's revert waits for the
+    # start-intent lock. A check made before F held the lock would still have
+    # found F's intent.
     world = _seeded(kind)
-    lock = world.lock
-    assert isinstance(lock, _ExclusiveLock)
+    lock = _intent_lock(world)
 
     async def stop_and_restart() -> None:
         await world.stop()
@@ -1113,26 +1186,98 @@ async def test_a_revert_checks_its_intent_once_it_holds_the_lock(kind: str) -> N
 async def test_a_revert_of_a_withdrawn_intent_does_not_wait_for_the_lock(
     kind: str,
 ) -> None:
-    # A newer start can hold the lock for minutes (it fetches the server JAR under
-    # it), and the advisory lock gives up after a few seconds. F's revert, whose
-    # intent the count already shows withdrawn, has nothing to undo: it must not
-    # wait for the lock, and so must not fail with the busy error instead of F's.
+    # F's revert, whose intent the count already shows withdrawn, has nothing to
+    # undo, so it does not wait for the start-intent lock to find that out. Here
+    # the lock is held elsewhere when F fails.
+    world = _seeded(kind)
+    lock = _intent_lock(world)
+    holder = _Holder(world)
+
+    async def stop_and_restart_then_fail_while_held() -> CommandOutcome:
+        await world.stop()
+        await world.start()
+        await holder.take()
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(stop_and_restart_then_fail_while_held)
+    f = asyncio.create_task(_fails(world, kind))
+    await _either(f, lock.waited)
+    await holder.release()
+    await f
+
+    assert not lock.waited.is_set()
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.decremented == [world.worker]
+
+
+@pytest.mark.parametrize(
+    ("kind", "reverted"),
+    [("start", DesiredState.STOPPED), ("placement", DesiredState.RUNNING)],
+    ids=["start", "placement"],
+)
+async def test_a_revert_does_not_wait_behind_an_unrelated_lifecycle_lock_holder(
+    kind: str, reverted: DesiredState
+) -> None:
+    # Operations that can never create a start intent hold the lifecycle lock
+    # across Storage I/O (a backup upload or delete, a prune, the integrity
+    # sweep), and that lock gives up busy after a few seconds. F's revert of its
+    # own intent does not take it, so the revert still happens, and the caller
+    # sees F's own failure.
     world = _seeded(kind)
     lock = world.lock
     assert isinstance(lock, _ExclusiveLock)
 
-    async def stop_and_restart_then_fail() -> CommandOutcome:
-        await world.stop()
-        await world.start()
+    async def fail_while_the_lifecycle_lock_is_busy() -> CommandOutcome:
         lock.busy = True
         return _HYDRATE_FAILED
 
-    world.cp.hydrate_hooks.append(stop_and_restart_then_fail)
+    world.cp.hydrate_hooks.append(fail_while_the_lifecycle_lock_is_busy)
 
     await _fails(world, kind)
 
-    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.stored() == (reverted, None)
     assert world.cp.decremented == [world.worker]
+    assert world.intents.current(world.server_id) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "reverted"),
+    [("start", DesiredState.STOPPED), ("placement", DesiredState.RUNNING)],
+    ids=["start", "placement"],
+)
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionError("commit landed, response lost"), asyncio.CancelledError()],
+    ids=["lost-response", "cancelled"],
+)
+async def test_a_revert_whose_commit_landed_but_raised_still_bumps(
+    kind: str, reverted: DesiredState, error: BaseException
+) -> None:
+    # As with a stop or a drain: the revert's commit may have landed though its
+    # await raised, so it bumps, and a re-send of the reverted intent that has
+    # not been queued yet is held back. It does not decrement: the state is not
+    # known.
+    world = _seeded(kind)
+    use_case = world.start_server(
+        _CommitLandsThenRaises(servers=world.repo, error=error, at=2)
+    )
+
+    async def fail() -> CommandOutcome:
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail)
+
+    with pytest.raises(type(error)):
+        if kind == "start":
+            await use_case(community_id=world.community, server_id=world.server_id)
+        else:
+            await use_case.place_and_start(
+                community_id=world.community, server_id=world.server_id
+            )
+
+    assert world.stored() == (reverted, None)
+    assert world.intents.current(world.server_id) == 1
+    assert world.cp.decremented == []
 
 
 @_REVERTS
@@ -1204,22 +1349,27 @@ async def test_a_start_whose_re_read_fails_leaves_a_newer_start_alone() -> None:
 
 async def test_a_start_that_lost_its_intent_answers_the_conflict_untouched() -> None:
     # A start whose re-read finds the intent gone answers the conflict and leaves
-    # the row to whatever moved it: it does not wait for the lock to try a revert.
-    # Here the row moved where the count cannot see, and the lock is busy.
+    # the row to whatever moved it: it takes no lock to try a revert. Here the row
+    # moved where the count cannot see, and the start-intent lock is held
+    # elsewhere, so a revert attempt would wait for it.
     world = _seeded("start")
     elsewhere = WorkerId(uuid.uuid4())
-    lock = world.lock
-    assert isinstance(lock, _ExclusiveLock)
+    lock = _intent_lock(world)
+    holder = _Holder(world)
 
-    async def re_placed_unseen() -> None:
+    async def re_placed_unseen_while_held() -> None:
         world.repo.by_id[world.server_id].assigned_worker_id = elsewhere
-        lock.busy = True
+        await holder.take()
 
-    world.after_hydrate(re_placed_unseen)
+    world.after_hydrate(re_placed_unseen_while_held)
+    start = asyncio.create_task(world.start())
+    await _either(start, lock.waited)
+    await holder.release()
 
     with pytest.raises(LifecycleTransitionConflictError):
-        await world.start()
+        await start
 
+    assert not lock.waited.is_set()
     assert world.kinds() == ["hydrate"]
     assert world.stored() == (DesiredState.RUNNING, elsewhere)
     assert world.cp.decremented == []
@@ -1269,6 +1419,7 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
     # instance; a construction site left on its private default fails silently.
     app = FastAPI()
     app.state.stop_intents = StopIntentCounter()
+    app.state.start_intent_lock = StartIntentLock()
     app.state.engine = create_async_engine("postgresql+asyncpg://u:p@h/db")
     app.state.storage = object()
     app.state.real_time_events = InProcessRealTimeEvents()
@@ -1294,6 +1445,7 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
         await app.state.engine.dispose()
 
     assert start.stop_intents is app.state.stop_intents
+    assert start.start_intent_lock is app.state.start_intent_lock
     assert stop.stop_intents is app.state.stop_intents
     assert isinstance(drain.stopper, ServersAssignedServerStopper)
     assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents

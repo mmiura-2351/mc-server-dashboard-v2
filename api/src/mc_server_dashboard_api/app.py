@@ -202,6 +202,9 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
     SnapshotServer,
 )
+from mc_server_dashboard_api.servers.application.start_intent_lock import (
+    StartIntentLock,
+)
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
 )
@@ -831,6 +834,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # late-snapshot sink's StopServer keeps a private one by design: its
         # release neither bumps nor reads it.
         app.state.stop_intents = StopIntentCounter()
+        # Process-wide per-server lock over a start intent's commit and a failed
+        # start's revert of it (issue #3741): every StartServer takes it, so a
+        # revert's check and write cannot straddle a newer start's commit.
+        app.state.start_intent_lock = StartIntentLock()
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
             clock=FleetSystemClock(),
@@ -1079,6 +1086,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         lifecycle_lock=PgLifecycleLock(engine=engine),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
                         stop_intents=app.state.stop_intents,
+                        start_intent_lock=app.state.start_intent_lock,
                     ),
                     stop_server=StopServer(
                         uow=ServersUnitOfWork(
@@ -1203,6 +1211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     lifecycle_lock=PgLifecycleLock(engine=engine),
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
                     stop_intents=app.state.stop_intents,
+                    start_intent_lock=app.state.start_intent_lock,
                 ),
                 make_stop_server=lambda: StopServer(
                     uow=ServersUnitOfWork(

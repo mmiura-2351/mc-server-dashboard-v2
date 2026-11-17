@@ -2095,6 +2095,7 @@ def get_start_server(
         lifecycle_lock=get_lifecycle_lock(request),
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),
         stop_intents=request.app.state.stop_intents,
+        start_intent_lock=request.app.state.start_intent_lock,
     )
 
 

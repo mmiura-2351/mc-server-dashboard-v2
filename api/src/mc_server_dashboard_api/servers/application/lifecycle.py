@@ -101,6 +101,9 @@ from mc_server_dashboard_api.servers.application.command_dispatch import (
 from mc_server_dashboard_api.servers.application.groups import (
     regenerate_pending_group_files,
 )
+from mc_server_dashboard_api.servers.application.start_intent_lock import (
+    StartIntentLock,
+)
 from mc_server_dashboard_api.servers.application.stop_convergence import (
     StopConvergenceGuard,
 )
@@ -356,6 +359,11 @@ class StartServer:
     # production, shared with every StopServer and the drain; the private default
     # only serves the call sites (unit tests) that never race a stop.
     stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
+    # Held across an intent's count read and commit, and across a revert's check
+    # and write (issue #3741, ``start_intent_lock.py``). Process-wide in
+    # production, shared by every StartServer; the private default only serves the
+    # call sites (unit tests) that never race two starts of one server.
+    start_intent_lock: StartIntentLock = field(default_factory=StartIntentLock)
 
     async def __call__(
         self,
@@ -432,49 +440,61 @@ class StartServer:
                 config[JAR_SOURCE_CONFIG_FIELD] = provisioned.source
             server.config = config
             server.updated_at = self.clock.now()
-            # Read before this start's intent exists (issue #3739): a stop can only
-            # withdraw the intent after the compare-and-set below lands, so its
-            # bump always comes after this read. Read after the commit, a stop and
-            # a newer start on the same Worker could both fit in before it.
-            stop_intent_count = self.stop_intents.current(server_id)
             # Any failure across the CAS+commit window — a raising update_lifecycle or
             # commit, the lost-race abort, or this request task being cancelled at an
-            # await (a client disconnect cancels the HTTP task) — must release the
-            # placement reservation (the slot _place tentatively took, #778), or it
-            # leaks permanently: a never-committed server id never appears in the
-            # authoritative tally, so no reconnect rebuild ever reclaims it. Releasing
-            # on an ambiguous commit failure is safe: if the commit actually landed,
-            # the committed count undercounts by one until the reconnect rebuild,
-            # exactly the recovery _compensate's docstring already relies on.
+            # await (a client disconnect cancels the HTTP task), including the wait
+            # for the start-intent lock — must release the placement reservation
+            # (the slot _place tentatively took, #778), or it leaks permanently: a
+            # never-committed server id never appears in the authoritative tally, so
+            # no reconnect rebuild ever reclaims it. Releasing on an ambiguous commit
+            # failure is safe: if the commit actually landed, the committed count
+            # undercounts by one until the reconnect rebuild, exactly the recovery
+            # _compensate's docstring already relies on.
             try:
-                applied = await self.uow.servers.update_lifecycle(
-                    server,
-                    expected_from=DesiredState.STOPPED,
-                    require_unassigned=True,
-                )
-                if not applied:
-                    # A concurrent start won the compare-and-set: the row is already
-                    # running/assigned. Abort before dispatch or any committed count
-                    # change so the lost race causes no double placement (FR-SRV-2).
-                    raise LifecycleTransitionConflictError(str(server_id.value))
-                # Clear the owed regenerations made above in the commit that makes
-                # the start durable (issue #3223), so a start that fails before
-                # this point leaves them owed. Token-guarded: a group change that
-                # committed since they were read keeps its mark for the next start.
-                await self.uow.groups.clear_sync_pending(server_id, owed_group_files)
-                await self.uow.commit()
-                # Confirm the placement reservation as a committed assignment now the
-                # intent is durable (#778); a no-op if a reconnect rebuild already
-                # counted this row. Confirm HERE — inside the transaction, immediately
-                # after the commit returns and with no await in between (a sync
-                # registry call) — not after the ``async with`` block: the UoW
-                # ``__aexit__`` awaits rollback()/close(), suspension points outside
-                # this try/except where a client-disconnect CancelledError (or a
-                # post-commit teardown error) would leave the committed reservation
-                # neither confirmed nor released, leaking it permanently (#840).
-                self.control_plane.increment_assignment(
-                    worker_id=worker_id, server_id=server_id
-                )
+                # From the count read to the commit (issue #3741,
+                # ``start_intent_lock.py``): a failed start's revert holds the same
+                # lock from its check to its write, so this intent cannot land in
+                # between, and the count read here already holds the revert's bump.
+                async with self.start_intent_lock.hold(server_id):
+                    # Read before this start's intent exists (issue #3739): a stop can
+                    # only withdraw the intent after the compare-and-set below lands,
+                    # so its bump always comes after this read. Read after the
+                    # commit, a stop and a newer start on the same Worker could both
+                    # fit in before it.
+                    stop_intent_count = self.stop_intents.current(server_id)
+                    applied = await self.uow.servers.update_lifecycle(
+                        server,
+                        expected_from=DesiredState.STOPPED,
+                        require_unassigned=True,
+                    )
+                    if not applied:
+                        # A concurrent start won the compare-and-set: the row is
+                        # already running/assigned. Abort before dispatch or any
+                        # committed count change so the lost race causes no double
+                        # placement (FR-SRV-2).
+                        raise LifecycleTransitionConflictError(str(server_id.value))
+                    # Clear the owed regenerations made above in the commit that makes
+                    # the start durable (issue #3223), so a start that fails before
+                    # this point leaves them owed. Token-guarded: a group change that
+                    # committed since they were read keeps its mark for the next
+                    # start.
+                    await self.uow.groups.clear_sync_pending(
+                        server_id, owed_group_files
+                    )
+                    await self.uow.commit()
+                    # Confirm the placement reservation as a committed assignment now
+                    # the intent is durable (#778); a no-op if a reconnect rebuild
+                    # already counted this row. Confirm HERE — inside the
+                    # transaction, immediately after the commit returns and with no
+                    # await in between (a sync registry call) — not after the ``async
+                    # with`` block: the UoW ``__aexit__`` awaits rollback()/close(),
+                    # suspension points outside this try/except where a
+                    # client-disconnect CancelledError (or a post-commit teardown
+                    # error) would leave the committed reservation neither confirmed
+                    # nor released, leaking it permanently (#840).
+                    self.control_plane.increment_assignment(
+                        worker_id=worker_id, server_id=server_id
+                    )
             except (Exception, asyncio.CancelledError):
                 self.control_plane.release_reservation(
                     worker_id=worker_id, server_id=server_id
@@ -669,7 +689,10 @@ class StartServer:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
-          ever reached a Worker, so re-placing elsewhere cannot double-start.
+          ever reached a Worker, so re-placing elsewhere cannot double-start. The
+          one exception is the re-read just before the send raising (a database
+          error, issue #3741): the hydrate succeeded, so the assignment is kept
+          for a re-send to the same Worker (see ``_launch``).
         - After the start was dispatched (a failed outcome, or a timeout/lost-response
           ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
           assignment. Subsequent ticks then take the ``redispatch_start`` path to the
@@ -710,41 +733,49 @@ class StartServer:
                 config[JAR_SOURCE_CONFIG_FIELD] = provisioned.source
             server.config = config
             server.updated_at = self.clock.now()
-            # Read before this placement's intent exists, as ``__call__`` does
-            # (issue #3739).
-            stop_intent_count = self.stop_intents.current(server_id)
             # Release the placement reservation on any failure across the CAS+commit
             # window — a raising update_lifecycle or commit, the lost-race abort, or a
-            # task cancellation at an await — so the tentatively-taken slot (#778) does
-            # not leak permanently (a never-committed server id never enters the
-            # authoritative tally, so no reconnect rebuild reclaims it). Releasing on
-            # an ambiguous commit failure is safe: a landed commit undercounts by one
-            # until the reconnect rebuild, the recovery this path already relies on.
+            # task cancellation at an await, including the wait for the start-intent
+            # lock — so the tentatively-taken slot (#778) does not leak permanently
+            # (a never-committed server id never enters the authoritative tally, so
+            # no reconnect rebuild reclaims it). Releasing on an ambiguous commit
+            # failure is safe: a landed commit undercounts by one until the reconnect
+            # rebuild, the recovery this path already relies on.
             try:
-                applied = await self.uow.servers.update_lifecycle(
-                    server,
-                    expected_from=DesiredState.RUNNING,
-                    require_unassigned=True,
-                )
-                if not applied:
-                    # A concurrent assignment (a real start or another reconcile tick)
-                    # won the compare-and-set; abort before dispatch or any committed
-                    # count change so the lost race causes no double placement.
-                    raise LifecycleTransitionConflictError(str(server_id.value))
-                await self.uow.groups.clear_sync_pending(server_id, owed_group_files)
-                await self.uow.commit()
-                # Confirm the placement reservation as a committed assignment now the
-                # intent is durable (#778); a no-op if a reconnect rebuild already
-                # counted this row. Confirm HERE — inside the transaction, immediately
-                # after the commit returns and with no await in between (a sync
-                # registry call) — not after the ``async with`` block: the UoW
-                # ``__aexit__`` awaits rollback()/close(), suspension points outside
-                # this try/except where a client-disconnect CancelledError (or a
-                # post-commit teardown error) would leave the committed reservation
-                # neither confirmed nor released, leaking it permanently (#840).
-                self.control_plane.increment_assignment(
-                    worker_id=worker_id, server_id=server_id
-                )
+                # From the count read to the commit, as in ``__call__`` (issue
+                # #3741).
+                async with self.start_intent_lock.hold(server_id):
+                    # Read before this placement's intent exists, as ``__call__``
+                    # does (issue #3739).
+                    stop_intent_count = self.stop_intents.current(server_id)
+                    applied = await self.uow.servers.update_lifecycle(
+                        server,
+                        expected_from=DesiredState.RUNNING,
+                        require_unassigned=True,
+                    )
+                    if not applied:
+                        # A concurrent assignment (a real start or another reconcile
+                        # tick) won the compare-and-set; abort before dispatch or any
+                        # committed count change so the lost race causes no double
+                        # placement.
+                        raise LifecycleTransitionConflictError(str(server_id.value))
+                    await self.uow.groups.clear_sync_pending(
+                        server_id, owed_group_files
+                    )
+                    await self.uow.commit()
+                    # Confirm the placement reservation as a committed assignment now
+                    # the intent is durable (#778); a no-op if a reconnect rebuild
+                    # already counted this row. Confirm HERE — inside the
+                    # transaction, immediately after the commit returns and with no
+                    # await in between (a sync registry call) — not after the ``async
+                    # with`` block: the UoW ``__aexit__`` awaits rollback()/close(),
+                    # suspension points outside this try/except where a
+                    # client-disconnect CancelledError (or a post-commit teardown
+                    # error) would leave the committed reservation neither confirmed
+                    # nor released, leaking it permanently (#840).
+                    self.control_plane.increment_assignment(
+                        worker_id=worker_id, server_id=server_id
+                    )
             except (Exception, asyncio.CancelledError):
                 self.control_plane.release_reservation(
                     worker_id=worker_id, server_id=server_id
@@ -1077,9 +1108,11 @@ class StartServer:
         # caller handles it as a failure before the send. ``__call__`` reverts its
         # intent, as after any such failure (issue #2001); the revert first checks
         # that the intent is still this start's (issue #3741). ``place_and_start``
-        # keeps its assignment: its hydrate succeeded, so the next tick re-sends the
-        # start to this Worker, which holds the working set. ``redispatch_start``
-        # reverts nothing, as on any failure.
+        # keeps its assignment: its hydrate succeeded, so once the reconciler's
+        # grace lapses, and while this Worker is connected, the reconciler re-sends
+        # the start here, without a second hydrate if the store has not moved past
+        # the generation recorded above. ``redispatch_start`` reverts nothing, as on
+        # any failure.
         async with self.uow:
             current = await self.uow.servers.get_by_id(server_id)
         if current is None or not self._still_owns(
@@ -1274,22 +1307,28 @@ class StartServer:
         Only this start's own intent is reverted (issue #3741). While the start
         hydrated, a stop may have released the row and a newer start placed it
         again, on this Worker or another, and sent its start. Reverting that intent
-        would leave the newer instance under a stopped, unassigned row, and take a
-        Worker's load down a second time. So the revert runs only while
-        :meth:`_still_owns` holds: the count is still ``stop_intent_count``, the
-        one this start read before its intent existed, and the row is still
-        desired=running on this start's Worker. Otherwise the newer transition owns
-        the row and its load, and both are left alone.
+        would leave the newer instance under a stopped, unassigned row, and the
+        placement load wrong: the decrement would drop the newer start's entry on
+        this Worker, or leave its entry on another Worker counted for a row that no
+        longer runs. So the revert runs only while :meth:`_still_owns` holds: the
+        count is still ``stop_intent_count``, the one this start read before its
+        intent existed, and the row is still desired=running on this start's
+        Worker. Otherwise the newer transition owns the row and its load, and both
+        are left alone.
 
-        The check and the write run under the server's lifecycle lock. Every write
-        that creates a start intent (the compare-and-set in ``__call__`` and in
-        ``place_and_start``) holds it too, so no newer intent can land in between,
+        The check and the write run under the server's start-intent lock
+        (``start_intent_lock.py``). The two writes that create a start intent (the
+        compare-and-set and commit in ``__call__`` and ``place_and_start``) hold
+        it too, from their count read on, so no newer intent can land in between,
         and a newer start reads its count only after this revert's bump. A stop or
         a drain takes no such lock, but it only withdraws: one that lands in
         between moves the row out of running, and the compare-and-set below then
-        matches nothing. A count that has already moved skips the revert before the
-        lock is even asked for: the newer start may hold the lock across a JAR
-        download, longer than the lock's bounded wait.
+        matches nothing. The revert does not take the lifecycle lock. Operations
+        that cannot create an intent hold that one across Storage I/O (a backup
+        upload or delete, a prune, the integrity sweep), and a revert waiting
+        behind one would give up busy and leave the row running with no start
+        sent. A count that has already moved skips the revert without taking any
+        lock: nothing of this start's is left to undo.
 
         Placement-load decrement semantics (symmetric with StartServer's
         increment): decrement **iff** the revert compare-and-set actually
@@ -1298,7 +1337,8 @@ class StartServer:
         the decrement; decrementing here too would drive the count below the true
         running tally. If the compensation commit itself errors the DB state is
         unknown, so we do **not** decrement and log loudly — the reconnect
-        assignment rebuild reconciles the count from the authoritative tally.
+        assignment rebuild reconciles the count from the authoritative tally. It
+        still bumps, as a stop does (issue #3739): the commit may have landed.
 
         If the compensation itself fails, the original dispatch failure
         (``original``) must not be masked: we log both errors explicitly and
@@ -1310,7 +1350,7 @@ class StartServer:
             return
         reverted = False
         try:
-            async with self.lifecycle_lock.hold(server_id), self.uow:
+            async with self.start_intent_lock.hold(server_id), self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
                 if (
                     server is not None
@@ -1323,12 +1363,16 @@ class StartServer:
                     reverted = await self.uow.servers.update_lifecycle(
                         server, expected_from=DesiredState.RUNNING
                     )
-                    await self.uow.commit()
                     # Withdrawn, so it bumps like a stop (issue #3739): a re-sent
                     # start of this same intent that has not sent yet sees it. The
-                    # revert sends no stop, so one already sent is not caught.
-                    if reverted:
-                        self.stop_intents.bump(server_id)
+                    # revert sends no stop, so one already sent is not caught. It
+                    # bumps when the commit raises too, as a stop does: the commit
+                    # may have landed.
+                    try:
+                        await self.uow.commit()
+                    finally:
+                        if reverted:
+                            self.stop_intents.bump(server_id)
         except Exception as compensation_error:
             _LOG.error(
                 "failed to compensate start intent after a failed dispatch; "
@@ -1367,11 +1411,12 @@ class StartServer:
         (and decrement its load iff the revert matched) so a later tick re-places on
         a fresh Worker.
 
-        Only this placement's own assignment is undone, under the lifecycle lock,
-        by the same rule as :meth:`_compensate` (issue #3741). A stop and a newer
-        start on this same Worker leave the row looking as this placement left it,
-        and clearing that start's assignment would let a later tick place a second
-        instance elsewhere while the first runs.
+        Only this placement's own assignment is undone, under the start-intent
+        lock and not the lifecycle lock, by the same rule as :meth:`_compensate`
+        (issue #3741). A stop and a newer start on this same Worker leave the row
+        looking as this placement left it, and clearing that start's assignment
+        would let a later tick place a second instance elsewhere while the first
+        runs.
 
         A failed unassign-commit is benign: it is logged (not masked) and the row is
         left assigned + desired=running, so the next tick sees an assigned orphan and
@@ -1384,7 +1429,7 @@ class StartServer:
             return
         reverted = False
         try:
-            async with self.lifecycle_lock.hold(server_id), self.uow:
+            async with self.start_intent_lock.hold(server_id), self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
                 if (
                     server is not None
@@ -1396,11 +1441,13 @@ class StartServer:
                     reverted = await self.uow.servers.update_lifecycle(
                         server, expected_from=DesiredState.RUNNING
                     )
-                    await self.uow.commit()
-                    # Withdrawn, so it bumps as ``_compensate`` does, with the same
-                    # limit (issue #3739).
-                    if reverted:
-                        self.stop_intents.bump(server_id)
+                    # Withdrawn, so it bumps as ``_compensate`` does, also when the
+                    # commit raises, with the same limit (issue #3739).
+                    try:
+                        await self.uow.commit()
+                    finally:
+                        if reverted:
+                            self.stop_intents.bump(server_id)
         except Exception as compensation_error:
             _LOG.error(
                 "failed to undo orphan re-placement after a failed dispatch; the "

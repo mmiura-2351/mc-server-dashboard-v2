@@ -45,8 +45,9 @@ held back.
 
 The writes that bump: a stop's and a drain's ``running -> stopped`` flip, and a
 failed start's or placement's revert of its own intent (``_compensate``,
-``_unassign``). A revert sends no stop, so a re-sent start of that same intent
-already enqueued when the revert lands is not caught. The later releases of an
+``_unassign``), which also bumps when its commit raises. A revert sends no stop,
+so a re-sent start of that same intent already enqueued when the revert lands is
+not caught. The later releases of an
 already stopped row (the final-snapshot clears, ``redispatch_stop``,
 ``clear_stale_assignment``) do not bump: the flip that made the row stopped
 already did.
@@ -54,7 +55,8 @@ already did.
 The value a start reads also identifies its intent: an unchanged count means no
 write in this process has withdrawn the intent since. A failed start's revert
 checks it, with the row, so that it undoes only its own intent and never a newer
-start's (issue #3741).
+start's (issue #3741). ``start_intent_lock.py`` keeps a newer intent from landing
+between that check and the revert's write.
 
 In-process, deliberately, like ``StopConvergenceGuard``. The API is a single
 instance (REQUIREMENTS.md NFR-SCALE-1), and the stops it orders against are sent
