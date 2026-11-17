@@ -50,6 +50,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_body_limit import (
     MULTIPART_OVERHEAD_BYTES,
+    RequestBodyLimitRoute,
     request_body_limit,
 )
 from mc_server_dashboard_api.http_content_disposition import content_disposition
@@ -80,6 +81,9 @@ from mc_server_dashboard_api.servers.application.backups import (
     SetBackupRetention,
     UploadBackup,
     download_grant_resource,
+)
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    WORKER_UNAVAILABLE_REASON,
 )
 from mc_server_dashboard_api.servers.application.files import MAX_UPLOAD_BYTES
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -114,7 +118,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _logger = logging.getLogger(__name__)
 
@@ -314,14 +318,20 @@ async def create_backup(
         )
         raise _service_unavailable("storage_unavailable") from exc
     except CommandDispatchError as exc:
+        # ``worker_unavailable`` (issue #3678): the Worker's backend did not answer,
+        # or a leftover container may be running against a stopped working set.
+        # Transient, so it takes the worker-down path's ERROR and 503.
+        unavailable = exc.reason == WORKER_UNAVAILABLE_REASON
         await _record_failure(
             recorder,
             ops.BACKUP_CREATE,
-            Outcome.DENIED,
+            Outcome.ERROR if unavailable else Outcome.DENIED,
             authorized,
             community_id,
             server_id,
         )
+        if unavailable:
+            raise _service_unavailable(WORKER_UNAVAILABLE_REASON) from exc
         # Honour the sanitized reason the way the lifecycle routes do (issue
         # #2436): the running-server create dispatches a SnapshotTrigger, and the
         # Worker refuses it with BUSY -> ``worker_busy`` when another mutating

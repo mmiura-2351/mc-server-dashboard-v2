@@ -1103,8 +1103,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   since the API always refuses it there.
 - The same verb-specific treatment extends to the **503 `worker_unavailable`** —
   the API's rendering of a dispatch that timed out or lost the Worker session,
-  where the generic "wait a moment and try again" invites a retry of an
-  intent that already stands. On stop it is unambiguous: `StopServer` can only
+  and of a Worker that answered that its container runtime did not (a start or a
+  restart's relaunch whose container calls timed out, or a container a failed
+  start left behind that it could not end) — where the generic "wait a moment
+  and try again" invites a retry of an intent that already stands. On stop it is unambiguous: `StopServer` can only
   raise it from a dispatch, which runs *after* `desired_state=stopped`
   is committed and the placement load decremented, and nothing is compensated —
   the stop itself, or, converging a server already desired-stopped, the final
@@ -1134,9 +1136,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `invalid_transition`: neither leaves a pending intent a retry collides with.
 - **Start keeps the verb-agnostic message for 503 `worker_unavailable`.** A start
   that demonstrably did not happen is compensated back to stopped, but a
-  **post-dispatch** `worker_unavailable` is not (the start may have been applied),
-  while its pre-dispatch twin — a failed hydrate, or a call that never reached the
-  Worker — compensates. This is the identical pre/post ambiguity as `worker_busy`
+  **post-dispatch** timeout or lost session is not (the start may have been
+  applied), while its pre-dispatch twin — a failed hydrate, or a call that never
+  reached the Worker — compensates, and so does a start or hydrate the Worker
+  answered it could not carry out because its container runtime did not. This is the identical pre/post ambiguity as `worker_busy`
   above, but a timeout answers *nothing*, so there is no honest thing to say
   beyond "could not reach the server host" — hence the verb-agnostic message.
 - Destructive operations (delete server/community/user/backup-restore) use

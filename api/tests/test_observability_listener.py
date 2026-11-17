@@ -68,7 +68,7 @@ def test_listener_serves_the_exposition_on_its_own_port() -> None:
         resp = httpx2.get(f"http://127.0.0.1:{listener.port}/metrics", timeout=10.0)
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/plain")
-        assert "http_requests_total" in resp.text
+        assert "reconciler_ticks_total" in resp.text
 
 
 @pytest.mark.usefixtures("_loopback_listener")
@@ -121,7 +121,7 @@ def test_listener_binds_an_ipv6_host(monkeypatch: pytest.MonkeyPatch) -> None:
         assert listener is not None
         resp = httpx2.get(f"http://[::1]:{listener.port}/metrics", timeout=10.0)
         assert resp.status_code == 200
-        assert "http_requests_total" in resp.text
+        assert "reconciler_ticks_total" in resp.text
 
 
 def test_a_serve_failure_is_reported_while_running(

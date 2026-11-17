@@ -268,7 +268,9 @@ no instance tracks it. Before the Worker touches the working set of a server it
 tracks no instance of (a hydrate, a stopped server's snapshot, the reclaim of a
 deleted server's scratch), it asks the driver's `LeftoverGuard` whether such a
 container may be running (issue #3672). While one may, the hydrate and the
-snapshot are refused as busy and the reclaim keeps the scratch. The hydrate and
+snapshot are refused as unavailable (`UNAVAILABLE`, issue #3678; the
+reconciler backs off a start or hydrate it sent that answered so) and the
+reclaim keeps the scratch. The hydrate and
 the reclaim first have the driver end the containers it recorded, as the
 server's next start would.
 

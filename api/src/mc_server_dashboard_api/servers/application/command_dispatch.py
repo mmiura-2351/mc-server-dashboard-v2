@@ -56,7 +56,19 @@ _LOG = logging.getLogger(__name__)
 # Worker-wide concurrency cap -- and was answered EXPIRED without being run. That
 # is a definite "not applied", the opposite of the catch-all ``command_failed``'s
 # "may have been", so clients say the command did not run and can be retried.
+#
+# ``worker_unavailable`` (issues #3673, #3678): the Worker answered, but its
+# execution backend did not -- a start's container create or start timed out, a
+# container a failed start left behind could not be removed, or the daemon could
+# not list or inspect the server's containers -- so the command did not complete
+# successfully (a start the bound cut short may still have run its container,
+# which the Worker then removes or records as a leftover). It is the
+# reason a Worker that did not answer at all gets (``WorkerUnavailableError``),
+# and the edge renders it 503 the same way: a transient condition the client
+# retries. Unlike ``worker_busy`` no other command holds the id, so nothing
+# promises the next attempt succeeds, and the reconciler backs its retries off.
 WORKER_BUSY_REASON = "worker_busy"
+WORKER_UNAVAILABLE_REASON = "worker_unavailable"
 _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.PORT_CONFLICT: "port_conflict",
     CommandStatus.IMAGE_MISSING: "image_missing",
@@ -64,6 +76,7 @@ _SANITIZED_REASONS: dict[CommandStatus, str] = {
     CommandStatus.COMMAND_DROPPED: "command_dropped",
     CommandStatus.SERVER_PROPERTIES_UNREADABLE: "server_properties_unreadable",
     CommandStatus.EXPIRED: "command_expired",
+    CommandStatus.UNAVAILABLE: WORKER_UNAVAILABLE_REASON,
 }
 
 # The Worker refused the command because it holds a failed-stop orphan for the

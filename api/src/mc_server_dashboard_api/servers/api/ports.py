@@ -28,13 +28,14 @@ from mc_server_dashboard_api.dependencies import (
     get_current_user,
     get_list_available_ports,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
 )
 
-router = APIRouter(prefix="/ports")
+router = APIRouter(prefix="/ports", route_class=RequestBodyLimitRoute)
 
 # The most ports a single availability query may request. A sane upper bound that
 # keeps the response small; a request above it is a 422 (FastAPI ``le``), not a

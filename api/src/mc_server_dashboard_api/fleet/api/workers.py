@@ -50,11 +50,12 @@ from mc_server_dashboard_api.fleet.application.set_worker_drain import SetWorker
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.registry import WorkerSnapshot
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import problem
 from mc_server_dashboard_api.identity.domain.entities import User
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class HostResourcesResponse(BaseModel):

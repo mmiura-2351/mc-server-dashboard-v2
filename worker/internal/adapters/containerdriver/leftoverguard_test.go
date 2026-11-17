@@ -35,8 +35,8 @@ func TestBusyReportsARecordedLeftover(t *testing.T) {
 			d.unremoved.add("s1", "container-1")
 
 			err := busyWithin(t, d, "s1")
-			if err == nil || !strings.Contains(err.Error(), "container container-1") {
-				t.Fatalf("Busy = %v, want the recorded leftover named", err)
+			if err == nil || !strings.Contains(err.Error(), "container container-1") || !errors.Is(err, execution.ErrBackendUnavailable) {
+				t.Fatalf("Busy = %v, want the recorded leftover named, classified as the backend's unavailability", err)
 			}
 			if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
 				t.Fatalf("recorded = %v, want the record left as it was", got)
@@ -71,8 +71,8 @@ func TestBusyReportsARunningContainerOfTheServer(t *testing.T) {
 	docker.runningID = "container-9"
 	d := newTestDriver(docker, nil, errors.New("no rcon"))
 
-	if err := busyWithin(t, d, "s1"); err == nil || !strings.Contains(err.Error(), "in use") {
-		t.Fatalf("Busy = %v, want the running container to make the server busy", err)
+	if err := busyWithin(t, d, "s1"); err == nil || !strings.Contains(err.Error(), "in use") || !errors.Is(err, execution.ErrBackendUnavailable) {
+		t.Fatalf("Busy = %v, want the running container to make the server busy, classified as the backend's unavailability", err)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestBusyFailsClosedWhenTheDaemonCannotList(t *testing.T) {
 			tc.setup(docker)
 			d := newTestDriver(docker, nil, errors.New("no rcon"))
 
-			if err := busyWithin(t, d, "s1"); err == nil || !strings.Contains(err.Error(), "cannot establish") {
-				t.Fatalf("Busy = %v, want a server whose containers cannot be listed treated as busy", err)
+			if err := busyWithin(t, d, "s1"); err == nil || !strings.Contains(err.Error(), "cannot establish") || !errors.Is(err, execution.ErrBackendUnavailable) {
+				t.Fatalf("Busy = %v, want a server whose containers cannot be listed treated as busy, classified as the backend's unavailability", err)
 			}
 		})
 	}
@@ -155,8 +155,8 @@ func TestEndLeftoversKeepsALeftoverItCannotRemove(t *testing.T) {
 	d.unremoved.add("s1", "container-1")
 
 	err := d.EndLeftovers(context.Background(), "s1", "/scratch/s1")
-	if err == nil || !strings.Contains(err.Error(), "container container-1") {
-		t.Fatalf("EndLeftovers = %v, want a refusal naming container-1", err)
+	if err == nil || !strings.Contains(err.Error(), "container container-1") || !errors.Is(err, execution.ErrBackendUnavailable) {
+		t.Fatalf("EndLeftovers = %v, want a refusal naming container-1, classified as the backend's unavailability", err)
 	}
 	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
 		t.Fatalf("recorded = %v, want container-1 kept", got)

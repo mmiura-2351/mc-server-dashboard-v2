@@ -55,6 +55,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
 )
@@ -360,6 +361,22 @@ def test_start_server_no_eligible_worker_records_error() -> None:
     assert len(recorder.events) == 1
     # A transient fleet failure is an ERROR outcome (issue #131).
     assert recorder.events[0].outcome is Outcome.ERROR
+
+
+def test_start_server_unavailable_worker_backend_records_error() -> None:
+    # The Worker's backend did not answer (issue #3673): rendered 503, so it is
+    # the transient ERROR outcome, not a DENIED refusal.
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
+        error=CommandDispatchError("x", reason="worker_unavailable")
+    )
+    client = _client(app)
+
+    resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+
+    assert resp.status_code == 503
+    assert [e.outcome for e in recorder.events] == [Outcome.ERROR]
 
 
 def test_set_worker_drain_records_success() -> None:

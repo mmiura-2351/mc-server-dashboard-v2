@@ -10,7 +10,7 @@ count without bound with tenant count (the classic Prometheus cardinality
 explosion, which degrades a scrape rather than failing loudly). Neither shows up
 in review unless the reviewer happens to know to look.
 
-So the single test below renders the exposition from a fixture with several
+So the main test below renders the exposition from a fixture with several
 servers, communities and workers present and asserts three things:
 
 1. every metric family in the exposition is in :data:`_ALLOWED_FAMILIES`;
@@ -28,58 +28,57 @@ being asserted:
 **The registry under test is the dedicated** ``metrics.REGISTRY``, not
 ``prometheus_client``'s default one, so the exposition carries no ``python_*`` /
 ``process_*`` platform collectors and every family in it is one this repo
-declares.
+declares, or one FastAPI's telemetry records into the meter provider that
+``core.adapters.metrics`` owns (issue #3563).
 
 **The** ``_created`` **companions are folded onto their parents.**
 ``prometheus_client`` emits a ``<name>_created`` gauge alongside every Counter
 and Histogram, carrying the parent's labels, and the text parser reports each as
 a family of its own. :func:`_declared_family` folds those back so the allowlist
-stays a statement about the metrics ``core.adapters.metrics`` declares. (The
-fold is by name, so a *real* metric named ``<something>_created`` would be
-checked against ``<something>``'s vocabulary rather than reported as unknown.)
+stays a statement about the metrics the exposition declares. (The fold is by
+name, so a *real* metric named ``<something>_created`` would be checked against
+``<something>``'s vocabulary rather than reported as unknown.)
 
-**The four labelled metrics are cleared first.** ``metrics.REGISTRY`` is
-process-wide and shared with every other test in this pytest worker — and some
-of them (``tests/test_http_problem.py``) drive the middleware from their own
-throwaway app, recording route templates such as ``/boom`` that exist on no real
-router. Clearing means this test owns every label value in the exposition it
-then asserts on, so its result does not depend on what ran before it.
+**The HTTP series cannot be cleared, so the vocabulary is checked over all of
+them and the driven requests over a delta.** The OpenTelemetry instruments have
+no public reset, and the meter provider is process-wide, so the exposition also
+carries whatever earlier tests in this pytest worker recorded. Every one of
+those series must still be inside the vocabulary — that is a stronger check, not
+a weaker one. The exact ``http_route`` / ``http_request_method`` sets the driven
+requests produce are asserted on the series whose request count moved.
 
-**The** ``<unmatched>`` **collapse is structural, not conventional.** The
-middleware labels ``route`` from ``request.scope["route"]`` only for an
-``APIRoute`` or ``APIWebSocketRoute``. A static mount, a plain Starlette route
-(``/api/openapi.json``) and a 404 all collapse to the literal ``<unmatched>``,
-even when the framework records a non-API route in the scope.
-The test drives a mount path and a 404, both carrying a UUID, and pins that
+**An absent label renders as** ``""``. The Prometheus exporter backfills every
+label a family carries anywhere onto every series of it, so ``http_route`` is
+``""`` on a request that matched no route, and ``error_type`` is ``""`` on a
+request that did not fail. Prometheus itself treats an empty label as absent.
+
+**A request that matched no route carries no route.** FastAPI records
+``http_route`` only when routing selects a route (including the 405 partial
+match and the trailing-slash redirect) or a mount; a 404 that matched nothing
+has none, so its raw path never reaches a label. A mount is labelled by its
+template, ``<prefix>/{path}`` (the docs-assets ``StaticFiles``; the SPA mount at
+``/{path}`` when a dist dir is configured), never by the file path requested.
+The test drives a 404 and a mount path, both carrying a UUID, and pins that
 neither raw path reaches the exposition.
 
-**The** ``method`` **label is bounded by a literal allowlist, not by the
+**The** ``http_request_method`` **label is bounded by FastAPI, not by the
 request** (issue #2762). ``uvicorn`` runs on ``h11`` here, whose grammar accepts
 any RFC token as a method, and an invented token on a templated path takes the
-405 partial-match branch, which still sets ``scope["route"]`` — so before the
-middleware normalised it, every invented token was a fresh series, from an
-unauthenticated client. The test drives one such request and pins that it is
-labelled ``<other>``, which is what makes the literal vocabulary below a real
-pin rather than a description of the methods the test happens to send.
+405 partial-match branch, which still selects a route — so an unbounded method
+label would mint a fresh series per token, from an unauthenticated client.
+FastAPI labels any method outside the OpenTelemetry known-method set as
+``_OTHER``. The test drives one such request and pins that it is labelled
+``_OTHER``.
 
-A second test guards that same ``method`` bound from the other end (issue
-#2872). The allowlist is deliberately narrower than the methods HTTP defines —
-the middleware's docstring excludes TRACE and CONNECT on the grounds that no
-route here serves either — and nothing reddened if that stopped being true: a
-route declaring a method off the list would be *served*, and then silently
-labelled ``<other>``.
-:func:`test_every_route_method_is_inside_the_metrics_allowlist` walks the app's
-routes and asserts the methods they declare are contained in the middleware's
-``_ALLOWED_METHODS``, so the two can no longer drift in silence.
-
-That leaves the drift between ``_ALLOWED_METHODS`` and this file's own restating
-of it (issue #2931). ``_HTTP_METHODS`` is only ever checked against label values
-some test actually drives, so *widening* the allowlist reddened nothing and left
-the literal silently stale — including when a route was added to serve the new
-method, because the containment test reads the widened set.
-:func:`test_the_method_vocabulary_restates_the_middleware_allowlist` asserts the
-two are equal up to ``<other>``, which is what turns a change to the production
-allowlist into a required, deliberate edit here.
+That set is FastAPI's, not this repo's, and nothing in FastAPI's public API
+exposes it, so :data:`_KNOWN_METHODS` restates it as a literal and two tests
+keep the literal honest from both ends (issues #2872, #2931):
+:func:`test_every_known_method_is_labelled_as_itself` drives each method in it
+and pins that FastAPI labels it as itself, not ``_OTHER``; and
+:func:`test_every_route_method_is_a_known_method` walks the app's routes and
+pins that every method they serve is in it, so a route can never be served and
+then silently labelled ``_OTHER``. (``OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS``
+replaces the set at runtime; this deployment does not set it.)
 """
 
 from __future__ import annotations
@@ -92,14 +91,12 @@ from pathlib import Path
 
 import pytest
 from fastapi import APIRouter, FastAPI
-from fastapi.routing import APIRoute, APIWebSocketRoute
+from fastapi.routing import iter_route_contexts
 from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 from starlette.routing import BaseRoute, Mount, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 
-from mc_server_dashboard_api.core.adapters import metrics
-from mc_server_dashboard_api.core.adapters.metrics_middleware import _ALLOWED_METHODS
 from mc_server_dashboard_api.dependencies import (
     get_metrics_session_factory,
     get_worker_registry,
@@ -111,31 +108,44 @@ from mc_server_dashboard_api.fleet.domain.value_objects import (
     WorkerCapabilities,
     WorkerId,
 )
+from mc_server_dashboard_api.http_body_limit import ANONYMOUS_MAX_REQUEST_BODY_BYTES
 from mc_server_dashboard_api.observability import create_observability_app
 from tests.core.test_metrics_refresh import _CountSession, _Registry
 
-# The route label a request that matched no ``APIRoute`` collapses to.
-_UNMATCHED = "<unmatched>"
-
-# The method label a request outside the middleware's allowlist collapses to.
-_OTHER_METHOD = "<other>"
+# The method label a request outside FastAPI's known-method set collapses to.
+_OTHER_METHOD = "_OTHER"
 
 # Every vocabulary below is written out as a literal rather than imported from
 # the code it describes: a vocabulary derived from the source widens silently
 # with it, and the whole point is that widening one must be a deliberate,
 # reviewable edit here.
 
-# HTTP request methods. Bounded by the middleware's literal allowlist (anything
-# else is labelled ``<other>``), not by the request and not by this repo's routes.
-# Still a literal, and reconciled against that allowlist by
-# ``test_the_method_vocabulary_restates_the_middleware_allowlist``: re-typed on
-# purpose when the allowlist moves, never imported and never left to go stale.
-_HTTP_METHODS = frozenset(
-    {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", _OTHER_METHOD}
+# The HTTP methods FastAPI's telemetry labels as themselves: the OpenTelemetry
+# semantic conventions' known methods. Anything else is ``_OTHER``. Reconciled
+# against FastAPI's behaviour by ``test_every_known_method_is_labelled_as_itself``.
+_KNOWN_METHODS = frozenset(
+    {
+        "CONNECT",
+        "DELETE",
+        "GET",
+        "HEAD",
+        "OPTIONS",
+        "PATCH",
+        "POST",
+        "PUT",
+        "QUERY",
+        "TRACE",
+    }
 )
+_HTTP_METHODS = _KNOWN_METHODS | {_OTHER_METHOD}
 
-# HTTP status codes, as ``str(response.status_code)``.
+# HTTP status codes, as ``str(status_code)``.
 _STATUS_CODE = re.compile(r"^[1-5][0-9]{2}$")
+
+# ``error_type`` on a failed request: the status code of a 5xx answered without
+# an exception reaching FastAPI, or the qualified class name of the exception
+# that did. Both bounded by the code, never by the request. ``""`` on success.
+_ERROR_TYPE = re.compile(r"^(|[1-5][0-9]{2}|[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_]\w*)*)$")
 
 # The server observed states (``metrics_refresh._OBSERVED_STATES``, mirroring the
 # server table's CHECK constraint — DATABASE.md Section 7).
@@ -146,8 +156,8 @@ _OBSERVED_STATES = frozenset(
 # The Worker liveness states (``fleet.domain.entities.WorkerStatus``).
 _WORKER_STATES = frozenset({"online", "draining", "offline"})
 
-# ``le`` on the latency histogram's bucket samples: prometheus_client's default
-# buckets, which ``http_request_duration_seconds`` takes unchanged.
+# ``le`` on the latency histogram's bucket samples: the boundaries FastAPI
+# advises for ``http.server.request.duration``, the semantic conventions' ones.
 _HISTOGRAM_BUCKETS = frozenset(
     {
         "0.005",
@@ -167,6 +177,16 @@ _HISTOGRAM_BUCKETS = frozenset(
         "+Inf",
     }
 )
+
+# ``url.scheme`` and ``network.protocol.version``, as the ASGI server reports
+# them for an HTTP request.
+_URL_SCHEMES = frozenset({"http", "https"})
+_PROTOCOL_VERSIONS = frozenset({"1.0", "1.1", "2", "3"})
+
+# The SPA mount's template (``webui.py`` mounts ``/``). The shared app has no
+# dist dir, so its route walk does not see it, but other tests in this worker
+# build an app with one and record it.
+_SPA_MOUNT = "/{path}"
 
 # Identifier shapes that must never appear in a label value, whole or embedded
 # (an embedded match also covers "a path containing a UUID").
@@ -193,19 +213,22 @@ def _label_vocabulary(
     """
 
     return {
-        "http_requests": {
-            "method": _HTTP_METHODS,
-            # Only a FastAPI route template, never a raw path (see the module
-            # docstring on the <unmatched> collapse).
-            "route": route_templates | {_UNMATCHED},
-            "status": _STATUS_CODE,
-        },
-        "http_request_duration_seconds": {
-            "method": _HTTP_METHODS,
-            "route": route_templates | {_UNMATCHED},
+        "http_server_request_duration_seconds": {
+            "http_request_method": _HTTP_METHODS,
+            # Only a route or mount template, never a raw path; ``""`` when no
+            # route matched (see the module docstring).
+            "http_route": route_templates | {_SPA_MOUNT, ""},
+            "http_response_status_code": _STATUS_CODE,
+            "error_type": _ERROR_TYPE,
+            "url_scheme": _URL_SCHEMES,
+            "network_protocol_version": _PROTOCOL_VERSIONS,
             # Only the ``_bucket`` samples carry ``le``; ``_sum`` / ``_count``
             # carry the family's own labels alone.
             "le": _HISTOGRAM_BUCKETS,
+        },
+        "http_server_active_requests": {
+            "http_request_method": _HTTP_METHODS,
+            "url_scheme": _URL_SCHEMES,
         },
         "servers": {"observed_state": _OBSERVED_STATES},
         "workers": {"state": _WORKER_STATES},
@@ -230,6 +253,43 @@ def _permits(permitted: frozenset[str] | re.Pattern[str], value: str) -> bool:
     if isinstance(permitted, re.Pattern):
         return permitted.fullmatch(value) is not None
     return value in permitted
+
+
+def _route_templates(app: FastAPI) -> frozenset[str]:
+    """Every route and mount template routing can select, ``/api`` included."""
+
+    return frozenset(
+        context.path_format
+        for context in iter_route_contexts(app.routes)
+        if context.path_format is not None
+    )
+
+
+_LabelSet = frozenset[tuple[str, str]]
+
+
+def _request_counts(client: TestClient) -> dict[_LabelSet, float]:
+    """Every ``http_server_request_duration_seconds_count`` series, by label set."""
+
+    return {
+        frozenset(sample.labels.items()): sample.value
+        for family in text_string_to_metric_families(client.get("/metrics").text)
+        if family.name == "http_server_request_duration_seconds"
+        for sample in family.samples
+        if sample.name == "http_server_request_duration_seconds_count"
+    }
+
+
+def _new_requests(
+    before: dict[_LabelSet, float], after: dict[_LabelSet, float]
+) -> list[dict[str, str]]:
+    """The label sets whose request count moved between two scrapes."""
+
+    return [
+        dict(labels)
+        for labels, value in after.items()
+        if value != before.get(labels, 0.0)
+    ]
 
 
 def _worker(status: WorkerStatus) -> WorkerSnapshot:
@@ -271,42 +331,48 @@ def exposition_client() -> Iterator[TestClient]:
         yield client
 
 
+@pytest.fixture
+def api_client(shared_app: FastAPI) -> Iterator[TestClient]:
+    """A client for the public API app, which records the HTTP metrics."""
+
+    shared_app.dependency_overrides.clear()
+    with TestClient(shared_app) as client:
+        yield client
+
+
 def test_exposition_label_values_stay_bounded_and_non_identifying(
-    shared_app: FastAPI, exposition_client: TestClient
+    shared_app: FastAPI, api_client: TestClient, exposition_client: TestClient
 ) -> None:
     community_id = uuid.uuid4()
     server_id = uuid.uuid4()
-    for labelled in (
-        metrics.http_requests_total,
-        metrics.http_request_duration_seconds,
-        metrics.servers,
-        metrics.workers,
-    ):
-        labelled.clear()
 
-    shared_app.dependency_overrides.clear()
-    with TestClient(shared_app) as api_client:
-        api_client.get("/api/healthz")
-        api_client.post("/api/auth/login", json={})
-        api_client.get(f"/api/communities/{community_id}")
-        api_client.get(f"/api/communities/{community_id}/servers/{server_id}")
-        # No route matches either of these: the first 404s, the second is served
-        # by the docs-assets ``StaticFiles`` mount. Both must collapse.
-        api_client.get(f"/api/no-such-route/{server_id}")
-        api_client.get(f"/api/docs-assets/{server_id}.css")
-        # An invented method token, which h11 accepts on the wire and the 405
-        # partial match still resolves to a route template. Must collapse too.
-        api_client.request("BREW", "/api/healthz")
+    before = _request_counts(exposition_client)
+    api_client.get("/api/healthz")
+    api_client.post("/api/auth/login", json={})
+    # Refused by the body limit before a byte is read: the route is already
+    # selected, so the 413 is labelled by its template like any other answer.
+    api_client.post(
+        "/api/auth/login",
+        content=b"",
+        headers={"Content-Length": str(ANONYMOUS_MAX_REQUEST_BODY_BYTES + 1)},
+    )
+    api_client.get(f"/api/communities/{community_id}")
+    api_client.get(f"/api/communities/{community_id}/servers/{server_id}")
+    # The trailing-slash redirect is labelled by the route it redirects to.
+    api_client.get("/api/healthz/", follow_redirects=False)
+    # No route matches this one: a 404 with no ``http_route`` at all.
+    api_client.get(f"/api/no-such-route/{server_id}")
+    # Served (and 404'd) by the docs-assets ``StaticFiles`` mount: labelled by
+    # the mount's template, not the requested file.
+    api_client.get(f"/api/docs-assets/{server_id}.css")
+    # An invented method token, which h11 accepts on the wire and the 405
+    # partial match still resolves to a route template. Must collapse.
+    api_client.request("BREW", "/api/healthz")
+    recorded = _new_requests(before, _request_counts(exposition_client))
 
     body = exposition_client.get("/metrics").text
     families = list(text_string_to_metric_families(body))
-    vocabulary = _label_vocabulary(
-        frozenset(
-            route.path
-            for route in shared_app.routes
-            if isinstance(route, APIRoute | APIWebSocketRoute)
-        )
-    )
+    vocabulary = _label_vocabulary(_route_templates(shared_app))
 
     exposed = {_declared_family(family.name) for family in families}
     assert exposed == _ALLOWED_FAMILIES, (
@@ -314,8 +380,6 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
         "lost one): state its label vocabulary in _label_vocabulary()"
     )
 
-    routes: set[str] = set()
-    methods: set[str] = set()
     for family in families:
         declared = _declared_family(family.name)
         permitted = vocabulary[declared]
@@ -327,9 +391,9 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
             )
             for label, value in sample.labels.items():
                 # The shape check runs first: it is the net for a vocabulary
-                # that is itself too permissive (``route`` is a set derived
-                # from the app's router, not a literal), and "this label
-                # carries a UUID" is the more useful red of the two.
+                # that is itself too permissive (``http_route`` is a set
+                # derived from the app's router, not a literal), and "this
+                # label carries a UUID" is the more useful red of the two.
                 for shape, pattern in _IDENTIFIER_SHAPES:
                     assert not pattern.search(value), (
                         f"{sample.name} label {label}={value!r} contains "
@@ -340,37 +404,71 @@ def test_exposition_label_values_stay_bounded_and_non_identifying(
                     f"vocabulary declared for {declared}: an unbounded label "
                     f"value grows the series count without bound"
                 )
-        if declared == "http_requests":
-            routes.update(sample.labels["route"] for sample in family.samples)
-            methods.update(sample.labels["method"] for sample in family.samples)
 
-    # The seven driven requests, as the ``route`` label saw them: four templates,
-    # and one ``<unmatched>`` covering both the 404 and the static-mount path.
-    assert routes == {
+    # The driven requests, as the ``http_route`` label saw them: the full
+    # templates (``/api`` prefix included), the mount's template, and ``""``
+    # for the 404 that matched nothing.
+    assert {labels["http_route"] for labels in recorded} == {
         "/api/healthz",
         "/api/auth/login",
         "/api/communities/{community_id}",
         "/api/communities/{community_id}/servers/{server_id}",
-        _UNMATCHED,
+        "/api/docs-assets/{path}",
+        "",
     }
-    # And as the ``method`` label saw them. ``BREW`` reached a real route
-    # template (the 405 partial match) and still contributed no series of its
-    # own: the vocabulary above bounds the label, the request does not.
-    assert methods == {"GET", "POST", _OTHER_METHOD}
+    assert {
+        labels["http_response_status_code"]
+        for labels in recorded
+        if labels["http_route"] == ""
+    } == {"404"}
+    # And as the ``http_request_method`` label saw them. ``BREW`` reached a real
+    # route template (the 405 partial match) and still contributed no series of
+    # its own: FastAPI bounds the label, the request does not.
+    assert {labels["http_request_method"] for labels in recorded} == {
+        "GET",
+        "POST",
+        _OTHER_METHOD,
+    }
+    assert {
+        labels["http_response_status_code"]
+        for labels in recorded
+        if labels["http_request_method"] == _OTHER_METHOD
+    } == {"405"}
+
+
+def test_every_known_method_is_labelled_as_itself(
+    api_client: TestClient, exposition_client: TestClient
+) -> None:
+    """:data:`_KNOWN_METHODS` is what FastAPI labels as itself (#2931, #3563).
+
+    The literal restates a set FastAPI owns and does not export, so it is pinned
+    by behaviour: each method in it, sent to a real route, must come back as its
+    own label rather than ``_OTHER``. A method FastAPI stops knowing reddens
+    here, and so does a stale entry in the literal.
+    """
+
+    before = _request_counts(exposition_client)
+    for method in sorted(_KNOWN_METHODS):
+        api_client.request(method, "/api/healthz")
+    recorded = _new_requests(before, _request_counts(exposition_client))
+    assert {labels["http_request_method"] for labels in recorded} == _KNOWN_METHODS
 
 
 def _declared_methods(routes: Iterable[BaseRoute]) -> frozenset[str]:
     """Every HTTP method the app's routes declare, recursively through mounts.
 
+    Routes are read through :func:`fastapi.routing.iter_route_contexts`, the
+    public view of an app's routes with every included router flattened (since
+    FastAPI 0.137 ``app.routes`` holds the included routers themselves, not
+    their routes).
+
     WebSocket routes (``@router.websocket``) are excluded rather than
-    overlooked. A handshake arrives with ``scope["type"] == "websocket"``, and
-    ``app.middleware("http")`` installs a ``BaseHTTPMiddleware``, whose
-    ``__call__`` hands every non-``http`` scope straight to the inner app — so a
-    WebSocket route never reaches the metrics middleware and contributes no
-    ``method`` label at all. The exclusion is by route type, not by "declares no
-    ``methods``", so that a future route class declaring neither methods nor
-    sub-routes is reported by the assertion below instead of silently inheriting
-    the WebSocket exemption.
+    overlooked: FastAPI's telemetry records no HTTP metrics for a WebSocket
+    connection, so such a route contributes no ``http_request_method`` label at
+    all. The exclusion is by route type, not by "declares no ``methods``", so
+    that a future route class declaring neither methods nor sub-routes is
+    reported by the assertion below instead of silently inheriting the
+    WebSocket exemption.
 
     A ``Mount`` is exempted by the type of the app it mounts, not by the shape of
     its ``routes`` (issue #2931). ``Mount.routes`` is
@@ -379,25 +477,26 @@ def _declared_methods(routes: Iterable[BaseRoute]) -> frozenset[str]:
     app, and a bare ASGI one would be skipped in silence rather than reported.
     The mounts this app declares are ``StaticFiles`` (``docs-assets``, and the
     SPA when a dist dir is configured), which answers GET and HEAD and 405s every
-    other method — both on the allowlist, and nothing underneath to walk — so
-    those are skipped by type; every other mount is walked through the mounted
-    app itself, and reaches the assertion when that app has no ``routes`` of its
-    own. (``Mount.app``, not the private ``_base_app``: a mount wrapped in
+    other method — both known, and nothing underneath to walk — so those are
+    skipped by type; every other mount is walked through the mounted app itself,
+    and reaches the assertion when that app has no ``routes`` of its own.
+    (``Mount.app``, not the private ``_base_app``: a mount wrapped in
     ``middleware=`` exposes the wrapper, which has no ``routes``, so it too
     reddens rather than passing silently.)
     """
 
     methods: set[str] = set()
-    for route in routes:
+    for context in iter_route_contexts(list(routes)):
+        route = context.original_route
         if isinstance(route, WebSocketRoute):
             continue
         if isinstance(route, Mount) and isinstance(route.app, StaticFiles):
             continue
-        declared: set[str] | None = getattr(route, "methods", None)
+        declared: set[str] | None = context.methods
         walkable = route.app if isinstance(route, Mount) else route
         nested: list[BaseRoute] | None = getattr(walkable, "routes", None)
         assert declared is not None or nested is not None, (
-            f"{type(route).__name__} {getattr(route, 'path', route)!r} declares "
+            f"{type(route).__name__} {context.path!r} declares "
             "neither HTTP methods nor sub-routes: this walk would skip it, and "
             "the method label it can produce would go unchecked"
         )
@@ -442,58 +541,23 @@ def test_the_route_walk_exempts_static_file_mounts_and_no_other_mount(
         _declared_methods([Mount("/bare", app=bare_asgi)])
 
 
-def test_every_route_method_is_inside_the_metrics_allowlist(
-    shared_app: FastAPI,
-) -> None:
-    """The app serves no method the middleware would label ``<other>`` (#2872).
+def test_every_route_method_is_a_known_method(shared_app: FastAPI) -> None:
+    """The app serves no method FastAPI would label ``_OTHER`` (#2872).
 
-    ``_ALLOWED_METHODS`` is a literal, deliberately not derived from the router:
-    that is what keeps the ``method`` label bounded when an unauthenticated
-    client invents a token on the wire (issue #2762). But a literal that no
-    longer covers the app's *own* routes is the silent case — a future
-    ``@router.trace(...)``, or an ``add_api_route(..., methods=[...])`` with a
-    method off the list, would be served and then labelled ``<other>``, which is
-    the metrics equivalent of a real route vanishing from the per-route
-    breakdown.
-
-    So this asserts containment, not derivation: the allowlist stays the bound,
-    and only the drift between it and the routes reddens. It reads the real
-    ``_ALLOWED_METHODS`` where every vocabulary above is written out as a
-    literal, because the two do opposite jobs — a vocabulary derived from the
-    source would widen silently with it, whereas a *copy* of the allowlist would
-    check this file against itself and stay green if the middleware ever
-    narrowed its allowlist under a route still serving the dropped method.
+    The known-method set is what keeps the method label bounded when an
+    unauthenticated client invents a token on the wire (issue #2762). But a set
+    that no longer covers the app's *own* routes is the silent case — a route
+    serving a method outside it would be served and then labelled ``_OTHER``,
+    which is the metrics equivalent of a real route vanishing from the
+    per-route breakdown. This asserts containment against the literal, which
+    :func:`test_every_known_method_is_labelled_as_itself` ties to FastAPI.
     """
 
     declared = _declared_methods(shared_app.routes)
     # Not vacuous: an empty walk would satisfy the containment below trivially,
     # so pin two methods this app certainly declares.
     assert {"GET", "POST"} <= declared
-    assert declared <= _ALLOWED_METHODS, (
-        f"the app's routes declare {sorted(declared - _ALLOWED_METHODS)}, which "
-        "the metrics middleware labels <other>: either do not serve the method, "
-        "or widen metrics_middleware._ALLOWED_METHODS and _HTTP_METHODS above "
-        "as one deliberate edit"
-    )
-
-
-def test_the_method_vocabulary_restates_the_middleware_allowlist() -> None:
-    """``_HTTP_METHODS`` is a re-typed literal, never a stale copy (#2931).
-
-    The two spellings of the ``method`` vocabulary in this file do opposite jobs
-    and each leaves the other's drift undetected. The containment test above
-    reads ``_ALLOWED_METHODS`` so that a *narrowing* under a route still serving
-    the dropped method reddens; ``_HTTP_METHODS`` is written out so that the
-    exposition's vocabulary cannot widen silently along with the source. But a
-    vocabulary is only exercised by the label values some test actually drives,
-    so *widening* the allowlist reddened nothing on either side.
-
-    This closes that direction, and takes no fixture on purpose: it must hold
-    whatever routes the app happens to declare.
-    """
-
-    assert _HTTP_METHODS == _ALLOWED_METHODS | {_OTHER_METHOD}, (
-        "metrics_middleware._ALLOWED_METHODS and _HTTP_METHODS above have "
-        "drifted apart: re-type _HTTP_METHODS to the allowlist plus <other> as "
-        "one deliberate edit, and keep it a literal"
+    assert declared <= _KNOWN_METHODS, (
+        f"the app's routes declare {sorted(declared - _KNOWN_METHODS)}, which "
+        "FastAPI's telemetry labels _OTHER: do not serve the method"
     )

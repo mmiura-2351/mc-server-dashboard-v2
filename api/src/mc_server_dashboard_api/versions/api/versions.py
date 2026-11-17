@@ -44,6 +44,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_versions,
     require_platform_admin,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.versions.application.catalog_refresh import CatalogRefresh
@@ -60,7 +61,7 @@ from mc_server_dashboard_api.versions.domain.errors import (
 )
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
-router = APIRouter(prefix="/versions")
+router = APIRouter(prefix="/versions", route_class=RequestBodyLimitRoute)
 
 
 class ServerTypesResponse(BaseModel):

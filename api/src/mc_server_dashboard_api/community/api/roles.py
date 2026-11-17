@@ -55,9 +55,10 @@ from mc_server_dashboard_api.dependencies import (
     get_update_role,
     require_permission,
 )
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class CreateRoleRequest(BaseModel):

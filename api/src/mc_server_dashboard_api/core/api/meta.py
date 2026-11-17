@@ -22,9 +22,10 @@ from pydantic import BaseModel
 
 from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import get_current_user, get_settings
+from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.identity.domain.entities import User
 
-router = APIRouter()
+router = APIRouter(route_class=RequestBodyLimitRoute)
 
 
 class MetaResponse(BaseModel):

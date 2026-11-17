@@ -18,9 +18,12 @@ chunked and ignores the length, so nothing here believes it either.
 
 The limit is :data:`DEFAULT_MAX_REQUEST_BODY_BYTES` unless the route declares its
 own with :func:`request_body_limit`. The declaration sits on the endpoint, beside
-the cap it derives from, and the middleware finds it through the ``endpoint`` the
-router records in the request scope: by the time a route reads its body, routing
-has happened. A request no route matched has the default.
+the cap it derives from. Every router is built with
+``route_class=``:class:`RequestBodyLimitRoute` (FastAPI's documented custom
+``APIRoute`` class), whose handler puts its endpoint's limit on
+``request.state`` (Starlette's documented per-request store) before FastAPI
+reads the body; the middleware reads it from there at the first body read (issue
+#3562). A request no route matched carries none, and has the default.
 
 It bounds what a route **reads**, and nothing else. A body the route never asks
 for is never buffered (uvicorn applies flow control and discards it). ``GET``,
@@ -79,12 +82,14 @@ or a length of zero -- has nothing unread, and its response is never touched.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from fastapi import status
+from fastapi.routing import APIRoute
 from starlette.requests import Request
+from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from mc_server_dashboard_api.http_problem import problem
@@ -128,6 +133,8 @@ EARLY_ANSWER_DISCARD_BYTES = 16 * 1024 * 1024
 EARLY_ANSWER_DISCARD_SECONDS = 10.0
 
 _ATTRIBUTE = "__mcsd_request_body_limit__"
+# The ``request.state`` attribute a route's limit travels on to the middleware.
+STATE_ATTRIBUTE = "request_body_limit"
 
 # Methods no route reads a body for (module docstring): a ``receive`` call on
 # them is not a body read, so it is neither classified nor limited, and a body
@@ -180,6 +187,45 @@ def request_body_limit_of(endpoint: object) -> RequestBodyLimit:
     limit = getattr(endpoint, _ATTRIBUTE, _DEFAULT)
     assert isinstance(limit, RequestBodyLimit)
     return limit
+
+
+class RequestBodyLimitRoute(APIRoute):
+    """The route class every router is built with (module docstring).
+
+    Its handler puts the endpoint's declared limit on ``request.state`` and then
+    hands the request to FastAPI's own handler, which reads the body. The route
+    receives its request exactly as without it; the class only makes the limit
+    reach the middleware. FastAPI documents this hook as "Custom Request and
+    APIRoute class" (``get_route_handler`` and ``APIRouter(route_class=...)``,
+    https://fastapi.tiangolo.com/how-to/custom-request-and-route/).
+
+    ``__init__`` takes the endpoint from its constructor arguments. That relies
+    on the constructor shape Starlette documents for ``Route(path, endpoint)``
+    (https://www.starlette.io/routing/), which FastAPI's ``APIRoute`` keeps and
+    its routers call; FastAPI's page shows only ``get_route_handler``
+    overridden. If that shape changes, the routers fail at import with a
+    ``TypeError``, never with a wrong limit. The owner accepted this reliance on
+    2026-11-16 under the public-API-only premise (#3560, DEPENDENCIES.md
+    Section 7).
+
+    FastAPI 0.162.2 marks ``APIRoute.get_route_handler`` (``fastapi/routing.py``,
+    around line 1280) with an upstream TODO to replace or deprecate the hook. If
+    it does, this class must follow the documented replacement.
+    """
+
+    def __init__(self, path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
+        self._request_body_limit = request_body_limit_of(endpoint)
+        super().__init__(path, endpoint, **kwargs)
+
+    def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
+        handler = super().get_route_handler()
+        limit = self._request_body_limit
+
+        async def handle(request: Request) -> Response:
+            setattr(request.state, STATE_ATTRIBUTE, limit)
+            return await handler(request)
+
+        return handle
 
 
 def _declared_length(headers: dict[bytes, bytes]) -> int | None:
@@ -256,7 +302,7 @@ class RequestBodyLimitMiddleware:
                 return await receive()
             if reads_a_body:
                 if limit is None:
-                    limit = request_body_limit_of(scope.get("endpoint"))
+                    limit = getattr(Request(scope).state, STATE_ATTRIBUTE, _DEFAULT)
                     if limit.max_bytes > _ANONYMOUS.max_bytes and not (
                         await self._credentialled(Request(scope))
                     ):

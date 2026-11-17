@@ -59,7 +59,10 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.fleet.domain.errors import InvalidWorkerIdError
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
-from mc_server_dashboard_api.http_body_limit import request_body_limit
+from mc_server_dashboard_api.http_body_limit import (
+    RequestBodyLimitRoute,
+    request_body_limit,
+)
 from mc_server_dashboard_api.http_problem import problem, validation_problem
 from mc_server_dashboard_api.storage.domain.errors import (
     IncompleteTransferError,
@@ -108,7 +111,7 @@ _BASE_GENERATION_HEADER = "X-Working-Set-Base-Generation"
 # (datatransfer.go).
 _WORKER_ID_HEADER = "X-Worker-Id"
 
-router = APIRouter(prefix="/data-plane")
+router = APIRouter(prefix="/data-plane", route_class=RequestBodyLimitRoute)
 
 _logger = logging.getLogger(__name__)
 
@@ -185,20 +188,32 @@ async def require_worker_credential(
     so a test can substitute it through ``dependency_overrides`` (issue #1753). A
     missing/wrong credential is a uniform 401. The credential is required to mount
     the data plane, enforced at app startup (the app factory fails fast); it is
-    non-None here.
+    non-None here. The compare is over the UTF-8 bytes, as ``has_body_credential``
+    compares (issue #3690): ``compare_digest`` refuses a non-ASCII ``str``, and a
+    header value is one whenever it carries a non-ASCII byte.
     """
 
     presented = _bearer(authorization)
     if (
         expected is None
         or presented is None
-        or not hmac.compare_digest(presented, expected)
+        or not _credential_matches(presented, expected)
     ):
         raise problem(
             status.HTTP_401_UNAUTHORIZED,
             "worker_credential_rejected",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+def _credential_matches(presented: str, expected: str) -> bool:
+    # A value with no UTF-8 encoding (a lone surrogate, as an undecodable
+    # environment byte becomes) matches nothing: the request fails closed with
+    # the uniform 401 rather than a 500.
+    try:
+        return hmac.compare_digest(presented.encode(), expected.encode())
+    except UnicodeEncodeError:
+        return False
 
 
 def _bearer(authorization: str | None) -> str | None:

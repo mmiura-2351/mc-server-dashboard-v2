@@ -111,12 +111,13 @@ func TestHydrateEndsLeftoversBeforeItWritesTheWorkingSet(t *testing.T) {
 	}
 }
 
-// A hydrate is refused BUSY, and writes nothing, while a container the manager
-// does not track may be running against the working set: a leftover that could
-// not be ended, a running container of the server the driver lists, or an answer
-// the driver could not get (issue #3672). The reservation is released, so the
-// retry goes ahead once the driver reports the server clear.
-func TestHydrateRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T) {
+// A hydrate is refused UNAVAILABLE, and writes nothing, while a container the
+// manager does not track may be running against the working set: a leftover that
+// could not be ended, a running container of the server the driver lists, or an
+// answer the driver could not get (issue #3672). It is not BUSY: no other command
+// holds the id, so the API backs its retries off (issue #3678). The reservation is
+// released, so the retry goes ahead once the driver reports the server clear.
+func TestHydrateRefusedUnavailableWhileAnUntrackedContainerMayRun(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		endErr, busyErr error
@@ -132,8 +133,8 @@ func TestHydrateRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T) {
 			g.set(tc.endErr, tc.busyErr)
 
 			res := m.Handle(context.Background(), hydrateCmd())
-			if res.Success || res.ErrorCode != session.CommandErrorBusy {
-				t.Fatalf("hydrate = %+v, want BUSY", res)
+			if res.Success || res.ErrorCode != session.CommandErrorUnavailable {
+				t.Fatalf("hydrate = %+v, want UNAVAILABLE", res)
 			}
 			want := tc.busyErr
 			if tc.endErr != nil {
@@ -154,13 +155,13 @@ func TestHydrateRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T) {
 	}
 }
 
-// A stopped server's snapshot is refused BUSY, and packs nothing, while a
+// A stopped server's snapshot is refused UNAVAILABLE, and packs nothing, while a
 // container the manager does not track may be running against the working set
-// (issue #3672). It does not end the leftover: the snapshot is no precondition
+// (issues #3672, #3678). It does not end the leftover: the snapshot is no precondition
 // of the start that ends it, and the leftover's own shutdown save would be what
 // it packed. The reservation is released, so the retry goes ahead once the
 // server is clear.
-func TestStoppedSnapshotRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T) {
+func TestStoppedSnapshotRefusedUnavailableWhileAnUntrackedContainerMayRun(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		busyErr error
@@ -175,9 +176,9 @@ func TestStoppedSnapshotRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T)
 			g.set(nil, tc.busyErr)
 
 			res := m.Handle(context.Background(), snapshotCmd())
-			if res.Success || res.ErrorCode != session.CommandErrorBusy ||
+			if res.Success || res.ErrorCode != session.CommandErrorUnavailable ||
 				!strings.Contains(res.ErrorMessage, tc.busyErr.Error()) {
-				t.Fatalf("snapshot = %+v, want BUSY carrying %q", res, tc.busyErr)
+				t.Fatalf("snapshot = %+v, want UNAVAILABLE carrying %q", res, tc.busyErr)
 			}
 			if n := packCount(tr); n != 0 {
 				t.Fatalf("packs = %d, want none while the working set may be in use", n)
@@ -189,6 +190,33 @@ func TestStoppedSnapshotRefusedBusyWhileAnUntrackedContainerMayRun(t *testing.T)
 			g.set(nil, nil)
 			if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 				t.Fatalf("retry = %+v, want success once the server is clear", res)
+			}
+		})
+	}
+}
+
+// A guard answer the command's own cancellation cut short still refuses the
+// hydrate and the stopped snapshot UNAVAILABLE (issue #3678): nothing was ruled
+// out, and the answer of a cancelled command reaches no caller, so it is not
+// worth a code of its own.
+func TestGuardRefusalOnCallerCancelIsStillUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  session.Command
+	}{
+		{"hydrate", hydrateCmd()},
+		{"stopped snapshot", snapshotCmd()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _ := newGuardedManager(t)
+			seedScratch(t, m, s1)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			res := m.Handle(ctx, tc.cmd)
+			if res.Success || res.ErrorCode != session.CommandErrorUnavailable ||
+				!strings.Contains(res.ErrorMessage, context.Canceled.Error()) {
+				t.Fatalf("%s = %+v, want UNAVAILABLE carrying the cancellation", tc.name, res)
 			}
 		})
 	}

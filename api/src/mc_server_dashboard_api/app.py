@@ -39,7 +39,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
 )
-from mc_server_dashboard_api.core.adapters.metrics_middleware import metrics_middleware
+from mc_server_dashboard_api.core.adapters.metrics import HTTP_TELEMETRY
 from mc_server_dashboard_api.core.api import health, meta, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
 from mc_server_dashboard_api.dependencies import (
@@ -1381,6 +1381,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(
         title="mc-server-dashboard API",
         lifespan=lifespan,
+        # HTTP request metrics come from FastAPI's own OpenTelemetry telemetry
+        # (issue #3563), labelled by the full route template, ``/api`` prefix
+        # included; tracing, logs and OTLP auto-configuration are off.
+        telemetry=HTTP_TELEMETRY,
         openapi_url="/api/openapi.json" if settings.docs.enabled else None,
         # Docs routes are self-hosted (issue #1990): the default CDN-backed
         # routes are disabled; mount_docs() below adds same-origin equivalents.
@@ -1402,7 +1406,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Middleware is applied outermost-last: the catch-all exception middleware is
     # registered FIRST of the ``http`` middlewares, so it is the innermost of them.
     # An unhandled exception caught here returns a problem+json 500 that flows
-    # outward through correlation-ID, security-headers, and metrics middleware —
+    # outward through correlation-ID and security-headers middleware —
     # unlike the belt-and-braces add_exception_handler(Exception, ...) path, which
     # Starlette attaches to ServerErrorMiddleware outside all user middleware
     # (issue #1951).
@@ -1421,7 +1425,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # nosniff, Referrer-Policy, Permissions-Policy and HSTS. Registered after the
     # correlation-ID middleware so it wraps it (outermost-last ordering).
     app.middleware("http")(security_headers_middleware)
-    app.middleware("http")(metrics_middleware)
     # Strip the spurious Content-Type/Content-Length the default JSONResponse
     # stamps onto a 204 No Content (issue #633). Registered last so it is the
     # outermost wrapper and sees the final response of every route.

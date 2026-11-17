@@ -164,6 +164,7 @@ func wantCode(t *testing.T, code string) (success bool, errCode session.CommandE
 		"command_dropped":              session.CommandErrorCommandDropped,
 		"server_properties_unreadable": session.CommandErrorServerPropertiesUnreadable,
 		"expired":                      session.CommandErrorExpired,
+		"unavailable":                  session.CommandErrorUnavailable,
 	}
 	c, ok := codes[code]
 	if !ok {
@@ -353,6 +354,12 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 
 	case "image_missing":
 		return driveStartError(t, row, fmt.Errorf("create: %w", execution.ErrImageMissing))
+
+	case "backend_unavailable":
+		// A driver whose Start fails because the daemon did not answer a bounded
+		// call in time; the container driver wraps the sentinel there, and for a
+		// leftover it could not remove (issue #3673).
+		return driveStartError(t, row, fmt.Errorf("start container: container start timed out after 10s: %w", execution.ErrBackendUnavailable))
 
 	case "missing_path":
 		m := newContractManager(t, &fakeDriver{})

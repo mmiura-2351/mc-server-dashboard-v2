@@ -337,3 +337,10 @@ Such a dependency can break on a release that keeps the public API unchanged,
 so every upgrade becomes a code change. When a need cannot be met with public
 API, do not add the dependency and do not carve out an exception for it: raise
 it for an owner decision.
+
+Owner-accepted reliances:
+
+- `RequestBodyLimitRoute` (`api/src/mc_server_dashboard_api/http_body_limit.py`,
+  #3562) overrides `APIRoute.__init__(path, endpoint, **kwargs)`, relying on the
+  constructor shape Starlette documents for `Route(path, endpoint)`. A change
+  fails at import. Accepted on 2026-11-16.

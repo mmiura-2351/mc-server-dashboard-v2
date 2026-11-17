@@ -134,6 +134,7 @@ _CODE_FROM_PROTO: dict[int, CommandResultCode] = {
         CommandResultCode.SERVER_PROPERTIES_UNREADABLE
     ),
     pb.COMMAND_ERROR_CODE_EXPIRED: CommandResultCode.EXPIRED,
+    pb.COMMAND_ERROR_CODE_UNAVAILABLE: CommandResultCode.UNAVAILABLE,
 }
 
 # Map the wire file-access reason onto the domain reason (issue #548). An

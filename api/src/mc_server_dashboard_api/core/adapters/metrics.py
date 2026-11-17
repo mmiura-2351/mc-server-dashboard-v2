@@ -2,9 +2,9 @@
 
 This is infrastructure: a single place that owns the metric objects and the
 exposition registry behind the ``/metrics`` endpoint. It is an *adapter* module —
-the application/domain layers never import it; only the edge (the HTTP middleware,
+the application/domain layers never import it; only the edge (the app factory,
 the ``/metrics`` route) and the background seams that already exist (the
-reconciler loop, the audit recorder) increment the module-level counters here.
+reconciler loop, the audit recorder) touch the objects here.
 The import-linter contracts forbid domain/application importing ``adapters``, so
 placing the counters here keeps the seams' coupling honest: a loop or recorder
 adapter importing another adapter is allowed.
@@ -17,17 +17,29 @@ The metric set is the M2 floor (issue #282): HTTP request count + latency by
 route template and status, servers by observed state (counted at scrape time
 through a bounded query), workers by state, the reconciler tick + last-success
 signals, and the audit-write failure counter. The servers / workers gauges are
-refreshed by the ``/metrics`` route on each scrape; the counters and histogram
-are fed by the seams as requests and ticks happen.
+refreshed by the ``/metrics`` route on each scrape; the counters are fed by the
+seams as ticks happen.
+
+The HTTP request metrics are not declared here (#3563). FastAPI records them
+itself through its native OpenTelemetry telemetry, under the OpenTelemetry
+semantic-convention names (``http_server_request_duration_seconds``,
+``http_server_active_requests``). This module owns the meter provider that
+telemetry records into and the Prometheus reader that renders it into
+:data:`REGISTRY`, so one scrape still returns every metric. Both are
+process-wide for the same reason as the registry: a reader registers a collector
+on construction, so a reader per app would duplicate the HTTP families in the
+exposition.
 """
 
 from __future__ import annotations
 
+from fastapi.telemetry import TelemetryConfig
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from opentelemetry.sdk.metrics import MeterProvider
 from prometheus_client import (
     CollectorRegistry,
     Counter,
     Gauge,
-    Histogram,
 )
 
 # The process-wide registry the /metrics endpoint renders. Module-level so the
@@ -35,24 +47,29 @@ from prometheus_client import (
 # objects regardless of how many apps a test process builds.
 REGISTRY = CollectorRegistry()
 
-# HTTP request count by method, route template, and status code. The route
-# template (``request.scope["route"].path``) is used, never the raw path, so the
-# label set stays bounded (cardinality — issue #282).
-http_requests_total = Counter(
-    "http_requests_total",
-    "Total HTTP requests by method, route template, and status code.",
-    ["method", "route", "status"],
-    registry=REGISTRY,
+# The meter provider FastAPI's native HTTP telemetry records into, read into
+# REGISTRY at scrape time. ``target_info`` and the ``otel_scope_*`` labels are
+# off: the first carries the SDK's resource attributes (a fixed set of SDK
+# facts, or whatever ``OTEL_RESOURCE_ATTRIBUTES`` says), the second the FastAPI
+# version, and neither describes a request.
+_HTTP_READER = PrometheusMetricReader(
+    disable_target_info=True, scope_info_enabled=False, registry=REGISTRY
 )
+_METER_PROVIDER = MeterProvider(metric_readers=[_HTTP_READER])
 
-# HTTP request latency by method and route template. Prometheus default buckets
-# are appropriate for a web API (issue #282).
-http_request_duration_seconds = Histogram(
-    "http_request_duration_seconds",
-    "HTTP request latency in seconds by method and route template.",
-    ["method", "route"],
-    registry=REGISTRY,
-)
+# The ``telemetry`` argument for the public API app: HTTP request metrics into
+# the provider above, and nothing else. Every key is explicit rather than left
+# to FastAPI's defaults, which trace and log through the global OpenTelemetry
+# providers and, when ``FASTAPI_OTEL_AUTO_CONFIGURE=true`` is set, add OTLP
+# exporters from ``OTEL_EXPORTER_OTLP_*`` at startup. This deployment exports
+# nothing over OTLP, so no environment variable may turn that on.
+HTTP_TELEMETRY: TelemetryConfig = {
+    "meter_provider": _METER_PROVIDER,
+    "metrics": True,
+    "tracing": False,
+    "logs": False,
+    "auto_configure": False,
+}
 
 # Reconciler tick counter and last-success timestamp (issue #101 seam). The loop
 # increments ``reconciler_ticks_total`` each iteration it ticks and sets

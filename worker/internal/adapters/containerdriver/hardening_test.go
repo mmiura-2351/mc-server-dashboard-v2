@@ -479,8 +479,8 @@ func TestStartRefusesHandOverWhileAContainerOfTheServerMayBeAlive(t *testing.T) 
 
 			_, err := d.Start(context.Background(), specIn(dir))
 
-			if err == nil || !strings.Contains(err.Error(), "/mcsd-s1") {
-				t.Fatalf("Start error = %v, want a refusal naming the live container", err)
+			if err == nil || !strings.Contains(err.Error(), "/mcsd-s1") || !errors.Is(err, execution.ErrBackendUnavailable) {
+				t.Fatalf("Start error = %v, want a refusal naming the live container, classified as the backend's unavailability", err)
 			}
 			if got := rec.seen(); len(got) != 0 {
 				t.Fatalf("ownership changed for %v, want none while a container may be alive", got)
@@ -502,8 +502,8 @@ func TestStartRefusesHandOverWhenLivenessIsUnknown(t *testing.T) {
 
 	_, err := d.Start(context.Background(), specIn(dir))
 
-	if !errors.Is(err, docker.listErr) {
-		t.Fatalf("Start error = %v, want the list failure", err)
+	if !errors.Is(err, docker.listErr) || !errors.Is(err, execution.ErrBackendUnavailable) {
+		t.Fatalf("Start error = %v, want the list failure, classified as the backend's unavailability", err)
 	}
 	if got := rec.seen(); len(got) != 0 || docker.createCalls != 0 {
 		t.Fatalf("chowned %v, createCalls %d; want neither", got, docker.createCalls)
@@ -607,8 +607,8 @@ func TestStartRefusesHandOverWhenTheContainerListStalls(t *testing.T) {
 			}()
 			select {
 			case err := <-done:
-				if err == nil || !strings.Contains(err.Error(), tc.want) {
-					t.Fatalf("Start error = %v, want %q", err, tc.want)
+				if err == nil || !strings.Contains(err.Error(), tc.want) || !errors.Is(err, execution.ErrBackendUnavailable) {
+					t.Fatalf("Start error = %v, want %q, classified as the backend's unavailability", err, tc.want)
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("a stalled container list still blocks the start past the 100 ms quiescence window")
@@ -634,7 +634,8 @@ func TestQuiescenceWaitStalledListHonorsCallerCancel(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cannot establish") {
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "cannot establish") ||
+			errors.Is(err, execution.ErrBackendUnavailable) {
 			t.Fatalf("err = %v, want the list failing on the caller's cancellation", err)
 		}
 	case <-time.After(10 * time.Second):

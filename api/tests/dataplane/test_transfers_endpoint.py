@@ -184,6 +184,55 @@ def test_snapshot_rejects_missing_credential(tmp_path: Path) -> None:
     assert resp.status_code == 401
 
 
+@pytest.mark.parametrize(
+    ("method", "suffix"), [("GET", "working-set"), ("POST", "snapshot")]
+)
+def test_non_ascii_credential_is_rejected_as_401(
+    tmp_path: Path, method: str, suffix: str
+) -> None:
+    # Issue #3690: the header arrives as raw bytes the server decodes latin-1, so
+    # a non-ASCII byte makes a non-ASCII str, which a str compare_digest refuses
+    # with TypeError (a 500). It is a wrong credential like any other: 401.
+    client, _ = _setup(tmp_path)
+    community, server = _scope()
+    with client:
+        resp = client.request(
+            method,
+            _url(community, server, suffix),
+            headers={b"Authorization": f"Bearer {_CREDENTIAL}é".encode()},
+            content=b"x" if method == "POST" else None,
+        )
+    assert resp.status_code == 401
+    assert resp.json()["reason"] == "worker_credential_rejected"
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix"), [("GET", "working-set"), ("POST", "snapshot")]
+)
+def test_unencodable_configured_credential_is_rejected_as_401(
+    tmp_path: Path, method: str, suffix: str
+) -> None:
+    # Issue #3690: a configured credential with no UTF-8 encoding (a lone
+    # surrogate, as an undecodable environment byte becomes) matches nothing, so
+    # the request fails closed with the uniform 401 rather than a 500.
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_worker_credential] = lambda: (
+        f"{_CREDENTIAL}\udce9"
+    )
+    community, server = _scope()
+    with client:
+        resp = client.request(
+            method,
+            _url(community, server, suffix),
+            headers=_auth(),
+            content=b"x" if method == "POST" else None,
+        )
+    assert resp.status_code == 401
+    assert resp.json()["reason"] == "worker_credential_rejected"
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+
 def test_hydrate_round_trips_the_published_working_set(tmp_path: Path) -> None:
     import asyncio
 
@@ -348,6 +397,10 @@ def test_snapshot_past_the_anonymous_body_limit_is_published(
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": level}
 
 
+# 13 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
+@pytest.mark.timeout(13 * 10 + 30)
 def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:
     # Issue #847 publish-time generation guard: a Worker that declares the store's
     # CURRENT generation as its base is publishing on top of the latest state, so

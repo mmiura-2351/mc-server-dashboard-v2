@@ -63,6 +63,10 @@ async def _archive(stream: AsyncIterator[bytes]) -> dict[str, bytes]:
 
 
 class FileStoreContract:
+    # 14 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+    # the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+    # Budget: 10 s per fsync plus 30 s of other work.
+    @pytest.mark.timeout(14 * 10 + 30)
     async def test_directory_download_contains_only_the_named_subtree(
         self, file_store_harness: FileStoreHarness
     ) -> None:
