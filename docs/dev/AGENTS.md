@@ -130,31 +130,55 @@ Each one succeeds, or appears to; the damage surfaces later.
   so its own nested runs (`make scripts-test` runs the orchestrator) do not wait
   for the lock they already hold; setting it by hand instead drops the host-wide
   serialisation below — never set it yourself.
-- **The argon2 flake explains itself, in a report kept as long as the logs.**
+- **Re-running the gate past the argon2 flake throws away its only evidence.**
   A correct password has intermittently failed to verify against a hash the
   same process had just made (#3748). The api tests exposed to it (the logins
   in `tests/integration/test_auth_flow.py` and `test_register_user.py`, and the
   argon2 verifies in `tests/identity/test_password_hasher.py`) then fail with
   an `AssertionError` whose message is a timestamped diagnostic report, in the
-  api chain's log: `check-logs/api.log`, or `check-logs.prev/api.log` after one
-  re-run, until the next gate run replaces it. Paste the whole report into
-  #3748 before running the gate again. A login refused by a lockout or
-  throttle says so in its first line; that is not this flake. To read the
-  report: if the stored hash verifies `True` on every re-verify, the refusal
-  was a verify-time transient (for a login, only when the chained traceback
-  shows `reason = 'wrong_password'`). If the re-verifies fail but the fresh
-  round trips pass, the stored hash is bad; `equals the hash the test produced`
-  then says whether it went bad in storage or was made bad. If the fresh round
-  trips fail too, the process state is persistently bad, and the thread list
-  and the tests that process ran before it are where to look. Mixed results,
-  such as only some re-verifies failing, or only the lines of one thread, mean
-  a state that comes and goes: say which thread labels failed. A KDF-executor
-  probe that times out skips the rest and says so. The printed hash can be
-  re-verified in a fresh process at any time afterwards; this prints `True`,
-  or raises `VerifyMismatchError` when the hash itself is bad:
+  api chain's log, and the gate's canary (below) writes `argon2-canary.log`
+  beside it. Both are in `check-logs/`, or `check-logs.prev/` after one
+  re-run, until the next gate run replaces them. Paste the whole report and
+  the canary log into #3748 before running the gate again. A login refused by
+  a lockout or throttle says so in its first line and skips the probes; that
+  is not this flake. To read the report: if the stored hash verifies `True` on
+  every re-verify, the refusal was a verify-time transient (for a login, only
+  when the chained traceback shows `reason = 'wrong_password'`). If the
+  re-verifies fail but the fresh round trips pass, the stored hash is bad;
+  `equals the hash the test produced` then says whether it went bad in storage
+  or was made bad. If the fresh round trips fail too, the process state is
+  persistently bad, and the thread list and the tests that process ran before
+  it are where to look. Mixed results, such as only some re-verifies failing,
+  or only the lines of one thread, mean a state that comes and goes: say which
+  thread labels failed. A KDF-executor probe that times out skips the rest and
+  says so. The `host` section is read before the probes, so it shows the host
+  as the refusal left it: the pressure stall averages (`some avg10=` is the
+  share of the last 10 s in which some task waited for the cpu, memory or io),
+  the swap counters, the `getrusage` deltas over the refused call
+  (`ru_majflt` above 0 means it waited for a page from disk or swap,
+  `ru_nivcsw` counts its preemptions), and the kernel's name for each thread,
+  native ones included. The printed hash can be re-verified in a fresh process
+  at any time afterwards. `<password>` is the password the failing test used:
+  its `_PASSWORD` constant (`_VALID_PASSWORD` in `test_register_user.py`, a
+  literal in `test_password_hasher.py`), `Wm7!qz#Lp2vT` in all three. This
+  prints `True`, or raises `VerifyMismatchError` when the hash itself is bad:
   ```sh
   cd api && uv run python -c 'import argon2, sys; print(argon2.PasswordHasher().verify(*sys.argv[1:]))' '<hash>' '<password>'
   ```
+  The canary is `scripts/argon2_canary.py`, which the gate runs for as long as
+  the api chain runs: a separate process, at nice 19, that shares nothing with
+  the suite but the host. Every ~2 s it recomputes a fixed Argon2id tag at the
+  production cost with 4 lanes on 4 threads (`kind=p4`) and with 1 lane
+  (`kind=p1`), plus a 64 MiB write-and-read-back control without argon2
+  (`kind=control`). Every line starts with a UTC timestamp, to set against the
+  report's `taken at`: a `MISMATCH` line for any computation that disagrees
+  (`ERROR` for one that raised), a `summary` every 30 checks, and a last
+  `stopped` line with its totals (`checks=`, and `cpu_s=` over `wall_s=` for
+  its cost). Read it against the flake: a canary `MISMATCH` decides it is the
+  host; one in `control` too means memory corruption in general; one only in
+  `p4` points to threads; and a canary that stays clean across further flakes
+  points to state inside the suite's own process. A clean canary with few
+  `checks=` says little either way.
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
   its own process, not the shell that invoked it — whose command line contains
   the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
