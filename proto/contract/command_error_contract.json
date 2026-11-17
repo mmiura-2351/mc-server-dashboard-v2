@@ -50,7 +50,8 @@
     "  - api: api/tests/servers/test_command_error_contract.py DERIVES its expectations",
     "    from the 'api' column: the (module, function, CommandStatus) triples declared",
     "    across the rows must equal the triples its ast scan finds in",
-    "    api/src/mc_server_dashboard_api/servers/application/. A read of a reason",
+    "    api/src/mc_server_dashboard_api/servers/application/ and in the HTTP edge",
+    "    servers/api/ (keyed from servers/, as api/backups.py). A read of a reason",
     "    constant in command_dispatch.py (WORKER_BUSY_REASON) counts as a match on the",
     "    status _SANITIZED_REASONS maps to it (issue #3808). So a new API match on a",
     "    (kind, code) the Worker never emits has no row to live on (the #202 incident),",
@@ -488,7 +489,7 @@
     {"kind": "SnapshotTrigger", "precondition": "rcon_command_dropped", "code": "transfer_failed", "api": "command_failed", "why": "the running path's quiesce is NOT best-effort: a dropped save-off or save-all leaves quiesceRunning reporting the world unquiesced, and handleSnapshot refuses the snapshot with TRANSFER_FAILED quiesce_unavailable before packing rather than pack a live world (issue #907). No API site matches it: the scheduler retries on its next tick, and a manual backup renders the catch-all command_failed"},
     {"kind": "SnapshotTrigger", "precondition": "server_properties_unreadable", "code": "server_properties_unreadable", "api": ["command_dispatch.py:_SANITIZED_REASONS"], "why": "the running path's save-off/save-all quiesce cannot open RCON, and a running snapshot that cannot be quiesced is refused rather than packed live (issue #907); the refusal names the cause instead of TRANSFER_FAILED quiesce_unavailable, so a manual backup of the running server reports it (issue #3347). A stopped-id snapshot needs no RCON and is not affected"},
     {"kind": "SnapshotTrigger", "precondition": "command_expired", "code": "expired", "api": ["command_dispatch.py:_SANITIZED_REASONS"], "why": "only a periodic or on-demand snapshot: a stop's final snapshot carries no expires_after, so it runs however late and its late result releases the held assignment"},
-    {"kind": "SnapshotTrigger", "precondition": "untracked_container", "code": "unavailable", "api": ["command_dispatch.py:_SANITIZED_REASONS"], "why": "packing a working set an untracked container may be writing is a mixed capture, so the stopped-id snapshot is refused. It ends nothing: it is no precondition of the start that ends the leftover, and it would pack that container's shutdown save"},
+    {"kind": "SnapshotTrigger", "precondition": "untracked_container", "code": "unavailable", "api": ["command_dispatch.py:_SANITIZED_REASONS", "api/backups.py:create_backup"], "why": "packing a working set an untracked container may be writing is a mixed capture, so the stopped-id snapshot is refused. It ends nothing: it is no precondition of the start that ends the leftover, and it would pack that container's shutdown save"},
     {"kind": "SnapshotTrigger", "precondition": "backend_unavailable", "code": "unaffected", "why": "SnapshotTrigger never invokes driver.Start, so a start classification cannot arise for it; its own leftover refusal is the untracked_container row"},
 
     {"kind": "ReadFile", "precondition": "instance_running", "code": "unaffected", "why": "the file handlers take no instance / orphan / reservation / driver check at all: they resolve a path under the scratch root and nothing else, so no state outside the path axis changes their answer"},

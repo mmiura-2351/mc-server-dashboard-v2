@@ -38,9 +38,9 @@ that lived in two hand copies of a Go literal.
 Granularity note: a site is ``(module, enclosing qualname, status)``. Two
 references to the same status inside one function are one site; the qualname is
 class-qualified, so ``StartServer.__call__`` and ``StopServer.__call__`` are
-distinct. Only ``servers/application/`` is scanned: ``servers/adapters/
-control_plane.py`` also names every ``CommandStatus``, but that is the wire
-translation building the outcome, not a match on one.
+distinct. Only ``servers/application/`` and the HTTP edge ``servers/api/`` are
+scanned: ``servers/adapters/control_plane.py`` also names every ``CommandStatus``,
+but that is the wire translation building the outcome, not a match on one.
 
 A site can also match a status by the reason ``dispatch_failure`` gives it, as
 the reconciler matches a busy start on ``WORKER_BUSY_REASON`` (issue #3808). So a
@@ -63,7 +63,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT_PATH = _REPO_ROOT / "proto" / "contract" / "command_error_contract.json"
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "mc_server_dashboard_api"
-_APPLICATION = _SRC / "servers" / "application"
+_SERVERS = _SRC / "servers"
+_APPLICATION = _SERVERS / "application"
+# The servers HTTP edge reads a reason constant too (``backups.py`` renders a
+# ``worker_unavailable`` snapshot refusal as a 503), so it is scanned as well.
+_EDGE = _SERVERS / "api"
 
 # Codes that carry no API handling: a success, and the marker for a cell whose
 # precondition determines no emission for that kind (issue #2472).
@@ -118,19 +122,24 @@ def _declared_triples() -> dict[Triple, set[str]]:
 
 
 def _modules() -> list[tuple[str, ast.Module]]:
-    """Every application-layer module, keyed by its path relative to the layer.
+    """Every application-layer and HTTP-edge module, keyed by its path.
 
     ``rglob`` rather than ``glob``: a use case moved into a subpackage would
     otherwise drop out of the scan silently, and a match site nobody scans is a
     match site nobody checks — the drift this module exists to end. A nested module
     keys as ``sub/mod.py``, so the key stays unique and an api entry naming it says
-    where it is.
+    where it is. An edge module keys from ``servers/``, as ``api/backups.py``.
     """
 
-    return [
+    application = [
         (path.relative_to(_APPLICATION).as_posix(), ast.parse(path.read_text()))
         for path in sorted(_APPLICATION.rglob("*.py"))
     ]
+    edge = [
+        (path.relative_to(_SERVERS).as_posix(), ast.parse(path.read_text()))
+        for path in sorted(_EDGE.rglob("*.py"))
+    ]
+    return application + edge
 
 
 def _reason_constants() -> dict[str, str]:
@@ -254,8 +263,8 @@ def test_declared_api_sites_match_the_source() -> None:
 
     undeclared = sorted(scanned - set(declared))
     assert not undeclared, (
-        "these status match sites are in servers/application/ but no "
-        f"contract row declares them: {undeclared}. Add the site to the 'api' "
+        "these status match sites are in servers/application/ or servers/api/ "
+        f"but no contract row declares them: {undeclared}. Add the site to the 'api' "
         "column of the row for the (kind, code) it matches in "
         "proto/contract/command_error_contract.json -- and if there is no such "
         "row, the API is matching a code the Worker never emits for that kind "

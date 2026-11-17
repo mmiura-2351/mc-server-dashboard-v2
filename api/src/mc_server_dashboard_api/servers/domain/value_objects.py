@@ -59,9 +59,9 @@ class CommunityId:
 class WorkerId:
     """A foreign reference to the assigned Worker, by id value only (nullable).
 
-    Set on placement, cleared (``ON DELETE SET NULL``) if the Worker disconnects
-    (FR-WRK-4). Held here as a plain UUID; the servers domain never imports the
-    fleet domain.
+    Set on placement, cleared when a stop releases the server or a failed start is
+    undone; a Worker disconnect keeps it (FR-WRK-4).
+    Held here as a plain UUID; the servers domain never imports the fleet domain.
     """
 
     value: uuid.UUID

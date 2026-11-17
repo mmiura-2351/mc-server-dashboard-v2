@@ -401,7 +401,7 @@ assigned Worker.
 | `desired_state` | text | what the operator wants: `running` / `stopped` (CHECK enum) |
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
-| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; kept when the Worker disconnects, and cleared when a stop releases the server (FR-WRK-4) |
+| `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; kept when the Worker disconnects, and cleared when a stop releases the server or a failed start is undone (FR-WRK-4) |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
@@ -473,7 +473,8 @@ startable.
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,
 set on placement (FR-WRK-3), and cleared when a stop releases the server, so it
-can be re-placed after hydrate (FR-WRK-4). A Worker disconnect does not clear it:
+can be re-placed after hydrate (FR-WRK-4), or when a failed start is undone
+(`StartServer._compensate`, `_unassign`). A Worker disconnect does not clear it:
 the API marks the Worker's servers `observed=unknown` and they stay assigned to
 it. A server whose Worker never comes back is released by an operator stop and
 re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
@@ -481,7 +482,7 @@ re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
 issue #3809).
 The server row survives the Worker; the Worker holds no authoritative state. The
 column is a **plain nullable uuid with no foreign key**: there is no durable `worker`
-table to reference (Section 7), so the API clears it on the stop path, not a DB
+table to reference (Section 7), so the API clears it on those paths, not a DB
 `ON DELETE SET NULL`. Should a
 later design add a `worker` table, the FK (with `ON DELETE SET NULL`) can be
 introduced alongside it without changing this column's semantics.
