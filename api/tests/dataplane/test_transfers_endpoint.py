@@ -10,11 +10,13 @@ length-mismatch uploads never published, and the Content-Length gate.
 from __future__ import annotations
 
 import asyncio
+import bz2
 import gzip
 import io
 import logging
 import lzma
 import os
+import random
 import shutil
 import tarfile
 import tempfile
@@ -63,7 +65,11 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
-from tests.storage.helpers import tar_with_link_member
+from tests.storage.helpers import (
+    BAD_SPARSE_FIELDS,
+    tar_with_a_bad_sparse_field,
+    tar_with_link_member,
+)
 
 _CREDENTIAL = "test-worker-credential"
 
@@ -2789,15 +2795,14 @@ def _tar_gz_cut_inside_its_member(tail: bytes = b"") -> bytes:
     return gzip_header + stream + tail
 
 
-# The trailer cases leave out the end-of-archive marker: the reader then looks for
-# a next header at the end of the compressed stream, which is where the trailer is
-# checked.
+# Without the end-of-archive marker, a reader looks for a next header at the end
+# of the compressed stream, which is where the trailer is checked.
 def _tar_without_end_marker() -> bytes:
     return _tar_bytes({"world/level.dat": _LONG_MEMBER})[: 512 + len(_LONG_MEMBER)]
 
 
-def _tar_gz_with_a_wrong_crc() -> bytes:
-    body = bytearray(gzip.compress(_tar_without_end_marker(), mtime=0))
+def _tar_gz_with_a_wrong_crc(tar: bytes) -> bytes:
+    body = bytearray(gzip.compress(tar, mtime=0))
     body[-8:-4] = bytes(b ^ 0xFF for b in body[-8:-4])  # the trailer's CRC-32
     return bytes(body)
 
@@ -2808,27 +2813,33 @@ def _tar_xz_with_a_damaged_footer() -> bytes:
     return bytes(body)
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        pytest.param(_tar_gz_cut_inside_its_member(), id="EOFError"),
-        # After the cut, a deflate block of the reserved type 3.
-        pytest.param(_tar_gz_cut_inside_its_member(b"\xff"), id="zlib.error"),
-        pytest.param(_tar_gz_with_a_wrong_crc(), id="BadGzipFile"),
-        pytest.param(_tar_xz_with_a_damaged_footer(), id="LZMAError"),
-    ],
-)
-def test_snapshot_whose_compression_breaks_is_refused_and_not_published(
-    tmp_path: Path, body: bytes
-) -> None:
-    # The object backend reads a compressed body with ``tarfile``'s random-access
-    # reader, which lets the decompressor's own error out when it breaks inside a
-    # member rather than a ``TarError``: that used to answer 500 (issue #3779).
-    # The fs backend's stream reader reports the first, second and last as a
-    # ``ReadError`` already; it never checks the gzip trailer, so it publishes
-    # the ``BadGzipFile`` body (issue #3786).
-    storage = _object_storage(tmp_path)
+def _tar_bz2_damaged_inside_its_member() -> bytes:
+    """A tar.bz2 whose last bzip2 block is damaged.
+
+    The incompressible tail spreads the archive over several 100 kB blocks, so a
+    reader opens the archive from the first and meets the damage in the member.
+    """
+
+    member = _LONG_MEMBER + random.Random(3786).randbytes(20 * 1024)
+    body = bytearray(bz2.compress(_tar_bytes({"world/level.dat": member}), 1))
+    body[-30] ^= 0xFF  # in the last block, short of the end-of-stream marker
+    return bytes(body)
+
+
+_NEW_WORLD = _tar_bytes({"world/level.dat": b"new"})
+
+
+def _post_snapshot_over_a_prior(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], body: bytes
+) -> tuple[int, str | None, dict[str, bytes], list[str]]:
+    """POST ``body`` as the snapshot of a server that has one published already.
+
+    Returns the status, the problem reason, the working set hydrated afterwards
+    and the staging left behind.
+    """
+
     client, _ = _setup(tmp_path)
+    storage = make_storage(tmp_path)
     _shared_app.dependency_overrides[get_storage] = lambda: storage
     community, server = _scope()
     c, s = CommunityId(community), ServerId(server)
@@ -2839,10 +2850,92 @@ def test_snapshot_whose_compression_breaks_is_refused_and_not_published(
             _url(community, server, "snapshot"), content=body, headers=_auth()
         )
 
-    assert resp.status_code == 422
-    assert resp.json()["reason"] == "invalid_archive"
-    assert asyncio.run(_hydrate(storage, c, s)) == {"keep.txt": b"prior"}
-    assert asyncio.run(_staging_left(storage, c, s)) == []
+    reason = resp.json().get("reason") if resp.content else None
+    return (
+        resp.status_code,
+        reason,
+        asyncio.run(_hydrate(storage, c, s)),
+        asyncio.run(_staging_left(storage, c, s)),
+    )
+
+
+_REFUSED: tuple[int, str, dict[str, bytes], list[str]] = (
+    422,
+    "invalid_archive",
+    {"keep.txt": b"prior"},
+    [],
+)
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(gzip.compress(_NEW_WORLD), id="tar.gz"),
+        pytest.param(bz2.compress(_NEW_WORLD), id="tar.bz2"),
+        pytest.param(lzma.compress(_NEW_WORLD), id="tar.xz"),
+        pytest.param(_tar_gz_with_a_wrong_crc(_NEW_WORLD), id="tar.gz-bad-crc"),
+        pytest.param(
+            _tar_gz_with_a_wrong_crc(_tar_without_end_marker()),
+            id="tar.gz-bad-crc-no-end-marker",
+        ),
+        pytest.param(_tar_gz_cut_inside_its_member(), id="tar.gz-cut"),
+        # After the cut, a deflate block of the reserved type 3.
+        pytest.param(_tar_gz_cut_inside_its_member(b"\xff"), id="tar.gz-bad-deflate"),
+        pytest.param(_tar_xz_with_a_damaged_footer(), id="tar.xz-bad-footer"),
+        pytest.param(_tar_bz2_damaged_inside_its_member(), id="tar.bz2-damaged"),
+        pytest.param(b"\x1f\x8b\x08", id="gzip-header-cut"),
+    ],
+)
+def test_snapshot_that_is_compressed_is_refused_and_not_published(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], body: bytes
+) -> None:
+    # A snapshot body is a plain tar; the Worker never compresses it (issue
+    # #3786). Both backends used to detect a compression and read through it, so
+    # a decompressor's faults reached this edge: a damaged tar.bz2 answered 500 on
+    # the object backend, a gzip header cut short answered 500 on fs, and a tar.gz
+    # whose trailer is damaged was published. A compressed body, sound or not, is
+    # now refused as the plain tar it is not.
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize("name", ["../x", "/x", "a//b", "a/./b"])
+def test_snapshot_with_an_escaping_or_non_canonical_member_is_refused(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], name: str
+) -> None:
+    # Both backends refuse the member at ingest: fs from its extraction filter
+    # (a ``TarError``), the object backend as the storage ``PathTraversalError``,
+    # which used to answer 500 there (issue #3786).
+    body = _tar_bytes({"world/level.dat": b"new", name: b"x"})
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize(
+    "after", [{}, {"world/level.dat": b"new"}], ids=["first", "after-a-member"]
+)
+@pytest.mark.parametrize("field", list(BAD_SPARSE_FIELDS))
+def test_snapshot_with_a_non_numeric_sparse_field_is_refused_and_not_published(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    after: dict[str, bytes],
+    field: str,
+) -> None:
+    # ``tarfile`` converts a GNU sparse field with a bare ``int()``, so a
+    # non-numeric one escaped both backends' readers as a ``ValueError`` and
+    # answered 500 (issue #3790). A bad header after a good member must not be
+    # taken for the end of the archive, which would publish that member alone.
+    body = tar_with_a_bad_sparse_field(field, after=after)
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
 
 
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(

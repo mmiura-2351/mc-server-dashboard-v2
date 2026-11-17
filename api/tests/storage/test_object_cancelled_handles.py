@@ -152,7 +152,7 @@ _Run = Callable[[Path], Awaitable[object]]
 
 
 async def _member_parts(spool: Path) -> object:
-    return await _archive_member_parts(spool, "a.txt", "r:*").__anext__()
+    return await _archive_member_parts(spool, "a.txt", "r:gz").__anext__()
 
 
 async def _file_first_part(spool: Path) -> object:

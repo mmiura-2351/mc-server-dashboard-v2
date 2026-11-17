@@ -124,6 +124,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
     GzipReadProbe,
+    HeaderCheckedTarInfo,
     archive_read_errors_as_unreadable,
     refuse_unrestorable_member,
 )
@@ -862,11 +863,11 @@ class ObjectStorage(Storage):
             spool = await _spool_stream(stream, ".snapshot.", ".tar")
             try:
                 for member_name, name in await asyncio.to_thread(
-                    _safe_archive_members, spool, "r:*"
+                    _safe_archive_members, spool, "r:"
                 ):
                     await client.upload_multipart(
                         incoming + name,
-                        _archive_member_parts(spool, member_name, "r:*"),
+                        _archive_member_parts(spool, member_name, "r:"),
                     )
             finally:
                 await _discard_spool(spool, raise_fault=False)
@@ -2630,7 +2631,7 @@ async def _tar_stream_from_objects(
 
 
 def _safe_archive_members(
-    spool: Path, mode: Literal["r:*", "r:gz"]
+    spool: Path, mode: Literal["r:", "r:gz"]
 ) -> list[tuple[str, str]]:
     """List the regular-file members of the spooled (tar / tar.gz) archive as
     ``(member name, key name)`` pairs, refusing ``..``/absolute names (the tar-side
@@ -2640,7 +2641,7 @@ def _safe_archive_members(
     without the tar root prefix (:func:`without_tar_root_prefix`)."""
 
     names: list[tuple[str, str]] = []
-    with tarfile.open(str(spool), mode=mode) as tar:
+    with tarfile.open(str(spool), mode=mode, tarinfo=HeaderCheckedTarInfo) as tar:
         for read in tar.getmembers():
             member = without_tar_root_prefix(read)
             if member is None:
@@ -2744,7 +2745,7 @@ class _HandleJobs:
 
 
 async def _archive_member_parts(
-    spool: Path, name: str, mode: Literal["r:*", "r:gz"]
+    spool: Path, name: str, mode: Literal["r:", "r:gz"]
 ) -> AsyncIterator[bytes]:
     """Stream one archive member's bytes in part-sized chunks (bounded memory)."""
 
@@ -2763,7 +2764,7 @@ async def _archive_member_parts(
 
 
 def _open_member(
-    spool: Path, name: str, mode: Literal["r:*", "r:gz"]
+    spool: Path, name: str, mode: Literal["r:", "r:gz"]
 ) -> tuple[tarfile.TarFile, Any]:
     tar = tarfile.open(str(spool), mode=mode)
     member_file = tar.extractfile(name)
@@ -2798,7 +2799,10 @@ async def _archive_file_member_streams(
     """
 
     with archive_read_errors_as_unreadable():
-        tar = await _acquire_off_loop(_close_abandoned, tarfile.open, str(spool), mode)
+        tar = await _acquire_off_loop(
+            _close_abandoned,
+            lambda: tarfile.open(str(spool), mode, tarinfo=HeaderCheckedTarInfo),
+        )
     jobs = _HandleJobs()
     try:
         while True:
