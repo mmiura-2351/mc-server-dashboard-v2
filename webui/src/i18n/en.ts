@@ -809,6 +809,9 @@ export const en = {
   "schedules.runs.outcome.success": "Success",
   "schedules.runs.outcome.failure": "Failure",
   "schedules.runs.outcome.skipped": "Skipped",
+  "schedules.runs.outcome.unknown": "Unknown",
+  "schedules.runs.unknownDetail":
+    "The host did not answer in time. The action may still have run.",
 
   // Files tab (WEBUI_SPEC.md 6.6). One contiguous block to keep merge
   // conflicts with sibling tab PRs minimal.

@@ -746,6 +746,28 @@ describe("ServerSchedulesTab toggle/delete/history", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("worker_unavailable")).toBeInTheDocument();
   });
+
+  it("explains an unknown outcome instead of calling it a failure", async () => {
+    // Issue #3660: the host did not answer in time, so the action may have run.
+    routeGet({
+      runs: [run({ outcome: "unknown", detail: "worker timed out" })],
+    });
+    renderTab(canFor(ALL_CODES));
+
+    await screen.findByText("nightly backup");
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.history") }),
+    );
+
+    const badge = await screen.findByText(t("schedules.runs.outcome.unknown"));
+    expect(badge).toHaveClass("run-unknown");
+    expect(
+      screen.getByText(t("schedules.runs.unknownDetail")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.runs.outcome.failure")),
+    ).not.toBeInTheDocument();
+  });
 });
 
 // Route api.post by path: preview vs. create.

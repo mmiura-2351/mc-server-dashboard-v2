@@ -1469,6 +1469,9 @@ table.data.schedules-runs td {
 .badge.run-skipped {
   color: var(--text-faint);
 }
+.badge.run-unknown {
+  color: var(--amber);
+}
 
 /* ---------- Server detail Plugins tab (issue #1153) ---------- */
 .plugins-notice {

@@ -653,8 +653,10 @@ Notes:
   - A command that has **started** is never interrupted when its expiry passes.
     The per-kind budgets are sized for the work, and the API already treats a
     timeout as "may have been applied": a start or stop keeps its intent and
-    assignment for the reconciler, and a late final-snapshot result releases its
-    held assignment (Section 5.1).
+    assignment for the reconciler, a late final-snapshot result releases its
+    held assignment (Section 5.1), and a scheduled command, stop or restart, or
+    a scheduled start whose start command was sent, records its run as `unknown`
+    rather than `failure` (DATABASE.md Section 8).
   - A **result that arrives late** is credited to nothing. Every dispatch has its
     own `command_id`, and a result whose dispatch the API no longer waits for is
     dropped (Section 3). Only a final snapshot's late result is acted on.
