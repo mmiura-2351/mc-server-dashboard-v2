@@ -227,6 +227,9 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
 from mc_server_dashboard_api.servers.adapters.cronsim_next_run_calculator import (
     CronsimNextRunCalculator,
 )
+from mc_server_dashboard_api.servers.adapters.deleted_server_reclaim import (
+    FleetDeletedServerReclaim,
+)
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
 )
@@ -2433,9 +2436,11 @@ def get_delete_server(
     """Assemble the :class:`DeleteServer` use case (server:delete).
 
     Binds the Storage backup seam so the delete can prune the server's archives and
-    pack its working set into the retained final tar.gz (issue #777), and the
+    pack its working set into the retained final tar.gz (issue #777), the
     fleet tunnel-credential table so the delete forgets the server's Bedrock
-    tunnel credential (issue #1544).
+    tunnel credential (issue #1544), and the fleet control plane so the delete is
+    reported to the connected Workers, which reclaim what they hold for the server
+    (issue #3679).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -2444,6 +2449,10 @@ def get_delete_server(
         backup_store=backup_store,
         lifecycle_lock=get_lifecycle_lock(request),
         bedrock_tunnel=get_bedrock_tunnel_credentials(request),
+        deleted_server_reclaim=FleetDeletedServerReclaim(
+            registry=get_worker_registry(request),
+            control_plane=request.app.state.control_plane,
+        ),
     )
 
 

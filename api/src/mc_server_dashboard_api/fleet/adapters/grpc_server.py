@@ -436,23 +436,6 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     "assignment rebuild failed during registration",
                 )
 
-            # Compute which held servers the Worker advertised no longer exist (issue
-            # #924). Fail-safe: any exception returns an empty list so a DB error
-            # never misclassifies a live server as deleted.
-            unknown_held_ids: list[str] = []
-            if held_ids:
-                try:
-                    existing = await self._state_sink.existing_server_ids(
-                        server_ids=held_ids
-                    )
-                    unknown_held_ids = [sid for sid in held_ids if sid not in existing]
-                except Exception:
-                    _LOG.warning(
-                        "failed to compute unknown held servers; sending empty list",
-                        extra={"worker_id": worker_id.value},
-                        exc_info=True,
-                    )
-
             # Race-free under cooperative scheduling (no await between this check
             # and open_session): a stale session that lost the registry to a newer
             # reconnect during its DB awaits is aborted before it can overwrite the
@@ -472,6 +455,26 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # registry's derived liveness at heartbeat_interval; returns when
             # heartbeats lapse, ending the Session through the normal teardown.
             watchdog = asyncio.ensure_future(self._watch_liveness(worker_id, session))
+            # Compute which held servers the Worker advertised no longer exist (issue
+            # #924). Fail-safe: any exception returns an empty list so a DB error
+            # never misclassifies a live server as deleted. The lookup runs with the
+            # session already open (issue #3679): a delete that commits after the
+            # lookup read its server is reported to every connected Worker, and that
+            # report lands on this session's queue, behind the ack, instead of
+            # finding no session and being lost until the next registration.
+            unknown_held_ids: list[str] = []
+            if held_ids:
+                try:
+                    existing = await self._state_sink.existing_server_ids(
+                        server_ids=held_ids
+                    )
+                    unknown_held_ids = [sid for sid in held_ids if sid not in existing]
+                except Exception:
+                    _LOG.warning(
+                        "failed to compute unknown held servers; sending empty list",
+                        extra={"worker_id": worker_id.value},
+                        exc_info=True,
+                    )
             yield self._register_ack(
                 correlation_id=correlation_id,
                 unknown_held_server_ids=unknown_held_ids,

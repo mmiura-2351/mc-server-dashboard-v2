@@ -105,7 +105,8 @@
     "ListFiles",
     "TunnelDial",
     "OpenBedrockTunnel",
-    "CloseBedrockTunnel"
+    "CloseBedrockTunnel",
+    "ReclaimDeletedServer"
   ],
   "preconditions": [
     {
@@ -618,6 +619,28 @@
     {"kind": "CloseBedrockTunnel", "precondition": "server_properties_unreadable", "code": "unaffected", "why": "Close takes no instance and no working-set check at all: it tears down whatever tunnel this Worker holds for the id"},
     {"kind": "CloseBedrockTunnel", "precondition": "command_expired", "code": "unaffected", "why": "dispatched fire-and-forget: nothing waits for its result, so the API stamps no expires_after on it and it cannot expire"},
     {"kind": "CloseBedrockTunnel", "precondition": "untracked_container", "code": "unaffected", "why": "Close takes no instance and no working-set check at all: it tears down whatever tunnel this Worker holds for the id"},
-    {"kind": "CloseBedrockTunnel", "precondition": "backend_unavailable", "code": "unaffected", "why": "CloseBedrockTunnel never invokes driver.Start, so a start classification cannot arise for it"}
+    {"kind": "CloseBedrockTunnel", "precondition": "backend_unavailable", "code": "unaffected", "why": "CloseBedrockTunnel never invokes driver.Start, so a start classification cannot arise for it"},
+
+    {"kind": "ReclaimDeletedServer", "precondition": "instance_running", "code": "ok", "why": "the answer reports only that the held id was queued for the reclaim (handleReclaimDeletedServer); the background reclaim's reserve() skips a running id and leaves its scratch"},
+    {"kind": "ReclaimDeletedServer", "precondition": "running_working_set_absent", "code": "unaffected", "why": "it answers ok as under instance_running: with the working set gone and no leftover recorded the id is not queued, and a queued id would be skipped as running by the reclaim's reserve()"},
+    {"kind": "ReclaimDeletedServer", "precondition": "instance_stopped", "code": "ok"},
+    {"kind": "ReclaimDeletedServer", "precondition": "working_set_absent", "code": "ok", "why": "the answer every Worker that never held the server gets: the API reports a delete to every connected Worker, and an id this Worker holds no working set and records no leftover for is not queued, so the backend is never asked"},
+    {"kind": "ReclaimDeletedServer", "precondition": "working_set_emptied", "code": "ok", "why": "a dir with no working set is not advertised as held; with no leftover recorded for the id (this fixture records none) the report queues nothing, as a registration is never offered the id, and the dir stays: it holds no world"},
+    {"kind": "ReclaimDeletedServer", "precondition": "command_in_flight", "code": "ok", "why": "the answer reports only that the held id was queued for the reclaim (handleReclaimDeletedServer); the background reclaim's reserve() skips an id another command holds, and the scratch it leaves offers the id again at the next registration"},
+    {"kind": "ReclaimDeletedServer", "precondition": "orphan_pending", "code": "ok", "why": "the answer reports only that the held id was queued for the reclaim (handleReclaimDeletedServer); the background reclaim's reserve() skips an id with a failed-stop orphan and leaves its scratch"},
+    {"kind": "ReclaimDeletedServer", "precondition": "snapshot_reserve_race", "code": "unaffected", "why": "only handleSnapshot reads the running flag outside a reservation; the reclaim decides in reserve() under mu, so there is no window for a start to slip into"},
+    {"kind": "ReclaimDeletedServer", "precondition": "running_snapshot_in_flight", "code": "unaffected", "why": "only handleSnapshot consults the running-snapshot mark; ReclaimDeletedServer answers exactly as under instance_running"},
+    {"kind": "ReclaimDeletedServer", "precondition": "driver_unavailable", "code": "unaffected", "why": "only handleStart and handleRestart resolve a driver from m.drivers; the reclaim resolves none, so an unoffered driver cannot refuse it"},
+    {"kind": "ReclaimDeletedServer", "precondition": "port_conflict", "code": "unaffected", "why": "ReclaimDeletedServer never invokes driver.Start, so a start classification cannot arise for it"},
+    {"kind": "ReclaimDeletedServer", "precondition": "image_missing", "code": "unaffected", "why": "ReclaimDeletedServer never invokes driver.Start, so a start classification cannot arise for it"},
+    {"kind": "ReclaimDeletedServer", "precondition": "missing_path", "code": "unaffected", "why": "ReclaimDeletedServer carries no path; its handler never resolves one, so the path axis is not consulted"},
+    {"kind": "ReclaimDeletedServer", "precondition": "unsafe_path", "code": "unaffected", "why": "ReclaimDeletedServer carries no path; its handler never resolves one, so the path axis is not consulted"},
+    {"kind": "ReclaimDeletedServer", "precondition": "unsafe_server_id", "code": "file_access_denied", "api": "fire_and_forget"},
+    {"kind": "ReclaimDeletedServer", "precondition": "console_line_too_long", "code": "unaffected", "why": "ReclaimDeletedServer carries no console line; only handleServerCommand reads one"},
+    {"kind": "ReclaimDeletedServer", "precondition": "rcon_command_dropped", "code": "unaffected", "why": "ReclaimDeletedServer sends nothing over RCON; only handleServerCommand writes a console line to it"},
+    {"kind": "ReclaimDeletedServer", "precondition": "server_properties_unreadable", "code": "unaffected", "why": "the reclaim removes the scratch without reading server.properties"},
+    {"kind": "ReclaimDeletedServer", "precondition": "command_expired", "code": "unaffected", "why": "dispatched fire-and-forget: nothing waits for its result, so the API stamps no expires_after on it and it cannot expire"},
+    {"kind": "ReclaimDeletedServer", "precondition": "untracked_container", "code": "ok", "why": "the answer reports only that the held id was queued for the reclaim (handleReclaimDeletedServer); the background reclaim asks the driver to end the leftover and keeps the scratch while a container may still run against it (issue #3672)"},
+    {"kind": "ReclaimDeletedServer", "precondition": "backend_unavailable", "code": "unaffected", "why": "ReclaimDeletedServer never invokes driver.Start, so a start classification cannot arise for it"}
   ]
 }

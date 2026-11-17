@@ -73,7 +73,7 @@ func releaseAndDrain(t *testing.T, handler *gateHandler, old *dispatcher) {
 // the drop, for every quick kind: the dropped session's lane discards it as it
 // already discards a capped one.
 func TestQuickCommandQueuedBeforeDropDoesNotRunAfterIt(t *testing.T) {
-	for _, kind := range []string{"ServerCommand", "TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel"} {
+	for _, kind := range []string{"ServerCommand", "TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel", "ReclaimDeletedServer"} {
 		t.Run(kind, func(t *testing.T) {
 			if !isQuickCommand(kind) {
 				t.Fatalf("%s is not a quick command; the table is stale", kind)

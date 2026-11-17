@@ -38,6 +38,10 @@ from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     CPU_ALLOCATION_CONFIG_KEY,
     cpu_allocation_from_config,
 )
+from mc_server_dashboard_api.servers.domain.deleted_server_reclaim import (
+    DeletedServerReclaim,
+    NullDeletedServerReclaim,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     PermissionDeniedError,
@@ -904,6 +908,11 @@ class DeleteServer:
     # #1544), or a stale entry lingers and keeps validating for a gone server.
     # Defaults to a no-op so non-relay construction sites need not wire it.
     bedrock_tunnel: BedrockTunnelCredentials = NullBedrockTunnelCredentials()
+    # Report the committed delete to the connected Workers (issue #3679), so one
+    # that stays connected reclaims the server's leftover container and scratch
+    # instead of keeping them until it next registers. Defaults to a no-op so
+    # construction sites without a control plane need not wire it.
+    deleted_server_reclaim: DeletedServerReclaim = NullDeletedServerReclaim()
 
     async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
         # Hold the per-server lifecycle lock across the at-rest check, the
@@ -972,3 +981,7 @@ class DeleteServer:
         # never re-mint it, and evicting before a failed commit would drop a
         # still-live server's credential. Idempotent when none is held.
         self.bedrock_tunnel.close(server_id)
+        # Only after the commit, for the same reason: a Worker's scratch may be the
+        # latest copy of a server whose delete did not commit. Server ids are minted
+        # once (uuid4) and never reused, so the report cannot reach a later server.
+        await self.deleted_server_reclaim.reclaim(server_id)

@@ -36,6 +36,9 @@ from mc_server_dashboard_api.servers.domain.bedrock_tunnel import (
 from mc_server_dashboard_api.servers.domain.cpu_allocation import (
     CPU_ALLOCATION_CONFIG_KEY,
 )
+from mc_server_dashboard_api.servers.domain.deleted_server_reclaim import (
+    DeletedServerReclaim,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidCpuAllocationError,
@@ -2314,6 +2317,67 @@ async def test_delete_does_not_evict_when_pack_fails() -> None:
         )
     assert server.id in uow.servers.by_id
     assert tunnel.closed == []
+
+
+class _RecordingReclaim(DeletedServerReclaim):
+    """Records each reported delete with whether the row was already gone (#3679)."""
+
+    def __init__(self, uow: FakeUnitOfWork) -> None:
+        self._uow = uow
+        self.reported: list[tuple[ServerId, bool]] = []
+
+    async def reclaim(self, server_id: ServerId) -> None:
+        self.reported.append((server_id, server_id not in self._uow.servers.by_id))
+
+
+async def test_delete_reports_the_committed_delete_to_the_workers() -> None:
+    # A Worker that stays connected reclaims a deleted server's leftovers only
+    # when it is told (issue #3679); it is told once the row is gone, so it never
+    # reclaims for a server whose delete may still fail.
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore()
+    reclaim = _RecordingReclaim(uow)
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    await DeleteServer(uow=uow, backup_store=store, deleted_server_reclaim=reclaim)(
+        community_id=community, server_id=server.id
+    )
+    assert reclaim.reported == [(server.id, True)]
+
+
+async def test_delete_reports_nothing_when_the_pack_fails() -> None:
+    uow = FakeUnitOfWork()
+    store = FakeBackupArchiveStore(pack_fails=True)
+    reclaim = _RecordingReclaim(uow)
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(RuntimeError):
+        await DeleteServer(uow=uow, backup_store=store, deleted_server_reclaim=reclaim)(
+            community_id=community, server_id=server.id
+        )
+    assert reclaim.reported == []
+
+
+async def test_delete_reports_nothing_when_the_commit_fails() -> None:
+    # The scratch a Worker holds is the latest copy of a server whose delete did
+    # not commit, so the report waits for the commit, not for the row delete.
+    class _FailingCommitUoW(FakeUnitOfWork):
+        async def commit(self) -> None:
+            raise RuntimeError("simulated commit failure")
+
+    uow = _FailingCommitUoW()
+    store = FakeBackupArchiveStore()
+    reclaim = _RecordingReclaim(uow)
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    uow.servers.seed(server)
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        await DeleteServer(uow=uow, backup_store=store, deleted_server_reclaim=reclaim)(
+            community_id=community, server_id=server.id
+        )
+    assert reclaim.reported == []
 
 
 async def test_delete_with_backups_keeps_newest_archive_and_prunes_the_rest() -> None:

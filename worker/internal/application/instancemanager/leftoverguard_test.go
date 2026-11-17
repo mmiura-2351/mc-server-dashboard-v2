@@ -3,13 +3,18 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager/goroutineleak"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -21,6 +26,9 @@ type fakeGuard struct {
 	endErr  error
 	busyErr error
 	calls   []string
+	// leftovers are the server ids the driver records a leftover for. Asking is a
+	// plain query, so it is not logged in calls.
+	leftovers map[string]bool
 	// onEnd, when set, runs inside EndLeftovers, so a test can look at the
 	// working set at the moment the leftover is ended.
 	onEnd func()
@@ -47,6 +55,21 @@ func (g *fakeGuard) Busy(ctx context.Context, serverID string) error {
 		return err
 	}
 	return g.busyErr
+}
+
+func (g *fakeGuard) HasLeftovers(serverID string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.leftovers[serverID]
+}
+
+func (g *fakeGuard) recordLeftover(serverID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.leftovers == nil {
+		g.leftovers = map[string]bool{}
+	}
+	g.leftovers[serverID] = true
 }
 
 func (g *fakeGuard) set(endErr, busyErr error) {
@@ -342,6 +365,361 @@ func TestReclaimEndsADeletedServersLeftoversBeforeRemovingTheScratch(t *testing.
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch not reclaimed: stat err = %v", err)
 	}
+}
+
+// A connected Worker reclaims a deleted server when the API reports the delete,
+// without waiting for its next registration (issue #3679). The command hands the
+// id to the same reclaim a registration runs: it ends what the driver left
+// running for the server, with the working set still in place, then removes the
+// hydrate leftovers and the scratch. The reclaim runs in the background, so the
+// test waits for the removal.
+func TestReclaimDeletedServerCommandReclaimsWithoutReconnecting(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	var presentAtEnd atomic.Bool
+	g.onEnd = func() {
+		_, err := os.Stat(dir)
+		presentAtEnd.Store(err == nil)
+	}
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	if !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(dir)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim never removed the scratch dir: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s1 + " " + dir, "busy " + s1}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+	if !presentAtEnd.Load() {
+		t.Fatal("the scratch was gone when the leftover was ended, want it in place")
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("hydrate leftover not reclaimed: stat err = %v", err)
+	}
+}
+
+// Delete reports reclaim single-flight per Worker (issue #3679): a report that
+// arrives while the reclaim runs is queued for it, and the running reclaim takes
+// every queued id in one more pass. So a burst of deletes costs one goroutine and
+// two passes, never one goroutine per report, and no reported id is dropped.
+func TestReclaimDeletedServerReportsDuringAReclaimJoinItsNextPass(t *testing.T) {
+	h := &syncSlogHandler{}
+	m, g, _ := newGuardedManager(t)
+	m.WithLogger(slog.New(h))
+	first := seedScratch(t, m, s1)
+	var later []string
+	for i := range 4 {
+		later = append(later, fmt.Sprintf("53000000-0000-4000-8000-%012d", i))
+	}
+	dirs := []string{first}
+	for _, id := range later {
+		dirs = append(dirs, seedScratch(t, m, id))
+	}
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	g.onEnd = func() {
+		mu.Lock()
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		mu.Unlock()
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}
+	report := func(id string) {
+		t.Helper()
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	report(s1)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first reclaim never asked the driver to end the server's leftovers")
+	}
+	for _, id := range later {
+		report(id)
+	}
+	// A reclaim started per report would be inside the driver beside the first
+	// one by now.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for _, dir := range dirs {
+		for {
+			_, err := os.Stat(dir)
+			if os.IsNotExist(err) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("a reported scratch was never reclaimed: %s: stat err = %v", dir, err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInFlight != 1 {
+		t.Fatalf("%d reclaims ran at once, want 1", maxInFlight)
+	}
+	if passes := logged(h, slog.LevelDebug, reclaimPassMsg); passes != 2 {
+		t.Fatalf("the reclaim made %d passes over the reported ids, want 2", passes)
+	}
+}
+
+// A report that arrives after the Worker's previous reclaim has ended starts a
+// new one (issue #3679). The single-flight flag is released when a reclaim ends;
+// one left set would queue every later report's id for a reclaim that never runs,
+// which is this issue's symptom again for every delete after the first burst.
+func TestReclaimDeletedServerReportAfterAReclaimEndedStartsAnother(t *testing.T) {
+	m, _, _ := newGuardedManager(t)
+	first := seedScratch(t, m, s1)
+	second := seedScratch(t, m, s2)
+	report := func(id string) {
+		t.Helper()
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	report(s1)
+	// Wait for the reclaim to end, not only for s1's scratch to go: a report that
+	// lands before the reclaim's last, empty pass is taken by the same reclaim.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.Lock()
+		running := m.reclaimingReported
+		m.mu.Unlock()
+		_, err := os.Stat(first)
+		if !running && os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the first reclaim never ended: still running = %v, scratch stat err = %v", running, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	report(s2)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(second)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the scratch reported after the first reclaim ended was never reclaimed: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A server that never published anything hydrates to a scratch holding only its
+// generation marker, which the launch guard accepts, so a start the daemon did not
+// answer can leave a container recorded for an id whose scratch holds no working
+// set (issue #3679). A delete report still ends that container and removes the
+// dir: the report reclaims an id the driver records a leftover for, as well as a
+// held one.
+func TestReclaimDeletedServerCommandEndsALeftoverOfAnUnheldScratch(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := filepath.Join(m.scratchDir, s1)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	g.recordLeftover(s1)
+
+	if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"}); !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(dir)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim never removed the marker-only scratch: stat err = %v; guard calls = %v", err, g.callLog())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s1 + " " + dir, "busy " + s1}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+}
+
+// A Worker reclaims on a delete report only an id it holds a working set for:
+// the set its registration advertises, which is all a registration's reclaim is
+// offered (issue #3679). The API reports a delete to every connected Worker, so
+// one that holds nothing for the id does nothing for it, not even ask the driver.
+func TestReclaimDeletedServerCommandLeavesAnIDThisWorkerDoesNotHold(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	held := seedScratch(t, m, s2)
+
+	for _, id := range []string{s1, s2} {
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	// One reclaim takes the reported ids in order, so s2's removal means s1 has
+	// had its turn.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(held)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the held scratch was never reclaimed: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s2 + " " + held, "busy " + s2}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want only the held id's %v", g.callLog(), want)
+	}
+}
+
+// A closed manager starts no reclaim, so it does not answer a delete report as if
+// it had (issue #3679). The scratch stays, and the next registration offers it.
+func TestReclaimDeletedServerCommandRefusedOnAClosedManager(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	m.Close()
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorInternal {
+		t.Fatalf("ReclaimDeletedServer on a closed manager = %+v, want an internal error", res)
+	}
+	if live, stacks := goroutineleak.Settle(0, 200*time.Millisecond); live != 0 {
+		t.Fatalf("a delete report on a closed manager started %d goroutine(s):\n%s", live, stacks)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch stat err = %v, want it kept", err)
+	}
+	if calls := g.callLog(); len(calls) != 0 {
+		t.Fatalf("guard calls = %v, want none", calls)
+	}
+}
+
+// The delete report keeps the reclaim's fencing (issue #3679): a deleted server
+// whose working set a container the Worker does not track may still use keeps its
+// scratch, as at registration (issue #3672), so the next registration offers it
+// again.
+func TestReclaimDeletedServerCommandKeepsAWorkingSetThatMayBeInUse(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	g.set(errLeftover, nil)
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	if !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	// The reclaim runs in the background. It asks the guard while it holds the
+	// id and releases the id last, so both together mean it has finished.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.Lock()
+		held := len(m.reserved)
+		m.mu.Unlock()
+		if len(g.callLog()) > 0 && held == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim never finished: guard calls = %v, reserved ids = %d", g.callLog(), held)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch stat err = %v, want it kept while a container may run against it", err)
+	}
+}
+
+// The delete report's reclaim is the manager's background work, not the lane's
+// (issue #3679): the command answers at once, and Close joins the reclaim it
+// started, as it joins a registration's (issue #2878). A session lane is joined
+// by nothing, so a reclaim run on it could be cut off between its scratch removal
+// and its reservation release.
+func TestReclaimDeletedServerCommandAnswersAtOnceAndCloseJoinsItsReclaim(t *testing.T) {
+	awaitManagerGoroutines(t, 0)
+	h := newBlockingReclaimLogger()
+	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+	// Registered AFTER newManager's Close, so cleanups run it FIRST (see
+	// TestCloseJoinsAnInFlightReclaim).
+	t.Cleanup(h.unpark)
+	dir := seedScratch(t, m, s1)
+
+	answered := make(chan session.CommandResult, 1)
+	go func() {
+		answered <- m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	}()
+	select {
+	case <-h.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reclaim never reached its removal; the log record this test parks on has changed")
+	}
+	select {
+	case res := <-answered:
+		if !res.Success {
+			t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReclaimDeletedServer did not answer while its reclaim was still running; it ran the reclaim on the lane")
+	}
+	// The status dispatcher and the reclaim.
+	awaitManagerGoroutines(t, 2)
+
+	closed := make(chan struct{})
+	go func() { m.Close(); close(closed) }()
+	// The dispatcher is gone, so Close is inside its Wait (see
+	// TestCloseJoinsAnInFlightReclaim).
+	awaitManagerGoroutines(t, 1)
+	select {
+	case <-closed:
+		t.Fatal("Close returned with the reported delete's reclaim parked between its scratch removal and its reservation release")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	h.unpark()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the reclaim it joined had finished")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("the joined reclaim did not remove the scratch dir: stat err = %v", err)
+	}
+	awaitManagerGoroutines(t, 0)
 }
 
 // A deleted server whose working set may still be in use keeps its scratch:
