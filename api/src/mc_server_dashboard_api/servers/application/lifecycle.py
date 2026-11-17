@@ -1048,11 +1048,8 @@ class StartServer:
         # the reconciler redispatches once its grace lapses.
         async with self.uow:
             current = await self.uow.servers.get_by_id(server_id)
-        if (
-            current is None
-            or current.desired_state is not DesiredState.RUNNING
-            or current.assigned_worker_id != worker_id
-            or self.stop_intents.current(server_id) != stop_intent_count
+        if current is None or not self._still_owns(
+            current, worker_id, stop_intent_count
         ):
             raise LifecycleTransitionConflictError(str(server_id.value))
         # No await from here to the enqueue (see above).
@@ -1206,6 +1203,23 @@ class StartServer:
             version=server.mc_version,
             known_key=known_key if isinstance(known_key, str) else None,
             known_source=known_source if isinstance(known_source, str) else None,
+        )
+
+    def _still_owns(
+        self, server: Server, worker_id: WorkerId, stop_intent_count: int
+    ) -> bool:
+        """Whether ``server`` still holds the intent of one start (issue #3739).
+
+        That start placed the server on ``worker_id`` and read
+        ``stop_intent_count`` before its intent existed. An unchanged count means
+        nothing in this process has withdrawn that intent since, and the row shows
+        the intent still in place.
+        """
+
+        return (
+            server.desired_state is DesiredState.RUNNING
+            and server.assigned_worker_id == worker_id
+            and self.stop_intents.current(server.id) == stop_intent_count
         )
 
     async def _compensate(
