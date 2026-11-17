@@ -92,6 +92,22 @@ func awaitAnswer(t *testing.T, done <-chan session.CommandResult) session.Comman
 	}
 }
 
+// awaitCompleted fails the test unless a snapshot command none of whose calls is
+// held answers within 120 s. It runs every phase, so its answer waits on
+// filesystem work, the marker stamp's fsyncs among it: the I/O bound (#3637)
+// fits that, and awaitAnswer's 5 s for an answer given while the body is held
+// does not (issue #3770).
+func awaitCompleted(t *testing.T, done <-chan session.CommandResult) session.CommandResult {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(120 * time.Second):
+		t.Fatal("the snapshot command, with no call held, did not answer within 120s")
+		return session.CommandResult{}
+	}
+}
+
 // awaitFinished fails the test unless c receives within bound. It waits for a
 // held call's caller to finish after the test released it, which awaitEnter's 2 s
 // arrival bound does not fit (issue #3685): a finish behind filesystem work gets
@@ -327,7 +343,7 @@ func TestRunningSnapshotAnswersWhileTheSpoolUnlinkIsStuck(t *testing.T) {
 func TestRunningSnapshotRestoreDoesNotReopenFromTheWorkingDir(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok", failLines: map[string]error{"save-on": errors.New("save-on boom")}}}
 	m := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
-	res := awaitAnswer(t, goHandle(m, snapshotCmd()))
+	res := awaitCompleted(t, goHandle(m, snapshotCmd()))
 	if !res.Success {
 		t.Fatalf("SnapshotTrigger = %+v, want success", res)
 	}
@@ -440,7 +456,7 @@ func TestRunningSnapshotMarkCoversTheCommandsSaveOnRecovery(t *testing.T) {
 	dialHeld.unblock()
 	assertFailed(t, awaitAnswer(t, first))
 	awaitFinished(t, released, 10*time.Second) // a fake redial and save-on, no files
-	if res := awaitAnswer(t, goHandle(m, snapshotCmd())); !res.Success {
+	if res := awaitCompleted(t, goHandle(m, snapshotCmd())); !res.Success {
 		t.Fatalf("SnapshotTrigger once the recovery finished = %+v, want it admitted", res)
 	}
 }
