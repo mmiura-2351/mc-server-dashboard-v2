@@ -58,6 +58,12 @@ _BCRYPT_MAX_BYTES = 72
 # raises the same VerificationError for every other failure, such as running out
 # of memory or threads, so the message is the only thing that tells them apart.
 # A message missing here is treated as a server failure (#3749).
+#
+# A known limit (#3762): a corrupt hash whose cost parameters are in range but
+# too large to allocate (e.g. m=4194304, 4 GiB) fails with "Memory allocation
+# error", exactly as a host out of memory does, so that account answers 503 with
+# an ERROR rather than 401 with a WARNING. That is the safe direction: a
+# password is never refused, or counted towards a lockout, unjudged.
 _MALFORMED_HASH_ERRORS = frozenset(
     {
         "Decoding failed",  # ARGON2_DECODING_FAIL

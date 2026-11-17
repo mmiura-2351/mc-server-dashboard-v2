@@ -97,6 +97,11 @@ async def test_argon2_verify_returns_false_on_a_wrong_password(
         pytest.param(_argon2_hash(params="m=1,t=3,p=4"), id="memory-too-small"),
         pytest.param(_argon2_hash(params="m=65536,t=0,p=4"), id="time-too-small"),
         pytest.param(_argon2_hash(params="m=65536,t=3,p=0"), id="too-few-lanes"),
+        # One lane past libargon2's maximum, with the 8 KiB a lane needs, so the
+        # lane check is the one that fails, before any allocation (#3762).
+        pytest.param(
+            _argon2_hash(params="m=134217728,t=3,p=16777216"), id="too-many-lanes"
+        ),
         pytest.param(_argon2_hash(params="m=8589934592,t=3,p=4"), id="memory-overflow"),
         # argon2-cffi refuses a non-ASCII hash before libargon2 sees it.
         pytest.param(_argon2_hash(salt="MpDmDyRnsUyW+VHLyrjk3é"), id="non-ascii"),
