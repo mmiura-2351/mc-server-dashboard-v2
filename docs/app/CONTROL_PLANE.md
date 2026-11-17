@@ -501,6 +501,15 @@ capabilities. The control plane keeps **no** cross-stream session state —
 each connect is a clean registration, matching the stateless, replaceable nature
 of Workers (REQUIREMENTS.md Section 5.1, FR-WRK-4). The API's record of desired
 state is authoritative and drives any catch-up commands after a reconnect.
+For the same reason, when a stream ends the Worker discards every command of
+that session still waiting in a server's order, of every kind, including
+`ServerCommand` and the tunnel commands that skip the cap. A command already
+executing is not interrupted by the lane, but its handler sees the session's
+context cancelled. An `OpenBedrockTunnel` or `CloseBedrockTunnel` that has not
+yet reached the tunneler then does nothing, and a step bound to that context,
+such as a `TunnelDial`'s dial, is cut short. A discarded command never runs after the
+reconnect, so a stale `OpenBedrockTunnel` or `CloseBedrockTunnel` cannot undo
+one the new session sent (issue #3658).
 
 **Teardown.** When a `Session` ends, the API fails the Worker's in-flight
 commands, marks the Worker offline, and marks its servers' observed state
