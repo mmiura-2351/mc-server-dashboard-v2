@@ -2978,12 +2978,21 @@ class _ObjectWorkingSetView(WorkingSetView):
         return self._stream_file(sub, rel_path)
 
     async def _stream_file(self, sub: str, rel_path: RelPath) -> AsyncIterator[bytes]:
-        assert self._snapshot_prefix is not None
-        async with shielded_exit(self._storage._client_factory()) as client:
-            key = self._snapshot_prefix + sub
-            if await client.head_object(key) is None:
-                raise NotFoundError(f"file not found: {rel_path.value}")
-            # Closed before the view's lease can go on its exit (issue #3655).
-            async with aclosing(await client.get_object(key)) as body:
-                async for chunk in body:
-                    yield chunk
+        # The stream takes a lease of its own on its first iteration, as the fs
+        # view's does (issue #3618): a stream left open past the view's exit would
+        # otherwise read a prefix nothing leases (issue #3670). A stream opened
+        # but never iterated holds none. The lease is released after the body and
+        # the client are closed, so nothing this stream opened outlives it (#3655).
+        prefix = self._snapshot_prefix
+        assert prefix is not None
+        self._storage._acquire_lease(prefix)
+        try:
+            async with shielded_exit(self._storage._client_factory()) as client:
+                key = prefix + sub
+                if await client.head_object(key) is None:
+                    raise NotFoundError(f"file not found: {rel_path.value}")
+                async with aclosing(await client.get_object(key)) as body:
+                    async for chunk in body:
+                        yield chunk
+        finally:
+            self._storage._release_lease(prefix)

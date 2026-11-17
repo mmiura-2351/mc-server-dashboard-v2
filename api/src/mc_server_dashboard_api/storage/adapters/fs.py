@@ -3737,6 +3737,46 @@ def _size_of_readable(path: Path, not_found: str) -> int:
         return os.fstat(handle.fileno()).st_size
 
 
+class _OffLoopReader:
+    """A file read by executor jobs, then closed (issue #3654).
+
+    A cancel during a job's await does not stop the job's thread, which holds the
+    buffered reader's lock while it reads or seeks. Closing the file then waits for
+    that lock, so the cancel would wait for the job too. So each job is awaited
+    shielded, and a caller cancelled during one returns at once: the job's
+    completion closes the file instead, and :meth:`close` leaves it to that job.
+    ``closing`` is what the close closes: the handle, or a
+    :class:`_ClosedThenReleased` that releases what it holds once the handle is
+    closed.
+    """
+
+    def __init__(self, closing: _Closable) -> None:
+        self._closing = closing
+        self._abandoned = False
+
+    async def run(self, fn: Callable[..., _R], *args: Any) -> _R:
+        job = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+        try:
+            return await asyncio.shield(job)
+        except asyncio.CancelledError:
+            # The cancelled caller no longer observes the job's fault, so it is
+            # marked retrieved before the close (issue #3584).
+            job.add_done_callback(
+                functools.partial(
+                    _release_after_read,
+                    functools.partial(_close_abandoned, self._closing),
+                )
+            )
+            self._abandoned = True
+            raise
+
+    async def close(self) -> None:
+        """Close the file and wait for it, unless a cancelled job closes it."""
+
+        if not self._abandoned:
+            await _close_off_loop(self._closing)
+
+
 def _file_stream(
     path: Path, byte_range: tuple[int, int] | None = None, *, not_found: str
 ) -> AsyncIterator[bytes]:
@@ -3754,26 +3794,30 @@ def _file_stream(
     ``byte_range`` is an inclusive ``(first, last)`` pair: the handle seeks to
     ``first`` and yields exactly ``last - first + 1`` bytes, so serving the tail
     of a multi-GB archive never reads the head (issue #2372).
+
+    A caller cancelled during a seek or read returns at once, and the job's
+    completion closes the handle (issue #3654).
     """
 
     async def _gen() -> AsyncIterator[bytes]:
         handle = await _open_readable(path, not_found)
+        reader = _OffLoopReader(handle)
         try:
             remaining = None
             if byte_range is not None:
                 first, last = byte_range
-                await asyncio.to_thread(handle.seek, first)
+                await reader.run(handle.seek, first)
                 remaining = last - first + 1
             while remaining is None or remaining > 0:
                 want = _CHUNK if remaining is None else min(_CHUNK, remaining)
-                chunk = await asyncio.to_thread(handle.read, want)
+                chunk = await reader.run(handle.read, want)
                 if not chunk:
                     return
                 if remaining is not None:
                     remaining -= len(chunk)
                 yield chunk
         finally:
-            await _close_off_loop(handle)
+            await reader.close()
 
     return _gen()
 
@@ -3789,7 +3833,9 @@ def _leased_file_stream(
     but never consumed never pins a snapshot (mirroring :func:`_tar_stream`). The
     lease is released exactly once, once the handle's close has finished: when the
     stream finishes, is closed early, or raises. A caller cancelled during the
-    close leaves the close running, and the lease with it (issue #3618).
+    close leaves the close running, and the lease with it (issue #3618). A caller
+    cancelled during a read returns at once, and the read's completion closes the
+    handle and then releases the lease (issue #3654).
 
     The open IS the existence check (issue #2391, the shape :func:`_file_stream`
     took in #2341): the lease protects the snapshot DIRECTORY, not the files in
@@ -3804,14 +3850,15 @@ def _leased_file_stream(
 
     async def _gen() -> AsyncIterator[bytes]:
         handle, on_close = await open_source()
+        reader = _OffLoopReader(_ClosedThenReleased(handle, on_close))
         try:
             while True:
-                chunk = await asyncio.to_thread(handle.read, _CHUNK)
+                chunk = await reader.run(handle.read, _CHUNK)
                 if not chunk:
                     return
                 yield chunk
         finally:
-            await _close_off_loop(_ClosedThenReleased(handle, on_close))
+            await reader.close()
 
     return _gen()
 
