@@ -95,6 +95,22 @@ environment is set —
 `MCD_E2E_STUB_GEYSER_IMAGE` (run via `make bedrock-e2e` rather than by hand —
 see that section).
 
+### Test tmp dir
+
+The `internal/application/instancemanager` tests set `TMPDIR`, and with it
+every `t.TempDir()`, to `/dev/shm` when that is a writable tmpfs with at least
+1 GiB free (issue #3783), as the api suite does
+([`../api/README.md`](../api/README.md), Test tmp dir). They fsync for real,
+and on a disk under load one fsync can stall for seconds; on a tmpfs it does not
+wait on the disk. Without such a `/dev/shm` the default tmp dir is kept.
+`MCSD_TEST_TMPDIR=<dir>` overrides both, e.g. `MCSD_TEST_TMPDIR=/tmp` to run on
+disk. The package prints the root in use (`tmp root: ...`), which `go test`
+shows with `-v` or when the package fails.
+
+Each test's temp dir is removed when the test ends, so a run leaves nothing in
+`/dev/shm`, except when the test binary is killed, for example by the
+`go test` timeout.
+
 ## Cross-language data-plane e2e
 
 `test/e2e/` drives the **real** Go data-plane client against a **real** running
