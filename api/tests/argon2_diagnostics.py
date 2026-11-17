@@ -138,6 +138,7 @@ async def log_in_seeded(
 ) -> LoginResult:
     """Log ``user`` in with its correct ``password``; on a refusal, fail with
     :func:`argon2_mismatch_report` over the hash read back from the database."""
+    __tracebackhide__ = True  # the failure points at the test's own login line
     try:
         return await login(username=user.username.value, password=password, ip=ip)
     except InvalidCredentialsError as exc:
