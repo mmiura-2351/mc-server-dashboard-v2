@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import logging
 import pathlib
 import re
 import uuid
@@ -948,6 +949,32 @@ async def test_the_worker_credential_keeps_the_routes_limit(
 
     assert await _file_write(live_app, _bearer("w-secret")) == _ROUTE_LIMIT
     assert await _file_write(live_app, _bearer("w-secreT")) == _CREDENTIAL_REQUIRED
+
+
+async def test_an_unencodable_worker_credential_still_lets_a_user_token_through(
+    live_app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A configured Worker credential with no UTF-8 encoding (a lone surrogate, as
+    # an undecodable environment byte becomes) is simply not the presented
+    # token: the check goes on to the user token, and logs no failure (#3695).
+    monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: "\udcff")
+    user = make_user()
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    tokens = FakeTokenService()
+    _authenticate_with(
+        monkeypatch, live_app, AuthenticateRequest(uow=uow, tokens=tokens)
+    )
+
+    with caplog.at_level(logging.ERROR, logger=dependencies.__name__):
+        refusal = await _file_write(
+            live_app, _bearer(tokens.issue_access_token(user.id))
+        )
+
+    assert refusal == _ROUTE_LIMIT
+    assert [r for r in caplog.records if r.name == dependencies.__name__] == []
 
 
 # --- the wiring: every route ----------------------------------------------------
