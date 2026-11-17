@@ -650,9 +650,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("applying…" while the
-  reconciler converges), worker id, port. A server at rest under a stopped
-  intent (observed stopped, crashed or unknown) has converged and shows no
-  hint; the dashboard rows mark drift by the same rule.
+  reconciler converges), worker id, port. No hint shows for a server at rest
+  under a stopped intent (observed stopped, crashed or unknown), whether or not
+  a Worker is still assigned; the dashboard rows mark drift by the same rule.
 - Crash banner: while crashed, the `detail`, a guidance line with a link to the
   Console tab, and — keyed on the status event's `reason` — the Forge install
   diagnostics. The guidance line follows the desired state. Under a running
