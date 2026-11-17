@@ -1437,11 +1437,15 @@ class StopServer:
                     # Abort before dispatch or the placement-load decrement so the
                     # lost race does not double-decrement the count (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
-                await self.uow.commit()
-                # Withdrawn: bump before anything can await (issue #3739). A start
-                # of this intent that has not sent yet sees it; one that has is
-                # ahead of the stop sent below.
-                self.stop_intents.bump(server_id)
+                # Withdrawn: bump as the commit returns, before anything else can
+                # await (issue #3739). A start of this intent that has not sent yet
+                # sees it; one that has is ahead of the stop sent below. Bump when
+                # the commit raises too: it may have landed, and then no stop is
+                # sent at all.
+                try:
+                    await self.uow.commit()
+                finally:
+                    self.stop_intents.bump(server_id)
 
         if owed == "redispatch_stop":
             # The same replay the reconciler sends, with the operator's ``force``.
@@ -2439,12 +2443,15 @@ class StopServersAssignedToWorker:
             for server in assigned:
                 if await _mark_stopped(self.uow, server, at=self.clock.now()):
                     stopped.append(server.id)
-            await self.uow.commit()
             # Withdrawn, as in ``StopServer`` (issue #3739): a start of one of these
             # intents that has not sent yet sees it, and one that has is ahead of
-            # the stop the reconciler sends.
-            for server_id in stopped:
-                self.stop_intents.bump(server_id)
+            # the stop the reconciler sends. A commit that raises may have landed,
+            # so it bumps too.
+            try:
+                await self.uow.commit()
+            finally:
+                for server_id in stopped:
+                    self.stop_intents.bump(server_id)
         return stopped
 
 

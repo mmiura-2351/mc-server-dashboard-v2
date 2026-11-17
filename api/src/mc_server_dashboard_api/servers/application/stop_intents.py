@@ -24,15 +24,25 @@ A bump follows the commit, never precedes it. A start that re-sends an intent
 someone else committed reads the count while a stop of that intent may already
 be past its own read and waiting on its write. A bump made before that write
 would land before the start read the count, and the stop could then be enqueued
-ahead of the start unseen.
+ahead of the start unseen. A stop or drain bumps when its commit raises, too: the
+commit may have landed (a lost response, or a client disconnect cancelling the
+request at that await), and then no stop is sent at all.
 
-The writes that bump: the operator stop's and the drain's ``running -> stopped``
-flip, and a failed start's or placement's revert (``_compensate``,
-``_unassign``). A revert sends no stop, so a start already enqueued when one
-lands is not caught; a revert should not touch an intent that is not its own
-(issue #3741). The later releases of an already stopped row (the final-snapshot
-clears, ``redispatch_stop``, ``clear_stale_assignment``) do not bump: the flip
-that made the row stopped already did.
+What this does not cover is a commit still in flight when a start compares. The
+start goes out, and the bump comes after it. If the commit then returns, the stop
+is sent behind the start and stops it for real. If the commit lands but raises,
+or the write was a drain, no stop follows the start. The reconciler sends one
+once the Worker reports the server running. A stop retried before that report
+finds ``observed`` still at rest, so it only releases the row, and that release
+happens under the instance that is launching (issue #3766).
+
+The writes that bump: a stop's and a drain's ``running -> stopped`` flip, and a
+failed start's or placement's revert (``_compensate``, ``_unassign``). A revert
+sends no stop, so a start already enqueued when one lands is not caught; a revert
+should not touch an intent that is not its own (issue #3741). The later releases
+of an already stopped row (the final-snapshot clears, ``redispatch_stop``,
+``clear_stale_assignment``) do not bump: the flip that made the row stopped
+already did.
 
 The value a start reads also identifies its intent: an unchanged count means no
 write has withdrawn the intent since. A later check can use it to decide whether
