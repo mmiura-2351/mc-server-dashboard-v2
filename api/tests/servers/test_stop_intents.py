@@ -851,6 +851,14 @@ def _seeded(kind: str) -> _World:
     return world
 
 
+async def _either(task: asyncio.Task[Server], event: asyncio.Event) -> None:
+    """Wait for ``event``, or for ``task`` to end first if it never gets there."""
+
+    waiter = asyncio.create_task(event.wait())
+    await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+    waiter.cancel()
+
+
 async def _fails(world: _World, kind: str) -> None:
     """Run the start or the placement, whose hydrate fails, and expect that failure."""
 
@@ -1021,9 +1029,7 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
     await world.stop()
     newer = asyncio.create_task(world.start())
     assert isinstance(world.lock, _ExclusiveLock)
-    waited = asyncio.create_task(world.lock.waited.wait())
-    await asyncio.wait({newer, waited}, return_when=asyncio.FIRST_COMPLETED)
-    waited.cancel()
+    await _either(newer, world.lock.waited)
     write.set()
     await f
     await newer
@@ -1063,9 +1069,9 @@ async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
     f = asyncio.create_task(_fails(world, kind))
     await world.repo.flip_paused.wait()
     newer = asyncio.create_task(world.start() if kind == "start" else world.place())
-    await lock.waited.wait()
+    await _either(newer, lock.waited)
     write.set()
-    await newer_hydrating.wait()
+    await _either(newer, newer_hydrating)
     newer_hydrates.set()
     await f
     await newer
