@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import {
   afterEach,
   beforeEach,
@@ -40,7 +40,6 @@ function renderLog() {
       <ForgeInstallLog communityId="c1" serverId="s1" />
     </QueryClientProvider>,
   );
-  return client;
 }
 
 function open() {
@@ -204,33 +203,5 @@ describe("ForgeInstallLog scroll position (#3285)", () => {
 
     const view = await screen.findByRole("log");
     expect(view.scrollTop).toBe(50 * LINE_PX);
-  });
-
-  it("follows new lines on a refresh while it is at the end", async () => {
-    mockApi.get.mockResolvedValue(logLines(50));
-    const client = renderLog();
-    open();
-    const view = await screen.findByRole("log");
-
-    mockApi.get.mockResolvedValue(logLines(60));
-    await act(() => client.invalidateQueries());
-    await screen.findByText(/line-59/);
-
-    expect(view.scrollTop).toBe(60 * LINE_PX);
-  });
-
-  it("keeps the operator's position on a refresh once they scrolled up", async () => {
-    mockApi.get.mockResolvedValue(logLines(50));
-    const client = renderLog();
-    open();
-    const view = await screen.findByRole("log");
-
-    view.scrollTop = 100;
-    fireEvent.scroll(view);
-    mockApi.get.mockResolvedValue(logLines(60));
-    await act(() => client.invalidateQueries());
-    await screen.findByText(/line-59/);
-
-    expect(view.scrollTop).toBe(100);
   });
 });

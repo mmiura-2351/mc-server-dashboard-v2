@@ -696,8 +696,8 @@ function StatePill({ state }: { state: ObservedState }) {
 
 // The desired/observed drift affordance for a list row (issue #2443). Mirrors
 // the detail page header's rule and string exactly (ServerDetailPage's
-// `Header`): the reconciler has not converged on the intent (`converging`), so
-// show an "applying…" hint. Without it a pending intent is invisible on the
+// `Header`, `converging`): until the observed state reaches the intent, show
+// an "applying…" hint. Without it a pending intent is invisible on the
 // list — e.g. a stop whose dispatch failed leaves desired=stopped while the
 // process keeps running, yet the row would otherwise show only a green pill.
 // The mark rides on the row wherever the observed state's bucket passes the

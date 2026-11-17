@@ -351,8 +351,8 @@ function Header({
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
-  // The reconciler has not yet converged on the intent; show an applying
-  // hint (WEBUI_SPEC.md 6.4).
+  // Show an applying hint until the observed state reaches the intent, which
+  // a stopped intent does at rest (WEBUI_SPEC.md 6.4).
   const drifting = converging(state, server.desired_state);
 
   return (

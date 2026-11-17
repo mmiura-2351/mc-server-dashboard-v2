@@ -664,8 +664,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   `forge_install_out_of_memory` and `forge_install_java_incompatible` each add
   a specific, localised explanation of what to change. Any `forge_install_*` reason adds a **View install log**
   toggle (hidden without `file:read`) that reads `logs/forge-install.log`
-  through the files API on demand and shows its last 200 lines, opened at the
-  end; a refresh keeps following the end unless the operator has scrolled up. The files API
+  through the files API on demand and shows its last 200 lines, opened at the end. The files API
   serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
   under a running intent is neither, so until it is stopped the viewer says to
   stop it first (409 `server_unsettled`); a log that was never written (404)

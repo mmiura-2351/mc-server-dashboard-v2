@@ -139,30 +139,22 @@ function InstallLogPanel({
 }
 
 /**
- * The tail itself, opened at its end, where the failure is (#3285). A refresh
- * of the query (the default refetch on window focus) keeps following the end,
- * unless the operator has scrolled up to read: then their position stands.
+ * The tail itself, opened at its end, where the failure is (#3285). It scrolls
+ * there once, on mount: the log of a finished install does not grow.
  */
 function InstallLogView({ text }: { text: string }) {
   const ref = useRef<HTMLPreElement>(null);
-  const atEnd = useRef(true);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `text` drives the scroll; re-run on every new tail.
   useLayoutEffect(() => {
-    if (atEnd.current && ref.current !== null) {
+    if (ref.current !== null) {
       ref.current.scrollTop = ref.current.scrollHeight;
     }
-  }, [text]);
+  }, []);
   return (
     <pre
       ref={ref}
       className="log-view install-log-view"
       role="log"
       aria-label={t("serverDetail.installLog.label")}
-      onScroll={(event) => {
-        const view = event.currentTarget;
-        atEnd.current =
-          view.scrollHeight - view.scrollTop - view.clientHeight <= 1;
-      }}
     >
       {text}
     </pre>

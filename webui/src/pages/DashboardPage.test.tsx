@@ -1296,24 +1296,27 @@ describe("DashboardPage desired/observed drift (issue #2443)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not mark a row that crashed under a stopped intent, which is at rest (#3285)", async () => {
-    mockApi.get.mockResolvedValue([
-      server({
-        observed_state: "crashed",
-        desired_state: "stopped",
-        assigned_worker_id: null,
-      }),
-    ]);
-    renderPage();
+  it.each([null, "worker-a"])(
+    "does not mark a row that crashed under a stopped intent, which is at rest, Worker %s (#3285)",
+    async (worker) => {
+      mockApi.get.mockResolvedValue([
+        server({
+          observed_state: "crashed",
+          desired_state: "stopped",
+          assigned_worker_id: worker,
+        }),
+      ]);
+      renderPage();
 
-    await screen.findByText("survival");
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(
-      screen.queryByText(t("serverDetail.converging")),
-    ).not.toBeInTheDocument();
-  });
+      await screen.findByText("survival");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(
+        screen.queryByText(t("serverDetail.converging")),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("marks a drifting row in the table view too", async () => {
     mockApi.get.mockResolvedValue([
