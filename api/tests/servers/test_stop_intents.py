@@ -263,17 +263,21 @@ class _ExclusiveLock(LifecycleLock):
 
     While ``busy`` is set, ``hold`` gives up at once, as the advisory lock does
     once another holder has kept it past its bounded wait: a backup upload or
-    delete, a prune, the integrity sweep.
+    delete, a prune, the integrity sweep. ``waited`` is set once a ``hold`` finds
+    the lock taken.
     """
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self.busy = False
+        self.waited = asyncio.Event()
 
     @contextlib.asynccontextmanager
     async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
         if self.busy:
             raise ServerBusyError(str(server_id.value))
+        if self._lock.locked():
+            self.waited.set()
         async with self._lock:
             yield
 
@@ -898,6 +902,11 @@ def _intent_lock(world: _World) -> _IntentLock:
     return world.intent_lock
 
 
+def _lifecycle_lock(world: _World) -> _ExclusiveLock:
+    assert isinstance(world.lock, _ExclusiveLock)
+    return world.lock
+
+
 class _Holder:
     """Holds a world's start-intent lock, as another start's commit would."""
 
@@ -923,12 +932,17 @@ class _Holder:
         await self._task
 
 
-async def _either(task: asyncio.Task[Any], event: asyncio.Event) -> None:
-    """Wait for ``event``, or for ``task`` to end first if it never gets there."""
+async def _either(task: asyncio.Task[Any], *events: asyncio.Event) -> None:
+    """Wait for one of ``events``, or for ``task`` to end first.
 
-    waiter = asyncio.create_task(event.wait())
-    await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
-    waiter.cancel()
+    A test waits for the step it expects next, and also for the steps that a
+    broken ordering takes instead, so that it fails rather than hangs.
+    """
+
+    waiters = {asyncio.create_task(event.wait()) for event in events}
+    await asyncio.wait({task, *waiters}, return_when=asyncio.FIRST_COMPLETED)
+    for waiter in waiters:
+        waiter.cancel()
 
 
 async def _fails(world: _World, kind: str, uow: FakeUnitOfWork | None = None) -> None:
@@ -1104,7 +1118,7 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
     await world.repo.flip_paused.wait()
     await world.stop()
     newer = asyncio.create_task(world.start())
-    await _either(newer, _intent_lock(world).waited)
+    await _either(newer, _intent_lock(world).waited, _lifecycle_lock(world).waited)
     write.set()
     await f
     await newer
@@ -1142,7 +1156,7 @@ async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
     f = asyncio.create_task(_fails(world, kind, revert))
     await revert.landed.wait()
     newer = asyncio.create_task(world.start() if kind == "start" else world.place())
-    await _either(newer, lock.waited)
+    await _either(newer, lock.waited, _lifecycle_lock(world).waited, newer_hydrating)
     revert.returns.set()
     await _either(newer, newer_hydrating)
     newer_hydrates.set()
@@ -1224,8 +1238,7 @@ async def test_a_revert_does_not_wait_behind_an_unrelated_lifecycle_lock_holder(
     # own intent does not take it, so the revert still happens, and the caller
     # sees F's own failure.
     world = _seeded(kind)
-    lock = world.lock
-    assert isinstance(lock, _ExclusiveLock)
+    lock = _lifecycle_lock(world)
 
     async def fail_while_the_lifecycle_lock_is_busy() -> CommandOutcome:
         lock.busy = True
