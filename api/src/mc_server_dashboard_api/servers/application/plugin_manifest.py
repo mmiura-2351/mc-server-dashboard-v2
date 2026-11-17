@@ -25,8 +25,9 @@ NeoForge mods, so each family tries both of its descriptors.)
 
 Robustness contract:
 
-* Bytes that do not open as a zip, carry too many entries, or decompress past
-  the size cap raise :class:`InvalidModJarError`.
+* Bytes that do not open as a zip, do not read back as one (a damaged,
+  encrypted or truncated member, a corrupt directory entry), carry too many
+  entries, or decompress past the size cap raise :class:`InvalidModJarError`.
 * A readable zip with no recognized manifest -- or a garbled/identity-less one --
   returns :meth:`ParsedManifest.empty` rather than raising. The install still
   succeeds (the loader is known from the server type); the jar simply carries no

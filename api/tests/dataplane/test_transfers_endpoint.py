@@ -2824,7 +2824,9 @@ def test_snapshot_whose_compression_breaks_is_refused_and_not_published(
     # The object backend reads a compressed body with ``tarfile``'s random-access
     # reader, which lets the decompressor's own error out when it breaks inside a
     # member rather than a ``TarError``: that used to answer 500 (issue #3779).
-    # The fs backend's stream reader reports each as a ``ReadError`` already.
+    # The fs backend's stream reader reports the first, second and last as a
+    # ``ReadError`` already; it never checks the gzip trailer, so it publishes
+    # the ``BadGzipFile`` body (issue #3786).
     storage = _object_storage(tmp_path)
     client, _ = _setup(tmp_path)
     _shared_app.dependency_overrides[get_storage] = lambda: storage

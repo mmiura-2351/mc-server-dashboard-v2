@@ -66,6 +66,13 @@ def _damaged_manifest(method: int) -> bytes:
     return bytes(jar)
 
 
+def _manifest_with_a_bad_local_header() -> bytes:
+    """A jar whose manifest's local header has lost its signature."""
+    jar = bytearray(_manifest_jar())
+    jar[0:4] = b"XXXX"  # the manifest's local header is the jar's first bytes
+    return bytes(jar)
+
+
 def _encrypted_manifest() -> bytes:
     """A jar whose manifest is flagged encrypted (general-purpose bit 0)."""
     jar = bytearray(_manifest_jar())
@@ -586,12 +593,13 @@ class TestInvalidJar:
         with pytest.raises(InvalidModJarError):
             parse_manifest(b"", server_type="fabric")
 
-    # Each jar opens as a zip, but ``zipfile`` raises something other than
-    # ``BadZipFile`` reading it back (issue #3779): the class each one used to
-    # escape as is in its id.
+    # Each jar passes ``is_zipfile`` but does not read back (issue #3779): the
+    # class ``zipfile`` raises for it is in its id. All but ``BadZipFile`` used
+    # to escape.
     @pytest.mark.parametrize(
         "jar",
         [
+            pytest.param(_manifest_with_a_bad_local_header(), id="BadZipFile"),
             pytest.param(_damaged_manifest(zipfile.ZIP_DEFLATED), id="zlib.error"),
             pytest.param(_damaged_manifest(zipfile.ZIP_BZIP2), id="OSError-bzip2"),
             pytest.param(_damaged_manifest(zipfile.ZIP_LZMA), id="LZMAError"),
