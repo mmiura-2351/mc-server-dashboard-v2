@@ -772,6 +772,10 @@ func TestStopDuringTheInstallRetrysGateWaitLeavesArtifactsUntouched(t *testing.T
 		// arrives, then the container exits.
 		go func() { stopped <- inst.Stop(context.Background(), false) }()
 		<-inst.installCtx.Done()
+		// Done closes before the contexts derived from it, the gate's among them,
+		// are cancelled. Stop holds the instance lock until endInstall has
+		// cancelled them, so taking the lock waits for that.
+		inst.stopWasRequested()
 		fake.mu.Lock()
 		delete(fake.running, other)
 		fake.mu.Unlock()
