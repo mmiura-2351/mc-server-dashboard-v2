@@ -73,6 +73,8 @@ describe("serverImportErrorPresentation", () => {
       "invalid_export_metadata",
       "serverCreate.import.error.invalid_export_metadata",
     ],
+    // An archive the zip reader cannot read at all (issue #3769).
+    [422, "invalid_archive", "serverCreate.import.error.invalid_archive"],
     [
       422,
       "platform_managed_path",
