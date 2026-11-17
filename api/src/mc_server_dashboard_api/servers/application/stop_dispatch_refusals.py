@@ -26,13 +26,21 @@ grace, which is the conservative answer, and no persisted marker can go stale
 across one. Same rationale as the reconciler's in-memory backoff map and the
 registry's held-working-set inventory.
 
-Size: one entry per server at most — every stop dispatch either clears the entry
-(:meth:`forget`, before the attempt) or replaces it. It is NOT bounded by the live
-fleet, though. A refusal superseded by a Worker report converges through
-``clear_stale_assignment``, which dispatches no stop and so runs no ``forget``, and
-deleting that server leaves its timestamp behind: nothing evicts here on delete,
-unlike the tunnel table (#1544). The real bound is one timestamp per server that had
-a refused stop during this process's lifetime. Left that way deliberately — a
+An ``EXPIRED`` refusal is recorded as such (issue #3682). The Worker answers it in
+time only once the server's lane frees, usually as the command ahead of it reports,
+so a Worker report lands with the refusal. ``EXPIRED`` proves the stop was never
+applied, so the reconciler does not let a later ``running`` report supersede it.
+An ``EXPIRED`` answer that arrives after the dispatch timed out never reaches here:
+the late result is dropped, and the stop keeps the full grace.
+
+Size: one entry per server at most — every stop dispatch and every final-snapshot
+dispatch clears the entry (:meth:`forget`, before the attempt), and a refused stop
+replaces it. It is NOT bounded by the live fleet, though. A refusal superseded by a
+Worker report can converge through ``clear_stale_assignment`` with no dispatch at
+all (its disconnected-Worker legs take no final snapshot), and deleting that server
+leaves its entry behind: nothing evicts here on delete, unlike the tunnel table
+(#1544). The real bound is one entry per server that had a refused stop during this
+process's lifetime. Left that way deliberately — a
 leftover entry is unreachable, because the reconciler only ever looks up ids
 ``list_reconcilable`` returned and a deleted row is never among them, and server ids
 are never reused. An eviction hook would buy a few dozen bytes for a use-case
@@ -51,11 +59,17 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
+@dataclass(frozen=True)
+class _Refusal:
+    at: dt.datetime
+    expired: bool
+
+
 @dataclass
 class StopDispatchRefusals:
     """The instant each server's last stop dispatch was refused, if it was."""
 
-    _refused_at: dict[ServerId, dt.datetime] = field(default_factory=dict)
+    _refusals: dict[ServerId, _Refusal] = field(default_factory=dict)
 
     def forget(self, server_id: ServerId) -> None:
         """Drop any recorded verdict, because a new dispatch is being attempted.
@@ -68,7 +82,7 @@ class StopDispatchRefusals:
         is the #930 floor's own failure mode.
         """
 
-        self._refused_at.pop(server_id, None)
+        self._refusals.pop(server_id, None)
 
     def record_refusal(
         self, server_id: ServerId, *, outcome: CommandOutcome, at: dt.datetime
@@ -91,13 +105,26 @@ class StopDispatchRefusals:
 
         A successful outcome is not a refusal and is likewise not recorded; the
         caller's own success paths converge the row out of the reconciler's reach.
+
+        Whether the refusal was ``EXPIRED`` is kept with it (issue #3682): that
+        answer proves the stop was never applied, which lets the reconciler keep the
+        short grace past a Worker report that arrives with it.
         """
 
         if outcome.success or outcome.status is CommandStatus.BUSY:
             return
-        self._refused_at[server_id] = at
+        self._refusals[server_id] = _Refusal(
+            at=at, expired=outcome.status is CommandStatus.EXPIRED
+        )
 
     def refused_at(self, server_id: ServerId) -> dt.datetime | None:
         """Return when this server's last stop dispatch was refused, else ``None``."""
 
-        return self._refused_at.get(server_id)
+        refusal = self._refusals.get(server_id)
+        return None if refusal is None else refusal.at
+
+    def expired(self, server_id: ServerId) -> bool:
+        """Return whether this server's last stop dispatch was refused ``EXPIRED``."""
+
+        refusal = self._refusals.get(server_id)
+        return refusal is not None and refusal.expired

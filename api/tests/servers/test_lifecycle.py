@@ -2649,6 +2649,7 @@ async def test_refused_stop_dispatch_is_recorded_for_the_reconciler() -> None:
     await _stop_expecting_failure(use_case, community, server_id)
 
     assert refusals.refused_at(ServerId(server_id)) == _NOW
+    assert refusals.expired(ServerId(server_id)) is False
 
 
 async def test_expired_stop_dispatch_is_recorded_as_a_refusal() -> None:
@@ -2677,9 +2678,102 @@ async def test_expired_stop_dispatch_is_recorded_as_a_refusal() -> None:
 
     assert excinfo.value.reason == "command_expired"
     assert refusals.refused_at(ServerId(server_id)) == _NOW
+    # Recorded AS expired (issue #3682): the reconciler keeps the short grace for it
+    # past the status report that freed the lane, which a plain refusal does not get.
+    assert refusals.expired(ServerId(server_id)) is True
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_expired_stop_replay_is_recorded_as_expired() -> None:
+    # The reconciler's replay records its own refusal too (#2478), so an EXPIRED
+    # replay must carry the same flag as an EXPIRED operator stop (issue #3682).
+    # Otherwise the replay's report-driven lane release would cost the next tick the
+    # full grace again.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(
+                status=worker_status("StopServer", "command_expired"),
+                message="expired",
+            )
+        }
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case.redispatch_stop(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert refusals.refused_at(ServerId(server_id)) == _NOW
+    assert refusals.expired(ServerId(server_id)) is True
+
+
+async def test_stale_assignment_clear_forgets_the_refusal_before_its_snapshot() -> None:
+    # The clear leg's final snapshot is a dispatch that may outlive its caller, the
+    # same reason it already drops an unrecorded stop (issue #3441). A refusal left
+    # behind would describe a stop the row has moved past (issue #3682). The fake
+    # reads the journal AT the snapshot dispatch, which pins "before the dispatch".
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        ServerId(server_id),
+        outcome=CommandOutcome(status=CommandStatus.EXPIRED),
+        at=_NOW - dt.timedelta(seconds=1),
+    )
+    seen_at_snapshot: list[dt.datetime | None] = []
+
+    class _SnapshotReadsJournal(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            seen_at_snapshot.append(refusals.refused_at(server_id))
+            return await super().snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
+            )
+
+    cp = _SnapshotReadsJournal()
+    await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert seen_at_snapshot == [None]
+    assert refusals.refused_at(ServerId(server_id)) is None
 
 
 async def test_busy_stop_dispatch_records_no_refusal() -> None:

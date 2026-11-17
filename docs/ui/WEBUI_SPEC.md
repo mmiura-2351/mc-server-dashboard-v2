@@ -1065,7 +1065,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   command, so nothing was half-done and retrying is safe. A start or a restart
   leaves nothing pending, so the restart message below would be wrong. A stop
   keeps its stop intent, and the system replays the stop on its own after a
-  short wait; the message still asks for a retry rather than taking the stop
+  short wait, even though the host reports the server still running at about the
+  same time. The wait is the full reconcile wait (about 11 minutes by default)
+  instead if the API restarts in between or the host then reports the server in
+  another state. The message still asks for a retry rather than taking the stop
   message below, since trying again replays the stop at once;
   `command_failed`, the catch-all for a dispatch failure the Worker did not
   classify, says the action did not go through and sends the operator to check
