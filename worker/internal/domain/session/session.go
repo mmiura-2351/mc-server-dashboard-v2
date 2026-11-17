@@ -597,8 +597,10 @@ func (d *dispatcher) dispatch(q queuedCommand) {
 // also acquired its slot, since the wait for the slot counts too (issue #3305).
 //
 // Once the session's stream has dropped, the lane discards every command still
-// queued, quick ones included, and exits (issue #3658). A command already
-// executing runs to completion.
+// queued, quick ones included, and exits (issue #3658). The lane does not
+// interrupt a command already executing, but its handler sees d.ctx cancelled:
+// a Bedrock tunnel Open or Close that has not yet reached the tunneler does
+// nothing, and a ctx-bound step such as a TunnelDial's dial is cut short.
 func (d *dispatcher) runLane(serverID string, l *lane) {
 	for {
 		d.mu.Lock()

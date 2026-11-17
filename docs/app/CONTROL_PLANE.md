@@ -504,7 +504,10 @@ state is authoritative and drives any catch-up commands after a reconnect.
 For the same reason, when a stream ends the Worker discards every command of
 that session still waiting in a server's order, of every kind, including
 `ServerCommand` and the tunnel commands that skip the cap. A command already
-executing runs to completion. A discarded command never runs after the
+executing is not interrupted by the lane, but its handler sees the session's
+context cancelled. An `OpenBedrockTunnel` or `CloseBedrockTunnel` that has not
+yet reached the tunneler then does nothing, and a step bound to that context,
+such as a `TunnelDial`'s dial, is cut short. A discarded command never runs after the
 reconnect, so a stale `OpenBedrockTunnel` or `CloseBedrockTunnel` cannot undo
 one the new session sent (issue #3658).
 
