@@ -133,9 +133,9 @@ Each one succeeds, or appears to; the damage surfaces later.
 - **A re-run that clears the argon2 flake discards its evidence.** A correct
   password has intermittently failed to verify against a hash the same process
   had just made (#3748). The api tests exposed to it (the logins in
-  `tests/integration/test_auth_flow.py` and `test_register_user.py`, and
-  `test_hash_and_verify_run_off_the_event_loop_thread`) then fail with an
-  `AssertionError` whose message is a diagnostic report, in the gate log's
+  `tests/integration/test_auth_flow.py` and `test_register_user.py`, and the
+  argon2 verifies in `tests/identity/test_password_hasher.py`) then fail with
+  an `AssertionError` whose message is a diagnostic report, in the gate log's
   failure section. Paste the whole report into #3748 before re-running. To
   read it: if the stored hash verifies `True` on every re-verify, the refusal
   was a verify-time transient (for a login, only when the chained traceback
