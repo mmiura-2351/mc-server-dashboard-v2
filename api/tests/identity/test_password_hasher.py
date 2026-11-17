@@ -87,6 +87,8 @@ async def test_argon2_verify_returns_false_on_a_wrong_password(
         pytest.param(_argon2_hash(params="m=65536,t=0,p=4"), id="time-too-small"),
         pytest.param(_argon2_hash(params="m=65536,t=3,p=0"), id="too-few-lanes"),
         pytest.param(_argon2_hash(params="m=8589934592,t=3,p=4"), id="memory-overflow"),
+        # argon2-cffi refuses a non-ASCII hash before libargon2 sees it.
+        pytest.param(_argon2_hash(salt="MpDmDyRnsUyW+VHLyrjk3é"), id="non-ascii"),
     ],
 )
 async def test_argon2_verify_refuses_a_corrupt_stored_hash(
@@ -175,6 +177,34 @@ async def test_bcrypt_hashes_at_72_byte_boundary() -> None:
     assert len(boundary_password.encode("utf-8")) == 72
     hashed = await hasher.hash(boundary_password)
     assert bcrypt.checkpw(boundary_password.encode("utf-8"), hashed.encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param("not-a-valid-bcrypt-hash", id="garbage"),
+        pytest.param("", id="empty"),
+        pytest.param(
+            "$9z$12$/ojJOhrhlOxTPk0wZGly0uPr1PwRSHD9pyBm75jkxgIW2hSVoriFy",
+            id="unknown-prefix",
+        ),
+        pytest.param(
+            "$2b$99$/ojJOhrhlOxTPk0wZGly0uPr1PwRSHD9pyBm75jkxgIW2hSVoriFy",
+            id="cost-out-of-range",
+        ),
+    ],
+)
+async def test_bcrypt_verify_refuses_a_corrupt_stored_hash(
+    stored: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # bcrypt raises ValueError("Invalid salt") on a stored hash it cannot parse.
+    # That is corrupt data, refused like a wrong password (the uniform 401)
+    # with a WARNING, as under argon2, not a 500 (#3749).
+    hasher = BcryptPasswordHasher()
+    with caplog.at_level("WARNING"):
+        result = await hasher.verify("Wm7!qz#Lp2vT", stored)
+    assert result is False
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
 
 
 async def test_bcrypt_verify_returns_false_on_password_over_72_bytes() -> None:
