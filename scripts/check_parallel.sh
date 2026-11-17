@@ -145,16 +145,24 @@ fi
 # deleting first destroyed the failing run's logs before anyone had read them.
 # One generation is kept. The lock above makes this safe: the dir is per
 # worktree, and a gate still running in this worktree holds the lock.
+#
+# Every step is checked, and a failed one stops the run: carrying on would put
+# this run's output in the previous run's check-logs (appended, by run_chain)
+# or, with `mv` into an existing dir, at check-logs.prev/check-logs. `mv -T`
+# never moves into a dir. With no check-logs to move -- the run before was
+# killed after its move and before its mkdir -- .prev holds the newest logs
+# there are, so it stays.
 git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || {
     echo "FAIL: not inside a git checkout (needed to locate the log dir)" >&2
     exit 1
 }
 LOGDIR="$git_dir/check-logs"
-rm -rf "$LOGDIR.prev"
-if [ -d "$LOGDIR" ]; then
-    mv "$LOGDIR" "$LOGDIR.prev"
-fi
-mkdir -p "$LOGDIR"
+if [ -e "$LOGDIR" ]; then
+    rm -rf "$LOGDIR.prev" && mv -T "$LOGDIR" "$LOGDIR.prev"
+fi && mkdir "$LOGDIR" || {
+    echo "FAIL: cannot rotate the gate logs ($LOGDIR -> $LOGDIR.prev)" >&2
+    exit 1
+}
 # `make api-test` writes the api suite's per-worker run order here (#3750).
 export MCSD_CHECK_LOGDIR="$LOGDIR"
 # On INT/TERM: kill background jobs first, then exit.

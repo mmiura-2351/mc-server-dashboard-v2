@@ -18,6 +18,13 @@
 #      targets it runs, and `make api-test` turns it into the pytest option that
 #      writes the per-worker run order there. Either half can regress silently
 #      -- the gate stays green without the record.
+#   3. A rotation step that fails stops the run with a message before any
+#      target runs. Otherwise the run would go on in the old check-logs and
+#      append to the previous run's chain logs, or move check-logs into the
+#      undeletable check-logs.prev as check-logs.prev/check-logs.
+#   4. A run that finds check-logs.prev but no check-logs -- the previous run
+#      was killed between moving its predecessor's logs aside and creating its
+#      own -- keeps check-logs.prev: there is nothing newer to replace it with.
 #
 # The runs use the real script with a stub `make` on PATH, as
 # test_check_parallel_identity.sh does: the stub writes its run's marker and the
@@ -66,7 +73,7 @@ run_gate() {
 				MCSD_CHECK_LOCK_FILE="$stub_dir/lock" \
 				RUN_MARKER="$1" \
 				bash "$ROOT/scripts/check_parallel.sh" "$fake_worktree"
-	) > /dev/null 2>&1
+	) > "$stub_dir/out" 2>&1
 }
 
 # marker_in <dir>: the marker the run that wrote <dir> recorded, or <none>.
@@ -120,6 +127,50 @@ marker_in() {
 		*--run-order-log*) fail_test "make api-test outside the gate writes a run order: $recipe" ;;
 		*) ok "make api-test outside the gate writes no run order" ;;
 	esac
+}
+
+# ---------------------------------------------------------------------------
+# 3. A failed rotation step stops the run. Needs a non-root user: root can
+#    delete from a read-only dir.
+if [ "$(id -u)" -eq 0 ]; then
+	echo "  SKIP: the failed-rotation case needs a non-root user"
+else
+	chmod a-w "$logdir.prev"
+	if run_gate fourth; then
+		fail_test "a run whose check-logs.prev cannot be removed did not fail"
+	else
+		ok "a run whose check-logs.prev cannot be removed fails"
+	fi
+	chmod u+w "$logdir.prev"
+
+	out="$(cat "$stub_dir/out")"
+	case "$out" in
+		*"cannot rotate"*) ok "the failure names the rotation" ;;
+		*) fail_test "the failure does not name the rotation: $out" ;;
+	esac
+
+	current="$(marker_in "$logdir")"
+	if [ "$current" = third ] && [ ! -e "$logdir.prev/check-logs" ]; then
+		ok "no target runs after a failed rotation, and nothing nests"
+	else
+		fail_test "after a failed rotation check-logs holds '$current' (want third); nested: $(ls "$logdir.prev")"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. A run killed between the move and the mkdir loses nothing on the next run.
+{
+	rm -rf "$logdir.prev"
+	mv "$logdir" "$logdir.prev"
+	run_gate fifth
+
+	current="$(marker_in "$logdir")"
+	previous="$(marker_in "$logdir.prev")"
+	if [ "$current" = fifth ] && [ "$previous" = third ]; then
+		ok "a run with no check-logs keeps check-logs.prev"
+	else
+		fail_test "check-logs holds '$current' and check-logs.prev '$previous' (want fifth, third)"
+	fi
 }
 
 # ---------------------------------------------------------------------------

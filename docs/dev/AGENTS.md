@@ -122,8 +122,10 @@ Each one succeeds, or appears to; the damage surfaces later.
   gate exists to establish beforehand. "Only the known flake" is a prediction,
   not a result. Escalate a flaky gate as an issue and re-run instead. The
   re-run keeps the failing run's logs in `check-logs.prev/`, including the api
-  suite's per-worker run order ([`DEVELOPMENT.md`](DEVELOPMENT.md) Section 3);
-  cite them in the issue.
+  suite's per-worker run order ([`DEVELOPMENT.md`](DEVELOPMENT.md) Section 3),
+  but only until the next gate run in that worktree replaces them — a second
+  re-run, or the next push. Cite or copy them into the issue before running the
+  gate again.
   `MCSD_CHECK_LOCK_HELD` is the quiet form of the same move: the gate exports it
   so its own nested runs (`make scripts-test` runs the orchestrator) do not wait
   for the lock they already hold; setting it by hand instead drops the host-wide

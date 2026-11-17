@@ -6,17 +6,23 @@ writes one tab-separated line per test as it finishes::
 
     worker  outcome  duration  nodeid
 
-``worker`` is the xdist gateway id (``gw0``...), or ``main`` in a serial run.
+``worker`` is the xdist worker id (``gw0``...), or ``main`` in a serial run.
 ``outcome`` is ``passed``, ``failed`` or ``skipped`` as the test's call
-reported it, ``error`` when its setup or teardown failed, and ``crashed`` when
-its worker died mid-test. ``duration`` is in seconds, summed over setup, call
-and teardown. Each worker runs its tests one at a time, so a worker's lines are
-in its run order. The node id is last because a parametrize id may contain
-spaces.
+reported it (so an xfailed test is ``skipped`` and an xpassed one ``passed``),
+``error`` when its setup or teardown failed, and ``crashed`` when its worker
+died mid-test. ``duration`` is in seconds, summed over setup, call and teardown.
+Each worker runs its tests one at a time, so a worker's lines are in its run
+order. The node id is last because a parametrize id may contain spaces.
 
-Only the xdist controller writes: it sees every worker's reports, including the
-one xdist makes up for a test whose worker crashed. Each line is flushed as it
-is written, so a killed run leaves the record up to that point.
+A crashed test's line carries the worker and duration of the phases it
+finished; the phase that crashed reports neither, and a crash during setup
+leaves the worker as ``?``.
+
+Only the xdist controller writes: it sees every worker's reports, and xdist
+tells it about a crashed worker through ``pytest_handlecrashitem``. Each line
+is flushed as it is written, so a killed run leaves a line for every test that
+finished. A test still running then has none: for a hang, read the last line
+of each worker together with pytest-timeout's traceback dump.
 """
 
 from __future__ import annotations
@@ -45,33 +51,41 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def _outcome(report: pytest.TestReport) -> str:
-    if report.when == "call":
+    if report.when == "call" or not report.failed:
         return report.outcome
-    if report.when not in ("setup", "teardown"):
-        return "crashed"
-    if report.failed:
-        return "error"
-    return report.outcome
+    return "error"
 
 
 class _RunOrderLog:
     def __init__(self, file: TextIO) -> None:
         self._file = file
-        # Tests whose teardown has not been reported yet, by (worker, node id).
-        self._running: dict[tuple[str, str], tuple[str, float]] = {}
+        # Tests whose teardown has not been reported yet, by node id: the
+        # worker, the outcome so far and the duration so far.
+        self._running: dict[str, tuple[str, str, float]] = {}
+        self._crashed: set[str] = set()
+
+    def _write(self, worker: str, outcome: str, duration: float, nodeid: str) -> None:
+        self._file.write(f"{worker}\t{outcome}\t{duration:.3f}\t{nodeid}\n")
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        node = getattr(report, "node", None)
-        worker = "main" if node is None else str(node.gateway.id)
-        key = (worker, report.nodeid)
-        outcome, duration = self._running.pop(key, ("passed", 0.0))
+        if report.nodeid in self._crashed:
+            # The failure report xdist makes up for the crash, already written.
+            return
+        worker = str(getattr(report, "worker_id", "main"))
+        _, outcome, duration = self._running.pop(report.nodeid, (worker, "passed", 0.0))
         if outcome == "passed":
             outcome = _outcome(report)
         duration += report.duration
-        if report.when in ("setup", "call"):
-            self._running[key] = (outcome, duration)
-            return
-        self._file.write(f"{worker}\t{outcome}\t{duration:.3f}\t{report.nodeid}\n")
+        if report.when == "teardown":
+            self._write(worker, outcome, duration, report.nodeid)
+        else:
+            self._running[report.nodeid] = (worker, outcome, duration)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_handlecrashitem(self, crashitem: str) -> None:
+        worker, _, duration = self._running.pop(crashitem, ("?", "", 0.0))
+        self._crashed.add(crashitem)
+        self._write(worker, "crashed", duration, crashitem)
 
     def pytest_unconfigure(self) -> None:
         self._file.close()
