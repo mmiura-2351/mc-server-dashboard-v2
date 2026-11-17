@@ -541,6 +541,7 @@ async def test_backup_stream_that_has_begun_survives_a_delete(tmp_path: Path) ->
         stream = storage.open_backup(community, server, key, byte_range=served)
 
         first = await anext(stream)
+        assert len(first) < size, "the archive must take more than one read"
         await storage.delete_backup(community, server, key)
 
         assert len(first) + len(await drain(stream)) == size, f"range {served}"
