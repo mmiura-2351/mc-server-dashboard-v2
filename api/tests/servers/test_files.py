@@ -3975,6 +3975,10 @@ _DAMAGE_ONLY_THE_GZIP_END_SHOWS = {
     # The damage is made before compressing, so the CRC32 holds and only the tar
     # layer can tell: ``tarfile`` lists ``a.txt`` alone.
     "damaged-second-header": gzip.compress(_flipped(_RAW_TAR, _B_TXT_HEADER)),
+    # The same on an empty last member, so only zeros follow the bad header.
+    "damaged-last-header": gzip.compress(
+        _flipped(_pax_tar_bytes({"a.txt": b"A", "empty.txt": b""}), _B_TXT_HEADER)
+    ),
     # What a multi-member gzip cut at a member boundary reads as.
     "no-end-marker": gzip.compress(_RAW_TAR[:_B_TXT_END]),
     "cut-end-marker": gzip.compress(_RAW_TAR[: _B_TXT_END + 100]),
