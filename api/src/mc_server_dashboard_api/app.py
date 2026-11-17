@@ -1374,6 +1374,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await snapshot_task
             if grpc_server is not None:
                 await grpc_server.stop(grace=None)
+                # Drop the stopped server (issue #3775): grpc.aio keeps its
+                # process-wide poller thread alive while any server object is.
+                app.state.grpc_server = None
             # A Session teardown can outlive its cancelled RPC, so the stop above
             # does not wait for it; it writes through the engine disposed below.
             if worker_sessions is not None:
