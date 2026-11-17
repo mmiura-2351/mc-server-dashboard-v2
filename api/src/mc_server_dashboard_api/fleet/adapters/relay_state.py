@@ -24,9 +24,10 @@ process owns the relay's gRPC calls at this scale (NFR-SCALE-1).
 
 from __future__ import annotations
 
-import hmac
 import secrets
 from dataclasses import dataclass
+
+from mc_server_dashboard_api.fleet.adapters.credential import credential_matches
 
 # A 128-bit token (RELAY.md Section 5), rendered as 32 lowercase hex chars.
 _TOKEN_BYTES = 16
@@ -146,5 +147,5 @@ class BedrockTunnelTable:
         return (
             current is not None
             and current.bedrock_port == bedrock_port
-            and hmac.compare_digest(current.token, token)
+            and credential_matches(token, current.token)
         )
