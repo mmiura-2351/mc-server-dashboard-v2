@@ -994,8 +994,9 @@ def _largest_bodies() -> dict[tuple[str, str], bytes]:
     Strings are at their worst on the wire: an astral code point JSON-escaped as
     a surrogate pair (``ensure_ascii``), 12 bytes. Each field is at its cap in
     code points: a registration's username at 64 and email at 254
-    (``RegisterUserRequest``), and every password, and a login's username, at
-    1024. A refresh token is ``token_urlsafe(32)``: 43 characters.
+    (``RegisterUserRequest``; all astral but the one ``@`` its schema and value
+    object require), and every password, and a login's username, at 1024. A
+    refresh token is ``token_urlsafe(32)``: 43 characters.
     """
 
     astral = "\U0001f600"
@@ -1005,7 +1006,7 @@ def _largest_bodies() -> dict[tuple[str, str], bytes]:
         ("POST", "/api/users"): json.dumps(
             {
                 "username": astral * 64,
-                "email": astral * (254 - len("@example.com")) + "@example.com",
+                "email": astral * 126 + "@" + astral * 127,
                 "password": long,
             }
         ).encode(),

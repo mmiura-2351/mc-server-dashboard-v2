@@ -109,8 +109,9 @@ DEFAULT_REASON = "request_too_large"
 # point JSON-escaped as a surrogate pair). The largest is a login of 24,608
 # bytes: a username and a password at their 1024 caps (``LoginRequest``; the
 # username's is a DoS bound, not the 64-character write cap, issue #3689). A
-# registration is 16,017 bytes: a 1024 password, a 64 username and a 254 email
-# (``RegisterUserRequest``); a refresh or a logout carries a 43-character token.
+# registration is 16,138 bytes: a 1024 password, a 64 username and a 254 email,
+# all astral but its ``@`` (``RegisterUserRequest``); a refresh or a logout
+# carries a 43-character token.
 ANONYMOUS_MAX_REQUEST_BODY_BYTES = 64 * 1024
 # The 413 ``reason`` past it: not the route's own cap (``request_too_large``)
 # but the want of a credential, so a client whose access token has expired can
