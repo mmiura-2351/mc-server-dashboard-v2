@@ -1693,6 +1693,68 @@ async def test_a_start_the_worker_refused_failed() -> None:
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
 
 
+async def test_a_stop_the_worker_answered_busy_is_unknown() -> None:
+    # BUSY refuses this stop command, but StopServer never reverts its intent:
+    # desired=stopped stands and the reconciler re-sends the stop once the Worker
+    # settles (issue #3799).
+    env = _env(
+        control_plane=FakeControlPlane(
+            outcomes={"stop": CommandOutcome(status=CommandStatus.BUSY)}
+        )
+    )
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.STOP,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.STOPPED
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == ["worker_busy"]
+
+
+@pytest.mark.parametrize(
+    ("action", "command", "status", "detail"),
+    [
+        (ScheduleAction.STOP, None, CommandStatus.INTERNAL, "dispatch failed"),
+        (ScheduleAction.STOP, None, CommandStatus.EXPIRED, "command_expired"),
+        (ScheduleAction.RESTART, None, CommandStatus.BUSY, "worker_busy"),
+        (ScheduleAction.COMMAND, "say hi", CommandStatus.BUSY, "worker_busy"),
+    ],
+    ids=["stop-internal", "stop-expired", "restart-busy", "command-busy"],
+)
+async def test_a_refusal_other_than_a_busy_stop_still_fails(
+    action: ScheduleAction, command: str | None, status: CommandStatus, detail: str
+) -> None:
+    # Only a busy stop leaves a refused action owed: nothing re-sends a refused
+    # restart or command, and a stop the Worker refused otherwise is a settled
+    # failure the run history names (issue #3799).
+    env = _env(
+        control_plane=FakeControlPlane(
+            outcomes={action.value: CommandOutcome(status=status)}
+        )
+    )
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=action,
+        command=command,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == [detail]
+
+
 def _titles(env: _Env) -> list[str]:
     return [title for _server_id, _kind, title, _detail in env.notifier.notifications]
 

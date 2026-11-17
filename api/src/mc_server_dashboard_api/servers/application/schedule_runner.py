@@ -29,17 +29,19 @@ Outcome taxonomy (owner-confirmed):
   answer. Neither proves the command left the API, since one dropped unsent from
   the outbound queue looks the same, so both err toward unknown. A start whose
   intent still stands after the error: an unreachable Worker, a lost answer or a
-  ``BUSY`` refusal at the start command, after which the reconciler starts the
-  server. Audited and
-  notified like a failure, under its own title, and never retried. It shares the
-  failing edge, but a failure after an unknown notifies once more as an
-  escalation; an unknown after a failure stays silent.
+  ``BUSY`` refusal at the start command, after which the reconciler re-sends the
+  start once the assigned Worker is connected (it skips the row while that
+  Worker is gone). A stop the Worker refused ``BUSY``, whose intent stands too:
+  the reconciler re-sends the stop (issue #3799). Audited and notified like a
+  failure, under its own title, and never retried. It shares the failing edge,
+  but a failure after an unknown notifies once more as an escalation; an unknown
+  after a failure stays silent.
 
   Every other error stays a failure: a command, stop or restart whose Worker was
-  not connected at dispatch or refused it, a start whose intent was reverted (its
-  hydrate failed or went unanswered, or it was refused and compensated), and a
-  backup whose snapshot failed or went unanswered (the archive is written only
-  after the snapshot returns, so no backup exists).
+  not connected at dispatch or refused it (but for that ``BUSY`` stop), a start
+  whose intent was reverted (its hydrate failed or went unanswered, or it was
+  refused and compensated), and a backup whose snapshot failed or went unanswered
+  (the archive is written only after the snapshot returns, so no backup exists).
   ``COMMAND_DROPPED`` stays a failure too, though whether the command ran is
   uncertain (CONTROL_PLANE.md Section 7): the Worker answered, its usual cause is
   a packet the game server dropped without running it, and the run history shows
@@ -129,7 +131,10 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 )
 from mc_server_dashboard_api.servers.domain.backup import BackupSource
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandStatus,
+    WorkerUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
@@ -443,18 +448,27 @@ class ExecuteScheduleAction:
         intent is reverted and the start will not happen. Once the start command
         is reached, an unreachable Worker, a lost answer (a timeout or a
         disconnect) or a ``BUSY`` refusal leaves the intent and assignment
-        standing, and the reconciler starts the server. The row tells these
-        apart.
+        standing, and the reconciler re-sends the start once the assigned Worker
+        is connected (it skips the row while that Worker is gone). The row tells
+        these apart.
 
-        A command, stop or restart can only when the Worker left its command
-        unanswered: it did not answer in time (``upload_may_be_live``) or its
-        session ended while the command awaited the answer
+        A stop the Worker refused ``BUSY`` can: :class:`StopServer` never reverts
+        its intent, so ``desired=stopped`` stands and the reconciler's
+        ``redispatch_stop`` re-sends the stop once the command holding the id
+        settles (issue #3799).
+
+        A command, stop or restart can otherwise only when the Worker left its
+        command unanswered: it did not answer in time (``upload_may_be_live``) or
+        its session ended while the command awaited the answer
         (``session_ended_in_flight``). Either way the command may have reached
         the Worker and run, or it may never have left the API: the flags cover a
         command dropped unsent from the outbound queue too, and the API cannot
-        tell. A Worker that was not connected at dispatch never ran it, and an
-        answered refusal stays a failure (``COMMAND_DROPPED`` too: see the module
-        docstring).
+        tell. A Worker that was not connected at dispatch never ran it, and every
+        other answered refusal stays a failure (``COMMAND_DROPPED`` too: see the
+        module docstring). Nothing re-sends a refused command or restart (a
+        restart commits no intent), and a stop refused for any other reason is an
+        attempt that failed, recorded under its cause, though the reconciler
+        still converges its intent.
         """
 
         if action is ScheduleAction.BACKUP:
@@ -463,6 +477,12 @@ class ExecuteScheduleAction:
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
             return server is not None and server.desired_state is DesiredState.RUNNING
+        if (
+            action is ScheduleAction.STOP
+            and isinstance(exc, CommandDispatchError)
+            and exc.status is CommandStatus.BUSY
+        ):
+            return True
         return isinstance(exc, WorkerUnavailableError) and (
             exc.upload_may_be_live or exc.session_ended_in_flight
         )
