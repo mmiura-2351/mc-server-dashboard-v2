@@ -796,7 +796,7 @@ requires-dist = [
     { name = "argon2-cffi", specifier = ">=25.1.0,<26" },
     { name = "asyncpg", specifier = ">=0.31.0,<0.33" },
     { name = "bcrypt", specifier = ">=5.0.0,<6" },
-    { name = "cronsim", specifier = ">=2.7,<3" },
+    { name = "cronsim", specifier = ">=2.8,<3" },
     { name = "fastapi", specifier = ">=0.162.2,<0.163" },
     { name = "grpcio", specifier = ">=1.80.0,<1.86" },
     { name = "httpx2", specifier = ">=2.13.1,<3" },
