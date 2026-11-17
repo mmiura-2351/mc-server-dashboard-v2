@@ -10,6 +10,7 @@ from __future__ import annotations
 import concurrent.futures
 import re
 import threading
+from collections.abc import Callable
 
 import argon2
 import pytest
@@ -117,6 +118,17 @@ def test_a_wedged_kdf_executor_still_yields_a_report(
 
     # The pool's four threads (max_workers in password_hasher.py), all parked.
     parkers = [_KDF_EXECUTOR.submit(park) for _ in range(4)]
+    probes: list[concurrent.futures.Future[str]] = []
+    real_submit = _KDF_EXECUTOR.submit
+
+    def recording_submit(
+        fn: Callable[..., str], /, *args: object
+    ) -> concurrent.futures.Future[str]:
+        future = real_submit(fn, *args)
+        probes.append(future)
+        return future
+
+    monkeypatch.setattr(_KDF_EXECUTOR, "submit", recording_submit)
     try:
         for _ in parkers:
             assert parked.acquire(timeout=10)
@@ -131,6 +143,49 @@ def test_a_wedged_kdf_executor_still_yields_a_report(
     assert on_executor[1:] == ["skipped: the KDF executor timed out above"] * 5
     on_thread = sections[_STORED_ON_THREAD] + sections[_FRESH_ON_THREAD]
     assert all(line.startswith("True [") for line in on_thread), report
+    # The timed-out probe was withdrawn, so it does not run an argon2 hash on
+    # the freed pool in the middle of whatever test comes next.
+    assert [probe.cancelled() for probe in probes] == [True]
+
+
+def test_a_shut_down_kdf_executor_still_yields_a_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pool that refuses new work is itself a finding, not a reason for the
+    # report to raise in place of the failure it explains.
+    shut_down = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    shut_down.shutdown()
+    monkeypatch.setattr(argon2_diagnostics, "_KDF_EXECUTOR", shut_down)
+    stored = argon2.PasswordHasher().hash(_PASSWORD)
+
+    report = argon2_mismatch_report(password=_PASSWORD, stored_hash=stored)
+
+    sections = _sections(report)
+    on_executor = sections[_STORED_ON_EXECUTOR] + sections[_FRESH_ON_EXECUTOR]
+    assert len(on_executor) == 6, report
+    assert all(
+        line.startswith("RuntimeError(") and line.endswith(" [KDF executor]")
+        for line in on_executor
+    ), report
+
+
+def test_skipped_probes_say_why_in_every_probe_section() -> None:
+    # A login refused by a lockout never reached argon2, so its report skips
+    # the probes, which cost 14 argon2 hashes, and says so.
+    stored = argon2.PasswordHasher().hash(_PASSWORD)
+
+    report = argon2_mismatch_report(
+        password=_PASSWORD, stored_hash=stored, skip_probes="a lockout refused it"
+    )
+
+    sections = _sections(report)
+    for heading in (
+        _STORED_ON_THREAD,
+        _STORED_ON_EXECUTOR,
+        _FRESH_ON_THREAD,
+        _FRESH_ON_EXECUTOR,
+    ):
+        assert sections[heading] == ["skipped: a lockout refused it"], report
 
 
 def test_unreadable_build_info_does_not_break_the_report(

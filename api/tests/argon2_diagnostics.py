@@ -70,14 +70,14 @@ class _KdfExecutorProbes:
     def __call__(self, call: Callable[[], bool]) -> str:
         if self._timed_out:
             return "skipped: the KDF executor timed out above"
-        future = _KDF_EXECUTOR.submit(_probe, call)
         try:
+            future = _KDF_EXECUTOR.submit(_probe, call)
             return future.result(timeout=_EXECUTOR_TIMEOUT_S)
         except TimeoutError:
-            future.cancel()
+            future.cancel()  # a probe still queued must not run once the pool frees
             self._timed_out = True
             return f"TimeoutError: no result within {_EXECUTOR_TIMEOUT_S} s"
-        except Exception as exc:  # a shut-down pool is itself a finding
+        except Exception as exc:  # a shut-down pool refuses the submit: a finding
             return f"{exc!r} [KDF executor]"
 
 
@@ -105,18 +105,31 @@ def _build_info() -> list[str]:
 
 
 def argon2_mismatch_report(
-    *, password: str, stored_hash: str, produced_hash: str | None = None
+    *,
+    password: str,
+    stored_hash: str,
+    produced_hash: str | None = None,
+    skip_probes: str | None = None,
 ) -> str:
     """Probe argon2 after it refused ``password`` against ``stored_hash``.
 
     ``produced_hash`` is the hash the test made, when it is not the one read
     back. The probes run in the failing test, so it fails as before, only
-    slower and with this report.
+    slower and with this report. ``skip_probes`` says why a refusal argon2
+    never saw needs none of them.
     """
     taken_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="microseconds")
     verify = functools.partial(_verify, password, stored_hash)
     round_trip = functools.partial(_round_trip, password)
     on_executor = _KdfExecutorProbes()
+
+    def probes(
+        run: Callable[[Callable[[], bool]], str], call: Callable[[], bool], times: int
+    ) -> list[str]:
+        if skip_probes is not None:
+            return [f"skipped: {skip_probes}"]
+        return [run(call) for _ in range(times)]
+
     same = "not available" if produced_hash is None else produced_hash == stored_hash
     return "\n".join(
         [
@@ -128,13 +141,13 @@ def argon2_mismatch_report(
             f"sha256: {hashlib.sha256(stored_hash.encode()).hexdigest()}",
             f"equals the hash the test produced: {same}",
             "--- stored hash verified 5x on this thread ---",
-            *(_probe(verify) for _ in range(5)),
+            *probes(_probe, verify, 5),
             "--- stored hash verified 3x on the KDF executor ---",
-            *(on_executor(verify) for _ in range(3)),
+            *probes(on_executor, verify, 3),
             "--- fresh hash+verify round trips 3x on this thread ---",
-            *(_probe(round_trip) for _ in range(3)),
+            *probes(_probe, round_trip, 3),
             "--- fresh hash+verify round trips 3x on the KDF executor ---",
-            *(on_executor(round_trip) for _ in range(3)),
+            *probes(on_executor, round_trip, 3),
             "--- process ---",
             f"pid: {os.getpid()}",
             f"xdist worker: {os.environ.get('PYTEST_XDIST_WORKER', 'none')}",
@@ -178,17 +191,20 @@ async def log_in_seeded(
                 " report probes the hash the test produced instead.\n"
             )
             stored = user.password_hash
-        report = argon2_mismatch_report(
-            password=password,
-            stored_hash=stored,
-            produced_hash=None if note else user.password_hash,
-        )
         if exc.retry_after is None:
             headline = "Login refused the correct password of a seeded user."
+            skip_probes = None
         else:
             # Only a lockout or an IP throttle sets it (login.py), never argon2.
             headline = (
                 f"Login refused by a lockout or throttle (retry_after="
                 f"{exc.retry_after}), not by argon2: this is not the #3748 flake."
             )
+            skip_probes = "a lockout or throttle refused this login, not argon2"
+        report = argon2_mismatch_report(
+            password=password,
+            stored_hash=stored,
+            produced_hash=None if note else user.password_hash,
+            skip_probes=skip_probes,
+        )
         raise AssertionError(f"{headline}\n{note}{report}") from exc
