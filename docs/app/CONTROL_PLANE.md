@@ -524,7 +524,9 @@ one the new session sent (issue #3658).
 
 **Teardown.** When a `Session` ends, the API fails the Worker's in-flight
 commands, marks the Worker offline, and marks its servers' observed state
-`unknown`. Each step is guarded by the ending Session's token: a stale
+`unknown`. A command failed this way may have reached the Worker and run, so
+its caller can tell it from one dispatched to a Worker with no session, which
+was never queued (issue #3781). Each step is guarded by the ending Session's token: a stale
 teardown, for a Worker that has already re-registered on a newer Session,
 leaves that Worker online and its servers' states untouched. The teardown runs
 in a task the API owns, not in the RPC task. When a Worker's transport dies,
@@ -670,7 +672,7 @@ Notes:
     timeout as "may have been applied": a start or stop keeps its intent and
     assignment for the reconciler, a late final-snapshot result releases its
     held assignment (Section 5.1), and a scheduled command, stop or restart, or
-    a scheduled start whose start command was sent, records its run as `unknown`
+    a scheduled start whose intent still stands, records its run as `unknown`
     rather than `failure` (DATABASE.md Section 8).
   - A **result that arrives late** is credited to nothing. Every dispatch has its
     own `command_id`, and a result whose dispatch the API no longer waits for is

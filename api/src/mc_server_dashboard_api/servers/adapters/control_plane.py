@@ -28,6 +28,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ReadFileCommand,
     RestartServerCommand,
     ServerCommandCommand,
+    SessionEndedError,
     SnapshotCommand,
     StartServerCommand,
     StopServerCommand,
@@ -506,9 +507,13 @@ class FleetControlPlaneAdapter(ControlPlane):
             # healthy and the transfer is still uploading (only the API future was
             # abandoned), so the final-stop snapshot must HOLD the assignment; a
             # DISCONNECT means the worker is gone and the upload died with its ctx,
-            # so the assignment is released as before.
+            # so the assignment is released as before. A disconnect that ended the
+            # session while this command awaited its answer is flagged apart from a
+            # Worker that was not connected at all: the command may have run
+            # (issue #3781).
             raise WorkerUnavailableError(
                 str(worker_id.value),
                 upload_may_be_live=isinstance(exc, CommandTimedOutError),
+                session_ended_in_flight=isinstance(exc, SessionEndedError),
             ) from exc
         return _to_outcome(result)
