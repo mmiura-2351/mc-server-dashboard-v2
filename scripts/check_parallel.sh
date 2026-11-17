@@ -179,7 +179,7 @@ trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 # scripts/argon2_canary.py is that process: fixed Argon2id answers and a 64 MiB
 # memory control, rechecked for as long as the api chain runs, into
 # argon2-canary.log beside the chain logs (docs/dev/AGENTS.md Section 3 says how
-# to read it). It runs at nice 19, a check every ~4 s under a gate, and it can
+# to read it). It runs at nice 19, a check every 4-9 s under a gate, and it can
 # never fail the run: its exit status is ignored, and it does not inherit fd 9,
 # so it never holds the gate lock. It is stopped as the api chain ends, and by
 # the EXIT trap on every other way out of this script; a canary that ignores the
@@ -189,7 +189,10 @@ trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 # A hit says nothing to a run that passes, and most runs pass, so the stop
 # reads the log: a MISMATCH or ERROR line is announced on stderr and the log
 # copied to argon2-canary-hits/ in the git common dir, which neither the log
-# rotation nor a worktree removal reaches. The run's verdict stays its own.
+# rotation nor a worktree removal reaches. A canary that got no check done --
+# no start line, or a last count of checks=0 -- is announced in one line, since
+# its clean log would otherwise read as a clean run. The run's verdict stays
+# its own.
 canary_pid=
 start_argon2_canary() {
     nice -n 19 api/.venv/bin/python -I scripts/argon2_canary.py --parent "$$" \
@@ -197,7 +200,7 @@ start_argon2_canary() {
     canary_pid=$!
 }
 stop_argon2_canary() {
-    local log="$LOGDIR/argon2-canary.log" kept hits_dir
+    local log="$LOGDIR/argon2-canary.log" kept hits_dir checks last
     [ -n "$canary_pid" ] || return 0
     kill -TERM "$canary_pid" 2>/dev/null
     for _ in $(seq 1 50); do
@@ -207,6 +210,12 @@ stop_argon2_canary() {
     kill -0 "$canary_pid" 2>/dev/null && kill -KILL "$canary_pid" 2>/dev/null
     wait "$canary_pid" 2>/dev/null
     canary_pid=
+    checks=$(grep -oE ' checks=[0-9]+' "$log" 2>/dev/null | tail -n 1)
+    checks=${checks# checks=}
+    if ! grep -q ' start pid=' "$log" 2>/dev/null || [ "${checks:-0}" -eq 0 ]; then
+        last=$(tail -n 1 "$log" 2>/dev/null)
+        echo "argon2 canary did not run: ${last:-its log is empty}" >&2
+    fi
     grep -qE ' (MISMATCH|ERROR) ' "$log" 2>/dev/null || return 0
     hits_dir="$(git rev-parse --path-format=absolute --git-common-dir)/argon2-canary-hits" &&
         kept="$hits_dir/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$worktree").log" &&
