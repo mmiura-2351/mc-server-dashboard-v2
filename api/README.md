@@ -35,6 +35,20 @@ Run from this directory (`api/`):
 | Test | `uv run pytest` |
 | Import contracts | `uv run lint-imports` |
 
+### Test tmp dir
+
+The test session sets `TMPDIR`, and with it pytest's basetemp, to `/dev/shm`
+when that is a writable tmpfs with at least 1 GiB free (issue #3722). The
+fs-backed storage tests fsync for real, and on a disk under load one fsync can
+block for minutes; on a tmpfs it does not wait on the disk. Without such a
+`/dev/shm`, for example in a container with the 64 MiB default, the default tmp
+dir is kept. `MCSD_TEST_TMPDIR=<dir>` overrides both, e.g. `MCSD_TEST_TMPDIR=/tmp`
+to run on disk. The pytest header prints the root in use (`tmp root: ...`).
+
+pytest keeps its last three basetemps, as it does on disk. A full run peaks at
+about 50 MiB and leaves about that much behind, so up to about 150 MiB of RAM
+stays in `/dev/shm` until later runs replace it.
+
 ## Configuration
 
 Configuration is read at startup with `defaults < TOML file < MCD_API_ env`
