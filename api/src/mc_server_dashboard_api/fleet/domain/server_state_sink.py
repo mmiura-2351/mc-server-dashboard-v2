@@ -65,9 +65,10 @@ class ServerStateSink(abc.ABC):
     async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
         """Return the subset of ``server_ids`` that still exist in the store.
 
-        Used by the RegisterAck to compute which held servers the Worker
-        advertised are no longer known (deleted while the scratch was live,
-        issue #924). The Worker reclaims the orphaned scratch for each unknown id.
+        Used by the RegisterAck to compute which servers the Worker listed, held
+        or with a scratch dir that holds no working set, are no longer known
+        (deleted while the scratch was there, issues #924, #3794). The Worker
+        reclaims the orphaned scratch for each unknown id.
         """
 
     @abc.abstractmethod

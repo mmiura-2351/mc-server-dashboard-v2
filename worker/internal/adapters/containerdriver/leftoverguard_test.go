@@ -12,13 +12,24 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
+// noDocker is a dockerAPI with no endpoint behind it: it embeds a nil one, so a
+// call of any endpoint panics.
+type noDocker struct{ dockerAPI }
+
 // HasLeftovers answers from the record alone, with no Docker call (issue #3679):
-// the instance manager asks it for every delete report, on every Worker.
+// the instance manager asks it for every delete report, on every Worker, and for
+// every scratch dir holding no working set at each registration (issue #3794).
+// The driver here has no Docker behind it, so a call of any endpoint, however
+// bounded, fails the test.
 func TestHasLeftoversAnswersFromTheRecord(t *testing.T) {
-	docker := newFakeDocker()
-	docker.listBlocksUntilCtxDone = true
-	docker.inspectBlocksUntilCtxDone = true
-	d := newTestDriver(docker, nil, errors.New("no rcon"))
+	d := New(noDocker{}, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
+		return nil, errors.New("no rcon")
+	}, Options{WorkerID: "w1"})
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("HasLeftovers called Docker: %v", r)
+		}
+	}()
 
 	if d.HasLeftovers("s1") {
 		t.Fatal("HasLeftovers = true with nothing recorded, want false")
