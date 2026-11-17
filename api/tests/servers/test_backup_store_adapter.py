@@ -408,6 +408,8 @@ async def _put_backup(
     return key.value
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_restore_corrupt_backup_without_force_translates_to_corrupt_error(
     tmp_path: Path,
 ) -> None:
@@ -440,6 +442,8 @@ async def test_restore_corrupt_backup_without_force_translates_to_corrupt_error(
     }
 
 
+# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(18 * 10 + 30)
 async def test_restore_corrupt_backup_with_force_publishes_and_reports_corrupt(
     tmp_path: Path,
 ) -> None:
@@ -469,6 +473,8 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports_corrupt(
     }
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_restore_healthy_backup_reports_not_corrupt(tmp_path: Path) -> None:
     """A healthy restore returns a zero corrupt count (#743)."""
 
@@ -568,6 +574,8 @@ async def test_delete_is_idempotent(tmp_path: Path) -> None:
     await adapter.delete(community_id=community, server_id=server, storage_ref=ref)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_prune_to_final_snapshot_packs_and_drops_working_set(
     tmp_path: Path,
 ) -> None:
@@ -597,6 +605,8 @@ async def test_prune_to_final_snapshot_unpublished_is_a_noop(tmp_path: Path) -> 
     await adapter.prune_to_final_snapshot(community_id=community, server_id=server)
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_open_then_store_to_another_server_restores(tmp_path: Path) -> None:
     """The seam's download (open) + upload (store) round-trip across servers: the
     archive bytes stream out of one server and into another, restorable there."""
@@ -905,6 +915,8 @@ async def test_check_current_health_unexamined_backend_reports_not_examined() ->
     )
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_list_archive_refs_returns_all_filesystem_archives(
     tmp_path: Path,
 ) -> None:

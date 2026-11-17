@@ -73,6 +73,8 @@ async def _publish(
     await storage.commit_snapshot(handle, publisher=publisher)
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_generation_and_publisher_share_one_atomic_marker(
     tmp_path: Path,
 ) -> None:
@@ -173,6 +175,8 @@ async def test_hydrate_yields_are_bounded_by_the_fs_chunk(tmp_path: Path) -> Non
     assert read_tar(b"".join(chunks)) == big
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_second_publish_supersedes_and_reclaims_old_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -192,6 +196,8 @@ async def test_second_publish_supersedes_and_reclaims_old_snapshot(
     assert read_tar(blob) == {"f": b"v2"}
 
 
+# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(18 * 10 + 30)
 async def test_a_failed_reclaim_after_a_forced_restore_leaves_it_to_the_sweep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -280,6 +286,8 @@ async def test_corrupt_region_refusal_keeps_current_link_and_cleans_staging(
     assert not incoming.exists() or not any(incoming.iterdir())
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_missing_region_refusal_keeps_current_link_and_cleans_staging(
     tmp_path: Path,
 ) -> None:
@@ -333,6 +341,8 @@ async def _put_backup(
     return await storage.put_backup(community, server, _stream())
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_restore_refusal_keeps_current_link_and_cleans_staging(
     tmp_path: Path,
 ) -> None:
@@ -447,6 +457,8 @@ def _tar_with_directory_member(mode: Literal["w", "w:gz"]) -> bytes:
     return buf.getvalue()
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_snapshot_and_restore_keep_a_directory_member(tmp_path: Path) -> None:
     # Refusing link members must not refuse the other bodiless member kind.
     storage = FsStorage(tmp_path)
@@ -572,6 +584,8 @@ def _prune_server_root(
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_prune_packs_final_targz_and_drops_the_tree(tmp_path: Path) -> None:
     # fs realization of the DeleteServer reclaim (#777): current/ is packed into
     # final.tar.gz at the server root and the working-set tree is removed.
@@ -646,6 +660,8 @@ async def test_commit_refuses_when_generation_marker_removed(
         await storage.commit_snapshot(handle, expected_base=base)
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_commit_pruned_store_error_identifies_concurrent_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -682,6 +698,8 @@ async def test_commit_pruned_store_error_identifies_concurrent_delete(
         await storage.commit_snapshot(handle, expected_base=base)
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_missing_region_gate_runs_under_server_lock(tmp_path: Path) -> None:
     """TOCTOU regression (issue #921 item 2): check_missing_regions must run inside
     the per-server publish lock, not before it.
@@ -795,6 +813,8 @@ async def _commit_tagged(
     )
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_a_restore_whose_marker_write_fails_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -818,6 +838,8 @@ async def test_a_restore_whose_marker_write_fails_publishes_nothing(
     assert await storage.current_publisher(community, server) == "worker-a"
 
 
+# 22 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(22 * 10 + 30)
 async def test_a_restore_whose_flip_fails_leaves_the_prior_world_ahead(
     tmp_path: Path,
 ) -> None:
@@ -840,6 +862,8 @@ async def test_a_restore_whose_flip_fails_leaves_the_prior_world_ahead(
         await _commit_tagged(storage, community, server, b"stale", expected_base=1)
 
 
+# 31 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(31 * 10 + 30)
 async def test_a_fault_after_the_restore_flip_reports_the_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
