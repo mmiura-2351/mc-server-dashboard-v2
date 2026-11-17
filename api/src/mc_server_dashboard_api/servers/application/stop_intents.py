@@ -26,6 +26,14 @@ be past its own read and waiting on its write. A bump made before that write
 would land before the start read the count, and the stop could then be enqueued
 ahead of the start unseen.
 
+The writes that bump: the operator stop's and the drain's ``running -> stopped``
+flip, and a failed start's or placement's revert (``_compensate``,
+``_unassign``). A revert sends no stop, so a start already enqueued when one
+lands is not caught; a revert should not touch an intent that is not its own
+(issue #3741). The later releases of an already stopped row (the final-snapshot
+clears, ``redispatch_stop``, ``clear_stale_assignment``) do not bump: the flip
+that made the row stopped already did.
+
 The value a start reads also identifies its intent: an unchanged count means no
 write has withdrawn the intent since. A later check can use it to decide whether
 a start still owns the row.
