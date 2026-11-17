@@ -80,6 +80,21 @@ def test_bedrock_tunnel_validate_rejects_wrong_token() -> None:
     assert table.validate(server_id="s1", bedrock_port=19132, token="wrong") is False
 
 
+def test_bedrock_tunnel_validate_rejects_non_ascii_token() -> None:
+    # A proto string carries any UTF-8, so a presented token can be non-ASCII; it
+    # is compared as UTF-8 bytes and rejected, not raised (issue #3695).
+    table = BedrockTunnelTable()
+    table.open(server_id="s1", bedrock_port=19132)
+    assert table.validate(server_id="s1", bedrock_port=19132, token="\u00e9") is False
+
+
+def test_bedrock_tunnel_validate_rejects_unencodable_token() -> None:
+    # A lone surrogate has no UTF-8 encoding: it matches nothing (issue #3695).
+    table = BedrockTunnelTable()
+    table.open(server_id="s1", bedrock_port=19132)
+    assert table.validate(server_id="s1", bedrock_port=19132, token="\udcff") is False
+
+
 def test_bedrock_tunnel_validate_rejects_unknown_server() -> None:
     table = BedrockTunnelTable()
     assert table.validate(server_id="s1", bedrock_port=19132, token="anything") is False
