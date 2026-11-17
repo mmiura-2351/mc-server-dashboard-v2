@@ -142,6 +142,9 @@ func (t *transport) SendRegister(_ context.Context, caps session.Capabilities) e
 				// each with its generation, so the API skips a destructive hydrate on a
 				// same-worker restart only when the held generation is fresh (#763).
 				HeldServers: mapHeldServers(caps.HeldServers),
+				// unheld_scratch_server_ids lists the scratch dirs that hold no working
+				// set; the API only checks them for a delete (#3794).
+				UnheldScratchServerIds: caps.UnheldScratchServerIDs,
 				Capabilities: &controlplanev1.WorkerCapabilities{
 					Drivers:    mapDrivers(caps.Drivers),
 					MaxServers: caps.MaxServers,

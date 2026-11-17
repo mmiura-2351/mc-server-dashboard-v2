@@ -422,3 +422,14 @@ func (h *fakeHeldServerHandler) setHeldServers(hs []HeldServer) {
 	defer h.mu.Unlock()
 	h.heldServers = hs
 }
+
+// fakeUnheldScratchHandler wraps a fakeHandler and adds UnheldScratchProvider,
+// listing fixed ids as scratch dirs that hold no working set (issue #3794).
+type fakeUnheldScratchHandler struct {
+	*fakeHandler
+	unheldIDs []string
+}
+
+func (h *fakeUnheldScratchHandler) UnheldScratchServerIDs() []string {
+	return append([]string(nil), h.unheldIDs...)
+}

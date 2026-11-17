@@ -287,6 +287,31 @@ func (m *Manager) HeldServers() []session.HeldServer {
 	return held
 }
 
+// UnheldScratchServerIDs returns the servers whose scratch dir exists but holds no
+// working set: it is empty, or holds only the generation marker, which is what a
+// server that never published anything hydrates to (issue #3794). HeldServers
+// leaves such a dir out, since it holds no world a start could skip its hydrate
+// for. The session lists these ids on each registration as well, the API checks
+// them for a delete, and a deleted one is reclaimed as a held one is: a container
+// a failed start left behind ended first, then the dir removed. Like HeldServers,
+// it lists only a directory named by a server id.
+func (m *Manager) UnheldScratchServerIDs() []string {
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, entry := range entries {
+		if !entry.IsDir() || !isServerIDName(entry.Name()) {
+			continue
+		}
+		if !hasWorkingSet(filepath.Join(m.scratchDir, entry.Name())) {
+			ids = append(ids, entry.Name())
+		}
+	}
+	return ids
+}
+
 // WarnOrphanDisplacedTrees logs a WARN for each .displaced-<id> tree in scratchDir
 // whose server id is NOT in heldServers (issue #911). A .displaced-<id> tree is a
 // last-resort recovery copy kept aside by a hydrate when a server's final stop

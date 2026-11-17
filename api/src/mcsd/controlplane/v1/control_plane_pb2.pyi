@@ -572,6 +572,7 @@ class Register(_message.Message):
     WORKER_VERSION_FIELD_NUMBER: _builtins.int
     CAPABILITIES_FIELD_NUMBER: _builtins.int
     HELD_SERVERS_FIELD_NUMBER: _builtins.int
+    UNHELD_SCRATCH_SERVER_IDS_FIELD_NUMBER: _builtins.int
     worker_id: _builtins.str
     """worker_id is the stable identifier the Worker registers under
     (CONFIGURATION.md Section 6.1 worker.id).
@@ -605,6 +606,20 @@ class Register(_message.Message):
         never silently booting a fresh/empty world.
         """
 
+    @_builtins.property
+    def unheld_scratch_server_ids(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
+        """unheld_scratch_server_ids lists the servers whose scratch dir exists but
+        holds no working set (issue #3794): it is empty, or holds only the
+        generation marker, which is what a server that never published anything
+        hydrates to. A start accepts such a dir, so a start the daemon did not
+        answer can also leave a container for it. The API only checks these ids for
+        a delete, and lists a deleted one in RegisterAck.unknown_held_server_ids, so
+        the Worker removes the dir. It never records them as held: they hold no world
+        a start could skip its hydrate for. An API that does not read the field
+        lists none of them; a Worker connected when the delete commits still
+        reclaims the dir on ReclaimDeletedServer.
+        """
+
     def __init__(
         self,
         *,
@@ -612,10 +627,11 @@ class Register(_message.Message):
         worker_version: _builtins.str = ...,
         capabilities: Global___WorkerCapabilities | None = ...,
         held_servers: _abc.Iterable[Global___HeldServer] | None = ...,
+        unheld_scratch_server_ids: _abc.Iterable[_builtins.str] | None = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities", "held_servers", b"held_servers", "worker_id", b"worker_id", "worker_version", b"worker_version"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["capabilities", b"capabilities", "held_servers", b"held_servers", "unheld_scratch_server_ids", b"unheld_scratch_server_ids", "worker_id", b"worker_id", "worker_version", b"worker_version"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
@@ -754,14 +770,16 @@ class RegisterAck(_message.Message):
 
     @_builtins.property
     def unknown_held_server_ids(self) -> _containers.RepeatedScalarFieldContainer[_builtins.str]:
-        """unknown_held_server_ids is the subset of Register.held_servers whose server
-        no longer exists in the API (deleted while the scratch was live, issue #924).
-        The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers for each id
-        listed here, but does NOT reclaim .displaced-<id> trees (issue #911: those are
-        intentionally retained for operator recovery). An empty list means every
-        advertised held server is still known (or that the API could not compute the
-        subset, e.g. a DB error — the empty list is the fail-safe default so a
-        transient failure never misclassifies a live server as deleted).
+        """unknown_held_server_ids is the subset of Register.held_servers and
+        Register.unheld_scratch_server_ids whose server no longer exists in the API
+        (deleted while the scratch dir was there, issues #924, #3794). For each id
+        listed here the Worker ends a container a failed start left behind, then
+        reclaims the .hydrate-<id>-* leftovers and the scratch dir, but does NOT
+        reclaim .displaced-<id> trees (issue #911: those are intentionally retained
+        for operator recovery). An empty list means every id the Worker listed is still
+        known (or that the API could not compute the subset, e.g. a DB error — the
+        empty list is the fail-safe default so a transient failure never
+        misclassifies a live server as deleted).
         """
 
     def __init__(
@@ -1348,15 +1366,16 @@ class ReclaimDeletedServer(_message.Message):
     """ReclaimDeletedServer reports that the API has deleted the server named by
     ApiCommand.server_id (issue #3679). The API sends it to every connected
     Worker once the delete has committed, without waiting for the result. A
-    Worker that holds no working set for the id, and records no container a
-    failed start of it left behind, does nothing. Otherwise it reclaims the id as
+    Worker that has no scratch dir for the id, and records no container a failed
+    start of it left behind, does nothing. Otherwise it reclaims the id as
     it does one listed in RegisterAck.unknown_held_server_ids: it ends a container
     a failed start left behind, then removes the .hydrate-<id>-* leftovers and
     the scratch dir, and keeps .displaced-<id>. The reclaim runs in the
     background, one at a time per Worker, and the Worker answers once the id is
     queued for it (a Worker shutting down answers COMMAND_ERROR_CODE_INTERNAL).
-    The reclaim is best-effort; an id it skips keeps its scratch, so the next
-    registration offers it again.
+    The reclaim is best-effort. An id it skips keeps its scratch dir, so the next
+    registration lists it again; a recorded container with no dir is left to the
+    Worker's next boot sweep.
     """
 
     DESCRIPTOR: _descriptor.Descriptor
