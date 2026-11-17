@@ -167,18 +167,30 @@ Each one succeeds, or appears to; the damage surfaces later.
   ```
   The canary is `scripts/argon2_canary.py`, which the gate runs for as long as
   the api chain runs: a separate process, at nice 19, that shares nothing with
-  the suite but the host. Every ~2 s it recomputes a fixed Argon2id tag at the
-  production cost with 4 lanes on 4 threads (`kind=p4`) and with 1 lane
-  (`kind=p1`), plus a 64 MiB write-and-read-back control without argon2
+  the suite but the host. About every 4 s under a gate (a check, then a 2 s
+  sleep) it recomputes a fixed Argon2id tag at the production cost with 4
+  lanes on 4 threads (`kind=p4`) and with 1 lane (`kind=p1`), each against a
+  hard-coded tag, plus a 64 MiB write-and-read-back control without argon2
   (`kind=control`). Every line starts with a UTC timestamp, to set against the
   report's `taken at`: a `MISMATCH` line for any computation that disagrees
-  (`ERROR` for one that raised), a `summary` every 30 checks, and a last
-  `stopped` line with its totals (`checks=`, and `cpu_s=` over `wall_s=` for
-  its cost). Read it against the flake: a canary `MISMATCH` decides it is the
-  host; one in `control` too means memory corruption in general; one only in
-  `p4` points to threads; and a canary that stays clean across further flakes
-  points to state inside the suite's own process. A clean canary with few
-  `checks=` says little either way.
+  (`check=0` is the one at start-up), `ERROR` for one that raised, a `summary`
+  every 30 checks, and a last `stopped` line with its totals (`checks=`, and
+  `cpu_s=` over `wall_s=` for its cost). A hit counts whether or not the suite
+  flaked in that run, so the gate reads the log as the canary stops: on a
+  `MISMATCH` or `ERROR` it prints a `!!! argon2 canary` banner to stderr, even
+  in a run that passes, and copies the log to `argon2-canary-hits/` in the git
+  common dir (`git rev-parse --git-common-dir`; the primary checkout's
+  `.git/`), which neither the log rotation nor a worktree removal reaches.
+  Look there, and paste any file in it into #3748. Read a hit this way: a
+  canary `MISMATCH` rules out the suite's process (a fault of the host or of
+  libargon2 itself would both show so); in `control` too, it is memory
+  corruption in general, and there `first` unlike `second` is a transient
+  read, while both unlike `expected` is corrupted memory; `p4` hits with none
+  in `p1` point to threads, but only once they repeat, since each kind runs
+  once a check. A clean canary is weak evidence: about 120 computations a
+  gate is a small sample next to the suite's own argon2 work, so it takes a
+  clean `argon2-canary-hits/` across many further flakes before it points to
+  state inside the suite's own process.
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
   its own process, not the shell that invoked it — whose command line contains
   the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never
