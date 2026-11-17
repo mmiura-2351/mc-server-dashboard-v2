@@ -352,6 +352,42 @@ async def test_install_unreadable_jar_stores_empty_manifest() -> None:
     assert plugin.dependencies == []
 
 
+async def test_install_jar_whose_manifest_cannot_be_read_stores_empty_manifest() -> (
+    None
+):
+    # A jar that opens as a zip but whose manifest ``zipfile`` cannot read back
+    # (here: flagged encrypted) used to fail the install with a ``RuntimeError``
+    # (issue #3779). It installs like any other unreadable jar.
+    import io
+    import json
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("fabric.mod.json", json.dumps({"id": "sodium"}))
+    jar = bytearray(buf.getvalue())
+    jar[6] |= 0x01  # the local header's encrypted bit
+    jar[jar.find(b"PK\x01\x02") + 8] |= 0x01  # the central directory's, likewise
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    uc = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+    plugin = await uc(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="sodium.jar",
+        display_name="Sodium",
+        content=bytes(jar),
+    )
+    assert plugin.mod_identifier is None
+    assert plugin.dependencies == []
+
+
 async def test_install_paper_plugin() -> None:
     uow = FakeUnitOfWork()
     server = _server(server_type=ServerType.PAPER)
