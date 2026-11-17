@@ -1567,7 +1567,7 @@ type instance struct {
 	logger *slog.Logger
 
 	events chan execution.StatusEvent
-	// exited is closed by supervise once the container has reached a terminal
+	// exited is closed by terminate once the instance has reached a terminal
 	// state; a stop's wait (stopWatch.wait) selects on it.
 	exited chan struct{}
 
@@ -1652,9 +1652,9 @@ type instance struct {
 	// holds, so the terminal emit and these post-terminal emits are serialized
 	// (issue #835).
 	terminalLatched bool
-	// terminal is the first terminal event, recorded by terminate before the state
-	// and the emit, and read without mu by Terminal (execution.Instance, issue
-	// #3597).
+	// terminal is the first terminal event, recorded by terminate under mu before
+	// the state and the emit, and read without mu by Terminal (execution.Instance,
+	// issue #3597). Once set, terminate is a no-op (issue #3652).
 	terminal atomic.Pointer[execution.StatusEvent]
 }
 
@@ -2257,8 +2257,9 @@ func (i *instance) finishInstallCrash(reason execution.CrashReason, detail strin
 }
 
 func (i *instance) finish(state execution.ServerState, detail string, reason execution.CrashReason) {
-	i.terminate(state, detail, reason)
-	close(i.exited)
+	if !i.terminate(state, detail, reason) {
+		return
+	}
 	i.logPump.Close()
 	i.mu.Lock()
 	i.closed = true
@@ -3269,17 +3270,18 @@ func (i *instance) supervise() {
 	stopping := i.stopRequested
 	i.mu.Unlock()
 
-	if stopping {
-		i.terminate(execution.StateStopped, "", execution.CrashReasonUnspecified)
-	} else {
-		detail := "container exited unexpectedly"
+	state, detail := execution.StateStopped, ""
+	if !stopping {
+		state, detail = execution.StateCrashed, "container exited unexpectedly"
 		if waitErr != nil {
 			detail = waitErr.Error()
 		}
-		i.terminate(execution.StateCrashed, detail, execution.CrashReasonUnspecified)
 	}
-	// Release any in-flight stop wait now the terminal state is set.
-	close(i.exited)
+	// Record the terminal and release any in-flight stop wait. Only the first
+	// terminal tears the instance down (issue #3652).
+	if !i.terminate(state, detail, execution.CrashReasonUnspecified) {
+		return
+	}
 
 	// End the log follow and wait for the capture goroutine before closing the
 	// pump so Logs() consumers finish cleanly (no goroutine leak).
@@ -3453,17 +3455,24 @@ func (i *instance) exitAfterTransportError(id string) (exited bool, info Contain
 	}
 }
 
-// terminate records a terminal state and emits it. The event is recorded first,
-// for Terminal, then the state, for Status, so whoever sees the terminal Status
-// can read the event (execution.Instance, issue #3597). Only the first terminal
-// is recorded, the one that latches the stream.
-func (i *instance) terminate(state execution.ServerState, detail string, reason execution.CrashReason) {
-	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail, CrashReason: reason}
-	i.terminal.CompareAndSwap(nil, &ev)
+// terminate finalizes the instance: it records the terminal event, for Terminal,
+// then the state, for Status, so whoever sees the terminal Status can read the
+// event (execution.Instance, issue #3597), emits it and closes exited. The first
+// terminal wins: it does all of this under i.mu as one step, and a later call
+// changes nothing and returns false, leaving the rest of the teardown (closing
+// the event stream) to the first caller (issue #3652).
+func (i *instance) terminate(state execution.ServerState, detail string, reason execution.CrashReason) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	if i.terminal.Load() != nil {
+		return false
+	}
+	ev := execution.StatusEvent{ServerID: i.spec.ServerID, State: state, Detail: detail, CrashReason: reason}
+	i.terminal.Store(&ev)
 	i.state.Store(int32(state))
 	i.emitLocked(state, detail, reason)
+	close(i.exited)
+	return true
 }
 
 // emit publishes a status event without ever blocking supervision. When the
