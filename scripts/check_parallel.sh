@@ -76,12 +76,12 @@ echo "=== check: $worktree ==="
 # survivor and died mid-suite (#2605, docs/dev/AGENTS.md Section 3).
 #
 # MCSD_CHECK_LOCK_HELD makes the lock re-entrant. `make scripts-test` runs this
-# script (test_check_parallel_lock.sh, test_check_parallel_identity.sh) from
-# inside a running gate, which would otherwise wait for the lock its own parent
-# holds, forever. It is internal -- the script exports it for the processes it
-# spawns -- and setting it by hand is a silent opt-out of the serialisation
-# above, which puts the #2513 timeout reds back on a host where nothing in the
-# output says why.
+# script (test_check_parallel_lock.sh, test_check_parallel_identity.sh,
+# test_check_parallel_logs.sh) from inside a running gate, which would otherwise
+# wait for the lock its own parent holds, forever. It is internal -- the script
+# exports it for the processes it spawns -- and setting it by hand is a silent
+# opt-out of the serialisation above, which puts the #2513 timeout reds back on
+# a host where nothing in the output says why.
 lock_file=${MCSD_CHECK_LOCK_FILE:-/tmp/mcsd-check.lock}
 if [ -z "${MCSD_CHECK_LOCK_HELD:-}" ]; then
     # Append rather than truncate: opening the file must not erase the holder
@@ -139,13 +139,32 @@ fi
 # keeps them unique per worktree, never tracked, and swept with the worktree
 # (same rationale as GOLANGCI_LINT_CACHE in the Makefile). Each run starts
 # clean, so the logs always describe the most recent run.
+#
+# The previous run's logs move to check-logs.prev rather than being deleted
+# (#3750): re-running a red gate is the documented response to a flake, and
+# deleting first destroyed the failing run's logs before anyone had read them.
+# One generation is kept. The lock above makes this safe: the dir is per
+# worktree, and a gate still running in this worktree holds the lock.
+#
+# Every step is checked, and a failed one stops the run: carrying on would put
+# this run's output in the previous run's check-logs (appended, by run_chain)
+# or, with `mv` into an existing dir, at check-logs.prev/check-logs. `mv -T`
+# never moves into a dir. With no check-logs to move -- the run before was
+# killed after its move and before its mkdir -- .prev holds the newest logs
+# there are, so it stays.
 git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || {
     echo "FAIL: not inside a git checkout (needed to locate the log dir)" >&2
     exit 1
 }
 LOGDIR="$git_dir/check-logs"
-rm -rf "$LOGDIR"
-mkdir -p "$LOGDIR"
+if [ -e "$LOGDIR" ]; then
+    rm -rf "$LOGDIR.prev" && mv -T "$LOGDIR" "$LOGDIR.prev"
+fi && mkdir "$LOGDIR" || {
+    echo "FAIL: cannot rotate the gate logs ($LOGDIR -> $LOGDIR.prev)" >&2
+    exit 1
+}
+# `make api-test` writes the api suite's per-worker run order here (#3750).
+export MCSD_CHECK_LOGDIR="$LOGDIR"
 # On INT/TERM: kill background jobs first, then exit.
 trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 
