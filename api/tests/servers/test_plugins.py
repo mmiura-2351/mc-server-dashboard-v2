@@ -352,9 +352,7 @@ async def test_install_unreadable_jar_stores_empty_manifest() -> None:
     assert plugin.dependencies == []
 
 
-async def test_install_jar_whose_manifest_cannot_be_read_stores_empty_manifest() -> (
-    None
-):
+async def test_install_jar_with_unreadable_manifest_stores_empty_manifest() -> None:
     # A jar that opens as a zip but whose manifest ``zipfile`` cannot read back
     # (here: flagged encrypted) used to fail the install with a ``RuntimeError``
     # (issue #3779). It installs like any other unreadable jar.

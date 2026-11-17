@@ -58,9 +58,8 @@ def _central_entry(jar: bytearray, name: bytes) -> int:
 def _damaged_manifest(method: int) -> bytes:
     """A jar whose manifest's compressed bytes are overwritten past their start."""
     jar = bytearray(_manifest_jar(method))
-    local = struct.unpack_from("<I", jar, _central_entry(jar, b"fabric.mod.json") + 42)[
-        0
-    ]
+    entry = _central_entry(jar, b"fabric.mod.json")
+    (local,) = struct.unpack_from("<I", jar, entry + 42)
     name_len, extra_len = struct.unpack_from("<HH", jar, local + 26)
     start = local + 30 + name_len + extra_len
     jar[start + 4 : start + 20] = b"\xff" * 16
