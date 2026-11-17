@@ -261,6 +261,24 @@ describe("ServerDetailPage scaffold + header", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows no converging hint for a server that crashed under a stopped intent (#3285)", async () => {
+    // Stopping a crashed server ends at (stopped, crashed): at rest, so
+    // nothing further will happen even though the two states differ.
+    mockApi.get.mockResolvedValue(
+      server({
+        desired_state: "stopped",
+        observed_state: "crashed",
+        assigned_worker_id: null,
+      }),
+    );
+    renderPage();
+
+    await screen.findByRole("heading", { level: 1 });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+  });
+
   it("surfaces a load error", async () => {
     mockApi.get.mockRejectedValue(new ApiError(500, {}));
     renderPage();

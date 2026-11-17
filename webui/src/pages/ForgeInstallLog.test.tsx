@@ -1,6 +1,14 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from "vitest";
 import { ApiError } from "../api/client.ts";
 import { t } from "../i18n/index.ts";
 import {
@@ -32,6 +40,7 @@ function renderLog() {
       <ForgeInstallLog communityId="c1" serverId="s1" />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 function open() {
@@ -161,5 +170,67 @@ describe("ForgeInstallLog", () => {
       screen.getByRole("button", { name: t("serverDetail.installLog.hide") }),
     );
     expect(screen.queryByText(/boom/)).not.toBeInTheDocument();
+  });
+});
+
+describe("ForgeInstallLog scroll position (#3285)", () => {
+  // Nothing is laid out here, so give every element a scroll height of 18px
+  // (`.log-view`'s 12px at line-height 1.5) per line of its text.
+  const LINE_PX = 18;
+  let scrollHeight: MockInstance;
+
+  beforeEach(() => {
+    scrollHeight = vi
+      .spyOn(Element.prototype, "scrollHeight", "get")
+      .mockImplementation(function (this: Element) {
+        return (this.textContent ?? "").split("\n").length * LINE_PX;
+      });
+  });
+
+  afterEach(() => {
+    scrollHeight.mockRestore();
+  });
+
+  function logLines(count: number) {
+    return fileBody(
+      `${Array.from({ length: count }, (_, i) => `line-${i}`).join("\n")}\n`,
+    );
+  }
+
+  it("opens scrolled to the end, where the failure is", async () => {
+    mockApi.get.mockResolvedValue(logLines(50));
+    renderLog();
+    open();
+
+    const view = await screen.findByRole("log");
+    expect(view.scrollTop).toBe(50 * LINE_PX);
+  });
+
+  it("follows new lines on a refresh while it is at the end", async () => {
+    mockApi.get.mockResolvedValue(logLines(50));
+    const client = renderLog();
+    open();
+    const view = await screen.findByRole("log");
+
+    mockApi.get.mockResolvedValue(logLines(60));
+    await act(() => client.invalidateQueries());
+    await screen.findByText(/line-59/);
+
+    expect(view.scrollTop).toBe(60 * LINE_PX);
+  });
+
+  it("keeps the operator's position on a refresh once they scrolled up", async () => {
+    mockApi.get.mockResolvedValue(logLines(50));
+    const client = renderLog();
+    open();
+    const view = await screen.findByRole("log");
+
+    view.scrollTop = 100;
+    fireEvent.scroll(view);
+    mockApi.get.mockResolvedValue(logLines(60));
+    await act(() => client.invalidateQueries());
+    await screen.findByText(/line-59/);
+
+    expect(view.scrollTop).toBe(100);
   });
 });

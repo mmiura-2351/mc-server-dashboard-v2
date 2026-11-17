@@ -53,6 +53,17 @@ export function atRest(state: ObservedState, desired?: string): boolean {
 }
 
 /**
+ * Whether the reconciler is still converging the server on its intent — the
+ * "applying…" hint (WEBUI_SPEC.md 6.4). A running intent is reached only by
+ * `running`. A stopped intent is reached by any at-rest state: a server that
+ * crashed under it is as settled as a stopped one (#3285). Like `atRest`, it
+ * ignores the Worker assignment, which the live status frames do not carry.
+ */
+export function converging(state: ObservedState, desired: string): boolean {
+  return state !== desired && !atRest(state, desired);
+}
+
+/**
  * The four semantic buckets the dashboard state filter groups the raw states
  * into (#2239). `other` folds together the transitional states and `unknown`.
  */

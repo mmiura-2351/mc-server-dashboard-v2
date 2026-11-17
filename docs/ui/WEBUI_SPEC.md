@@ -649,8 +649,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
-  category), desired-vs-observed mismatch hint ("starting…" spinner while
-  reconciler converges), worker id, port.
+  category), desired-vs-observed mismatch hint ("applying…" while the
+  reconciler converges), worker id, port. A server at rest under a stopped
+  intent (observed stopped, crashed or unknown) has converged and shows no
+  hint; the dashboard rows mark drift by the same rule.
 - Crash banner: while crashed, the `detail`, a guidance line with a link to the
   Console tab, and — keyed on the status event's `reason` — the Forge install
   diagnostics. The guidance line follows the desired state. Under a running
@@ -662,7 +664,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   `forge_install_out_of_memory` and `forge_install_java_incompatible` each add
   a specific, localised explanation of what to change. Any `forge_install_*` reason adds a **View install log**
   toggle (hidden without `file:read`) that reads `logs/forge-install.log`
-  through the files API on demand and shows its last 200 lines. The files API
+  through the files API on demand and shows its last 200 lines, opened at the
+  end; a refresh keeps following the end unless the operator has scrolled up. The files API
   serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
   under a running intent is neither, so until it is stopped the viewer says to
   stop it first (409 `server_unsettled`); a log that was never written (404)

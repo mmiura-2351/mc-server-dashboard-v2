@@ -16,7 +16,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -133,13 +133,38 @@ function InstallLogPanel({
           })}
         </div>
       )}
-      <pre
-        className="log-view install-log-view"
-        role="log"
-        aria-label={t("serverDetail.installLog.label")}
-      >
-        {tail.text}
-      </pre>
+      <InstallLogView text={tail.text} />
     </>
+  );
+}
+
+/**
+ * The tail itself, opened at its end, where the failure is (#3285). A refresh
+ * of the query (the default refetch on window focus) keeps following the end,
+ * unless the operator has scrolled up to read: then their position stands.
+ */
+function InstallLogView({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const atEnd = useRef(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `text` drives the scroll; re-run on every new tail.
+  useLayoutEffect(() => {
+    if (atEnd.current && ref.current !== null) {
+      ref.current.scrollTop = ref.current.scrollHeight;
+    }
+  }, [text]);
+  return (
+    <pre
+      ref={ref}
+      className="log-view install-log-view"
+      role="log"
+      aria-label={t("serverDetail.installLog.label")}
+      onScroll={(event) => {
+        const view = event.currentTarget;
+        atEnd.current =
+          view.scrollHeight - view.scrollTop - view.clientHeight <= 1;
+      }}
+    >
+      {text}
+    </pre>
   );
 }

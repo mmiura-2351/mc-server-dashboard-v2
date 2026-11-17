@@ -40,6 +40,7 @@ import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentati
 import {
   actionApplies,
   atRest,
+  converging,
   normalizeState,
   statePill,
 } from "./serverState.ts";
@@ -350,9 +351,9 @@ function Header({
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
-  // The reconciler has not yet converged when desired ≠ observed; show an
-  // applying hint (WEBUI_SPEC.md 6.4).
-  const drifting = server.desired_state !== server.observed_state;
+  // The reconciler has not yet converged on the intent; show an applying
+  // hint (WEBUI_SPEC.md 6.4).
+  const drifting = converging(state, server.desired_state);
 
   return (
     <div className="page-head">
