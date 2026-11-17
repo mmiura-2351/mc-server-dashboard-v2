@@ -1201,8 +1201,8 @@ function RunHistoryBody({
                 </span>
               </td>
               <td>
-                {/* The host did not answer in time (issue #3660): say what that
-                    means rather than echo the bare category. */}
+                {/* The host did not confirm the result (issues #3660, #3781):
+                    say what that means rather than echo the bare category. */}
                 {run.outcome === "unknown"
                   ? t("schedules.runs.unknownDetail")
                   : (run.detail ?? t("schedules.none"))}

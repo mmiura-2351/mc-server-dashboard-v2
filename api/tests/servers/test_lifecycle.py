@@ -4889,11 +4889,11 @@ class _RepositoryFailingOneRead(FakeServerRepository):
         return await super().get_by_id(server_id)
 
 
-async def test_start_does_not_compensate_when_the_re_read_fails() -> None:
-    # The re-read before the start raises (a database error). Nothing says this
-    # start still owns the row, and _compensate reverts without checking (issue
-    # #3741), so the error propagates as is: no start, no revert, and the row stays
-    # desired=running and assigned for the reconciler to redispatch.
+async def test_start_compensates_when_the_re_read_fails() -> None:
+    # The re-read before the start raises (a database error). No start went out,
+    # so this is a failure before the send, like a failed hydrate: the start
+    # reverts its intent (issue #2001), which the revert now checks is still its
+    # own (issue #3741), and the error propagates.
     community, server_id, worker = _ids()
     repo = _RepositoryFailingOneRead()
     uow = FakeUnitOfWork(servers=repo)
@@ -4908,6 +4908,43 @@ async def test_start_does_not_compensate_when_the_re_read_fails() -> None:
 
     with pytest.raises(RuntimeError, match="database unavailable"):
         await _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    stored = repo.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id is None
+    assert cp.decremented == [WorkerId(worker)]
+
+
+async def test_place_and_start_keeps_the_assignment_when_the_re_read_fails() -> None:
+    # The same failure on the reconciler's placement. The hydrate succeeded and
+    # the Worker holds the working set; only the database failed. The placement
+    # keeps the row on that Worker: no start went out, and the next tick re-sends
+    # it there without a second hydrate. Unassigning would only buy a placement
+    # and a hydrate over again, and the running intent is not the placement's.
+    community, server_id, worker = _ids()
+    repo = _RepositoryFailingOneRead()
+    uow = FakeUnitOfWork(servers=repo)
+    repo.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+        )
+    )
+
+    def read_fails() -> None:
+        repo.fail_next_read = True
+
+    cp = _HydrateRunsHookControlPlane(
+        place_to=WorkerId(worker), during_hydrate=read_fails
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await _start_server(uow, cp).place_and_start(
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
 

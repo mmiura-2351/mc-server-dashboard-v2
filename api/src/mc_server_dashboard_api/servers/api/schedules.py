@@ -548,8 +548,8 @@ async def list_schedule_runs(
 
     Requires `schedule:read`. Each run carries the outcome
     (`success`/`failure`/`skipped`/`unknown`) and an optional sanitized `detail`
-    note. `unknown` is an action the Worker did not answer in time: it may still
-    have run.
+    note. `unknown` is an action whose result the Worker did not confirm: it may
+    have run, or may still take effect.
     """
 
     try:

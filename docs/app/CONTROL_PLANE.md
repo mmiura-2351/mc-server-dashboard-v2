@@ -524,7 +524,9 @@ one the new session sent (issue #3658).
 
 **Teardown.** When a `Session` ends, the API fails the Worker's in-flight
 commands, marks the Worker offline, and marks its servers' observed state
-`unknown`. Each step is guarded by the ending Session's token: a stale
+`unknown`. A command failed this way may have reached the Worker and run, so
+its caller can tell it from one dispatched to a Worker with no session, which
+was never queued (issue #3781). Each step is guarded by the ending Session's token: a stale
 teardown, for a Worker that has already re-registered on a newer Session,
 leaves that Worker online and its servers' states untouched. The teardown runs
 in a task the API owns, not in the RPC task. When a Worker's transport dies,
@@ -631,11 +633,21 @@ Notes:
   then stops the start until the reconciler acts on the Worker's report, and a
   stop retried before that report only releases the server. Whether a
   cancelled commit can raise before its flip is visible is also open. Both
-  are tracked in issue #3766. A failed start's revert also adds to the count,
-  but it sends no stop. A start that was already queued when such a revert
-  landed is still not caught (issue #3741). The count lives in the API
-  process. This holds because the API runs as a single instance
-  (REQUIREMENTS.md NFR-SCALE-1).
+  are tracked in issue #3766. The count also tells a failed start's revert
+  whether the intent is still its own (issue #3741). The revert undoes the
+  intent only if the count is still the one the start read and the server is
+  still `desired=running` on the start's Worker. Otherwise a newer stop or
+  start owns the server, and the revert leaves it, and its placement count,
+  alone. The revert makes that check and its write under a per-server lock in
+  the API process, which every start also holds from reading the count to
+  committing its intent. It is not the lifecycle lock: backup uploads and
+  deletes, prunes and the integrity sweep hold that lock across Storage I/O,
+  and a revert waiting behind them would give up. A revert adds to the count,
+  also when its commit raises, so a re-sent start of the same intent that is
+  not yet queued is not sent. It sends no stop, so a re-sent start already
+  queued when the revert lands still runs.
+  The count lives in the API process. This holds because the API runs as a
+  single instance (REQUIREMENTS.md NFR-SCALE-1).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
@@ -670,7 +682,7 @@ Notes:
     timeout as "may have been applied": a start or stop keeps its intent and
     assignment for the reconciler, a late final-snapshot result releases its
     held assignment (Section 5.1), and a scheduled command, stop or restart, or
-    a scheduled start whose start command was sent, records its run as `unknown`
+    a scheduled start whose intent still stands, records its run as `unknown`
     rather than `failure` (DATABASE.md Section 8).
   - A **result that arrives late** is credited to nothing. Every dispatch has its
     own `command_id`, and a result whose dispatch the API no longer waits for is

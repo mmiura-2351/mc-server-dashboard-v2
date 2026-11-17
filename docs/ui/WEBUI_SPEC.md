@@ -827,9 +827,9 @@ numbers): the UI for the general scheduler.
 - Run history: per-schedule dialog, newest first — outcome badge
   (`success`/`failure`/`skipped`/`unknown`), sanitized detail, started/finished
   timestamps. Capped at 50 rows per schedule server-side. An `unknown` run is an
-  action the host did not answer in time (issue #3660): it gets its own amber
-  badge, and in place of the detail the row says the action may still have run,
-  so it is not read as a failure.
+  action whose result the host did not confirm (issues #3660, #3781): it gets
+  its own amber badge, and in place of the detail the row says the action may
+  have run or may still take effect, so it is not read as a failure.
 - Permission gating (7.3): the tab body needs `schedule:read`; writes are
   two-layer — `schedule:manage` **and** the action's own permission gates the
   create button's action options and each row's edit/toggle/delete

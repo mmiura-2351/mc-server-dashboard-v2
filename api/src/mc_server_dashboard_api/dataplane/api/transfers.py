@@ -20,21 +20,19 @@ never community-authenticated: a Worker is platform infrastructure, not a member
   staging guarantees a partial upload is never made authoritative (FR-DATA-6). A
   size cap rejects an implausibly large body before it can fill the disk.
 
-The archive format is the stdlib tar stream Storage already produces/consumes
-(STORAGE.md Section 7.1 wire-format note); this surface carries it verbatim.
+The archive format is the plain, uncompressed stdlib tar stream Storage already
+produces/consumes (STORAGE.md Section 7.1 wire-format note); this surface carries
+it verbatim.
 """
 
 from __future__ import annotations
 
 import asyncio
-import gzip
 import hmac
 import io
 import logging
-import lzma
 import tarfile
 import uuid
-import zlib
 from collections.abc import AsyncIterator
 from typing import Annotated
 
@@ -72,6 +70,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     IntegrityCheckError,
     MissingRegionsError,
     NotFoundError,
+    PathTraversalError,
     PrunedStoreError,
     PublisherFencedError,
     StaleGenerationError,
@@ -132,21 +131,17 @@ _MISSING_REGION_NAME_CAP = 50
 # limit can be made configurable when a deployment needs it.
 _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
 
-# What reading a snapshot body raises when its own bytes do not read back as an
-# archive (issues #3365, #3779): a ``TarError`` (not a tar, a bad header, a member
-# the extraction refuses), or, when the body is compressed and breaks inside a
-# member, the decompressor's own error, which ``tarfile``'s random-access reader
-# (the object backend's) does not translate: ``EOFError`` for a cut stream,
-# ``zlib.error`` for damaged deflate data, ``BadGzipFile`` for a bad gzip trailer and
-# ``LZMAError`` for damaged xz data. A plain ``OSError`` is deliberately not here,
-# though bzip2 reports damaged data as one: the read shares this handler with the
+# What reading a snapshot body raises when its own bytes are not a publishable
+# plain tar (issues #3365, #3779, #3786): a ``TarError`` (not a plain tar, a bad
+# header, a member the fs extraction refuses), or the ``PathTraversalError`` the
+# object backend's member listing raises for an escaping or non-canonical member
+# name, its only source inside the handler. Both backends read the body as a plain
+# tar, never through a decompressor, so no decompressor error can reach here. A
+# plain ``OSError`` is deliberately not here: the read shares this handler with the
 # staging's disk and object-store I/O, whose faults say nothing about the body.
 _UNREADABLE_SNAPSHOT_ERRORS: tuple[type[Exception], ...] = (
     tarfile.TarError,
-    EOFError,
-    zlib.error,
-    gzip.BadGzipFile,
-    lzma.LZMAError,
+    PathTraversalError,
 )
 
 # Per-chunk idle timeout for the snapshot upload stream (issue #1699). If no new
@@ -441,11 +436,11 @@ async def publish_snapshot(
 
     The "proven complete" gate: a missing Content-Length is 411, an oversized one
     is 413, a streamed-byte count that does not match Content-Length is 400 (as is
-    a Worker that disconnects mid-upload), a body that does not read as a tar is
-    422 ``invalid_archive``, and a body that stages zero files (an empty working
-    set) is 400 ``empty_snapshot`` — in every reject path the staged transfer is
-    aborted, so ``current/`` keeps the prior authoritative copy (FR-DATA-6,
-    STORAGE.md Section 4.1).
+    a Worker that disconnects mid-upload), a body that does not read as a plain,
+    uncompressed tar is 422 ``invalid_archive``, and a body that stages zero files
+    (an empty working set) is 400 ``empty_snapshot`` — in every reject path the
+    staged transfer is aborted, so ``current/`` keeps the prior authoritative copy
+    (FR-DATA-6, STORAGE.md Section 4.1).
 
     The cap and the declared length are both enforced *during* streaming, not only
     against the header: an under-declaring client (small Content-Length, longer
@@ -681,9 +676,9 @@ async def publish_snapshot(
             )
             raise problem(status.HTTP_400_BAD_REQUEST, "length_mismatch") from None
         except _UNREADABLE_SNAPSHOT_ERRORS as exc:
-            # The byte-complete body does not read as a tar, or carries a member
-            # the extraction refuses (issues #3365, #3779): the body is at fault, as
-            # an uploaded backup's is (422 ``invalid_archive``), not the API.
+            # The byte-complete body does not read as a plain tar, or carries a
+            # member the ingest refuses (issues #3365, #3779, #3786): the body is at
+            # fault, as an uploaded backup's is (422 ``invalid_archive``), not the API.
             await storage.abort_snapshot(handle)
             _logger.warning(
                 "snapshot publish refused: body is not a readable tar for "

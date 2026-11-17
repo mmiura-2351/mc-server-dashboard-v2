@@ -811,7 +811,7 @@ export const en = {
   "schedules.runs.outcome.skipped": "Skipped",
   "schedules.runs.outcome.unknown": "Unknown",
   "schedules.runs.unknownDetail":
-    "The host did not answer in time. The action may still have run.",
+    "The host did not confirm the result. The action may have run, or may still take effect.",
 
   // Files tab (WEBUI_SPEC.md 6.6). One contiguous block to keep merge
   // conflicts with sibling tab PRs minimal.

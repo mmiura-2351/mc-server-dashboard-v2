@@ -48,6 +48,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
+    BAD_SPARSE_FIELDS,
     bomb_targz,
     corrupt_region_bytes,
     drain,
@@ -60,6 +61,7 @@ from tests.storage.helpers import (
     stream_of,
     tar_bytes,
     tar_stream,
+    tar_with_a_bad_sparse_field,
     unaligned_live_region_bytes,
     wait_until_contended,
     watch_lock_contention,
@@ -1490,6 +1492,35 @@ async def test_archive_with_an_escaping_member_is_unreadable(
 
     with pytest.raises(ArchiveUnreadableError):
         await harness.storage.restore_backup(community, server, key, force=force)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("field", list(BAD_SPARSE_FIELDS))
+async def test_archive_with_a_non_numeric_sparse_field_is_unreadable(
+    harness: StorageHarness, field: str
+) -> None:
+    """A member header whose GNU sparse field is not a number makes the archive
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3790), for the restore and
+    the health probe, not the raw ``ValueError`` ``tarfile`` raises for it. The bad
+    header follows a good member, so a reader that took it for the end of the
+    archive would restore that member alone; the live snapshot stays untouched."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    archive = tar_with_a_bad_sparse_field(field, after={"server.properties": b"k=v"})
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(archive), chunk=8192)
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key)
     with pytest.raises(ArchiveUnreadableError):
         await harness.storage.check_backup_health(community, server, key)
 

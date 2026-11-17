@@ -18,7 +18,9 @@ accept is as harmful as passing one it would not.
 
 The paths that extract an archive with ``tarfile`` instead — restore on both
 backends, and the fs health check — reach the same verdict through
-:func:`archive_read_errors_as_unreadable` (issue #3230). The restore and health
+:func:`archive_read_errors_as_unreadable` (issue #3230). Every member walk of
+both backends, snapshot ingest included, reads the headers through
+:class:`HeaderCheckedTarInfo` (issue #3790). The restore and health
 paths of both backends judge each member by :func:`refuse_unrestorable_member`
 (issue #3550), and both backends' snapshot ingest takes only the canonical names
 ``is_canonical_name`` admits (issue #3574). Every one of those paths first reads
@@ -34,6 +36,7 @@ import gzip
 import tarfile
 import zlib
 from collections.abc import Iterator
+from typing import Self
 
 from mc_server_dashboard_api.archive_member import unrestorable_reason
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
@@ -154,7 +157,9 @@ class GzipReadProbe:
 # ``FilterError`` branch refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
 # nothing about the archive's bytes, and each backend keeps its own I/O-fault
-# policy for it.
+# policy for it. Nor is ``ValueError``, though ``tarfile`` raises it for a header
+# with a bad number (issue #3790): the fs restore's wrap spans its own code too.
+# :class:`HeaderCheckedTarInfo` turns that one into a ``ReadError`` where it arises.
 _ARCHIVE_READ_ERRORS = (
     EOFError,
     zlib.error,
@@ -162,6 +167,30 @@ _ARCHIVE_READ_ERRORS = (
     tarfile.ReadError,
     tarfile.CompressionError,
 )
+
+
+class HeaderCheckedTarInfo(tarfile.TarInfo):
+    """A ``TarInfo`` whose header read reports a ``ValueError`` as ``ReadError``.
+
+    CPython's ``tarfile`` converts the PAX ``GNU.sparse.size``,
+    ``GNU.sparse.realsize`` and ``GNU.sparse.map`` fields, and the sparse format
+    1.0 map, with a bare ``int()``, so a non-numeric one raises ``ValueError``
+    (issue #3790). Opening an archive with ``tarinfo=HeaderCheckedTarInfo``
+    reports it as the ``ReadError`` that the restore walk and the snapshot edge
+    already refuse. Both hooks are public: the library reference documents the
+    ``tarinfo`` argument as replacing the default ``TarInfo`` class, and
+    ``TarInfo.fromtarfile`` as the classmethod that reads the next member. Only
+    the header read is covered, so a ``ValueError`` from the caller's own code is
+    never mistaken for one. Not ``InvalidHeaderError``: ``TarFile.next`` takes
+    that, past the first header, for the end of the archive.
+    """
+
+    @classmethod
+    def fromtarfile(cls, archive: tarfile.TarFile) -> Self:
+        try:
+            return super().fromtarfile(archive)
+        except ValueError as exc:
+            raise tarfile.ReadError(f"unreadable member header: {exc}") from exc
 
 
 @contextlib.contextmanager
