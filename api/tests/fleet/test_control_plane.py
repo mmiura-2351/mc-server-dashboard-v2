@@ -1481,6 +1481,29 @@ async def test_reconnect_retires_the_superseded_sessions_commands() -> None:
     assert state.final_snapshot_outstanding(_SERVER)
 
 
+async def test_dispatch_superseded_by_a_reconnect_raises_session_ended() -> None:
+    # The other retire path (issue #3781): a reconnect retires the commands the
+    # prior session still awaited. They may have reached the Worker and run, so
+    # the dispatch fails as SessionEndedError, not as never-connected.
+    state = ControlPlaneState()
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
+    worker = WorkerId(_WORKER)
+    queue = state.open_session(worker, 1)
+    task = asyncio.create_task(
+        control_plane.dispatch(
+            worker_id=worker,
+            server_id=_SERVER,
+            command=ServerCommandCommand(line="list"),
+        )
+    )
+    await queue.get()  # the command is on the old session's stream
+
+    state.open_session(worker, 2)
+
+    with pytest.raises(SessionEndedError):
+        await asyncio.wait_for(task, timeout=2.0)
+
+
 # ---------------------------------------------------------------------------
 # Command expiry (issue #3305)
 # ---------------------------------------------------------------------------

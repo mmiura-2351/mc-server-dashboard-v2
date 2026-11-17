@@ -251,35 +251,41 @@ class SqlAlchemyServerRepository(ServerRepository):
         server: Server,
         *,
         expected_from: DesiredState,
-        require_unassigned: bool = False,
+        expected_assigned_worker_id: WorkerId | None,
+        write_config: bool = False,
     ) -> bool:
-        # Compare-and-set: the WHERE clause carries the expected-from precondition
-        # so a concurrent transition that already moved the row matches no row and
-        # returns rowcount 0 (the lost-race signal). require_unassigned adds the
-        # start precondition that nothing has placed the server yet.
-        conditions = [
-            ServerModel.id == server.id.value,
-            ServerModel.desired_state == expected_from.value,
-        ]
-        if require_unassigned:
-            conditions.append(ServerModel.assigned_worker_id.is_(None))
+        # Compare-and-set: the WHERE clause carries the desired state and the
+        # assignment the caller read, so a concurrent transition that already
+        # moved either matches no row and returns rowcount 0 (the lost-race
+        # signal). IS NOT DISTINCT FROM lets an expected NULL (a start, which
+        # requires that nothing has placed the server yet) match only NULL
+        # (issue #3792).
+        values: dict[str, Any] = {
+            "desired_state": server.desired_state.value,
+            "assigned_worker_id": (
+                None
+                if server.assigned_worker_id is None
+                else server.assigned_worker_id.value
+            ),
+            "updated_at": server.updated_at,
+        }
+        if write_config:
+            # A start's resolved-JAR reference (issue #118) lands atomically with
+            # its flip. No other transition owns the config: writing back the one
+            # it read would undo an edit committed since (issue #3792).
+            values["config"] = server.config
         stmt = (
             update(ServerModel)
-            .where(*conditions)
-            .values(
-                desired_state=server.desired_state.value,
-                assigned_worker_id=(
+            .where(
+                ServerModel.id == server.id.value,
+                ServerModel.desired_state == expected_from.value,
+                ServerModel.assigned_worker_id.is_not_distinct_from(
                     None
-                    if server.assigned_worker_id is None
-                    else server.assigned_worker_id.value
+                    if expected_assigned_worker_id is None
+                    else expected_assigned_worker_id.value
                 ),
-                # Persist config alongside the flip so StartServer's resolved-JAR
-                # reference (issue #118) lands atomically with the desired-state
-                # change. Other callers (stop/restart) pass an unchanged config, so
-                # this is a no-op write for them.
-                config=server.config,
-                updated_at=server.updated_at,
             )
+            .values(**values)
         )
         result = await self._session.execute(stmt)
         # An UPDATE returns a CursorResult, whose rowcount is the matched count;
@@ -315,7 +321,7 @@ class SqlAlchemyServerRepository(ServerRepository):
     ) -> bool:
         values: dict[str, Any] = {}
         # On a CONFIRMED stop, clear the assignment in the same write so a later
-        # start can re-place under require_unassigned (issue #206).
+        # start can re-place under the unassigned-only CAS (issue #206).
         if unassign:
             values["assigned_worker_id"] = None
         # Monotonic guard (issue #216): drop a write stamped no later than the row's
@@ -458,7 +464,7 @@ class SqlAlchemyServerRepository(ServerRepository):
     ) -> bool:
         # Guarded so the late unassign only clears OUR held assignment (issue #847):
         # match only a still desired=stopped row still assigned to worker_id. A start
-        # cannot have re-placed during the snapshot window (its require_unassigned CAS
+        # cannot have re-placed during the snapshot window (its unassigned-only CAS
         # saw the held assignment), so the guard normally matches; it makes the clear
         # a no-op rather than a clobber if the row moved by any other path.
         stmt = (
@@ -565,7 +571,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # desired=stopped, observed=stopped, still assigned (issue #847,
                 # bug 2): a stop wedged because its deferred unassign never ran (an
                 # API crash or HTTP-task cancellation mid final-snapshot). No other
-                # path converges this triple — StartServer's require_unassigned CAS
+                # path converges this triple — StartServer's unassigned-only CAS
                 # 409s before flipping desired, and the sink no longer unassigns —
                 # so the reconciler's stale-stop arm releases the assignment.
                 and_(
@@ -593,7 +599,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # reset_unverifiable_observed_states (API restart) deliberately
                 # leaves it alone as still-truthful. Nothing else flags the row
                 # either — is_at_rest() reads true — so the assignment stands and
-                # every later start 409s on require_unassigned, for as long as the
+                # every later start 409s on the unassigned-only CAS, for as long as the
                 # owning worker stays connected. (A disconnect does rewrite it to
                 # unknown, but only by accident of that invalidation being
                 # unfiltered; an operator cannot be told to unplug a worker.)
@@ -611,9 +617,9 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # completely: is_at_rest() is false so file/backup/restore/delete all
                 # 409 "unsettled", StopServer and RestartServer raise
                 # InvalidLifecycleTransitionError (desired is already stopped) and
-                # StartServer 409s on require_unassigned. The reconciler routes this
-                # to redispatch_stop (connected worker) or clear_stale_assignment
-                # (disconnected worker).
+                # StartServer 409s on the unassigned-only CAS. The reconciler routes
+                # this to redispatch_stop (connected worker) or
+                # clear_stale_assignment (disconnected worker).
                 and_(
                     ServerModel.desired_state == stopped,
                     ServerModel.observed_state == ObservedState.STOPPING.value,

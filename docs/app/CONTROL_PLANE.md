@@ -535,18 +535,19 @@ one the new session sent (issue #3658).
 commands, marks the Worker offline, and marks its servers' observed state
 `unknown`. A command failed this way may have reached the Worker and run, so
 its caller can tell it from one dispatched to a Worker with no session, which
-was never queued (issue #3781). Each step is guarded by the ending Session's token: a stale
-teardown, for a Worker that has already re-registered on a newer Session,
-leaves that Worker online and its servers' states untouched. The teardown runs
-in a task the API owns, not in the RPC task. When a Worker's transport dies,
-gRPC reports the end of the inbound stream and cancels the RPC separately, and
-the cancel can arrive while the teardown is already writing. The teardown
-finishes regardless. API shutdown waits, after the gRPC server stops, for
-every `Session` to reach its teardown and for each teardown to finish, within
-one 10-second budget. A teardown still running past the budget is logged with
-its Worker id and cancelled. So is any teardown a `Session` hands off after the
-budget. Shutdown waits up to 2 more seconds for them to settle before it closes
-the database connections, and logs any Worker whose teardown is still pending.
+was never queued (issue #3781). Each step is guarded by the ending Session's
+token: a stale teardown, for a Worker that has already re-registered on a newer
+Session, leaves that Worker online and its servers' states untouched. The
+teardown runs in a task the API owns, not in the RPC task. When a Worker's
+transport dies, gRPC reports the end of the inbound stream and cancels the RPC
+separately, and the cancel can arrive while the teardown is already writing. The
+teardown finishes regardless. API shutdown waits, after the gRPC server stops,
+for every `Session` to reach its teardown and for each teardown to finish,
+within one 10-second budget. A teardown still running past the budget is logged
+with its Worker id and cancelled. So is any teardown a `Session` hands off after
+the budget. Shutdown waits up to 2 more seconds for them to settle before it
+closes the database connections, and logs any Worker whose teardown is still
+pending.
 
 ---
 
@@ -655,6 +656,18 @@ Notes:
   also when its commit raises, so a re-sent start of the same intent that is
   not yet queued is not sent. It sends no stop, so a re-sent start already
   queued when the revert lands still runs.
+  Every write of the intent (a start, a stop, a drain, a restart, a revert)
+  checks, as it writes, that the server's `desired_state` and assigned Worker
+  are still the ones it read (issue #3792). If either moved, it changes
+  nothing: a stop or a restart answers `409 transition_conflict` and sends
+  nothing, a drain leaves the server out, and a revert leaves the server
+  alone. None of them then adds to the count or changes a Worker's placement
+  count; the write that moved the server owns both. So a stop or a drain that
+  read the server before a failed placement released its Worker neither puts
+  that Worker back nor drops its placement count a second time, and a restart
+  does not put it back either. Only a start writes the server's config, to
+  record the JAR it resolved; the other writes leave it, so a config edit
+  made while the server runs is kept.
   The count lives in the API process. This holds because the API runs as a
   single instance (REQUIREMENTS.md NFR-SCALE-1).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a

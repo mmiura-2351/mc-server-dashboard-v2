@@ -7,6 +7,7 @@ provide fresh repositories and the foreign-key parents needed by PostgreSQL.
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import uuid
 from copy import deepcopy
 
@@ -351,13 +352,19 @@ class ServerRepositoryContract:
         changed.observed_at = _LATER
         async with server_repository_harness.open() as tx:
             assert await tx.repository.update_lifecycle(
-                changed, expected_from=DesiredState.RUNNING
+                changed,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=item.assigned_worker_id,
+                write_config=True,
             )
             await tx.commit()
         changed.config["properties"]["motd"] = "changed-locally"
         async with server_repository_harness.open() as tx:
             assert not await tx.repository.update_lifecycle(
-                changed, expected_from=DesiredState.RUNNING
+                changed,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=item.assigned_worker_id,
+                write_config=True,
             )
             stored = await tx.repository.get_by_id(item.id)
         assert stored is not None
@@ -372,6 +379,95 @@ class ServerRepositoryContract:
             ObservedState.CRASHED,
             _NOW,
         )
+
+    @pytest.mark.parametrize(
+        ("stored", "expected", "applies"),
+        [
+            ("w1", "w1", True),
+            (None, None, True),
+            ("w1", None, False),
+            (None, "w1", False),
+            ("w1", "w2", False),
+        ],
+        ids=["same", "both-null", "null-expected", "null-stored", "other-worker"],
+    )
+    async def test_lifecycle_update_compares_the_assignment_it_read(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        stored: str | None,
+        expected: str | None,
+        applies: bool,
+    ) -> None:
+        # Issue #3792: a write whose read is stale on the assignment alone loses
+        # as one stale on the desired state does, and leaves the row untouched.
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.assigned_worker_id = None if stored is None else workers[stored]
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        changed = deepcopy(item)
+        changed.desired_state = DesiredState.STOPPED
+        changed.updated_at = _LATER
+        async with server_repository_harness.open() as tx:
+            applied = await tx.repository.update_lifecycle(
+                changed,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=(
+                    None if expected is None else workers[expected]
+                ),
+            )
+            await tx.commit()
+        assert applied is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.desired_state, row.assigned_worker_id, row.updated_at) == (
+            DesiredState.STOPPED if applies else DesiredState.RUNNING,
+            item.assigned_worker_id,
+            _LATER if applies else _NOW,
+        )
+
+    async def test_lifecycle_update_leaves_the_config_unless_it_owns_it(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Only a start writes the config, to record the JAR it resolved (issue
+        # #118). Every other transition keeps the row's config, so an edit that
+        # committed after the caller read the row survives (issue #3792).
+        item = server(contract_community_id)
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        changed = deepcopy(item)
+        changed.desired_state = DesiredState.STOPPED
+        changed.config = {"properties": {"motd": "read before an edit"}}
+        changed.updated_at = _LATER
+        async with server_repository_harness.open() as tx:
+            assert await tx.repository.update_lifecycle(
+                changed,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=item.assigned_worker_id,
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.desired_state, row.config) == (DesiredState.STOPPED, item.config)
+
+    async def test_lifecycle_update_has_no_default_for_the_expected_assignment(
+        self, server_repository_harness: RepositoryHarness[ServerRepository]
+    ) -> None:
+        # Issue #3792: a caller cannot leave the assignment out of the compare.
+        async with server_repository_harness.open() as tx:
+            adapter = inspect.signature(tx.repository.update_lifecycle)
+        port = inspect.signature(ServerRepository.update_lifecycle)
+        for signature in (adapter, port):
+            parameter = signature.parameters["expected_assigned_worker_id"]
+            assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            assert parameter.default is inspect.Parameter.empty
 
     async def test_missing_updates_do_not_insert(
         self,

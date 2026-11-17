@@ -261,15 +261,19 @@ async def _mark_stopped(uow: UnitOfWork, server: Server, *, at: dt.datetime) -> 
     The single flip both stop paths share (issue #2578): :class:`StopServer` for one
     server, :class:`StopServersAssignedToWorker` for every server a drained Worker
     holds. Returns whether the compare-and-set applied; ``False`` means a concurrent
-    transition already moved the row out of running, which the two callers answer
-    differently — a single stop raises a conflict, a drain skips that server. The
+    transition already moved the row out of running, or off the Worker it was read
+    on (issue #3792), which the two callers answer differently — a single stop
+    raises a conflict, a drain skips that server. Either way the caller neither
+    bumps nor decrements: the write that moved the row owns both. The
     ``updated_at`` stamp lives here with the flip so the two cannot drift apart.
     """
 
     server.desired_state = DesiredState.STOPPED
     server.updated_at = at
     return await uow.servers.update_lifecycle(
-        server, expected_from=DesiredState.RUNNING
+        server,
+        expected_from=DesiredState.RUNNING,
+        expected_assigned_worker_id=server.assigned_worker_id,
     )
 
 
@@ -385,7 +389,7 @@ class StartServer:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             if server.assigned_worker_id is not None:
                 # A stop still holds the assignment for its final snapshot (issue
-                # #847). Refuse now, with the conflict the ``require_unassigned``
+                # #847). Refuse now, with the conflict the unassigned-only
                 # compare-and-set below would answer, instead of carrying on to
                 # it: the snapshot's deferred clear takes no lifecycle lock, so it
                 # can release the row while this start provisions its JAR, and the
@@ -465,7 +469,8 @@ class StartServer:
                     applied = await self.uow.servers.update_lifecycle(
                         server,
                         expected_from=DesiredState.STOPPED,
-                        require_unassigned=True,
+                        expected_assigned_worker_id=None,
+                        write_config=True,
                     )
                     if not applied:
                         # A concurrent start won the compare-and-set: the row is
@@ -751,7 +756,8 @@ class StartServer:
                     applied = await self.uow.servers.update_lifecycle(
                         server,
                         expected_from=DesiredState.RUNNING,
-                        require_unassigned=True,
+                        expected_assigned_worker_id=None,
+                        write_config=True,
                     )
                     if not applied:
                         # A concurrent assignment (a real start or another reconcile
@@ -1334,9 +1340,10 @@ class StartServer:
         Placement-load decrement semantics (symmetric with StartServer's
         increment): decrement **iff** the revert compare-and-set actually
         reverted the row (rowcount true). If the CAS matched no row, a concurrent
-        transition (e.g. a stop) already moved the state out of running and owns
-        the decrement; decrementing here too would drive the count below the true
-        running tally. If the compensation commit itself errors the DB state is
+        transition (e.g. a stop) already moved the state out of running, or the
+        row off this start's Worker (issue #3792), and owns the decrement;
+        decrementing here too would drive the count below the true running
+        tally. If the compensation commit itself errors the DB state is
         unknown, so we do **not** decrement and log loudly — the reconnect
         assignment rebuild reconciles the count from the authoritative tally. It
         still bumps, as a stop does (issue #3739): the commit may have landed.
@@ -1367,7 +1374,9 @@ class StartServer:
                     server.assigned_worker_id = None
                     server.updated_at = self.clock.now()
                     reverted = await self.uow.servers.update_lifecycle(
-                        server, expected_from=DesiredState.RUNNING
+                        server,
+                        expected_from=DesiredState.RUNNING,
+                        expected_assigned_worker_id=worker_id,
                     )
                     # Withdrawn, so it bumps like a stop (issue #3739): a re-sent
                     # start of this same intent that has not sent yet sees it. The
@@ -1454,7 +1463,9 @@ class StartServer:
                     server.assigned_worker_id = None
                     server.updated_at = self.clock.now()
                     reverted = await self.uow.servers.update_lifecycle(
-                        server, expected_from=DesiredState.RUNNING
+                        server,
+                        expected_from=DesiredState.RUNNING,
+                        expected_assigned_worker_id=worker_id,
                     )
                     # Withdrawn, so it bumps as ``_compensate`` does, also when the
                     # commit raises, with the same limit (issue #3739).
@@ -1688,12 +1699,12 @@ class StopServer:
         sites take the identical sequence. The ordering closes the stop→re-place
         generation race: the unassign is held until the final snapshot SETTLES, so a
         start that races the in-flight snapshot finds the assignment still set and
-        its ``require_unassigned`` compare-and-set 409s — it cannot re-place the
+        its unassigned-only compare-and-set 409s — it cannot re-place the
         server on a DIFFERENT worker whose hydrate would pull store generation N
         while the final (would-be N+1) snapshot is still uploading.
 
         The unassign cannot wait on the later StatusChange(stopped) event: a start
-        blocked on ``require_unassigned`` must be unblocked the moment the snapshot
+        blocked on the unassigned-only CAS must be unblocked the moment the snapshot
         settles (issue #206). The clear-vs-HOLD decision keys on whether the
         worker's upload is still live, which splits the ``WorkerUnavailableError``
         the dispatch may raise by its underlying cause (issue #847):
@@ -1857,7 +1868,7 @@ class StopServer:
 
         Ordering is the graceful path's (issue #847): snapshot BEFORE the guarded
         clear, so a start racing the in-flight upload finds the assignment still set
-        and its ``require_unassigned`` compare-and-set 409s instead of re-placing on
+        and its unassigned-only compare-and-set 409s instead of re-placing on
         a different Worker mid-upload. A snapshot TIMEOUT therefore HOLDS the
         assignment (``upload_may_be_live``), released early by the worker's late
         ``CommandResult`` (``clear_assignment_after_late_snapshot``, #891) or by the
@@ -1948,7 +1959,7 @@ class StopServer:
         """Release the assignment held across the final snapshot (issue #847).
 
         Guarded so it only clears OUR still-held assignment: a start cannot have
-        re-placed during the window (its ``require_unassigned`` CAS saw the held
+        re-placed during the window (its unassigned-only CAS saw the held
         assignment), so the guard normally matches; it makes the clear a no-op rather
         than a clobber if the row moved by any other path.
         """
@@ -2108,7 +2119,7 @@ class StopServer:
 
         On a CONFIRMED stop (success, or SERVER_NOT_FOUND meaning no live instance
         remains) the final snapshot is taken and THEN the assignment is cleared, so
-        a later start can re-place under require_unassigned (issue #206) without
+        a later start can re-place under the unassigned-only CAS (issue #206) without
         racing an in-flight upload (issue #847). A failed dispatch keeps the
         assignment for a same-Worker retry.
         """
@@ -2195,7 +2206,7 @@ class StopServer:
         commit and the post-snapshot clear in ``_record_stopped_then_final_snapshot``
         leaves the row assigned forever, and an API restart or worker disconnect
         mid-stop leaves (stopped, unknown, assigned). No other path converges
-        either triple: ``StartServer`` 409s on ``require_unassigned`` before
+        either triple: ``StartServer`` 409s on the unassigned-only CAS before
         flipping desired, and the sink no longer unassigns from a status report
         (bug 1). This deliberate recovery replaces #217's sink-unassign, which used
         to rescue the case but raced the snapshot window.
@@ -2617,9 +2628,10 @@ class RestartServer:
 
     Nothing to compensate on a failed dispatch (issue #2435): restart commits no
     desired-state change — the compare-and-set below only asserts the row is
-    still running — and ``desired_state=running`` remains the correct intent
-    whatever the Worker did, including the case where it stopped the server and
-    failed to relaunch it. The reconciler converges that from the same row.
+    still running on the Worker it read — and ``desired_state=running`` remains
+    the correct intent whatever the Worker did, including the case where it
+    stopped the server and failed to relaunch it. The reconciler converges that
+    from the same row.
 
     A player-group file change the server is owed is NOT applied here (issue
     #3223): the Worker relaunches its own working set, where the change cannot be
@@ -2645,10 +2657,16 @@ class RestartServer:
             # Restart keeps desired=running; the compare-and-set asserts the row
             # is still running before we dispatch, so a stop that won a concurrent
             # race turns this into a transition conflict rather than a restart of
-            # a server already moving to stopped (FR-SRV-2).
+            # a server already moving to stopped (FR-SRV-2). It asserts the
+            # Worker too: a failed placement's undo, or a placement elsewhere
+            # after it, turns this into the same conflict, rather than writing
+            # this read's Worker back onto the row and restarting a server that
+            # Worker does not run (issue #3792).
             server.updated_at = self.clock.now()
             applied = await self.uow.servers.update_lifecycle(
-                server, expected_from=DesiredState.RUNNING
+                server,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=worker_id,
             )
             if not applied:
                 raise LifecycleTransitionConflictError(str(server_id.value))

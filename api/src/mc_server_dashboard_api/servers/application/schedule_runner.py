@@ -29,17 +29,21 @@ Outcome taxonomy (owner-confirmed):
   answer. Neither proves the command left the API, since one dropped unsent from
   the outbound queue looks the same, so both err toward unknown. A start whose
   intent still stands after the error: an unreachable Worker, a lost answer or a
-  ``BUSY`` refusal at the start command, after which the reconciler starts the
-  server. Audited and
-  notified like a failure, under its own title, and never retried. It shares the
-  failing edge, but a failure after an unknown notifies once more as an
-  escalation; an unknown after a failure stays silent.
+  ``BUSY`` refusal at the start command, after which the reconciler re-sends the
+  start once the assigned Worker is connected (it skips the row while that
+  Worker is gone). A stop the Worker refused ``BUSY``, whose intent stands too,
+  which the reconciler converges (issue #3799). Audited and notified like a
+  failure, under its own title, and never retried. It shares the failing edge,
+  but a failure after an unknown notifies once more as an escalation; an unknown
+  after a failure stays silent.
 
   Every other error stays a failure: a command, stop or restart whose Worker was
-  not connected at dispatch or refused it, a start whose intent was reverted (its
-  hydrate failed or went unanswered, or it was refused and compensated), and a
-  backup whose snapshot failed or went unanswered (the archive is written only
-  after the snapshot returns, so no backup exists).
+  not connected at dispatch or refused it (but for that ``BUSY`` stop), a start
+  whose intent was reverted (its hydrate failed or went unanswered, or it was
+  refused and compensated), and a backup whose snapshot failed or went unanswered
+  (the archive is written only after the snapshot returns, so no backup exists).
+  So is a start whose row re-read, which tells those apart, raised: it records
+  ``outcome check failed`` and advances rather than re-execute every tick.
   ``COMMAND_DROPPED`` stays a failure too, though whether the command ran is
   uncertain (CONTROL_PLANE.md Section 7): the Worker answered, its usual cause is
   a packet the game server dropped without running it, and the run history shows
@@ -129,7 +133,10 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 )
 from mc_server_dashboard_api.servers.domain.backup import BackupSource
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.control_plane import WorkerUnavailableError
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandStatus,
+    WorkerUnavailableError,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
@@ -398,9 +405,23 @@ class ExecuteScheduleAction:
                 server_id.value,
                 exc,
             )
+            try:
+                may_have_run = await self._may_have_run(server_id, action, exc)
+            except Exception:  # noqa: BLE001 - the occurrence must still be recorded
+                # The start's row re-read raised (canonically a database error).
+                # Escaping would leave no run row and no advance, and the
+                # occurrence would re-execute every tick (issue #3799).
+                _LOG.exception(
+                    "scheduled %s for server %s: its outcome check raised",
+                    action.value,
+                    server_id.value,
+                )
+                return ActionResult(
+                    ScheduleRunOutcome.FAILURE, "outcome check failed", community_id
+                )
             outcome = (
                 ScheduleRunOutcome.UNKNOWN
-                if await self._may_have_run(server_id, action, exc)
+                if may_have_run
                 else ScheduleRunOutcome.FAILURE
             )
             return ActionResult(
@@ -443,18 +464,26 @@ class ExecuteScheduleAction:
         intent is reverted and the start will not happen. Once the start command
         is reached, an unreachable Worker, a lost answer (a timeout or a
         disconnect) or a ``BUSY`` refusal leaves the intent and assignment
-        standing, and the reconciler starts the server. The row tells these
-        apart.
+        standing, and the reconciler re-sends the start once the assigned Worker
+        is connected (it skips the row while that Worker is gone). The row tells
+        these apart.
 
-        A command, stop or restart can only when the Worker left its command
-        unanswered: it did not answer in time (``upload_may_be_live``) or its
-        session ended while the command awaited the answer
+        A stop the Worker refused ``BUSY`` can: :class:`StopServer` never reverts
+        its intent, so ``desired=stopped`` stands, which the reconciler
+        converges (issue #3799).
+
+        A command, stop or restart can otherwise only when the Worker left its
+        command unanswered: it did not answer in time (``upload_may_be_live``) or
+        its session ended while the command awaited the answer
         (``session_ended_in_flight``). Either way the command may have reached
         the Worker and run, or it may never have left the API: the flags cover a
         command dropped unsent from the outbound queue too, and the API cannot
-        tell. A Worker that was not connected at dispatch never ran it, and an
-        answered refusal stays a failure (``COMMAND_DROPPED`` too: see the module
-        docstring).
+        tell. A Worker that was not connected at dispatch never ran it, and every
+        other answered refusal stays a failure (``COMMAND_DROPPED`` too: see the
+        module docstring). Nothing re-sends a refused command or restart (a
+        restart commits no intent), and a stop refused for any other reason is an
+        attempt that failed, recorded under its cause, though the reconciler
+        still converges its intent.
         """
 
         if action is ScheduleAction.BACKUP:
@@ -463,6 +492,12 @@ class ExecuteScheduleAction:
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
             return server is not None and server.desired_state is DesiredState.RUNNING
+        if (
+            action is ScheduleAction.STOP
+            and isinstance(exc, CommandDispatchError)
+            and exc.status is CommandStatus.BUSY
+        ):
+            return True
         return isinstance(exc, WorkerUnavailableError) and (
             exc.upload_may_be_live or exc.session_ended_in_flight
         )
@@ -528,6 +563,7 @@ class RunScheduleTick:
     # notified for the incident: a FAILURE or UNKNOWN notifies only when the id is
     # absent, or as the escalation of an UNKNOWN to a FAILURE (issue #3781), then
     # records it; the next SUCCESS clears it and fires one recovery notification.
+    # A deleted schedule's entry goes at the next tick's poll at the latest.
     # In-memory — same accepted "lost on api restart" trade as _backup_retry /
     # _warned above (a restart may re-notify one failure).
     _notifying: dict[ScheduleId, ScheduleRunOutcome] = field(default_factory=dict)
@@ -548,10 +584,22 @@ class RunScheduleTick:
         self._last_tick_at = now
         async with self.uow:
             due = await self.uow.schedules.list_due(now)
+            # A schedule deleted between ticks never reaches the claim or the record
+            # that forget it, so look up each one still notifying: the due poll
+            # lists only the due ones, and a failing schedule outlives the ticks
+            # between its occurrences (issue #3799). Only its toast state goes: a
+            # pending backup retry still reaches its claim, which logs the delete.
+            gone = [
+                schedule_id
+                for schedule_id in list(self._notifying)
+                if await self.uow.schedules.get_ref(schedule_id) is None
+            ]
             # Commit the poll transaction: list_due may have quarantined a corrupt
             # row (disabled it), and without this commit that write would roll back
             # and respool every tick (issue #2150). A read-only poll commits nothing.
             await self.uow.commit()
+        for schedule_id in gone:
+            self._notifying.pop(schedule_id, None)
         handled: set[ScheduleId] = set()
 
         # Group due schedules by server so same-server schedules stay serial,

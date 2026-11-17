@@ -130,7 +130,7 @@ async def test_update_lifecycle_persists_desired_and_assignment(
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         applied = await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         assert applied is True
         await uow.commit()
@@ -146,7 +146,7 @@ async def test_record_observed_state_unassign_clears_assignment(
     engine: AsyncEngine,
 ) -> None:
     # A confirmed stop records observed=stopped and clears the assignment in one
-    # write, so a later start can re-place under require_unassigned (issue #206).
+    # write, so a later start can re-place under the unassigned-only CAS (issue #206).
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()
@@ -159,7 +159,7 @@ async def test_record_observed_state_unassign_clears_assignment(
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -309,7 +309,7 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         # A fresh observed write lands first.
         await uow.servers.record_observed_state(
@@ -356,7 +356,7 @@ async def test_record_observed_state_drops_write_from_lost_expected_worker(
         server.assigned_worker_id = WorkerId(current_owner)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_OLD
@@ -443,7 +443,7 @@ async def test_mark_worker_servers_unknown_overrides_fresher_observed_at(
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
@@ -479,7 +479,7 @@ async def test_reset_unverifiable_overrides_fresher_observed_at(
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.servers.record_observed_state(
             server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
@@ -518,7 +518,7 @@ async def test_update_lifecycle_compare_and_set_rejects_lost_race(
         server.assigned_worker_id = WorkerId(first_worker)
         server.updated_at = _NOW
         applied = await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         assert applied is True
         await uow.commit()
@@ -531,7 +531,7 @@ async def test_update_lifecycle_compare_and_set_rejects_lost_race(
         stale.assigned_worker_id = WorkerId(second_worker)
         stale.updated_at = _NOW
         applied = await uow.servers.update_lifecycle(
-            stale, expected_from=DesiredState.STOPPED, require_unassigned=True
+            stale, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         assert applied is False
         await uow.commit()
@@ -557,7 +557,7 @@ async def test_sink_records_observed_state_from_assigned_worker(
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -589,7 +589,7 @@ async def test_sink_drops_status_from_non_owning_worker(engine: AsyncEngine) -> 
         server.assigned_worker_id = WorkerId(owner)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -631,7 +631,7 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
         server.assigned_worker_id = WorkerId(worker_a)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -656,7 +656,11 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
             assert row is not None
             row.desired_state = DesiredState.STOPPED
             row.updated_at = _NOW
-            await uow.servers.update_lifecycle(row, expected_from=DesiredState.RUNNING)
+            await uow.servers.update_lifecycle(
+                row,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=row.assigned_worker_id,
+            )
             await uow.servers.record_observed_state(
                 sid,
                 observed_state=ObservedState.STOPPED,
@@ -666,7 +670,9 @@ async def test_sink_drops_stale_worker_report_racing_a_reassignment(
             row.desired_state = DesiredState.RUNNING
             row.assigned_worker_id = WorkerId(worker_b)
             await uow.servers.update_lifecycle(
-                row, expected_from=DesiredState.STOPPED, require_unassigned=True
+                row,
+                expected_from=DesiredState.STOPPED,
+                expected_assigned_worker_id=None,
             )
             await uow.commit()
         return snapshot
@@ -715,7 +721,7 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_st
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -750,7 +756,7 @@ async def test_sink_keeps_assignment_when_owning_worker_reports_stopped_under_ru
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -785,7 +791,7 @@ async def test_sink_keeps_assignment_for_non_stopped_reports_under_desired_stopp
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -814,7 +820,7 @@ async def test_sink_marks_worker_servers_unknown(engine: AsyncEngine) -> None:
         server.assigned_worker_id = WorkerId(worker)
         server.desired_state = DesiredState.RUNNING
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -849,7 +855,9 @@ async def test_sink_returns_running_assignment_ids(engine: AsyncEngine) -> None:
             server.assigned_worker_id = WorkerId(worker)
             server.desired_state = desired
             await uow.servers.update_lifecycle(
-                server, expected_from=DesiredState.STOPPED, require_unassigned=True
+                server,
+                expected_from=DesiredState.STOPPED,
+                expected_assigned_worker_id=None,
             )
         await uow.commit()
 
@@ -874,7 +882,7 @@ async def test_repository_running_assignment_ids_for_worker(
         server.assigned_worker_id = WorkerId(worker)
         server.desired_state = DesiredState.RUNNING
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -900,7 +908,7 @@ async def test_repository_list_desired_running_assigned(engine: AsyncEngine) -> 
         server.assigned_worker_id = WorkerId(worker)
         server.desired_state = DesiredState.RUNNING
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.commit()
 
@@ -924,7 +932,7 @@ async def _assign_with_observed(
         server.assigned_worker_id = WorkerId(worker)
         server.desired_state = DesiredState.RUNNING
         await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, require_unassigned=True
+            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         await uow.servers.record_observed_state(
             server_id, observed_state=observed, observed_at=_OLD
