@@ -207,6 +207,8 @@ async def _assert_reclaim_waits_for_the_thread(
     assert not snapshot.exists()
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 @pytest.mark.parametrize(
     ("read", "arm"),
     [(r, a) for _, r, a in _THREADED_READS],
@@ -237,6 +239,8 @@ async def test_a_cancelled_reader_keeps_its_lease_until_its_thread_finishes(
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_a_hydrate_stream_keeps_its_lease_until_its_tar_writer_finishes(
     pause: _Pause, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -378,6 +382,8 @@ def _lease_ledger(
     return ledger
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 @pytest.mark.parametrize("opens", [True, False], ids=["late-handle", "open-fault"])
 async def test_a_view_stream_cancelled_in_its_open_holds_its_lease_through_the_cleanup(
     opens: bool, pause: _Pause, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

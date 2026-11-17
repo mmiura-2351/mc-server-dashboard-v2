@@ -52,6 +52,8 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
     endpoints._shared_app = shared_app
 
 
+# 28 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(28 * 10 + 30)
 def test_restore_of_a_backup_with_fewer_regions_than_current_is_204(
     tmp_path: Path,
 ) -> None:

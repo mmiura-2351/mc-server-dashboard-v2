@@ -229,6 +229,8 @@ def _setup(
     return storage, uow, cp, server
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 @_BACKENDS
 async def test_start_hydrates_over_a_publish_past_its_fence(
     tmp_path: Path, make_storage: Callable[[Path], Storage]
@@ -249,6 +251,8 @@ async def test_start_hydrates_over_a_publish_past_its_fence(
     ]
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 @_BACKENDS
 async def test_redispatch_start_hydrates_over_a_publish_past_its_fence(
     tmp_path: Path, make_storage: Callable[[Path], Storage]

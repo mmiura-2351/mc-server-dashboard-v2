@@ -178,6 +178,8 @@ def _backup(server_id: ServerId, ref: str) -> Backup:
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_sweep_classifies_backups_and_flags_a_corrupt_snapshot(
     engine: AsyncEngine, tmp_path: Path
 ) -> None:
@@ -334,6 +336,8 @@ class _ObservedLifecycleLock(LifecycleLock):
             yield
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
     engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
