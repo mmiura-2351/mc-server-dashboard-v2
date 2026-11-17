@@ -240,7 +240,8 @@ class _ExclusiveLock(LifecycleLock):
     ``on_next_hold`` runs once, at the entry of the next ``hold``, before the lock
     is taken. ``waited`` is set once a ``hold`` finds the lock taken. While
     ``busy`` is set, ``hold`` gives up at once, as the advisory lock does once its
-    bounded wait runs out.
+    bounded wait runs out. The release awaits, as the advisory unlock does, so a
+    waiter can take the lock and run before the holder goes on.
     """
 
     def __init__(self) -> None:
@@ -260,6 +261,7 @@ class _ExclusiveLock(LifecycleLock):
             self.waited.set()
         async with self._lock:
             yield
+        await asyncio.sleep(0)
 
 
 class _Worker(FakeControlPlane):
@@ -1027,6 +1029,49 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
     await newer
 
     assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
+
+
+@_REVERTS
+async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
+    kind: str,
+) -> None:
+    # A start that asks for the lock while F's revert holds it takes the lock once
+    # the revert is done, and reads the count then. The revert must have bumped by
+    # that point. Otherwise the start reads the count from before the bump, and
+    # its own check before it sends sees the count move and holds it back, though
+    # the intent is its own.
+    world = _seeded(kind)
+    lock = world.lock
+    assert isinstance(lock, _ExclusiveLock)
+    write = asyncio.Event()
+    newer_hydrating = asyncio.Event()
+    newer_hydrates = asyncio.Event()
+
+    async def fail_and_hold_the_revert_write() -> CommandOutcome:
+        world.repo.pause_next_flip = write
+        return _HYDRATE_FAILED
+
+    async def newer_hydrate_waits() -> None:
+        newer_hydrating.set()
+        await newer_hydrates.wait()
+
+    world.cp.hydrate_hooks.append(fail_and_hold_the_revert_write)
+    world.cp.hydrate_hooks.append(newer_hydrate_waits)
+    f = asyncio.create_task(_fails(world, kind))
+    await world.repo.flip_paused.wait()
+    newer = asyncio.create_task(world.start() if kind == "start" else world.place())
+    await lock.waited.wait()
+    write.set()
+    await newer_hydrating.wait()
+    newer_hydrates.set()
+    await f
+    await newer
+
+    # F's hydrate, then the newer start's hydrate and start.
+    assert world.kinds() == ["hydrate", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
