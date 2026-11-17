@@ -2988,9 +2988,9 @@ class _ObjectWorkingSetView(WorkingSetView):
         # while the view's lease still pins ``prefix``, so the first iteration has
         # to happen inside the view; after the view exits, the prefix may already
         # be reclaimed and the stream raise ``NotFoundError``. A stream already
-        # started may outlive the view and keeps ``prefix`` leased until it is
-        # closed. The lease is released after the body and the client are closed,
-        # so nothing this stream opened outlives it (#3655).
+        # started may outlive the view and keeps ``prefix`` leased until it
+        # finishes or is closed. The lease is released after the body and the
+        # client are closed, so nothing this stream opened outlives it (#3655).
         self._storage._acquire_lease(prefix)
         try:
             async with shielded_exit(self._storage._client_factory()) as client:

@@ -119,7 +119,8 @@ class WorkingSetView(abc.ABC):
         takes a lease of its own then, and only the view's lease keeps the snapshot
         from being reclaimed until it does. A stream first iterated after the view
         exits may raise :class:`~.errors.NotFoundError`. A stream already started
-        may outlive the view, and keeps its snapshot leased until it is closed.
+        may outlive the view, and keeps its snapshot leased until it finishes or
+        is closed.
 
         The set of paths that miss is exactly :meth:`FileStore.open_file_stream`'s,
         and so is the set it refuses, or the export walk would read bytes the view's

@@ -122,20 +122,16 @@ def _object_storage(
 _Build = Callable[[Path, Callable[[], None], pytest.MonkeyPatch], _Storage]
 
 
-# 7 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(7 * 10 + 30)
 @pytest.mark.parametrize("build", [_fs_storage, _object_storage], ids=["fs", "object"])
 async def test_a_dir_zip_closed_mid_member_closes_its_body_under_its_own_lease(
     build: _Build, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     log: _Log = []
-    storages: list[_Storage] = []
 
     def _note(event: str) -> None:
-        log.append((event, _held(storages[0])))
+        log.append((event, _held(storage)))
 
     storage = build(tmp_path, lambda: _note("body-close"), monkeypatch)
-    storages.append(storage)
     release = storage._release_lease
 
     def _releasing(prefix: Any) -> None:
