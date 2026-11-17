@@ -264,6 +264,7 @@ async def test_prune_never_removes_a_live_prunes_spool(
     # renamed into place.
     import asyncio
     import threading
+    from collections.abc import Callable
 
     import mc_server_dashboard_api.storage.adapters.fs as fs_module
 
@@ -288,13 +289,29 @@ async def test_prune_never_removes_a_live_prunes_spool(
 
     monkeypatch.setattr(fs_module, "_write_tar_gz", gated_write_tar_gz)
 
+    # Observe the server-lock attempts so the test knows the second prune actually
+    # found the lock held, instead of guessing with a sleep.
+    contended = threading.Event()
+    real_run_if_unlocked = storage._run_if_unlocked
+
+    def observed_run_if_unlocked(
+        community_id: CommunityId,
+        server_id: ServerId,
+        work: Callable[[], object],
+    ) -> object:
+        outcome = real_run_if_unlocked(community_id, server_id, work)
+        if outcome is fs_module._LockHeld.LOCK_HELD:
+            contended.set()
+        return outcome
+
+    monkeypatch.setattr(storage, "_run_if_unlocked", observed_run_if_unlocked)
+
     first = asyncio.create_task(storage.prune_to_final_snapshot(community, server))
     second: asyncio.Task[None] | None = None
     try:
         assert await asyncio.to_thread(entered.wait, 10)
         second = asyncio.create_task(storage.prune_to_final_snapshot(community, server))
-        # Give the second prune time to contend for the held server lock.
-        await asyncio.sleep(0.05)
+        assert await asyncio.to_thread(contended.wait, 10)
         assert not second.done()
     finally:
         release.set()
