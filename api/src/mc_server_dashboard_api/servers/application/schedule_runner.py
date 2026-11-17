@@ -588,7 +588,8 @@ class RunScheduleTick:
             # A schedule deleted between ticks never reaches the claim or the record
             # that forget it, so look up each one still notifying: the due poll
             # lists only the due ones, and a failing schedule outlives the ticks
-            # between its occurrences (issue #3799).
+            # between its occurrences (issue #3799). Only its toast state goes: a
+            # pending backup retry still reaches its claim, which logs the delete.
             gone = [
                 schedule_id
                 for schedule_id in list(self._notifying)
@@ -599,7 +600,7 @@ class RunScheduleTick:
             # and respool every tick (issue #2150). A read-only poll commits nothing.
             await self.uow.commit()
         for schedule_id in gone:
-            self._forget(schedule_id)
+            self._notifying.pop(schedule_id, None)
         handled: set[ScheduleId] = set()
 
         # Group due schedules by server so same-server schedules stay serial,
