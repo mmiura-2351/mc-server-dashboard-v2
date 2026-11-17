@@ -371,10 +371,17 @@ func TestReclaimDeletedServerCommandReclaimsWithoutReconnecting(t *testing.T) {
 		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
 	}
 
-	waitFor(t, func() bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
 		_, err := os.Stat(dir)
-		return os.IsNotExist(err)
-	})
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim never removed the scratch dir: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if want := []string{"end " + s1 + " " + dir, "busy " + s1}; !slices.Equal(g.callLog(), want) {
 		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
 	}
@@ -383,6 +390,40 @@ func TestReclaimDeletedServerCommandReclaimsWithoutReconnecting(t *testing.T) {
 	}
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 		t.Fatalf("hydrate leftover not reclaimed: stat err = %v", err)
+	}
+}
+
+// The delete report keeps the reclaim's fencing (issue #3679): a deleted server
+// whose working set a container the Worker does not track may still use keeps its
+// scratch, as at registration (issue #3672), so the next registration offers it
+// again.
+func TestReclaimDeletedServerCommandKeepsAWorkingSetThatMayBeInUse(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	g.set(errLeftover, nil)
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	if !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	// The reclaim runs in the background. It asks the guard while it holds the
+	// id and releases the id last, so both together mean it has finished.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		m.mu.Lock()
+		held := len(m.reserved)
+		m.mu.Unlock()
+		if len(g.callLog()) > 0 && held == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the reclaim never finished: guard calls = %v, reserved ids = %d", g.callLog(), held)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch stat err = %v, want it kept while a container may run against it", err)
 	}
 }
 
