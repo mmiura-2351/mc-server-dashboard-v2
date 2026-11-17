@@ -97,12 +97,27 @@ _EXPECTED_OUTCOMES = {
     "test_inner.py::test_with_space[a b]": "passed",
 }
 
-# Takes its worker down mid-test; only an xdist run survives it.
+# Each test takes its worker down; only an xdist run survives it. One crashes
+# in its call after a slow setup, the other in its setup.
 _CRASH = """
 import os
+import time
 
-def test_crashes():
+import pytest
+
+@pytest.fixture
+def slow_setup():
+    time.sleep(0.3)
+
+@pytest.fixture
+def crash():
     os._exit(1)
+
+def test_crashes(slow_setup):
+    os._exit(1)
+
+def test_crashes_in_setup(crash):
+    pass
 """
 
 # Runs after test_inner.py in a serial run: the lines for the tests before it
@@ -185,11 +200,18 @@ def test_an_xdist_run_records_each_test_with_the_worker_that_ran_it(
         "2",
     )
 
-    _assert_lines(
-        rows,
-        recorded,
-        {**_EXPECTED_OUTCOMES, "test_crash.py::test_crashes": "crashed"},
-    )
+    # A crash in setup leaves no finished phase to take the worker from, though
+    # the test recorded one before it crashed.
+    assert rows.pop("test_crash.py::test_crashes_in_setup")[:3] == [
+        "?",
+        "crashed",
+        "0.000",
+    ]
+    del recorded["test_crashes_in_setup"]
+    crash = "test_crash.py::test_crashes"
+    _assert_lines(rows, recorded, {**_EXPECTED_OUTCOMES, crash: "crashed"})
+    # A crash in call counts the setup that finished before it.
+    assert float(rows[crash][2]) >= 0.3
     # More than one worker ran tests, so a fixed worker name cannot pass.
     assert len({row[0] for row in rows.values()}) > 1
 
@@ -206,3 +228,18 @@ def test_a_serial_run_records_its_tests_in_run_order(
 
     _assert_lines(rows, recorded, {**_EXPECTED_OUTCOMES, flushed: "passed"})
     assert list(rows) == [*_EXPECTED_OUTCOMES, flushed]
+
+
+def test_a_run_without_xdist_still_records_its_tests(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The crash hook is xdist's; without xdist pytest must not reject it.
+    rows, _ = _run(
+        pytester,
+        monkeypatch,
+        {"test_one": "def test_passes():\n    pass\n"},
+        "-p",
+        "no:xdist",
+    )
+
+    assert [row[:2] for row in rows.values()] == [["main", "passed"]]

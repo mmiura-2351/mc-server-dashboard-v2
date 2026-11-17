@@ -24,13 +24,20 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
 from mc_server_dashboard_api.identity.domain.errors import (
     PasswordVerificationUnavailableError,
 )
+from tests.argon2_diagnostics import argon2_mismatch_report
 
 
 async def test_argon2_hash_is_not_plaintext_and_verifies() -> None:
     hasher = Argon2PasswordHasher()
     hashed = await hasher.hash("Wm7!qz#Lp2vT")
     assert hashed != "Wm7!qz#Lp2vT"
-    assert argon2.PasswordHasher().verify(hashed, "Wm7!qz#Lp2vT") is True
+    try:
+        assert argon2.PasswordHasher().verify(hashed, "Wm7!qz#Lp2vT") is True
+    except argon2.exceptions.VerifyMismatchError as exc:
+        # The intermittent refusal of #3748: fail with its report.
+        raise AssertionError(
+            argon2_mismatch_report(password="Wm7!qz#Lp2vT", stored_hash=hashed)
+        ) from exc
 
 
 async def test_argon2_salts_each_hash() -> None:
@@ -253,7 +260,11 @@ async def test_hash_and_verify_run_off_the_event_loop_thread() -> None:
     hasher = _ThreadProbeHasher()
 
     hashed = await hasher.hash("Wm7!qz#Lp2vT")
-    assert await hasher.verify("Wm7!qz#Lp2vT", hashed) is True
+    verified = await hasher.verify("Wm7!qz#Lp2vT", hashed)
+    # The report runs only on a failure, the intermittent refusal of #3748.
+    assert verified is True, argon2_mismatch_report(
+        password="Wm7!qz#Lp2vT", stored_hash=hashed
+    )
 
     assert hasher.hash_thread is not None
     assert hasher.verify_thread is not None
@@ -265,7 +276,11 @@ async def test_kdf_runs_on_dedicated_pool() -> None:
     """KDF work runs on the dedicated ``password-kdf`` pool, not the default (#1696)."""
     hasher = _ThreadProbeHasher()
     hashed = await hasher.hash("Wm7!qz#Lp2vT")
-    await hasher.verify("Wm7!qz#Lp2vT", hashed)
+    verified = await hasher.verify("Wm7!qz#Lp2vT", hashed)
+    # The report runs only on a failure, the intermittent refusal of #3748.
+    assert verified is True, argon2_mismatch_report(
+        password="Wm7!qz#Lp2vT", stored_hash=hashed
+    )
 
     assert hasher.hash_thread is not None
     assert hasher.verify_thread is not None
@@ -297,7 +312,10 @@ async def test_hasher_not_starved_by_default_executor_saturation() -> None:
         result = await asyncio.wait_for(
             hasher.verify("Wm7!qz#Lp2vT", hashed), timeout=5
         )
-        assert result is True
+        # The report runs only on a failure, the intermittent refusal of #3748.
+        assert result is True, argon2_mismatch_report(
+            password="Wm7!qz#Lp2vT", stored_hash=hashed
+        )
     finally:
         blocker.set()
         concurrent.futures.wait(futs)

@@ -727,7 +727,8 @@ class RunReconcilerTick:
             ) and isinstance(exc, LifecycleTransitionConflictError):
                 # The row moved under the start: a stop intent committed, or the
                 # server was placed on another Worker, before the start was sent
-                # (issue #3737), or a concurrent placement won the assignment. The
+                # (issue #3737), a stop withdrew the intent the start was sending
+                # (issue #3739), or a concurrent placement won the assignment. The
                 # newer transition owns the row, so nothing failed here: no backoff
                 # and no WARNING, and the next tick acts on the row as it now is.
                 _LOG.info(

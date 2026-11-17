@@ -599,8 +599,29 @@ Notes:
   to another Worker, the API does not send the start and answers it
   `409 transition_conflict`. The start compensates nothing, because the stop
   owns the release. The reconciler skips such a start without counting it
-  toward its backoff (CONFIGURATION.md Section 5.6). A stop that commits after
-  that re-read can still be overtaken (issue #3739).
+  toward its backoff (CONFIGURATION.md Section 5.6).
+  The re-read misses two cases: a stop that commits after it, and a stop
+  followed by a new start that puts the server back on the same Worker. A
+  per-server count catches both (issue #3739). A stop or a drain adds one to
+  the server's count when its `desired=stopped` commit returns, and also when
+  the commit raises, because it may have landed anyway. The start reads the
+  count before its intent exists: before its own commit, or, for a re-sent
+  start, before the read that finds the intent. It compares the count again
+  just before it queues `StartServer`, with nothing in between that waits. If
+  the count moved, the start is not sent. Otherwise any later stop is queued
+  behind the start, and the Worker's per-server lane runs it as a real stop.
+  A commit that truly failed still adds one, so an in-flight start of the
+  still-running intent is refused and waits for the reconciler's re-send.
+  Not covered: a stop intent that sends no stop and lands after the start
+  compares, such as a stop commit that lands but raises, or any drain. Nothing
+  then stops the start until the reconciler acts on the Worker's report, and a
+  stop retried before that report only releases the server. Whether a
+  cancelled commit can raise before its flip is visible is also open. Both
+  are tracked in issue #3766. A failed start's revert also adds to the count,
+  but it sends no stop. A start that was already queued when such a revert
+  landed is still not caught (issue #3741). The count lives in the API
+  process. This holds because the API runs as a single instance
+  (REQUIREMENTS.md NFR-SCALE-1).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

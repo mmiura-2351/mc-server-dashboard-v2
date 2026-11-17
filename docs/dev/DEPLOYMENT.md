@@ -644,8 +644,9 @@ filesystem without `O_TMPFILE` (NFS, some FUSE filesystems) a worker without
 re-owns or removes it ([`../app/SECURITY.md`](../app/SECURITY.md), "Container
 hardening"). A write to the log that fails part way through (a full or failing
 filesystem) logs `forge install log write failed` at `WARN` with the error, and
-the install goes on: the log stops at the failure point, and the worker still
-reads the rest of the installer's output to explain a failed install.
+the install goes on: that attempt's log stops at the failure point, and the
+worker still reads the rest of the installer's output to explain a failed
+install.
 
 If the install fails, the server goes `crashed` with a reason. An installer that
 exits non-zero is retried twice (the usual cause is a failed download) before the
