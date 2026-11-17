@@ -946,6 +946,10 @@ class FakeServerRepository(ServerRepository):
         # row.
         if expected_worker is not None and server.assigned_worker_id != expected_worker:
             return False
+        # Mirror the real adapter's release condition (issue #3766): an unassign
+        # needs a stopped intent.
+        if unassign and server.desired_state is not DesiredState.STOPPED:
+            return False
         # Mirror the real adapter's monotonic guard (issue #216): drop a write
         # stamped no later than the row's current observed_at; a never-observed row
         # (observed_at is None) still accepts its first write.
@@ -969,6 +973,26 @@ class FakeServerRepository(ServerRepository):
             server is None
             or server.desired_state is not DesiredState.STOPPED
             or server.assigned_worker_id != worker_id
+        ):
+            return False
+        server.assigned_worker_id = None
+        return True
+
+    async def clear_stale_assignment(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        *,
+        observed_at: dt.datetime | None,
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #3766): the final-snapshot clear's,
+        # plus the observed_at the caller read, None matching None only.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.desired_state is not DesiredState.STOPPED
+            or server.assigned_worker_id != worker_id
+            or server.observed_at != observed_at
         ):
             return False
         server.assigned_worker_id = None
