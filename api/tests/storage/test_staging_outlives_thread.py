@@ -189,6 +189,8 @@ _BACKUP_OPS: list[tuple[str, _BackupOp, _Arm, dict[str, bytes]]] = [
 ]
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 @pytest.mark.parametrize(
     ("op", "arm", "live"),
     [(o, a, w) for _, o, a, w in _BACKUP_OPS],
@@ -257,6 +259,8 @@ _HANDLE_OPS: list[tuple[str, _HandleOp, _Arm, dict[str, bytes]]] = [
 ]
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 @pytest.mark.parametrize(
     ("op", "arm", "live"),
     [(o, a, w) for _, o, a, w in _HANDLE_OPS],
@@ -600,7 +604,9 @@ async def test_a_refusal_cancelled_in_its_cleanup_releases_the_lease_after_the_r
     assert storage._staging_jobs == {}
 
 
-@pytest.mark.timeout(120 + 30)
+# 14 fsyncs on the fs backend at 10 s each, then the 120 s removal bound, plus 30 s
+# (issue #3651).
+@pytest.mark.timeout(14 * 10 + 120 + 30)
 @pytest.mark.parametrize(("arrange", "error"), _REFUSALS.values(), ids=_REFUSALS)
 async def test_a_refusal_leaves_its_staging_to_a_job_still_using_it(
     arrange: _Arrange, error: type[Exception], tmp_path: Path
@@ -630,6 +636,8 @@ async def test_a_refusal_leaves_its_staging_to_a_job_still_using_it(
     assert storage._staging_jobs == {}
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 @pytest.mark.parametrize(("arrange", "error"), _REFUSALS.values(), ids=_REFUSALS)
 async def test_a_refusal_whose_cleanup_fails_still_raises_the_refusal(
     arrange: _Arrange,

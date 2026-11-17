@@ -92,6 +92,8 @@ async def test_crash_before_flip_keeps_old_snapshot_live(
     await _assert_current_resolves_complete(tmp_path, community, server, [OLD])
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("phase", _AFTER_FLIP)
 async def test_crash_after_flip_keeps_new_snapshot_live(
     tmp_path: Path, phase: PublishPhase
@@ -109,6 +111,8 @@ async def test_crash_after_flip_keeps_new_snapshot_live(
     await _assert_current_resolves_complete(tmp_path, community, server, [NEW])
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("phase", _BEFORE_FLIP + _AFTER_FLIP)
 async def test_sweep_reclaims_orphan_after_crash_idempotently(
     tmp_path: Path, phase: PublishPhase
@@ -187,6 +191,8 @@ def _prune_server_root(
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     tmp_path: Path,
 ) -> None:
@@ -231,6 +237,8 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     assert not list(server_root.glob(".final.*.tmp"))
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_prune_reclaims_young_crash_left_final_spool_while_packing(
     tmp_path: Path,
 ) -> None:
@@ -254,6 +262,8 @@ async def test_prune_reclaims_young_crash_left_final_spool_while_packing(
     assert read_tar((server_root / "final.tar.gz").read_bytes()) == NEW
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_prune_never_removes_a_live_prunes_spool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,6 +334,8 @@ async def test_prune_never_removes_a_live_prunes_spool(
     assert not list(server_root.glob(".final.*.tmp"))
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_prune_fsyncs_final_before_unlinking_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -377,6 +389,8 @@ async def test_prune_fsyncs_final_before_unlinking_current(
     assert "fsync-dir" in events and events.index("fsync-dir") < unlink_at
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_prune_advances_generation_marker(tmp_path: Path) -> None:
     # Issue #3434: the prune advances the generation instead of dropping its marker,
     # so a row that survives a failed delete commit never reads a lower generation
@@ -614,6 +628,8 @@ async def test_commit_snapshot_fsyncs_staged_data_before_flip(
     )
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_restore_backup_fsyncs_staged_data_before_flip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -831,6 +847,8 @@ async def test_sweep_skips_dot_tmp_shaped_version_directory(
     assert version_file.exists()
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_version_capture_fsyncs_before_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

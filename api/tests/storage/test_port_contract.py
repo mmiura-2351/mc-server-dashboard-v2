@@ -85,6 +85,8 @@ async def test_hydrate_before_any_publish_is_not_found(
         await drain(harness.storage.open_hydrate_source(community, server))
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_second_publish_supersedes(harness: StorageHarness) -> None:
     community, server = new_scope()
     await harness.publish(community, server, {"f": b"v1"})
@@ -94,6 +96,8 @@ async def test_second_publish_supersedes(harness: StorageHarness) -> None:
     assert read_tar(blob) == {"f": b"v2"}
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_commit_bumps_generation_and_round_trips(
     harness: StorageHarness,
 ) -> None:
@@ -116,6 +120,8 @@ async def test_commit_bumps_generation_and_round_trips(
     assert await harness.storage.current_generation(community, server) == 2
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_settled_generation_waits_for_a_publish_past_its_fence(
     harness: StorageHarness,
 ) -> None:
@@ -153,6 +159,8 @@ async def test_settled_generation_waits_for_a_publish_past_its_fence(
     assert await asyncio.wait_for(settled, 10) == 2
 
 
+# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(18 * 10 + 30)
 async def test_commit_records_publisher_and_reads_it_back(
     harness: StorageHarness,
 ) -> None:
@@ -180,6 +188,8 @@ async def test_commit_records_publisher_and_reads_it_back(
     assert await harness.storage.current_publisher(community, server) is None
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_generation_is_per_server(harness: StorageHarness) -> None:
     # The generation counter is scoped per server, not global (issue #763).
     community, server_a = new_scope()
@@ -213,6 +223,8 @@ async def test_refused_commit_does_not_bump_generation(
     assert await harness.storage.current_generation(community, server) == 1
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_commit_with_matching_expected_base_publishes(
     harness: StorageHarness,
 ) -> None:
@@ -231,6 +243,8 @@ async def test_commit_with_matching_expected_base_publishes(
     assert read_tar(blob) == {"f": b"v2"}
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 async def test_commit_refused_when_edit_advanced_during_upload(
     harness: StorageHarness,
 ) -> None:
@@ -275,6 +289,8 @@ async def test_commit_refused_when_edit_advanced_during_upload(
     )
 
 
+# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(18 * 10 + 30)
 async def test_commit_without_expected_base_skips_recheck(
     harness: StorageHarness,
 ) -> None:
@@ -295,6 +311,8 @@ async def test_commit_without_expected_base_skips_recheck(
     assert await harness.storage.current_generation(community, server) == generation
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 async def test_edit_racing_a_commit_through_the_lock_lands_on_the_postflip_world(
     harness: StorageHarness,
 ) -> None:
@@ -444,6 +462,8 @@ async def test_hydrate_source_generation_equals_current_after_iteration(
     await drain(source)
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_hydrate_source_generation_tracks_bumps(
     harness: StorageHarness,
 ) -> None:
@@ -638,6 +658,8 @@ async def test_commit_publishes_a_structurally_healthy_region(
     assert read_tar(blob) == files
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_commit_refuses_partial_region_loss_and_keeps_prior(
     harness: StorageHarness,
 ) -> None:
@@ -676,6 +698,8 @@ async def test_commit_refuses_partial_region_loss_and_keeps_prior(
     assert await harness.storage.current_generation(community, server) == generation
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 async def test_commit_allows_full_dimension_delete(harness: StorageHarness) -> None:
     """A publish that removes a WHOLE dimension's regions (legitimate delete) is
     allowed — only a partial loss is the corruption signature (issue #854)."""
@@ -759,6 +783,8 @@ async def test_restore_of_a_backup_with_fewer_regions_bypasses_the_missing_regio
     assert read_tar(blob) == backup
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_running_source_publish_then_backup_create_succeeds(
     harness: StorageHarness,
 ) -> None:
@@ -833,6 +859,8 @@ async def test_snapshot_fsck_is_examined_only_where_the_backend_examines_it(
         assert report.scanned == 1
 
 
+# 26 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(26 * 10 + 30)
 async def test_restore_of_a_live_format_archive_succeeds(
     harness: StorageHarness,
 ) -> None:
@@ -961,6 +989,8 @@ async def test_delete_jar_is_idempotent(harness: StorageHarness) -> None:
 # --- backup archive create / list / restore / delete (Section 3.3) ---------
 
 
+# 24 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(24 * 10 + 30)
 async def test_backup_create_list_restore_round_trip(
     harness: StorageHarness,
 ) -> None:
@@ -978,6 +1008,8 @@ async def test_backup_create_list_restore_round_trip(
     assert read_tar(blob) == original
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 async def test_restore_bumps_generation_and_records_sentinel_publisher(
     harness: StorageHarness,
 ) -> None:
@@ -1062,6 +1094,8 @@ async def _edit_rollback_file(
     return 2
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 @pytest.mark.parametrize(
     "edit",
     [
@@ -1171,6 +1205,8 @@ async def test_check_backup_health_rejects_decompression_bomb(
         await harness.storage.check_backup_health(community, server, key)
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_restore_corrupt_backup_without_force_is_refused(
     harness: StorageHarness,
 ) -> None:
@@ -1199,6 +1235,8 @@ async def test_restore_corrupt_backup_without_force_is_refused(
     assert read_tar(blob) == {"world/region/r.0.0.mca": healthy_region_bytes()}
 
 
+# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(18 * 10 + 30)
 async def test_restore_corrupt_backup_with_force_publishes_and_reports(
     harness: StorageHarness,
 ) -> None:
@@ -1225,6 +1263,8 @@ async def test_restore_corrupt_backup_with_force_publishes_and_reports(
     assert read_tar(blob) == {"world/region/r.0.0.mca": corrupt_region}
 
 
+# 26 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(26 * 10 + 30)
 async def test_restore_healthy_backup_reports_healthy(
     harness: StorageHarness,
 ) -> None:
@@ -1245,6 +1285,8 @@ async def test_restore_healthy_backup_reports_healthy(
     assert read_tar(blob) == original
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_restore_drops_reserved_marker_members_of_a_legacy_archive(
     harness: StorageHarness, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1403,6 +1445,8 @@ async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
         await harness.storage.check_backup_health(community, server, key)
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("force", [False, True])
 @pytest.mark.parametrize("shape", [*_UNREADABLE_SHAPES, "split_member"])
 async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
@@ -1427,6 +1471,8 @@ async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
     assert read_tar(blob) == live
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("force", [False, True])
 async def test_archive_with_an_escaping_member_is_unreadable(
     harness: StorageHarness, force: bool
@@ -1516,6 +1562,8 @@ def _dot_rooted_tar(*, gz: bool) -> bytes:
     return buf.getvalue()
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_a_dot_rooted_backup_restores_on_both_backends(
     harness: StorageHarness,
 ) -> None:
@@ -1550,6 +1598,8 @@ async def test_snapshot_ingest_takes_a_dot_rooted_tar_on_both_backends(
     assert read_tar(blob) == _CLEAN_MEMBERS
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("force", [False, True])
 @pytest.mark.parametrize("shape", list(_ODD_MEMBERS))
 async def test_archive_member_rule_refuses_the_same_members_on_both_backends(
@@ -1575,6 +1625,8 @@ async def test_archive_member_rule_refuses_the_same_members_on_both_backends(
     assert read_tar(blob) == live
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_archive_member_rule_admits_the_clean_control_on_both_backends(
     harness: StorageHarness,
 ) -> None:
@@ -1606,6 +1658,8 @@ async def test_delete_backup_is_idempotent(harness: StorageHarness) -> None:
 # --- prune to final snapshot (DeleteServer reclaim, issue #777) -------------
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_prune_drops_working_set_but_keeps_backups(
     harness: StorageHarness,
 ) -> None:
@@ -1641,6 +1695,8 @@ async def test_prune_without_published_snapshot_advances_generation(
     assert await harness.storage.current_generation(community, server) == 2
 
 
+# 22 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(22 * 10 + 30)
 async def test_prune_after_restore_still_drops_working_set(
     harness: StorageHarness,
 ) -> None:
@@ -1663,6 +1719,8 @@ async def test_prune_after_restore_still_drops_working_set(
 # --- backup transfer: open / put / size (Section 3.3, issue #281) -----------
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 async def test_open_backup_streams_native_archive_round_trips_via_put(
     harness: StorageHarness,
 ) -> None:
@@ -1971,6 +2029,8 @@ async def test_path_exists_before_any_publish_is_false(
     assert not await harness.storage.path_exists(community, server, RelPath("anything"))
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_write_file_overwrites_and_retains_prior_version(
     harness: StorageHarness,
 ) -> None:
@@ -2053,6 +2113,8 @@ async def test_read_file_before_any_publish_is_not_found(
         await harness.storage.read_file(community, server, RelPath("eula.txt"))
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_write_file_creates_new_file_without_version(
     harness: StorageHarness,
 ) -> None:
@@ -2134,6 +2196,8 @@ async def test_version_retention_is_count_bounded(backend: str, tmp_path: Path) 
     assert b"v0" not in contents and b"v3" not in contents
 
 
+# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(18 * 10 + 30)
 async def test_rollback_restores_and_is_reversible(
     harness: StorageHarness,
 ) -> None:
@@ -2187,6 +2251,8 @@ async def test_retain_file_version_dedups_repeated_identical_snapshots(
     )
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_retain_file_version_retains_again_when_content_changes(
     harness: StorageHarness,
 ) -> None:
@@ -2212,6 +2278,8 @@ async def test_retain_file_version_retains_again_when_content_changes(
     )
 
 
+# 22 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(22 * 10 + 30)
 async def test_retain_file_version_does_not_evict_distinct_at_rest_versions(
     backend: str, tmp_path: Path
 ) -> None:
@@ -2288,6 +2356,8 @@ async def test_retain_file_version_before_any_publish_is_noop(
 # --- version ring isolation (issue #1952) -----------------------------------
 
 
+# 30 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(30 * 10 + 30)
 async def test_file_history_isolated_from_same_named_directory_children(
     harness: StorageHarness,
 ) -> None:
@@ -2396,6 +2466,8 @@ async def test_child_ring_does_not_count_against_parent_retention(
     assert len(child_versions) == 2
 
 
+# 27 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(27 * 10 + 30)
 async def test_retain_dedup_ignores_child_ring_versions(
     backend: str, tmp_path: Path
 ) -> None:
@@ -2443,6 +2515,8 @@ async def test_retain_dedup_ignores_child_ring_versions(
 # --- delete / mkdir (Section 3.4, issue #259) ------------------------------
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_delete_file_removes_and_retains_prior_content(
     harness: StorageHarness,
 ) -> None:
@@ -2475,6 +2549,8 @@ async def test_delete_missing_file_is_not_found(harness: StorageHarness) -> None
         await harness.storage.delete_file(community, server, RelPath("missing"))
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_delete_dir_removes_subtree(harness: StorageHarness) -> None:
     community, server = new_scope()
     await harness.publish(
@@ -2502,6 +2578,8 @@ async def test_delete_dir_removes_subtree(harness: StorageHarness) -> None:
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_delete_dir_removes_a_make_dir_only_directory(
     harness: StorageHarness,
 ) -> None:
@@ -2561,6 +2639,8 @@ async def test_make_dir_creates_an_observable_empty_directory(
     assert await harness.storage.path_exists(community, server, RelPath("plugins"))
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> None:
     """A file written under a created directory is listed there.
 
@@ -2581,6 +2661,8 @@ async def test_make_dir_then_write_file_under_it(harness: StorageHarness) -> Non
     assert {e.name for e in entries} == {"p.jar"}
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_rename_file_moves_without_version_capture(
     harness: StorageHarness,
 ) -> None:
@@ -2631,6 +2713,8 @@ async def test_rename_missing_file_is_not_found(harness: StorageHarness) -> None
         )
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_rename_dir_moves_subtree(harness: StorageHarness) -> None:
     community, server = new_scope()
     await harness.publish(
@@ -2673,6 +2757,8 @@ async def test_rename_dir_moves_subtree(harness: StorageHarness) -> None:
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_rename_dir_moves_a_make_dir_only_directory(
     harness: StorageHarness,
 ) -> None:
@@ -2724,6 +2810,8 @@ async def test_sweep_never_reclaims_live_snapshot(harness: StorageHarness) -> No
     assert read_tar(blob) == {"f": b"LIVE"}
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_active_staging_survives_concurrent_sweep(
     harness: StorageHarness,
 ) -> None:

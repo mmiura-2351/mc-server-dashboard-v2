@@ -1195,6 +1195,8 @@ def _store_failing_its_restore(
     return storage, storage_ref
 
 
+# 21 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(21 * 10 + 30)
 @pytest.mark.parametrize(
     ("backend", "corrupt", "operation"),
     [
@@ -1249,6 +1251,8 @@ def test_a_store_failure_after_the_restore_flip_keeps_the_restore_identity(
     assert b"enable-rcon=" in live["server.properties"]
 
 
+# 21 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(21 * 10 + 30)
 @pytest.mark.parametrize(
     ("fault", "reason"),
     [
@@ -1295,6 +1299,8 @@ def test_an_fs_restore_whose_replace_applied_and_raised_finishes_as_published(
     assert b"enable-rcon=" in live["server.properties"]
 
 
+# 21 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(21 * 10 + 30)
 @pytest.mark.parametrize(
     ("fault", "corrupt", "reason"),
     [
@@ -1352,6 +1358,8 @@ def test_an_fs_restore_whose_staging_cannot_be_removed_keeps_its_outcome(
     assert b"enable-rcon=" in live["server.properties"]
 
 
+# 22 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(22 * 10 + 30)
 def test_an_fs_restore_whose_superseded_snapshot_cannot_be_removed_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1390,6 +1398,8 @@ def test_an_fs_restore_whose_superseded_snapshot_cannot_be_removed_succeeds(
     assert b"enable-rcon=" in live["server.properties"]
 
 
+# 17 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(17 * 10 + 30)
 def test_an_fs_restore_whose_replace_raised_unapplied_publishes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1428,6 +1438,8 @@ def test_an_fs_restore_whose_replace_raised_unapplied_publishes_nothing(
     assert live == {"world/region/r.0.0.mca": healthy_region_bytes()}
 
 
+# 21 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(21 * 10 + 30)
 def test_an_fs_restore_whose_flip_cannot_be_reread_finishes_as_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1513,6 +1525,8 @@ def test_an_object_restore_that_may_have_published_finishes_as_published(
     assert b"enable-rcon=" in live["server.properties"]
 
 
+# 17 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(17 * 10 + 30)
 @pytest.mark.parametrize("backend", ["fs", "object"])
 def test_a_step_failing_after_a_partial_publication_is_the_answer(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1548,6 +1562,8 @@ def test_a_step_failing_after_a_partial_publication_is_the_answer(
     assert persisted.health is BackupHealth.QUARANTINED
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 @pytest.mark.parametrize("backend", ["fs", "object"])
 def test_a_failed_restore_generation_write_publishes_nothing(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

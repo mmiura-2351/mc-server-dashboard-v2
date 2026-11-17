@@ -232,6 +232,8 @@ def _upload(
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_server_delete_in_the_upload_window_waits_for_the_publication(
     engine: AsyncEngine, tmp_path: Path
 ) -> None:
@@ -310,6 +312,8 @@ async def test_backup_delete_in_the_upload_window_removes_the_published_archive(
     assert remaining == []
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_upload_behind_a_server_delete_is_refused_as_not_found(
     engine: AsyncEngine, tmp_path: Path
 ) -> None:

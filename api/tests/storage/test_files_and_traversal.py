@@ -143,6 +143,8 @@ def _stale_existence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Path, "is_file", lambda self, *args, **kwargs: True)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_open_file_stream_delete_racing_the_open_is_not_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -158,6 +160,8 @@ async def test_open_file_stream_delete_racing_the_open_is_not_found(
         await drain(stream)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_view_file_stream_delete_racing_the_open_is_not_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -329,6 +333,8 @@ def _stale_dir_existence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Path, "is_dir", lambda self, *args, **kwargs: True)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_read_file_delete_racing_the_read_is_not_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -358,6 +364,8 @@ async def test_backup_size_delete_racing_the_stat_is_not_found(
         await storage.backup_size(community, server, key)
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_list_dir_delete_racing_the_iterdir_is_not_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -372,6 +380,8 @@ async def test_list_dir_delete_racing_the_iterdir_is_not_found(
         await storage.list_dir(community, server, RelPath("d"))
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_view_list_dir_delete_racing_the_iterdir_is_not_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1279,6 +1289,8 @@ def test_version_ids_sort_chronologically_across_time_low_wrap(
     assert sorted(ids) == ids  # lexicographic order == creation order
 
 
+# 30 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(30 * 10 + 30)
 async def test_retention_prunes_the_oldest_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
