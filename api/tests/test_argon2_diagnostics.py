@@ -13,6 +13,7 @@ import resource
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import argon2
 import pytest
@@ -231,9 +232,20 @@ def test_the_host_section_reads_the_host_around_the_refused_call(
             "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
         )
     (proc / "vmstat").write_text("nr_free_pages 9\npswpin 17\npswpout 23\npgfault 5\n")
-    for tid, name in (("12", "grpc_global_tim"), ("3", "python")):
+    for tid, name in (("12", "grpc_global_tim"), ("3", "python"), ("7", "ended")):
         (proc / "self" / "task" / tid).mkdir(parents=True)
         (proc / "self" / "task" / tid / "comm").write_text(f"{name}\n")
+    # Thread 7 ends between the listing and the read, which the kernel answers
+    # with ESRCH: it drops out of the list, and the others stay.
+    ended = proc / "self" / "task" / "7" / "comm"
+    read_text = Path.read_text
+
+    def ending_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+        if path == ended:
+            raise ProcessLookupError(3, "No such process")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", ending_read_text)
     monkeypatch.setattr(argon2_diagnostics, "_PROC", proc)
     stored = argon2.PasswordHasher().hash(_PASSWORD)
     with RusageWindow() as window:

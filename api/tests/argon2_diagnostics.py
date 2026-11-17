@@ -112,7 +112,7 @@ def _native_thread_names() -> str:
     for task in sorted((_PROC / "self" / "task").iterdir(), key=lambda t: int(t.name)):
         try:
             names.append((task / "comm").read_text().strip())
-        except FileNotFoundError:  # the thread ended after the listing
+        except (FileNotFoundError, ProcessLookupError):  # it ended since the listing
             continue
     return ", ".join(names)
 
