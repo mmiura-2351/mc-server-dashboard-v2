@@ -130,18 +130,19 @@ marker_in() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. A failed rotation step stops the run. Needs a non-root user: root can
-#    delete from a read-only dir.
+# 3. A failed rotation step stops the run. check-logs.prev holds a read-only
+#    dir with a file in it, so it cannot be removed but would still take a
+#    move into it. Needs a non-root user: root can delete from a read-only dir.
 if [ "$(id -u)" -eq 0 ]; then
 	echo "  SKIP: the failed-rotation case needs a non-root user"
 else
-	chmod a-w "$logdir.prev"
+	mkdir "$logdir.prev/stuck" && touch "$logdir.prev/stuck/file" && chmod a-w "$logdir.prev/stuck"
 	if run_gate fourth; then
 		fail_test "a run whose check-logs.prev cannot be removed did not fail"
 	else
 		ok "a run whose check-logs.prev cannot be removed fails"
 	fi
-	chmod u+w "$logdir.prev"
+	chmod u+w "$logdir.prev/stuck"
 
 	out="$(cat "$stub_dir/out")"
 	case "$out" in

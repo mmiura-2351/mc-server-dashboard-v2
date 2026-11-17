@@ -20,9 +20,10 @@ leaves the worker as ``?``.
 
 Only the xdist controller writes: it sees every worker's reports, and xdist
 tells it about a crashed worker through ``pytest_handlecrashitem``. Each line
-is flushed as it is written, so a killed run leaves a line for every test that
-finished. A test still running then has none: for a hang, read the last line
-of each worker together with pytest-timeout's traceback dump.
+is flushed as it is written, so a run killed from outside leaves a line for
+every test that finished. A test still running then has none, and the last
+line of each worker shows where it stopped. A test that pytest-timeout stops
+fails like any other and has its line.
 """
 
 from __future__ import annotations
@@ -62,15 +63,11 @@ class _RunOrderLog:
         # Tests whose teardown has not been reported yet, by node id: the
         # worker, the outcome so far and the duration so far.
         self._running: dict[str, tuple[str, str, float]] = {}
-        self._crashed: set[str] = set()
 
     def _write(self, worker: str, outcome: str, duration: float, nodeid: str) -> None:
         self._file.write(f"{worker}\t{outcome}\t{duration:.3f}\t{nodeid}\n")
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        if report.nodeid in self._crashed:
-            # The failure report xdist makes up for the crash, already written.
-            return
         worker = str(getattr(report, "worker_id", "main"))
         _, outcome, duration = self._running.pop(report.nodeid, (worker, "passed", 0.0))
         if outcome == "passed":
@@ -84,8 +81,9 @@ class _RunOrderLog:
     @pytest.hookimpl(optionalhook=True)
     def pytest_handlecrashitem(self, crashitem: str) -> None:
         worker, _, duration = self._running.pop(crashitem, ("?", "", 0.0))
-        self._crashed.add(crashitem)
         self._write(worker, "crashed", duration, crashitem)
+        # xdist then reports a made-up failure for the test, with ``when`` set
+        # to ``"???"``. It is not a teardown, so it is never written.
 
     def pytest_unconfigure(self) -> None:
         self._file.close()

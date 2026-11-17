@@ -148,17 +148,16 @@ fi
 #
 # Every step is checked, and a failed one stops the run: carrying on would put
 # this run's output in the previous run's check-logs (appended, by run_chain)
-# or, with `mv` into an existing dir, at check-logs.prev/check-logs. `mv -T`
-# never moves into a dir. With no check-logs to move -- the run before was
-# killed after its move and before its mkdir -- .prev holds the newest logs
-# there are, so it stays.
+# or, with `mv` into an existing dir, at check-logs.prev/check-logs. With no
+# check-logs to move -- the run before was killed after its move and before
+# its mkdir -- .prev holds the newest logs there are, so it stays.
 git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || {
     echo "FAIL: not inside a git checkout (needed to locate the log dir)" >&2
     exit 1
 }
 LOGDIR="$git_dir/check-logs"
 if [ -e "$LOGDIR" ]; then
-    rm -rf "$LOGDIR.prev" && mv -T "$LOGDIR" "$LOGDIR.prev"
+    rm -rf "$LOGDIR.prev" && mv "$LOGDIR" "$LOGDIR.prev"
 fi && mkdir "$LOGDIR" || {
     echo "FAIL: cannot rotate the gate logs ($LOGDIR -> $LOGDIR.prev)" >&2
     exit 1
