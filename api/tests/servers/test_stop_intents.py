@@ -380,6 +380,31 @@ async def test_a_start_reads_the_counter_before_its_own_commit() -> None:
     assert world.cp.live == {world.server_id}
 
 
+async def test_a_placement_reads_the_counter_before_its_own_commit() -> None:
+    # The reconciler's placement of an unassigned desired-running row commits its
+    # assignment the same way, so the same re-placement inside that commit must
+    # hold it back too.
+    world = _World(desired=DesiredState.RUNNING)
+
+    async def stop_then_restart() -> None:
+        await world.stop()
+        await world.start()
+
+    place = world.start_server(
+        _CommitRunsHook(servers=world.repo, hook=stop_then_restart)
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await place.place_and_start(
+            community_id=world.community, server_id=world.server_id
+        )
+
+    # The placement always hydrates; it then sends nothing.
+    assert world.kinds() == ["stop", "snapshot", "hydrate", "start", "hydrate"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+
+
 async def test_a_drain_that_lands_after_the_re_read_keeps_the_start_unsent() -> None:
     # A drain withdraws the intent without sending a stop (the reconciler sends
     # it later). The start is not sent under the drained row either.
