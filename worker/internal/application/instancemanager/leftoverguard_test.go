@@ -577,6 +577,125 @@ func TestReclaimDeletedServerCommandEndsALeftoverOfAnUnheldScratch(t *testing.T)
 	}
 }
 
+// seedMarkerOnly makes the scratch dir a server that never published anything
+// hydrates to: the generation marker and nothing else.
+func seedMarkerOnly(t *testing.T, m *Manager, serverID string) string {
+	t.Helper()
+	dir := filepath.Join(m.scratchDir, serverID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The manager lists for a recorded leftover exactly the server-id dirs that hold
+// no working set and whose id a driver records a leftover for (issue #3794). A
+// marker-only dir with no leftover is not listed, and a held dir with one is
+// advertised as held instead, never as both.
+func TestLeftoverServerIDsListsOnlyUnheldScratchesWithALeftover(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	seedMarkerOnly(t, m, s1)
+	g.recordLeftover(s1)
+	seedMarkerOnly(t, m, s2)
+	seedScratch(t, m, ghost)
+	g.recordLeftover(ghost)
+
+	if got := m.LeftoverServerIDs(); !slices.Equal(got, []string{s1}) {
+		t.Fatalf("LeftoverServerIDs = %v, want [%s]", got, s1)
+	}
+	held := m.HeldServers()
+	if len(held) != 1 || held[0].ServerID != ghost {
+		t.Fatalf("HeldServers = %+v, want only %s", held, ghost)
+	}
+	if len(g.callLog()) != 0 {
+		t.Fatalf("guard calls = %v, want none: listing asks the backend nothing", g.callLog())
+	}
+}
+
+// registrationAPI stands in for the API's side of a Worker's registration: it
+// answers a Register with the ids it listed, held or for a recorded leftover,
+// that the API has deleted, as the API's servicer does, and then sends nothing.
+type registrationAPI struct {
+	deleted map[string]bool
+
+	mu   sync.Mutex
+	caps session.Capabilities
+}
+
+func (a *registrationAPI) Dial(context.Context) (session.Transport, error) { return a, nil }
+
+func (a *registrationAPI) SendRegister(_ context.Context, caps session.Capabilities) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.caps = caps
+	return nil
+}
+
+func (a *registrationAPI) RecvRegisterAck(context.Context) (session.RegisterAck, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	listed := a.caps.LeftoverServerIDs
+	for _, hs := range a.caps.HeldServers {
+		listed = append(listed, hs.ServerID)
+	}
+	ack := session.RegisterAck{HeartbeatInterval: time.Hour}
+	for _, id := range listed {
+		if a.deleted[id] {
+			ack.UnknownHeldServerIDs = append(ack.UnknownHeldServerIDs, id)
+		}
+	}
+	return ack, nil
+}
+
+func (a *registrationAPI) RecvCommand(ctx context.Context) (session.Command, error) {
+	<-ctx.Done()
+	return session.Command{}, ctx.Err()
+}
+
+func (a *registrationAPI) SendHeartbeat(context.Context) error                            { return nil }
+func (a *registrationAPI) SendCommandResult(context.Context, session.CommandResult) error { return nil }
+func (a *registrationAPI) SendStatusChange(context.Context, session.StatusEvent) error    { return nil }
+func (a *registrationAPI) SendLogLine(context.Context, session.LogEvent) error            { return nil }
+func (a *registrationAPI) SendMetrics(context.Context, session.MetricsEvent) error        { return nil }
+func (a *registrationAPI) Close() error                                                   { return nil }
+
+// A deleted server whose scratch holds only its generation marker, and whose
+// failed start left a container the driver records, is reclaimed when the Worker
+// registers (issue #3794), not left until its next boot. The manager lists the id
+// for its leftover, the API answers it deleted, and the session hands it to the
+// reclaim, which ends the container and then removes the dir.
+func TestRegistrationReclaimsALeftoverOfAnUnheldScratch(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedMarkerOnly(t, m, s1)
+	g.recordLeftover(s1)
+	api := &registrationAPI{deleted: map[string]bool{s1: true}}
+	r := session.NewRunner(api, session.Capabilities{WorkerID: "w1"}, systemClock{},
+		slog.New(slog.DiscardHandler), session.WithCommandHandler(m))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(dir)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the registration never reclaimed the marker-only scratch: stat err = %v; guard calls = %v", err, g.callLog())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s1 + " " + dir, "busy " + s1}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+}
+
 // A Worker reclaims on a delete report only an id it holds a working set for:
 // the set its registration advertises, which is all a registration's reclaim is
 // offered (issue #3679). The API reports a delete to every connected Worker, so

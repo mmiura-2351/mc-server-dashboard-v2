@@ -856,9 +856,18 @@ type Register struct {
 	// clean replacement is simpler than a parallel field. An older Worker that does
 	// not set held_servers reports holding nothing, so the API hydrates as before —
 	// never silently booting a fresh/empty world.
-	HeldServers   []*HeldServer `protobuf:"bytes,4,rep,name=held_servers,json=heldServers,proto3" json:"held_servers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	HeldServers []*HeldServer `protobuf:"bytes,4,rep,name=held_servers,json=heldServers,proto3" json:"held_servers,omitempty"`
+	// leftover_server_ids lists the servers whose scratch dir holds no working set
+	// but for which the Worker's driver records a container a failed start left
+	// behind (issue #3794): a server that never published anything hydrates to a
+	// dir holding only the generation marker, which a start accepts. The API only
+	// checks them for a delete, and lists a deleted one in
+	// RegisterAck.unknown_held_server_ids. It never records them as held: they hold
+	// no world a start could skip its hydrate for. An API that does not read the
+	// field lists none of them, and their containers wait for the Worker's next boot.
+	LeftoverServerIds []string `protobuf:"bytes,5,rep,name=leftover_server_ids,json=leftoverServerIds,proto3" json:"leftover_server_ids,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Register) Reset() {
@@ -915,6 +924,13 @@ func (x *Register) GetCapabilities() *WorkerCapabilities {
 func (x *Register) GetHeldServers() []*HeldServer {
 	if x != nil {
 		return x.HeldServers
+	}
+	return nil
+}
+
+func (x *Register) GetLeftoverServerIds() []string {
+	if x != nil {
+		return x.LeftoverServerIds
 	}
 	return nil
 }
@@ -1122,14 +1138,17 @@ type RegisterAck struct {
 	// Worker applies it as a per-command context deadline; a non-positive or
 	// unset value (an older API) leaves the transfer unbounded as before.
 	TransferDeadline *durationpb.Duration `protobuf:"bytes,4,opt,name=transfer_deadline,json=transferDeadline,proto3" json:"transfer_deadline,omitempty"`
-	// unknown_held_server_ids is the subset of Register.held_servers whose server
-	// no longer exists in the API (deleted while the scratch was live, issue #924).
-	// The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers for each id
-	// listed here, but does NOT reclaim .displaced-<id> trees (issue #911: those are
-	// intentionally retained for operator recovery). An empty list means every
-	// advertised held server is still known (or that the API could not compute the
-	// subset, e.g. a DB error — the empty list is the fail-safe default so a
-	// transient failure never misclassifies a live server as deleted).
+	// unknown_held_server_ids is the subset of Register.held_servers and
+	// Register.leftover_server_ids whose server no longer exists in the API
+	// (deleted while the scratch was live, issue #924, or while a failed start's
+	// container was recorded, issue #3794). For each id listed here the Worker
+	// ends a container a failed start left behind, then reclaims the
+	// .hydrate-<id>-* leftovers and the scratch dir, but does NOT reclaim
+	// .displaced-<id> trees (issue #911: those are intentionally retained for
+	// operator recovery). An empty list means every id the Worker listed is still
+	// known (or that the API could not compute the subset, e.g. a DB error — the
+	// empty list is the fail-safe default so a transient failure never
+	// misclassifies a live server as deleted).
 	UnknownHeldServerIds []string `protobuf:"bytes,5,rep,name=unknown_held_server_ids,json=unknownHeldServerIds,proto3" json:"unknown_held_server_ids,omitempty"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -2267,8 +2286,9 @@ func (x *CloseBedrockTunnel) GetServerId() string {
 // the scratch dir, and keeps .displaced-<id>. The reclaim runs in the
 // background, one at a time per Worker, and the Worker answers once the id is
 // queued for it (a Worker shutting down answers COMMAND_ERROR_CODE_INTERNAL).
-// The reclaim is best-effort; an id it skips keeps its scratch, so the next
-// registration offers it again.
+// The reclaim is best-effort. An id it skips keeps its working set or its
+// recorded container, so the next registration offers it again; a Worker
+// restart drops that record, and the boot's sweep removes the container.
 type ReclaimDeletedServer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -3027,12 +3047,13 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\fregister_ack\x18\x03 \x01(\v2!.mcsd.controlplane.v1.RegisterAckH\x00R\vregisterAck\x12C\n" +
 	"\vapi_command\x18\x04 \x01(\v2 .mcsd.controlplane.v1.ApiCommandH\x00R\n" +
 	"apiCommandB\t\n" +
-	"\apayload\"\xe1\x01\n" +
+	"\apayload\"\x91\x02\n" +
 	"\bRegister\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12%\n" +
 	"\x0eworker_version\x18\x02 \x01(\tR\rworkerVersion\x12L\n" +
 	"\fcapabilities\x18\x03 \x01(\v2(.mcsd.controlplane.v1.WorkerCapabilitiesR\fcapabilities\x12C\n" +
-	"\fheld_servers\x18\x04 \x03(\v2 .mcsd.controlplane.v1.HeldServerR\vheldServers\"I\n" +
+	"\fheld_servers\x18\x04 \x03(\v2 .mcsd.controlplane.v1.HeldServerR\vheldServers\x12.\n" +
+	"\x13leftover_server_ids\x18\x05 \x03(\tR\x11leftoverServerIds\"I\n" +
 	"\n" +
 	"HeldServer\x12\x1b\n" +
 	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12\x1e\n" +

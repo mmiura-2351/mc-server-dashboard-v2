@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -58,6 +59,7 @@ type fakeServer struct {
 	registers   int
 	heartbeats  int
 	heldServers []*controlplanev1.HeldServer
+	leftoverIDs []string
 	resources   *controlplanev1.HostResources
 	// messages records every WorkerMessage received on the stream, in order.
 	messages []*controlplanev1.WorkerMessage
@@ -80,6 +82,7 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	s.mu.Lock()
 	s.registers++
 	s.heldServers = first.GetRegister().GetHeldServers()
+	s.leftoverIDs = first.GetRegister().GetLeftoverServerIds()
 	s.resources = first.GetRegister().GetCapabilities().GetResources()
 	s.messages = append(s.messages, first)
 	s.mu.Unlock()
@@ -138,6 +141,12 @@ func (s *fakeServer) reportedHeldServers() []*controlplanev1.HeldServer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.heldServers
+}
+
+func (s *fakeServer) reportedLeftoverIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leftoverIDs
 }
 
 func (s *fakeServer) reportedResources() *controlplanev1.HostResources {
@@ -274,6 +283,36 @@ func TestRegisterAdvertisesHeldServers(t *testing.T) {
 		if !ok || gen != h.GetGeneration() {
 			t.Fatalf("held_servers = %v, want %v", got, want)
 		}
+	}
+}
+
+// TestRegisterListsLeftoverServerIDs proves the adapter maps the domain
+// Capabilities.LeftoverServerIDs onto the wire Register.leftover_server_ids
+// (issue #3794), so the API checks those servers for a delete too.
+func TestRegisterListsLeftoverServerIDs(t *testing.T) {
+	srv := &fakeServer{
+		wantCredential: "the-secret",
+		heartbeatEvery: 20 * time.Millisecond,
+	}
+	conn := startServer(t, srv)
+
+	caps := testCaps()
+	caps.LeftoverServerIDs = []string{"server-a", "server-b"}
+	dialer := controlplane.NewDialer(conn, "the-secret", realClock{})
+	runner := session.NewRunner(dialer, caps, realClock{}, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = runner.Run(ctx); close(done) }()
+
+	waitFor(t, func() bool { return srv.registerCount() == 1 })
+	got := srv.reportedLeftoverIDs()
+	cancel()
+	<-done
+
+	if !slices.Equal(got, []string{"server-a", "server-b"}) {
+		t.Fatalf("leftover_server_ids = %v, want [server-a server-b]", got)
 	}
 }
 

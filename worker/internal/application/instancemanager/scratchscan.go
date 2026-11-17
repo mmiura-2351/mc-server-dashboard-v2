@@ -287,6 +287,32 @@ func (m *Manager) HeldServers() []session.HeldServer {
 	return held
 }
 
+// LeftoverServerIDs returns the servers whose scratch dir holds no working set
+// but for which a driver records a container a failed start left behind (issue
+// #3794). HeldServers leaves such a dir out: a server that never published
+// anything hydrates to a dir holding only its generation marker, which the launch
+// guard accepts, so a start the daemon did not answer can leave a container
+// recorded for an id that is not held. The session lists these ids on each
+// registration, the API checks them for a delete, and a deleted one is reclaimed
+// as a held one is: its container ended, then its dir removed. Like the delete
+// report's gate (handleReclaimDeletedServer), it asks the backend nothing.
+func (m *Manager) LeftoverServerIDs() []string {
+	entries, err := os.ReadDir(m.scratchDir)
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, entry := range entries {
+		if !entry.IsDir() || !isServerIDName(entry.Name()) {
+			continue
+		}
+		if !hasWorkingSet(filepath.Join(m.scratchDir, entry.Name())) && m.recordsLeftovers(entry.Name()) {
+			ids = append(ids, entry.Name())
+		}
+	}
+	return ids
+}
+
 // WarnOrphanDisplacedTrees logs a WARN for each .displaced-<id> tree in scratchDir
 // whose server id is NOT in heldServers (issue #911). A .displaced-<id> tree is a
 // last-resort recovery copy kept aside by a hydrate when a server's final stop

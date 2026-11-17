@@ -422,3 +422,14 @@ func (h *fakeHeldServerHandler) setHeldServers(hs []HeldServer) {
 	defer h.mu.Unlock()
 	h.heldServers = hs
 }
+
+// fakeLeftoverServerHandler wraps a fakeHandler and adds LeftoverServerProvider,
+// listing fixed ids for a recorded leftover container (issue #3794).
+type fakeLeftoverServerHandler struct {
+	*fakeHandler
+	leftoverIDs []string
+}
+
+func (h *fakeLeftoverServerHandler) LeftoverServerIDs() []string {
+	return append([]string(nil), h.leftoverIDs...)
+}

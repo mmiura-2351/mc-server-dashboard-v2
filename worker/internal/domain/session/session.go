@@ -140,6 +140,9 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 	if provider, ok := r.handler.(HeldServerProvider); ok {
 		r.caps.HeldServers = provider.HeldServers()
 	}
+	if provider, ok := r.handler.(LeftoverServerProvider); ok {
+		r.caps.LeftoverServerIDs = provider.LeftoverServerIDs()
+	}
 
 	if err := transport.SendRegister(ctx, r.caps); err != nil {
 		return false, fmt.Errorf("send register: %w", err)
@@ -168,18 +171,22 @@ func (r *Runner) runOnce(ctx context.Context) (registered bool, err error) {
 		setter.SetTransferDeadline(ack.TransferDeadline)
 	}
 
-	// Reclaim scratch dirs for held servers the API reports as deleted (issue
-	// #924). Defense in depth: intersect the ack's list with the held set this
-	// Register actually advertised, so a malformed ack cannot point the Worker
-	// at a server it never claimed to hold.
+	// Reclaim scratch dirs for servers the API reports as deleted (issue #924),
+	// held ones and ones listed for a recorded leftover container (issue #3794).
+	// Defense in depth: intersect the ack's list with the ids this Register
+	// actually listed, so a malformed ack cannot point the Worker at a server it
+	// never claimed.
 	if reclaimer, ok := r.handler.(ScratchReclaimer); ok && len(ack.UnknownHeldServerIDs) > 0 {
-		held := make(map[string]bool, len(r.caps.HeldServers))
+		listed := make(map[string]bool, len(r.caps.HeldServers)+len(r.caps.LeftoverServerIDs))
 		for _, hs := range r.caps.HeldServers {
-			held[hs.ServerID] = true
+			listed[hs.ServerID] = true
+		}
+		for _, id := range r.caps.LeftoverServerIDs {
+			listed[id] = true
 		}
 		var toReclaim []string
 		for _, id := range ack.UnknownHeldServerIDs {
-			if held[id] {
+			if listed[id] {
 				toReclaim = append(toReclaim, id)
 			}
 		}

@@ -750,8 +750,11 @@ sent a hydrate, and with it another graceful stop, every tick. A refused stopped
 snapshot does not reach that backoff: a periodic one is retried on the server's
 next interval, and a stop's final snapshot is not retried. The reclaim of a deleted
 server's scratch, when the API reports the delete or at registration, deals with the
-kept ids like the hydrate, and keeps the scratch while the server is busy, so the
-next registration offers it again. A failed start that a reconnect had reported as
+kept ids like the hydrate, and keeps the scratch while the server is busy. The
+next registration offers it again: the Worker lists a server for that reclaim
+while its scratch holds a working set or the driver keeps an id for it. A Worker
+restart forgets the id, and the boot's sweep removes the container instead. A
+failed start that a reconnect had reported as
 `starting` is then reported `crashed` rather than `stopped` while the server is
 busy. A Forge
 installer's output is followed into

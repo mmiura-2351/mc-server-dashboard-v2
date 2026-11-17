@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1354,6 +1355,43 @@ func TestRegisterAckUnknownHeldServerIDsPlumbedToReclaimer(t *testing.T) {
 	// was in unknown but not held, so it should be filtered out.
 	if len(got) != 1 || got[0] != "srv-a" {
 		t.Fatalf("reclaimed ids = %v, want [srv-a]", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// A server whose scratch holds no working set, but whose failed start left a
+// container the driver records, is listed on the Register apart from the held
+// ones (issue #3794). The ack's unknown ids are intersected with both lists, so
+// the reclaimer gets a deleted id from either, and never one the Register did not
+// list.
+func TestRegisterAckUnknownLeftoverServerIDsPlumbedToReclaimer(t *testing.T) {
+	ack := acceptedAck()
+	ack.UnknownHeldServerIDs = []string{"srv-a", "srv-b", "srv-x"}
+	transport := newFakeTransport(ack)
+	dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+	handler := &fakeLeftoverServerHandler{
+		fakeHandler: newFakeHandler(CommandResult{Success: true}),
+		leftoverIDs: []string{"srv-b"},
+	}
+	caps := testCaps()
+	caps.HeldServers = []HeldServer{{ServerID: "srv-a", Generation: 1}}
+	r := NewRunner(dialer, caps, newFakeClock(), discardLogger(), WithCommandHandler(handler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+
+	// ResyncStatus runs after the reclaim hand-off, so the ack has been acted on.
+	waitFor(t, func() bool { return handler.resyncCallsCopy() > 0 })
+	registered := transport.registeredCaps()
+	if len(registered) != 1 || !slices.Equal(registered[0].LeftoverServerIDs, []string{"srv-b"}) {
+		t.Fatalf("registered caps = %+v, want one Register listing srv-b for its leftover", registered)
+	}
+	if got := handler.reclaimedIDsCopy(); !slices.Equal(got, []string{"srv-a", "srv-b"}) {
+		t.Fatalf("reclaimed ids = %v, want [srv-a srv-b]: the held and the leftover id, not srv-x", got)
 	}
 
 	cancel()

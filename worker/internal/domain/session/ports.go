@@ -23,6 +23,12 @@ type Capabilities struct {
 	// would clobber the Worker's live, newer working set with the last authoritative
 	// snapshot). It generalizes the presence-only HeldServerIDs of issue #696.
 	HeldServers []HeldServer
+	// LeftoverServerIDs lists the servers whose scratch holds no working set but
+	// for which the driver records a container a failed start left behind (issue
+	// #3794). The adapter maps it onto the wire Register.leftover_server_ids. The
+	// API only checks them for a delete, so a deleted one's container is ended at
+	// registration rather than left until the next boot's sweep.
+	LeftoverServerIDs []string
 	// Resources advertises the host's hardware resources (CPU cores and total
 	// memory) for the API's placement logic (FR-WRK-3, issue #1218). When
 	// MemoryBytes is 0 the API skips the memory hard-gate, so this must be
@@ -457,6 +463,16 @@ type HeldServerProvider interface {
 	// HeldServers returns the working sets this Worker currently holds in its
 	// local scratch, each tagged with its recorded generation.
 	HeldServers() []HeldServer
+}
+
+// LeftoverServerProvider is an optional CommandHandler capability: before each
+// registration the session asks the handler which servers to list for a recorded
+// leftover container (issue #3794). A handler that does not implement it lists
+// none.
+type LeftoverServerProvider interface {
+	// LeftoverServerIDs returns the servers whose scratch holds no working set but
+	// for which a failed start left a container the driver records.
+	LeftoverServerIDs() []string
 }
 
 // ErrMessageTooLarge is returned by a Transport Send method for a message whose
