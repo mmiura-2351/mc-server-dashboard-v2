@@ -693,6 +693,22 @@ class RunReconcilerTick:
                     server.id.value,
                 )
                 return
+            if action in (
+                "place_and_start",
+                "redispatch_start",
+            ) and isinstance(exc, LifecycleTransitionConflictError):
+                # The row moved under the start: a stop intent committed, or the
+                # server was placed on another Worker, before the start was sent
+                # (issue #3737), or a concurrent placement won the assignment. The
+                # newer transition owns the row, so nothing failed here: no backoff
+                # and no WARNING, and the next tick acts on the row as it now is.
+                _LOG.info(
+                    "reconcile action %s skipped for server %s: the server's "
+                    "intent or assignment changed before the start was sent",
+                    action,
+                    server.id.value,
+                )
+                return
             self._record_failure(server.id, now)
             _LOG.warning(
                 "reconcile action %s failed for server %s: %r; backing off",

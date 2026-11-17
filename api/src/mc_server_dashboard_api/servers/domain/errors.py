@@ -188,6 +188,12 @@ class LifecycleTransitionConflictError(ServerError):
     already moved the server out of the expected state. The use case aborts
     *before* dispatching or touching placement-load counts so a lost race causes
     no double placement/dispatch; the edge maps this to 409 ``transition_conflict``.
+
+    A start also raises it from the re-read just before it sends the start (issue
+    #3737): the server, read again after the hydrate, is no longer desired-running
+    on this start's Worker, or is gone. The start's own placement count may already
+    be confirmed by then. It is not undone here, because the transition that moved
+    the row owns that count; the start is simply not sent.
     """
 
 
