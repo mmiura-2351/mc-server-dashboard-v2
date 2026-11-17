@@ -1101,6 +1101,8 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleOpenBedrockTunnel(ctx, cmd)
 	case "CloseBedrockTunnel":
 		return m.handleCloseBedrockTunnel(ctx, cmd)
+	case "ReclaimDeletedServer":
+		return m.handleReclaimDeletedServer(cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -3283,7 +3285,9 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // Reclamation contract update (issue #924, extending #841):
 //   - The post-stop final snapshot path (removeScratch) remains the primary GC.
 //   - This method covers the gap: a server deleted while its scratch was live
-//     (the final snapshot never arrived), reclaimed at the next registration.
+//     (the final snapshot never arrived). It is reclaimed when the API reports the
+//     delete to the connected Worker (ReclaimDeletedServer, issue #3679), and at
+//     the next registration as the backstop.
 //   - Phase 2 (refresh held inventory per re-registration) is implemented:
 //     HeldServers() (issue #1711) refreshes the advertised set each register.
 //
@@ -3302,6 +3306,19 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // dropped here is offered again at the next one.
 func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	m.goBackground(func() { m.reclaimDeletedScratches(serverIDs) })
+}
+
+// handleReclaimDeletedServer answers the API's report that the server was deleted
+// (issue #3679). Before it, a Worker that stayed connected kept a deleted server's
+// leftover container and scratch until it next registered. It hands the id to
+// ReclaimDeletedScratches, the reclaim a registration runs, and answers at once:
+// the reclaim stays a background job Close joins, so its per-id body keeps the
+// join it relies on (issue #2878). The answer therefore says only that the reclaim
+// was started. An id the reclaim skips keeps its scratch, and with it the
+// advertisement that offers the id again at the next registration.
+func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.CommandResult {
+	m.ReclaimDeletedScratches([]string{cmd.ServerID})
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 }
 
 // reclaimDeletedScratches is the synchronous body of ReclaimDeletedScratches.

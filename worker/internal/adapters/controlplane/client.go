@@ -695,6 +695,8 @@ func commandKind(cmd *controlplanev1.ApiCommand) string {
 		return "OpenBedrockTunnel"
 	case *controlplanev1.ApiCommand_CloseBedrockTunnel:
 		return "CloseBedrockTunnel"
+	case *controlplanev1.ApiCommand_ReclaimDeletedServer:
+		return "ReclaimDeletedServer"
 	default:
 		return "unknown"
 	}

@@ -1210,6 +1210,7 @@ type ApiCommand struct {
 	//	*ApiCommand_TunnelDial
 	//	*ApiCommand_OpenBedrockTunnel
 	//	*ApiCommand_CloseBedrockTunnel
+	//	*ApiCommand_ReclaimDeletedServer
 	Command isApiCommand_Command `protobuf_oneof:"command"`
 	// expires_after is how long the Worker may hold this command before it
 	// starts executing it, measured from when the Worker received it, so the two
@@ -1387,6 +1388,15 @@ func (x *ApiCommand) GetCloseBedrockTunnel() *CloseBedrockTunnel {
 	return nil
 }
 
+func (x *ApiCommand) GetReclaimDeletedServer() *ReclaimDeletedServer {
+	if x != nil {
+		if x, ok := x.Command.(*ApiCommand_ReclaimDeletedServer); ok {
+			return x.ReclaimDeletedServer
+		}
+	}
+	return nil
+}
+
 func (x *ApiCommand) GetExpiresAfter() *durationpb.Duration {
 	if x != nil {
 		return x.ExpiresAfter
@@ -1466,6 +1476,12 @@ type ApiCommand_CloseBedrockTunnel struct {
 	CloseBedrockTunnel *CloseBedrockTunnel `protobuf:"bytes,14,opt,name=close_bedrock_tunnel,json=closeBedrockTunnel,proto3,oneof"`
 }
 
+type ApiCommand_ReclaimDeletedServer struct {
+	// ReclaimDeletedServer tells the Worker that the server has been deleted,
+	// so it reclaims what it still holds for it (issue #3679).
+	ReclaimDeletedServer *ReclaimDeletedServer `protobuf:"bytes,16,opt,name=reclaim_deleted_server,json=reclaimDeletedServer,proto3,oneof"`
+}
+
 func (*ApiCommand_Start) isApiCommand_Command() {}
 
 func (*ApiCommand_Stop) isApiCommand_Command() {}
@@ -1489,6 +1505,8 @@ func (*ApiCommand_TunnelDial) isApiCommand_Command() {}
 func (*ApiCommand_OpenBedrockTunnel) isApiCommand_Command() {}
 
 func (*ApiCommand_CloseBedrockTunnel) isApiCommand_Command() {}
+
+func (*ApiCommand_ReclaimDeletedServer) isApiCommand_Command() {}
 
 // StartServer launches a server on the Worker. Hydrate (FR-DATA-4) precedes the
 // launch; the API issues a HydrateTrigger first, then StartServer.
@@ -2239,6 +2257,51 @@ func (x *CloseBedrockTunnel) GetServerId() string {
 	return ""
 }
 
+// ReclaimDeletedServer reports that the API has deleted the server named by
+// ApiCommand.server_id (issue #3679). The API sends it to every connected
+// Worker once the delete has committed, without waiting for the result. The
+// Worker reclaims what it holds for the id exactly as it does for an id listed
+// in RegisterAck.unknown_held_server_ids: it ends a container a failed start
+// left behind, then removes the .hydrate-<id>-* leftovers and the scratch dir,
+// and keeps .displaced-<id>. It answers once it has started that reclaim. The
+// reclaim is best-effort; an id it skips keeps its scratch, so the next
+// registration offers it again.
+type ReclaimDeletedServer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReclaimDeletedServer) Reset() {
+	*x = ReclaimDeletedServer{}
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReclaimDeletedServer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReclaimDeletedServer) ProtoMessage() {}
+
+func (x *ReclaimDeletedServer) ProtoReflect() protoreflect.Message {
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReclaimDeletedServer.ProtoReflect.Descriptor instead.
+func (*ReclaimDeletedServer) Descriptor() ([]byte, []int) {
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{20}
+}
+
 // CommandResult answers exactly one ApiCommand. The enclosing WorkerMessage's
 // correlation_id equals the command's command_id.
 type CommandResult struct {
@@ -2280,7 +2343,7 @@ type CommandResult struct {
 
 func (x *CommandResult) Reset() {
 	*x = CommandResult{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[20]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2292,7 +2355,7 @@ func (x *CommandResult) String() string {
 func (*CommandResult) ProtoMessage() {}
 
 func (x *CommandResult) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[20]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2305,7 +2368,7 @@ func (x *CommandResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandResult.ProtoReflect.Descriptor instead.
 func (*CommandResult) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{20}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CommandResult) GetSuccess() bool {
@@ -2404,7 +2467,7 @@ type FileListing struct {
 
 func (x *FileListing) Reset() {
 	*x = FileListing{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[21]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2416,7 +2479,7 @@ func (x *FileListing) String() string {
 func (*FileListing) ProtoMessage() {}
 
 func (x *FileListing) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[21]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2429,7 +2492,7 @@ func (x *FileListing) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileListing.ProtoReflect.Descriptor instead.
 func (*FileListing) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{21}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *FileListing) GetEntries() []*FileEntry {
@@ -2464,7 +2527,7 @@ type FileEntry struct {
 
 func (x *FileEntry) Reset() {
 	*x = FileEntry{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[22]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2476,7 +2539,7 @@ func (x *FileEntry) String() string {
 func (*FileEntry) ProtoMessage() {}
 
 func (x *FileEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[22]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2489,7 +2552,7 @@ func (x *FileEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FileEntry.ProtoReflect.Descriptor instead.
 func (*FileEntry) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{22}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *FileEntry) GetName() string {
@@ -2535,7 +2598,7 @@ type CommandError struct {
 
 func (x *CommandError) Reset() {
 	*x = CommandError{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[23]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2547,7 +2610,7 @@ func (x *CommandError) String() string {
 func (*CommandError) ProtoMessage() {}
 
 func (x *CommandError) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[23]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2560,7 +2623,7 @@ func (x *CommandError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandError.ProtoReflect.Descriptor instead.
 func (*CommandError) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{23}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *CommandError) GetCode() CommandErrorCode {
@@ -2603,7 +2666,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[24]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2615,7 +2678,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[24]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2628,7 +2691,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{24}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *Event) GetServerId() string {
@@ -2734,7 +2797,7 @@ type StatusChange struct {
 
 func (x *StatusChange) Reset() {
 	*x = StatusChange{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[25]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2746,7 +2809,7 @@ func (x *StatusChange) String() string {
 func (*StatusChange) ProtoMessage() {}
 
 func (x *StatusChange) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[25]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2759,7 +2822,7 @@ func (x *StatusChange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusChange.ProtoReflect.Descriptor instead.
 func (*StatusChange) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{25}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *StatusChange) GetState() ServerState {
@@ -2796,7 +2859,7 @@ type LogLine struct {
 
 func (x *LogLine) Reset() {
 	*x = LogLine{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[26]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2808,7 +2871,7 @@ func (x *LogLine) String() string {
 func (*LogLine) ProtoMessage() {}
 
 func (x *LogLine) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[26]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2821,7 +2884,7 @@ func (x *LogLine) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogLine.ProtoReflect.Descriptor instead.
 func (*LogLine) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{26}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *LogLine) GetLine() string {
@@ -2854,7 +2917,7 @@ type Metrics struct {
 
 func (x *Metrics) Reset() {
 	*x = Metrics{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[27]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2866,7 +2929,7 @@ func (x *Metrics) String() string {
 func (*Metrics) ProtoMessage() {}
 
 func (x *Metrics) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[27]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2879,7 +2942,7 @@ func (x *Metrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Metrics.ProtoReflect.Descriptor instead.
 func (*Metrics) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{27}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Metrics) GetCpuMillis() uint32 {
@@ -2913,7 +2976,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[28]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2925,7 +2988,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[28]
+	mi := &file_mcsd_controlplane_v1_control_plane_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2938,7 +3001,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{28}
+	return file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP(), []int{29}
 }
 
 var File_mcsd_controlplane_v1_control_plane_proto protoreflect.FileDescriptor
@@ -2984,7 +3047,7 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\vRegisterAck\x12H\n" +
 	"\x12heartbeat_interval\x18\x02 \x01(\v2\x19.google.protobuf.DurationR\x11heartbeatInterval\x12F\n" +
 	"\x11transfer_deadline\x18\x04 \x01(\v2\x19.google.protobuf.DurationR\x10transferDeadline\x125\n" +
-	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIdsJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\bacceptedR\x10rejection_reason\"\xda\a\n" +
+	"\x17unknown_held_server_ids\x18\x05 \x03(\tR\x14unknownHeldServerIdsJ\x04\b\x01\x10\x02J\x04\b\x03\x10\x04R\bacceptedR\x10rejection_reason\"\xbe\b\n" +
 	"\n" +
 	"ApiCommand\x12\x1d\n" +
 	"\n" +
@@ -3004,7 +3067,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\vtunnel_dial\x18\f \x01(\v2 .mcsd.controlplane.v1.TunnelDialH\x00R\n" +
 	"tunnelDial\x12Y\n" +
 	"\x13open_bedrock_tunnel\x18\r \x01(\v2'.mcsd.controlplane.v1.OpenBedrockTunnelH\x00R\x11openBedrockTunnel\x12\\\n" +
-	"\x14close_bedrock_tunnel\x18\x0e \x01(\v2(.mcsd.controlplane.v1.CloseBedrockTunnelH\x00R\x12closeBedrockTunnel\x12>\n" +
+	"\x14close_bedrock_tunnel\x18\x0e \x01(\v2(.mcsd.controlplane.v1.CloseBedrockTunnelH\x00R\x12closeBedrockTunnel\x12b\n" +
+	"\x16reclaim_deleted_server\x18\x10 \x01(\v2*.mcsd.controlplane.v1.ReclaimDeletedServerH\x00R\x14reclaimDeletedServer\x12>\n" +
 	"\rexpires_after\x18\x0f \x01(\v2\x19.google.protobuf.DurationR\fexpiresAfterB\t\n" +
 	"\acommand\"\xae\x02\n" +
 	"\vStartServer\x12A\n" +
@@ -3051,7 +3115,8 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\n" +
 	"tls_ca_pem\x18\x05 \x01(\tR\btlsCaPem\"1\n" +
 	"\x12CloseBedrockTunnel\x12\x1b\n" +
-	"\tserver_id\x18\x01 \x01(\tR\bserverId\"\xc5\x02\n" +
+	"\tserver_id\x18\x01 \x01(\tR\bserverId\"\x16\n" +
+	"\x14ReclaimDeletedServer\"\xc5\x02\n" +
 	"\rCommandResult\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x128\n" +
 	"\x05error\x18\x02 \x01(\v2\".mcsd.controlplane.v1.CommandErrorR\x05error\x12'\n" +
@@ -3163,7 +3228,7 @@ func file_mcsd_controlplane_v1_control_plane_proto_rawDescGZIP() []byte {
 }
 
 var file_mcsd_controlplane_v1_control_plane_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
-var file_mcsd_controlplane_v1_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_mcsd_controlplane_v1_control_plane_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
 var file_mcsd_controlplane_v1_control_plane_proto_goTypes = []any{
 	(ExecutionDriverKind)(0),      // 0: mcsd.controlplane.v1.ExecutionDriverKind
 	(LaunchMode)(0),               // 1: mcsd.controlplane.v1.LaunchMode
@@ -3193,32 +3258,33 @@ var file_mcsd_controlplane_v1_control_plane_proto_goTypes = []any{
 	(*TunnelDial)(nil),            // 25: mcsd.controlplane.v1.TunnelDial
 	(*OpenBedrockTunnel)(nil),     // 26: mcsd.controlplane.v1.OpenBedrockTunnel
 	(*CloseBedrockTunnel)(nil),    // 27: mcsd.controlplane.v1.CloseBedrockTunnel
-	(*CommandResult)(nil),         // 28: mcsd.controlplane.v1.CommandResult
-	(*FileListing)(nil),           // 29: mcsd.controlplane.v1.FileListing
-	(*FileEntry)(nil),             // 30: mcsd.controlplane.v1.FileEntry
-	(*CommandError)(nil),          // 31: mcsd.controlplane.v1.CommandError
-	(*Event)(nil),                 // 32: mcsd.controlplane.v1.Event
-	(*StatusChange)(nil),          // 33: mcsd.controlplane.v1.StatusChange
-	(*LogLine)(nil),               // 34: mcsd.controlplane.v1.LogLine
-	(*Metrics)(nil),               // 35: mcsd.controlplane.v1.Metrics
-	(*Heartbeat)(nil),             // 36: mcsd.controlplane.v1.Heartbeat
-	(*timestamppb.Timestamp)(nil), // 37: google.protobuf.Timestamp
-	(*durationpb.Duration)(nil),   // 38: google.protobuf.Duration
+	(*ReclaimDeletedServer)(nil),  // 28: mcsd.controlplane.v1.ReclaimDeletedServer
+	(*CommandResult)(nil),         // 29: mcsd.controlplane.v1.CommandResult
+	(*FileListing)(nil),           // 30: mcsd.controlplane.v1.FileListing
+	(*FileEntry)(nil),             // 31: mcsd.controlplane.v1.FileEntry
+	(*CommandError)(nil),          // 32: mcsd.controlplane.v1.CommandError
+	(*Event)(nil),                 // 33: mcsd.controlplane.v1.Event
+	(*StatusChange)(nil),          // 34: mcsd.controlplane.v1.StatusChange
+	(*LogLine)(nil),               // 35: mcsd.controlplane.v1.LogLine
+	(*Metrics)(nil),               // 36: mcsd.controlplane.v1.Metrics
+	(*Heartbeat)(nil),             // 37: mcsd.controlplane.v1.Heartbeat
+	(*timestamppb.Timestamp)(nil), // 38: google.protobuf.Timestamp
+	(*durationpb.Duration)(nil),   // 39: google.protobuf.Duration
 }
 var file_mcsd_controlplane_v1_control_plane_proto_depIdxs = []int32{
-	37, // 0: mcsd.controlplane.v1.WorkerMessage.emitted_at:type_name -> google.protobuf.Timestamp
+	38, // 0: mcsd.controlplane.v1.WorkerMessage.emitted_at:type_name -> google.protobuf.Timestamp
 	10, // 1: mcsd.controlplane.v1.WorkerMessage.register:type_name -> mcsd.controlplane.v1.Register
-	28, // 2: mcsd.controlplane.v1.WorkerMessage.command_result:type_name -> mcsd.controlplane.v1.CommandResult
-	32, // 3: mcsd.controlplane.v1.WorkerMessage.event:type_name -> mcsd.controlplane.v1.Event
-	37, // 4: mcsd.controlplane.v1.ApiMessage.sent_at:type_name -> google.protobuf.Timestamp
+	29, // 2: mcsd.controlplane.v1.WorkerMessage.command_result:type_name -> mcsd.controlplane.v1.CommandResult
+	33, // 3: mcsd.controlplane.v1.WorkerMessage.event:type_name -> mcsd.controlplane.v1.Event
+	38, // 4: mcsd.controlplane.v1.ApiMessage.sent_at:type_name -> google.protobuf.Timestamp
 	14, // 5: mcsd.controlplane.v1.ApiMessage.register_ack:type_name -> mcsd.controlplane.v1.RegisterAck
 	15, // 6: mcsd.controlplane.v1.ApiMessage.api_command:type_name -> mcsd.controlplane.v1.ApiCommand
 	12, // 7: mcsd.controlplane.v1.Register.capabilities:type_name -> mcsd.controlplane.v1.WorkerCapabilities
 	11, // 8: mcsd.controlplane.v1.Register.held_servers:type_name -> mcsd.controlplane.v1.HeldServer
 	0,  // 9: mcsd.controlplane.v1.WorkerCapabilities.drivers:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
 	13, // 10: mcsd.controlplane.v1.WorkerCapabilities.resources:type_name -> mcsd.controlplane.v1.HostResources
-	38, // 11: mcsd.controlplane.v1.RegisterAck.heartbeat_interval:type_name -> google.protobuf.Duration
-	38, // 12: mcsd.controlplane.v1.RegisterAck.transfer_deadline:type_name -> google.protobuf.Duration
+	39, // 11: mcsd.controlplane.v1.RegisterAck.heartbeat_interval:type_name -> google.protobuf.Duration
+	39, // 12: mcsd.controlplane.v1.RegisterAck.transfer_deadline:type_name -> google.protobuf.Duration
 	16, // 13: mcsd.controlplane.v1.ApiCommand.start:type_name -> mcsd.controlplane.v1.StartServer
 	17, // 14: mcsd.controlplane.v1.ApiCommand.stop:type_name -> mcsd.controlplane.v1.StopServer
 	18, // 15: mcsd.controlplane.v1.ApiCommand.restart:type_name -> mcsd.controlplane.v1.RestartServer
@@ -3231,29 +3297,30 @@ var file_mcsd_controlplane_v1_control_plane_proto_depIdxs = []int32{
 	25, // 22: mcsd.controlplane.v1.ApiCommand.tunnel_dial:type_name -> mcsd.controlplane.v1.TunnelDial
 	26, // 23: mcsd.controlplane.v1.ApiCommand.open_bedrock_tunnel:type_name -> mcsd.controlplane.v1.OpenBedrockTunnel
 	27, // 24: mcsd.controlplane.v1.ApiCommand.close_bedrock_tunnel:type_name -> mcsd.controlplane.v1.CloseBedrockTunnel
-	38, // 25: mcsd.controlplane.v1.ApiCommand.expires_after:type_name -> google.protobuf.Duration
-	0,  // 26: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
-	1,  // 27: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
-	31, // 28: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
-	29, // 29: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
-	30, // 30: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
-	2,  // 31: mcsd.controlplane.v1.FileEntry.kind:type_name -> mcsd.controlplane.v1.FileEntryKind
-	4,  // 32: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
-	3,  // 33: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
-	33, // 34: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
-	34, // 35: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
-	35, // 36: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
-	36, // 37: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
-	6,  // 38: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
-	5,  // 39: mcsd.controlplane.v1.StatusChange.crash_reason:type_name -> mcsd.controlplane.v1.CrashReason
-	7,  // 40: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
-	8,  // 41: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
-	9,  // 42: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
-	42, // [42:43] is the sub-list for method output_type
-	41, // [41:42] is the sub-list for method input_type
-	41, // [41:41] is the sub-list for extension type_name
-	41, // [41:41] is the sub-list for extension extendee
-	0,  // [0:41] is the sub-list for field type_name
+	28, // 25: mcsd.controlplane.v1.ApiCommand.reclaim_deleted_server:type_name -> mcsd.controlplane.v1.ReclaimDeletedServer
+	39, // 26: mcsd.controlplane.v1.ApiCommand.expires_after:type_name -> google.protobuf.Duration
+	0,  // 27: mcsd.controlplane.v1.StartServer.driver:type_name -> mcsd.controlplane.v1.ExecutionDriverKind
+	1,  // 28: mcsd.controlplane.v1.StartServer.launch_mode:type_name -> mcsd.controlplane.v1.LaunchMode
+	32, // 29: mcsd.controlplane.v1.CommandResult.error:type_name -> mcsd.controlplane.v1.CommandError
+	30, // 30: mcsd.controlplane.v1.CommandResult.file_listing:type_name -> mcsd.controlplane.v1.FileListing
+	31, // 31: mcsd.controlplane.v1.FileListing.entries:type_name -> mcsd.controlplane.v1.FileEntry
+	2,  // 32: mcsd.controlplane.v1.FileEntry.kind:type_name -> mcsd.controlplane.v1.FileEntryKind
+	4,  // 33: mcsd.controlplane.v1.CommandError.code:type_name -> mcsd.controlplane.v1.CommandErrorCode
+	3,  // 34: mcsd.controlplane.v1.CommandError.file_access_reason:type_name -> mcsd.controlplane.v1.FileAccessReason
+	34, // 35: mcsd.controlplane.v1.Event.status_change:type_name -> mcsd.controlplane.v1.StatusChange
+	35, // 36: mcsd.controlplane.v1.Event.log_line:type_name -> mcsd.controlplane.v1.LogLine
+	36, // 37: mcsd.controlplane.v1.Event.metrics:type_name -> mcsd.controlplane.v1.Metrics
+	37, // 38: mcsd.controlplane.v1.Event.heartbeat:type_name -> mcsd.controlplane.v1.Heartbeat
+	6,  // 39: mcsd.controlplane.v1.StatusChange.state:type_name -> mcsd.controlplane.v1.ServerState
+	5,  // 40: mcsd.controlplane.v1.StatusChange.crash_reason:type_name -> mcsd.controlplane.v1.CrashReason
+	7,  // 41: mcsd.controlplane.v1.LogLine.stream:type_name -> mcsd.controlplane.v1.LogStream
+	8,  // 42: mcsd.controlplane.v1.WorkerService.Session:input_type -> mcsd.controlplane.v1.WorkerMessage
+	9,  // 43: mcsd.controlplane.v1.WorkerService.Session:output_type -> mcsd.controlplane.v1.ApiMessage
+	43, // [43:44] is the sub-list for method output_type
+	42, // [42:43] is the sub-list for method input_type
+	42, // [42:42] is the sub-list for extension type_name
+	42, // [42:42] is the sub-list for extension extendee
+	0,  // [0:42] is the sub-list for field type_name
 }
 
 func init() { file_mcsd_controlplane_v1_control_plane_proto_init() }
@@ -3283,13 +3350,14 @@ func file_mcsd_controlplane_v1_control_plane_proto_init() {
 		(*ApiCommand_TunnelDial)(nil),
 		(*ApiCommand_OpenBedrockTunnel)(nil),
 		(*ApiCommand_CloseBedrockTunnel)(nil),
+		(*ApiCommand_ReclaimDeletedServer)(nil),
 	}
-	file_mcsd_controlplane_v1_control_plane_proto_msgTypes[20].OneofWrappers = []any{
+	file_mcsd_controlplane_v1_control_plane_proto_msgTypes[21].OneofWrappers = []any{
 		(*CommandResult_CommandOutput)(nil),
 		(*CommandResult_FileContent)(nil),
 		(*CommandResult_FileListing)(nil),
 	}
-	file_mcsd_controlplane_v1_control_plane_proto_msgTypes[24].OneofWrappers = []any{
+	file_mcsd_controlplane_v1_control_plane_proto_msgTypes[25].OneofWrappers = []any{
 		(*Event_StatusChange)(nil),
 		(*Event_LogLine)(nil),
 		(*Event_Metrics)(nil),
@@ -3301,7 +3369,7 @@ func file_mcsd_controlplane_v1_control_plane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mcsd_controlplane_v1_control_plane_proto_rawDesc), len(file_mcsd_controlplane_v1_control_plane_proto_rawDesc)),
 			NumEnums:      8,
-			NumMessages:   29,
+			NumMessages:   30,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

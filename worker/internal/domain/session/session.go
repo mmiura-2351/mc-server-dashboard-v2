@@ -520,7 +520,7 @@ func IsHandledKind(kind string) bool {
 	switch kind {
 	case "StartServer", "StopServer", "RestartServer", "ServerCommand",
 		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
-		"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel":
+		"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel", "ReclaimDeletedServer":
 		return true
 	default:
 		return false
@@ -659,14 +659,16 @@ func (d *dispatcher) runLane(serverID string, l *lane) {
 // qualify for the same reason (docs/app/BEDROCK_TUNNEL.md, issue #1546): Open
 // returns once the tunnel is registered, and its dial/handshake/reconnect-with-
 // backoff run off the lane on the tunnel's own long-lived context, so neither
-// command should queue behind a hydrate. Every other server-scoped kind
+// command should queue behind a hydrate. ReclaimDeletedServer qualifies too (issue
+// #3679): it hands the reclaim to the handler's background work and returns. Every
+// other server-scoped kind
 // (StartServer/StopServer/RestartServer, HydrateTrigger/SnapshotTrigger, and the
 // file ops) can run long and stays bounded by the cap (issue #169). The bypass
 // keeps per-server FIFO: it changes only whether a lane acquires a cap slot for a
 // command, never the order in which a server's commands run.
 func isQuickCommand(kind string) bool {
 	switch kind {
-	case "ServerCommand", "TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel":
+	case "ServerCommand", "TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel", "ReclaimDeletedServer":
 		return true
 	default:
 		return false

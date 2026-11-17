@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
@@ -341,6 +342,45 @@ func TestReclaimEndsADeletedServersLeftoversBeforeRemovingTheScratch(t *testing.
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("scratch not reclaimed: stat err = %v", err)
+	}
+}
+
+// A connected Worker reclaims a deleted server when the API reports the delete,
+// without waiting for its next registration (issue #3679). The command hands the
+// id to the same reclaim a registration runs: it ends what the driver left
+// running for the server, with the working set still in place, then removes the
+// hydrate leftovers and the scratch. The reclaim runs in the background, so the
+// test waits for the removal.
+func TestReclaimDeletedServerCommandReclaimsWithoutReconnecting(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	leftover := filepath.Join(m.scratchDir, ".hydrate-"+s1+"-stale")
+	if err := os.MkdirAll(leftover, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	var presentAtEnd atomic.Bool
+	g.onEnd = func() {
+		_, err := os.Stat(dir)
+		presentAtEnd.Store(err == nil)
+	}
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	if !res.Success {
+		t.Fatalf("ReclaimDeletedServer = %+v, want success", res)
+	}
+
+	waitFor(t, func() bool {
+		_, err := os.Stat(dir)
+		return os.IsNotExist(err)
+	})
+	if want := []string{"end " + s1 + " " + dir, "busy " + s1}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+	if !presentAtEnd.Load() {
+		t.Fatal("the scratch was gone when the leftover was ended, want it in place")
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("hydrate leftover not reclaimed: stat err = %v", err)
 	}
 }
 

@@ -235,6 +235,9 @@ message ApiCommand {
     // CloseBedrockTunnel instructs the Worker to close a server's Bedrock
     // relay tunnel, dispatched when the server stops (issue #1544).
     CloseBedrockTunnel close_bedrock_tunnel = 14;
+    // ReclaimDeletedServer tells the Worker that the server has been deleted,
+    // so it reclaims what it still holds for it (issue #3679).
+    ReclaimDeletedServer reclaim_deleted_server = 16;
   }
 
   // expires_after is how long the Worker may hold this command before it
@@ -449,6 +452,17 @@ message CloseBedrockTunnel {
   // server_id identifies the local server whose Bedrock tunnel to close.
   string server_id = 1;
 }
+
+// ReclaimDeletedServer reports that the API has deleted the server named by
+// ApiCommand.server_id (issue #3679). The API sends it to every connected
+// Worker once the delete has committed, without waiting for the result. The
+// Worker reclaims what it holds for the id exactly as it does for an id listed
+// in RegisterAck.unknown_held_server_ids: it ends a container a failed start
+// left behind, then removes the .hydrate-<id>-* leftovers and the scratch dir,
+// and keeps .displaced-<id>. It answers once it has started that reclaim. The
+// reclaim is best-effort; an id it skips keeps its scratch, so the next
+// registration offers it again.
+message ReclaimDeletedServer {}
 
 // ---------------------------------------------------------------------------
 // Command results: Worker -> API

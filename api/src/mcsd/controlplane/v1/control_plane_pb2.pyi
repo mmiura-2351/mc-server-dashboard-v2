@@ -805,6 +805,7 @@ class ApiCommand(_message.Message):
     TUNNEL_DIAL_FIELD_NUMBER: _builtins.int
     OPEN_BEDROCK_TUNNEL_FIELD_NUMBER: _builtins.int
     CLOSE_BEDROCK_TUNNEL_FIELD_NUMBER: _builtins.int
+    RECLAIM_DELETED_SERVER_FIELD_NUMBER: _builtins.int
     EXPIRES_AFTER_FIELD_NUMBER: _builtins.int
     command_id: _builtins.str
     """command_id correlates this command with its CommandResult
@@ -874,6 +875,12 @@ class ApiCommand(_message.Message):
         """
 
     @_builtins.property
+    def reclaim_deleted_server(self) -> Global___ReclaimDeletedServer:
+        """ReclaimDeletedServer tells the Worker that the server has been deleted,
+        so it reclaims what it still holds for it (issue #3679).
+        """
+
+    @_builtins.property
     def expires_after(self) -> _duration_pb2.Duration:
         """expires_after is how long the Worker may hold this command before it
         starts executing it, measured from when the Worker received it, so the two
@@ -906,13 +913,14 @@ class ApiCommand(_message.Message):
         tunnel_dial: Global___TunnelDial | None = ...,
         open_bedrock_tunnel: Global___OpenBedrockTunnel | None = ...,
         close_bedrock_tunnel: Global___CloseBedrockTunnel | None = ...,
+        reclaim_deleted_server: Global___ReclaimDeletedServer | None = ...,
         expires_after: _duration_pb2.Duration | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "edit_file", b"edit_file", "expires_after", b"expires_after", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "edit_file", b"edit_file", "expires_after", b"expires_after", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "reclaim_deleted_server", b"reclaim_deleted_server", "restart", b"restart", "server_command", b"server_command", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "expires_after", b"expires_after", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["close_bedrock_tunnel", b"close_bedrock_tunnel", "command", b"command", "command_id", b"command_id", "edit_file", b"edit_file", "expires_after", b"expires_after", "hydrate", b"hydrate", "list_files", b"list_files", "open_bedrock_tunnel", b"open_bedrock_tunnel", "read_file", b"read_file", "reclaim_deleted_server", b"reclaim_deleted_server", "restart", b"restart", "server_command", b"server_command", "server_id", b"server_id", "snapshot", b"snapshot", "start", b"start", "stop", b"stop", "tunnel_dial", b"tunnel_dial"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files", "tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel"]  # noqa: Y015
+    _WhichOneofReturnType_command: _TypeAlias = _typing.Literal["start", "stop", "restart", "server_command", "hydrate", "snapshot", "read_file", "edit_file", "list_files", "tunnel_dial", "open_bedrock_tunnel", "close_bedrock_tunnel", "reclaim_deleted_server"]  # noqa: Y015
     _WhichOneofArgType_command: _TypeAlias = _typing.Literal["command", b"command"]  # noqa: Y015
     def WhichOneof(self, oneof_group: _WhichOneofArgType_command) -> _WhichOneofReturnType_command | None: ...
 
@@ -1334,6 +1342,32 @@ class CloseBedrockTunnel(_message.Message):
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
 Global___CloseBedrockTunnel: _TypeAlias = CloseBedrockTunnel  # noqa: Y015
+
+@_typing.final
+class ReclaimDeletedServer(_message.Message):
+    """ReclaimDeletedServer reports that the API has deleted the server named by
+    ApiCommand.server_id (issue #3679). The API sends it to every connected
+    Worker once the delete has committed, without waiting for the result. The
+    Worker reclaims what it holds for the id exactly as it does for an id listed
+    in RegisterAck.unknown_held_server_ids: it ends a container a failed start
+    left behind, then removes the .hydrate-<id>-* leftovers and the scratch dir,
+    and keeps .displaced-<id>. It answers once it has started that reclaim. The
+    reclaim is best-effort; an id it skips keeps its scratch, so the next
+    registration offers it again.
+    """
+
+    DESCRIPTOR: _descriptor.Descriptor
+
+    def __init__(
+        self,
+    ) -> None: ...
+    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
+    _ClearFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
+    def WhichOneof(self, oneof_group: _Never) -> None: ...
+
+Global___ReclaimDeletedServer: _TypeAlias = ReclaimDeletedServer  # noqa: Y015
 
 @_typing.final
 class CommandResult(_message.Message):
