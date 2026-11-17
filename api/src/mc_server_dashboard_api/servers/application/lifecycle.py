@@ -35,8 +35,8 @@ is a reconciler's job, tracked separately; the in-line compensation above covers
 every failure where NO instance can be live on the assigned Worker — not only
 pre-dispatch ones. That includes the pre-dispatch failures where the start command
 demonstrably never reached the Worker (placement, jar provisioning, a failing
-skip-hydrate generation read, a failed hydrate, or a pre-dispatch
-``WorkerUnavailableError``) AND a post-dispatch explicit
+skip-hydrate generation read, a failed hydrate, a failed re-read before the send,
+or a pre-dispatch ``WorkerUnavailableError``) AND a post-dispatch explicit
 refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 ``DRIVER_UNAVAILABLE``, ``INTERNAL``). Only a timeout/lost-response AFTER the start
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
@@ -508,7 +508,13 @@ class StartServer:
                 community_id=community_id, server_id=server_id
             )
         except Exception as exc:
-            await self._compensate(community_id, server_id, worker_id, original=exc)
+            await self._compensate(
+                community_id,
+                server_id,
+                worker_id,
+                stop_intent_count=stop_intent_count,
+                original=exc,
+            )
             raise
         jar_changed = provisioned.key != previous_key and previous_key is not None
         skip_hydrate = (
@@ -541,17 +547,28 @@ class StartServer:
                 skip_hydrate=skip_hydrate,
                 stop_intent_count=stop_intent_count,
             )
-        except WorkerUnavailableError as exc:
+        except LifecycleTransitionConflictError:
+            # The intent is no longer this start's (see ``_launch``): the write that
+            # moved it owns the row and its load, so there is nothing to revert.
+            raise
+        except Exception as exc:
             # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
             # MAY have been applied by the Worker (issue #773, mirroring #101's fix
             # to place_and_start): keep desired=running and the assignment so the
             # reconciler redispatches to the SAME Worker, where an INVALID_STATE
             # resolves it as already-running. Compensating here would orphan a live
             # instance and let a later start place a second one on a different
-            # Worker. Only a PRE-dispatch unavailable (e.g. a failed hydrate) never
-            # reached the Worker, so the committed intent is safe to compensate.
+            # Worker. Only a PRE-dispatch failure never reached the Worker, so the
+            # committed intent is safe to compensate: an unavailable hydrate, or the
+            # re-read before the send raising (a database error, issue #3741).
             if not dispatch.attempted:
-                await self._compensate(community_id, server_id, worker_id, original=exc)
+                await self._compensate(
+                    community_id,
+                    server_id,
+                    worker_id,
+                    stop_intent_count=stop_intent_count,
+                    original=exc,
+                )
             raise
         if outcome.success:
             return server
@@ -621,7 +638,13 @@ class StartServer:
             # PRE-dispatch BUSY — a hydrate refused for either reason — still
             # compensates below: that one never reached the start.
             raise failure
-        await self._compensate(community_id, server_id, worker_id, original=failure)
+        await self._compensate(
+            community_id,
+            server_id,
+            worker_id,
+            stop_intent_count=stop_intent_count,
+            original=failure,
+        )
         raise failure
 
     async def place_and_start(
@@ -744,7 +767,13 @@ class StartServer:
             # tick redispatches to the SAME Worker (stickiness invariant). Only a
             # pre-dispatch unavailable (a failed hydrate) is safe to unassign.
             if not dispatch.attempted:
-                await self._unassign(community_id, server_id, worker_id, original=exc)
+                await self._unassign(
+                    community_id,
+                    server_id,
+                    worker_id,
+                    stop_intent_count=stop_intent_count,
+                    original=exc,
+                )
             raise
         if not outcome.success:
             failure = _dispatch_failure(
@@ -755,7 +784,11 @@ class StartServer:
             # HYDRATE outcome (not dispatched) never reached the start, so unassign.
             if not dispatch.attempted:
                 await self._unassign(
-                    community_id, server_id, worker_id, original=failure
+                    community_id,
+                    server_id,
+                    worker_id,
+                    stop_intent_count=stop_intent_count,
+                    original=failure,
                 )
             raise failure
         return server
@@ -1040,12 +1073,13 @@ class StartServer:
         # has not bumped by then is enqueued after this start, and the Worker's
         # per-server lane runs it as a real stop.
         #
-        # A read that raises (a database error) propagates uncompensated too, unlike
-        # the failed generation read above (issue #2001). The row could not be read,
-        # so nothing says this start still owns it, and ``_compensate`` would revert
-        # whatever it finds without checking (issue #3741). Left alone, the row
-        # stays consistent: desired=running and assigned, with no start sent, which
-        # the reconciler redispatches once its grace lapses.
+        # A read that raises (a database error) sends no start either, and each
+        # caller handles it as a failure before the send. ``__call__`` reverts its
+        # intent, as after any such failure (issue #2001); the revert first checks
+        # that the intent is still this start's (issue #3741). ``place_and_start``
+        # keeps its assignment: its hydrate succeeded, so the next tick re-sends the
+        # start to this Worker, which holds the working set. ``redispatch_start``
+        # reverts nothing, as on any failure.
         async with self.uow:
             current = await self.uow.servers.get_by_id(server_id)
         if current is None or not self._still_owns(
@@ -1228,6 +1262,7 @@ class StartServer:
         server_id: ServerId,
         worker_id: WorkerId,
         *,
+        stop_intent_count: int,
         original: Exception,
     ) -> None:
         """Revert the committed start intent after a failed dispatch.
@@ -1235,6 +1270,26 @@ class StartServer:
         The desired state and assignment were committed before the dispatch; on
         failure we honestly undo them so the record does not claim a server is
         running when the Worker rejected it.
+
+        Only this start's own intent is reverted (issue #3741). While the start
+        hydrated, a stop may have released the row and a newer start placed it
+        again, on this Worker or another, and sent its start. Reverting that intent
+        would leave the newer instance under a stopped, unassigned row, and take a
+        Worker's load down a second time. So the revert runs only while
+        :meth:`_still_owns` holds: the count is still ``stop_intent_count``, the
+        one this start read before its intent existed, and the row is still
+        desired=running on this start's Worker. Otherwise the newer transition owns
+        the row and its load, and both are left alone.
+
+        The check and the write run under the server's lifecycle lock. Every write
+        that creates a start intent (the compare-and-set in ``__call__`` and in
+        ``place_and_start``) holds it too, so no newer intent can land in between,
+        and a newer start reads its count only after this revert's bump. A stop or
+        a drain takes no such lock, but it only withdraws: one that lands in
+        between moves the row out of running, and the compare-and-set below then
+        matches nothing. A count that has already moved skips the revert before the
+        lock is even asked for: the newer start may hold the lock across a JAR
+        download, longer than the lock's bounded wait.
 
         Placement-load decrement semantics (symmetric with StartServer's
         increment): decrement **iff** the revert compare-and-set actually
@@ -1251,11 +1306,17 @@ class StartServer:
         lost (the record is left diverged, which a reconciler later detects).
         """
 
+        if self.stop_intents.current(server_id) != stop_intent_count:
+            return
         reverted = False
         try:
-            async with self.uow:
+            async with self.lifecycle_lock.hold(server_id), self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
-                if server is not None and server.community_id == community_id:
+                if (
+                    server is not None
+                    and server.community_id == community_id
+                    and self._still_owns(server, worker_id, stop_intent_count)
+                ):
                     server.desired_state = DesiredState.STOPPED
                     server.assigned_worker_id = None
                     server.updated_at = self.clock.now()
@@ -1263,10 +1324,9 @@ class StartServer:
                         server, expected_from=DesiredState.RUNNING
                     )
                     await self.uow.commit()
-                    # The revert withdraws whatever intent the row held, possibly a
-                    # newer start's (issue #3741), so it bumps like a stop (issue
-                    # #3739). It sends no stop, so a start of that intent that has
-                    # already sent is not caught: only #3741's check closes that.
+                    # Withdrawn, so it bumps like a stop (issue #3739): a re-sent
+                    # start of this same intent that has not sent yet sees it. The
+                    # revert sends no stop, so one already sent is not caught.
                     if reverted:
                         self.stop_intents.bump(server_id)
         except Exception as compensation_error:
@@ -1289,6 +1349,7 @@ class StartServer:
         server_id: ServerId,
         worker_id: WorkerId,
         *,
+        stop_intent_count: int,
         original: Exception,
     ) -> None:
         """Undo only the assignment after a failed PRE-DISPATCH orphan placement.
@@ -1306,6 +1367,12 @@ class StartServer:
         (and decrement its load iff the revert matched) so a later tick re-places on
         a fresh Worker.
 
+        Only this placement's own assignment is undone, under the lifecycle lock,
+        by the same rule as :meth:`_compensate` (issue #3741). A stop and a newer
+        start on this same Worker leave the row looking as this placement left it,
+        and clearing that start's assignment would let a later tick place a second
+        instance elsewhere while the first runs.
+
         A failed unassign-commit is benign: it is logged (not masked) and the row is
         left assigned + desired=running, so the next tick sees an assigned orphan and
         takes the ``redispatch_start`` path to the SAME Worker — exactly the
@@ -1313,14 +1380,16 @@ class StartServer:
         case (the DB state is unknown; the reconnect rebuild reconciles it).
         """
 
+        if self.stop_intents.current(server_id) != stop_intent_count:
+            return
         reverted = False
         try:
-            async with self.uow:
+            async with self.lifecycle_lock.hold(server_id), self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
                 if (
                     server is not None
                     and server.community_id == community_id
-                    and server.assigned_worker_id == worker_id
+                    and self._still_owns(server, worker_id, stop_intent_count)
                 ):
                     server.assigned_worker_id = None
                     server.updated_at = self.clock.now()
@@ -1328,9 +1397,8 @@ class StartServer:
                         server, expected_from=DesiredState.RUNNING
                     )
                     await self.uow.commit()
-                    # Released, possibly from a newer start on this same Worker, so
-                    # it bumps like ``_compensate`` does, with the same limit
-                    # (issue #3739).
+                    # Withdrawn, so it bumps as ``_compensate`` does, with the same
+                    # limit (issue #3739).
                     if reverted:
                         self.stop_intents.bump(server_id)
         except Exception as compensation_error:

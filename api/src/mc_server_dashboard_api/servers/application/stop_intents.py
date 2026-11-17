@@ -44,16 +44,17 @@ argued against above, and a re-send that read the count in that gap would not be
 held back.
 
 The writes that bump: a stop's and a drain's ``running -> stopped`` flip, and a
-failed start's or placement's revert (``_compensate``, ``_unassign``). A revert
-sends no stop, so a start already enqueued when one lands is not caught; a revert
-should not touch an intent that is not its own (issue #3741). The later releases
-of an already stopped row (the final-snapshot clears, ``redispatch_stop``,
+failed start's or placement's revert of its own intent (``_compensate``,
+``_unassign``). A revert sends no stop, so a re-sent start of that same intent
+already enqueued when the revert lands is not caught. The later releases of an
+already stopped row (the final-snapshot clears, ``redispatch_stop``,
 ``clear_stale_assignment``) do not bump: the flip that made the row stopped
 already did.
 
 The value a start reads also identifies its intent: an unchanged count means no
-write has withdrawn the intent since. A later check can use it to decide whether
-a start still owns the row.
+write in this process has withdrawn the intent since. A failed start's revert
+checks it, with the row, so that it undoes only its own intent and never a newer
+start's (issue #3741).
 
 In-process, deliberately, like ``StopConvergenceGuard``. The API is a single
 instance (REQUIREMENTS.md NFR-SCALE-1), and the stops it orders against are sent

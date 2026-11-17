@@ -6,6 +6,10 @@ first, and a stop followed by a newer start that put the server back on the same
 Worker. Either way the Worker answered the stop ``SERVER_NOT_FOUND``, the stop
 released the row, and the start then launched an instance nobody owns.
 
+The same count tells a failed start's revert whether the intent on the row is
+still its own (issue #3741). Before, the revert undid whatever intent it found,
+including a newer start's that had already been sent.
+
 Each test runs the real use cases, each with its own unit of work over one shared
 repository and one shared ``StopIntentCounter``, as in production. The competing
 write is injected at an exact point: inside the start's re-read once the row
@@ -17,9 +21,10 @@ live there, and a stop of a server that is not live answers ``SERVER_NOT_FOUND``
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
 from fastapi import FastAPI
@@ -74,6 +79,11 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
     LifecycleTransitionConflictError,
+    ServerBusyError,
+)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    LifecycleLock,
+    NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -224,6 +234,34 @@ class _CommitLandsThenRaises(FakeUnitOfWork):
         raise self._error
 
 
+class _ExclusiveLock(LifecycleLock):
+    """A lifecycle lock that excludes, as the advisory lock does, for one server.
+
+    ``on_next_hold`` runs once, at the entry of the next ``hold``, before the lock
+    is taken. ``waited`` is set once a ``hold`` finds the lock taken. While
+    ``busy`` is set, ``hold`` gives up at once, as the advisory lock does once its
+    bounded wait runs out.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self.on_next_hold: Hook | None = None
+        self.waited = asyncio.Event()
+        self.busy = False
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+        hook, self.on_next_hold = self.on_next_hold, None
+        if hook is not None:
+            await hook()
+        if self.busy:
+            raise ServerBusyError(str(server_id.value))
+        if self._lock.locked():
+            self.waited.set()
+        async with self._lock:
+            yield
+
+
 class _Worker(FakeControlPlane):
     """One Worker, as far as these races need it.
 
@@ -317,6 +355,9 @@ class _World:
         self.repo.seed(self.row(self.server_id, desired=desired, assigned=assigned))
         self.cp = _Worker(place_to=self.worker)
         self.intents = StopIntentCounter()
+        # The starts' lifecycle lock. No exclusion by default: some tests run a
+        # whole start inside another start's commit, which the real lock forbids.
+        self.lock: LifecycleLock = NullLifecycleLock()
 
     def row(
         self, server_id: ServerId, *, desired: DesiredState, assigned: bool
@@ -341,14 +382,20 @@ class _World:
             updated_at=_NOW,
         )
 
-    def start_server(self, uow: FakeUnitOfWork | None = None) -> StartServer:
+    def start_server(
+        self,
+        uow: FakeUnitOfWork | None = None,
+        *,
+        control_plane: _Worker | None = None,
+    ) -> StartServer:
         return StartServer(
             uow=uow or FakeUnitOfWork(servers=self.repo),
-            control_plane=self.cp,
+            control_plane=control_plane or self.cp,
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(generation=0),
             file_store=FakeFileStore(seed_eula=True),
+            lifecycle_lock=self.lock,
             stop_intents=self.intents,
         )
 
@@ -363,6 +410,11 @@ class _World:
     async def start(self, server_id: ServerId | None = None) -> Server:
         return await self.start_server()(
             community_id=self.community, server_id=server_id or self.server_id
+        )
+
+    async def place(self) -> Server:
+        return await self.start_server().place_and_start(
+            community_id=self.community, server_id=self.server_id
         )
 
     async def stop(self, server_id: ServerId | None = None) -> Server:
@@ -780,81 +832,346 @@ async def test_a_stop_of_another_server_does_not_hold_the_start_back() -> None:
     assert world.cp.live == {world.server_id}
 
 
-async def test_a_failed_start_reverting_a_newer_intent_keeps_that_start_unsent() -> (
-    None
-):
-    # The interleaving of issue #3741, closed here only where it meets the window.
-    # Start B's hydrate is in flight, a stop releases B's row, and start A places
-    # it again. B's hydrate then fails while A re-reads, and B's compensation
-    # reverts A's intent: (stopped, unassigned), with nothing sent to stop A's
-    # start. The compensation bumps, so A sends nothing.
-    world = _World()
-    b_hydrating = asyncio.Event()
-    b_fails = asyncio.Event()
+_REVERTS = pytest.mark.parametrize("kind", ["start", "placement"])
 
-    async def b_hydrate_fails_later() -> CommandOutcome:
-        b_hydrating.set()
-        await b_fails.wait()
+
+def _seeded(kind: str) -> _World:
+    """A world for a start (``_compensate``) or a placement (``_unassign``).
+
+    A user start sets a stopped row running; the reconciler's placement assigns a
+    desired-running row nobody holds. The starts here hold an excluding lock.
+    """
+
+    world = _World(
+        desired=DesiredState.STOPPED if kind == "start" else DesiredState.RUNNING
+    )
+    world.lock = _ExclusiveLock()
+    return world
+
+
+async def _fails(world: _World, kind: str) -> None:
+    """Run the start or the placement, whose hydrate fails, and expect that failure."""
+
+    with pytest.raises(CommandDispatchError):
+        if kind == "start":
+            await world.start()
+        else:
+            await world.place()
+
+
+@_REVERTS
+async def test_a_failed_revert_does_not_hold_back_a_newer_start(kind: str) -> None:
+    # F hydrates; a stop releases its row, and start A places it on the same Worker
+    # again. F's hydrate then fails while A re-reads. The intent is A's now, so
+    # F's revert leaves it alone and adds nothing to the count: A's start goes
+    # out. (Before issue #3741 F undid A's intent, and only its bump held A back.)
+    world = _seeded(kind)
+    f_hydrating = asyncio.Event()
+    f_fails = asyncio.Event()
+
+    async def f_hydrate_fails_later() -> CommandOutcome:
+        f_hydrating.set()
+        await f_fails.wait()
         return _HYDRATE_FAILED
 
-    world.cp.hydrate_hooks.append(b_hydrate_fails_later)
-    b = asyncio.create_task(world.start())
-    await b_hydrating.wait()
+    world.cp.hydrate_hooks.append(f_hydrate_fails_later)
+    f = asyncio.create_task(_fails(world, kind))
+    await f_hydrating.wait()
     await world.stop()
 
-    async def b_compensates() -> None:
-        b_fails.set()
-        with pytest.raises(CommandDispatchError):
-            await b
+    async def f_reverts() -> None:
+        f_fails.set()
+        await f
 
-    world.after_hydrate_and_next_read(b_compensates)
+    world.after_hydrate_and_next_read(f_reverts)
 
-    with pytest.raises(LifecycleTransitionConflictError):
+    await world.start()
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
+
+
+@_REVERTS
+async def test_a_failed_revert_leaves_a_newer_start_on_its_worker_alone(
+    kind: str,
+) -> None:
+    # Issue #3741. While F hydrates, a stop releases the row, and a newer start
+    # puts it back on the same Worker and sends its start. F's hydrate then fails.
+    # The row reads desired=running on F's Worker, as F left it; only the count
+    # shows the intent is not F's. Undoing it would leave the instance just
+    # started under a stopped or unassigned row, and take the Worker's load down
+    # a second time.
+    world = _seeded(kind)
+
+    async def stop_and_restart_then_fail() -> CommandOutcome:
+        await world.stop()
         await world.start()
-
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate"]
-    assert world.stored() == (DesiredState.STOPPED, None)
-    assert world.cp.live == set()
-
-
-async def test_a_failed_placement_undoing_a_newer_intent_keeps_that_start_unsent() -> (
-    None
-):
-    # The same interleaving through the reconciler's placement of an unassigned
-    # row: its undo clears the assignment of start A's intent on the same Worker.
-    # A start sent now would run under (running, unassigned), and the next tick
-    # would place a second instance. The undo bumps, so A sends nothing.
-    world = _World(desired=DesiredState.RUNNING)
-    p_hydrating = asyncio.Event()
-    p_fails = asyncio.Event()
-
-    async def p_hydrate_fails_later() -> CommandOutcome:
-        p_hydrating.set()
-        await p_fails.wait()
         return _HYDRATE_FAILED
 
-    world.cp.hydrate_hooks.append(p_hydrate_fails_later)
-    p = asyncio.create_task(
-        world.start_server().place_and_start(
+    world.cp.hydrate_hooks.append(stop_and_restart_then_fail)
+
+    await _fails(world, kind)
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.incremented == [world.worker, world.worker]
+    assert world.cp.decremented == [world.worker]
+
+
+@_REVERTS
+async def test_a_failed_revert_leaves_a_newer_start_on_another_worker_alone(
+    kind: str,
+) -> None:
+    # The same, with the newer start placed on another Worker. Undoing it would
+    # also take the load down on F's Worker, which the stop already did, and leave
+    # it up on the other one.
+    world = _seeded(kind)
+    elsewhere = WorkerId(uuid.uuid4())
+    other = _Worker(place_to=elsewhere)
+
+    async def stop_and_restart_elsewhere_then_fail() -> CommandOutcome:
+        await world.stop()
+        await world.start_server(control_plane=other)(
             community_id=world.community, server_id=world.server_id
         )
-    )
-    await p_hydrating.wait()
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(stop_and_restart_elsewhere_then_fail)
+
+    await _fails(world, kind)
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert [k for k, _, _ in other.dispatched] == ["hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, elsewhere)
+    assert other.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
+    assert other.decremented == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "reverted"),
+    [("start", DesiredState.STOPPED), ("placement", DesiredState.RUNNING)],
+    ids=["start", "placement"],
+)
+async def test_a_failed_revert_with_nothing_in_between_undoes_its_own_intent(
+    kind: str, reverted: DesiredState
+) -> None:
+    # Nothing came between: the intent is F's own, so F undoes it as before. A
+    # start reverts to stopped; a placement only gives up its assignment.
+    world = _seeded(kind)
+
+    async def fail() -> CommandOutcome:
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail)
+
+    await _fails(world, kind)
+
+    assert world.kinds() == ["hydrate"]
+    assert world.stored() == (reverted, None)
+    assert world.cp.decremented == [world.worker]
+    assert world.intents.current(world.server_id) == 1
+
+
+@_REVERTS
+async def test_a_failed_revert_leaves_a_row_re_placed_out_of_its_sight_alone(
+    kind: str,
+) -> None:
+    # The count sees only this process's writes. A row moved to another Worker by
+    # a write it did not see (one from outside the process) keeps the count as F
+    # read it, but no longer names F's Worker: F leaves it alone.
+    world = _seeded(kind)
+    elsewhere = WorkerId(uuid.uuid4())
+
+    async def re_placed_unseen_then_fail() -> CommandOutcome:
+        world.repo.by_id[world.server_id].assigned_worker_id = elsewhere
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(re_placed_unseen_then_fail)
+
+    await _fails(world, kind)
+
+    assert world.stored() == (DesiredState.RUNNING, elsewhere)
+    assert world.cp.decremented == []
+    assert world.intents.current(world.server_id) == 0
+
+
+@_REVERTS
+async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
+    # The revert holds the lifecycle lock across its check and its write, as every
+    # start does across its commit. Here F's revert has checked, and is about to
+    # write, when a stop releases the row and a newer start begins. The newer start
+    # waits for the lock, and F's write then finds the row stopped and does
+    # nothing. Had the newer start committed first, F's write would undo it.
+    world = _seeded(kind)
+    write = asyncio.Event()
+
+    async def fail_and_hold_the_revert_write() -> CommandOutcome:
+        world.repo.pause_next_flip = write
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail_and_hold_the_revert_write)
+    f = asyncio.create_task(_fails(world, kind))
+    await world.repo.flip_paused.wait()
     await world.stop()
+    newer = asyncio.create_task(world.start())
+    assert isinstance(world.lock, _ExclusiveLock)
+    waited = asyncio.create_task(world.lock.waited.wait())
+    await asyncio.wait({newer, waited}, return_when=asyncio.FIRST_COMPLETED)
+    waited.cancel()
+    write.set()
+    await f
+    await newer
 
-    async def p_unassigns() -> None:
-        p_fails.set()
-        with pytest.raises(CommandDispatchError):
-            await p
+    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
 
-    world.after_hydrate_and_next_read(p_unassigns)
+
+@_REVERTS
+async def test_a_revert_checks_its_intent_once_it_holds_the_lock(kind: str) -> None:
+    # The stop and the newer start land while F's revert waits for the lock. A
+    # check made before F held the lock would still have found F's intent.
+    world = _seeded(kind)
+    lock = world.lock
+    assert isinstance(lock, _ExclusiveLock)
+
+    async def stop_and_restart() -> None:
+        await world.stop()
+        await world.start()
+
+    async def fail_as_the_revert_asks_for_the_lock() -> CommandOutcome:
+        lock.on_next_hold = stop_and_restart
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail_as_the_revert_asks_for_the_lock)
+
+    await _fails(world, kind)
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
+
+
+@_REVERTS
+async def test_a_revert_of_a_withdrawn_intent_does_not_wait_for_the_lock(
+    kind: str,
+) -> None:
+    # A newer start can hold the lock for minutes (it fetches the server JAR under
+    # it), and the advisory lock gives up after a few seconds. F's revert, whose
+    # intent the count already shows withdrawn, has nothing to undo: it must not
+    # wait for the lock, and so must not fail with the busy error instead of F's.
+    world = _seeded(kind)
+    lock = world.lock
+    assert isinstance(lock, _ExclusiveLock)
+
+    async def stop_and_restart_then_fail() -> CommandOutcome:
+        await world.stop()
+        await world.start()
+        lock.busy = True
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(stop_and_restart_then_fail)
+
+    await _fails(world, kind)
+
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.decremented == [world.worker]
+
+
+@_REVERTS
+async def test_a_re_sent_start_sees_its_intent_undone_and_placed_again(
+    kind: str,
+) -> None:
+    # A revert sends no stop. Its bump is what tells a start re-sending the same
+    # intent that the intent is gone. Here F's revert lands while a re-send of F's
+    # intent hydrates, and a newer start or placement puts the server back on the
+    # same Worker, so the re-send's re-read finds desired=running there again.
+    world = _seeded(kind)
+    f_hydrating = asyncio.Event()
+    f_fails = asyncio.Event()
+
+    async def f_hydrate_fails_later() -> CommandOutcome:
+        f_hydrating.set()
+        await f_fails.wait()
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(f_hydrate_fails_later)
+    f = asyncio.create_task(_fails(world, kind))
+    await f_hydrating.wait()
+
+    async def f_reverts_then_newer() -> None:
+        f_fails.set()
+        await f
+        if kind == "start":
+            await world.start()
+        else:
+            await world.place()
+
+    world.after_hydrate(f_reverts_then_newer)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server().redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+
+    # F's hydrate, the re-send's, then the newer one's hydrate and start.
+    assert world.kinds() == ["hydrate", "hydrate", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+
+
+async def test_a_start_whose_re_read_fails_leaves_a_newer_start_alone() -> None:
+    # A re-read that raises is a failure before the send, so the start reverts,
+    # as after a failed hydrate, and only its own intent. Here a stop and a newer
+    # start came first.
+    world = _seeded("start")
+
+    async def database_error() -> None:
+        raise RuntimeError("database unavailable")
+
+    async def stop_and_restart_then_fail_the_re_read() -> None:
+        await world.stop()
+        await world.start()
+        world.repo.after_next_read = database_error
+
+    world.after_hydrate(stop_and_restart_then_fail_the_re_read)
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await world.start()
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
+
+
+async def test_a_start_that_lost_its_intent_answers_the_conflict_untouched() -> None:
+    # A start whose re-read finds the intent gone answers the conflict and leaves
+    # the row to whatever moved it: it does not wait for the lock to try a revert.
+    # Here the row moved where the count cannot see, and the lock is busy.
+    world = _seeded("start")
+    elsewhere = WorkerId(uuid.uuid4())
+    lock = world.lock
+    assert isinstance(lock, _ExclusiveLock)
+
+    async def re_placed_unseen() -> None:
+        world.repo.by_id[world.server_id].assigned_worker_id = elsewhere
+        lock.busy = True
+
+    world.after_hydrate(re_placed_unseen)
 
     with pytest.raises(LifecycleTransitionConflictError):
         await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate"]
-    assert world.stored() == (DesiredState.RUNNING, None)
-    assert world.cp.live == set()
+    assert world.kinds() == ["hydrate"]
+    assert world.stored() == (DesiredState.RUNNING, elsewhere)
+    assert world.cp.decremented == []
 
 
 async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends() -> (
