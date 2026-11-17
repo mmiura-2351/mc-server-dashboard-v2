@@ -133,6 +133,9 @@ def _run(
     monkeypatch.setenv("PYTHONPATH", str(Path(run_order_log.__file__).parents[1]))
     monkeypatch.setenv("RUN_ORDER_LOG", str(log))
     monkeypatch.setenv("RUN_ORDER_WORKERS", str(workers))
+    # Under the gate this test itself runs on an xdist worker, whose id a serial
+    # inner session would otherwise inherit.
+    monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     pytester.makeconftest(_CONFTEST)
     pytester.makepyfile(**files)
     pytester.run(
