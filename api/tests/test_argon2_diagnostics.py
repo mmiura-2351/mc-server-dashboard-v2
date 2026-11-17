@@ -217,9 +217,24 @@ def test_unreadable_build_info_does_not_break_the_report(
     ]
 
 
-def test_the_host_section_reads_the_host_around_the_refused_call() -> None:
+def test_the_host_section_reads_the_host_around_the_refused_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     # Whether the host was swapping, stalled or preempting the process when
-    # argon2 went wrong (#3748), read before the probes add their own load.
+    # argon2 went wrong (#3748), read before the probes add their own load. The
+    # kernel's files are faked: not every kernel has pressure stall information.
+    proc = tmp_path / "proc"
+    (proc / "pressure").mkdir(parents=True)
+    for kind, avg10 in (("cpu", "41.66"), ("memory", "0.00"), ("io", "12.50")):
+        (proc / "pressure" / kind).write_text(
+            f"some avg10={avg10} avg60=1.00 avg300=2.00 total=3\n"
+            "full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+        )
+    (proc / "vmstat").write_text("nr_free_pages 9\npswpin 17\npswpout 23\npgfault 5\n")
+    for tid, name in (("12", "grpc_global_tim"), ("3", "python")):
+        (proc / "self" / "task" / tid).mkdir(parents=True)
+        (proc / "self" / "task" / tid / "comm").write_text(f"{name}\n")
+    monkeypatch.setattr(argon2_diagnostics, "_PROC", proc)
     stored = argon2.PasswordHasher().hash(_PASSWORD)
     with RusageWindow() as window:
         argon2.PasswordHasher().verify(stored, _PASSWORD)
@@ -231,7 +246,13 @@ def test_the_host_section_reads_the_host_around_the_refused_call() -> None:
     host = _sections(report)["host"]
     assert [line.split(": ", 1)[0] for line in host] == _HOST_KEYS, report
     readings = dict(line.split(": ", 1) for line in host)
-    assert re.fullmatch(r"pswpin=\d+ pswpout=\d+", readings["vmstat"]), report
+    assert readings["pressure cpu"] == (
+        "some avg10=41.66 avg60=1.00 avg300=2.00 total=3"
+        " | full avg10=0.00 avg60=0.00 avg300=0.00 total=0"
+    )
+    assert readings["pressure io"].startswith("some avg10=12.50 "), report
+    assert readings["vmstat"] == "pswpin=17 pswpout=23"
+    assert readings["native threads"] == "python, grpc_global_tim"
     deltas = re.fullmatch(
         r"ru_majflt=\d+ ru_minflt=(\d+) ru_nivcsw=\d+ ru_nvcsw=\d+",
         readings["rusage over the refused call"],
@@ -239,8 +260,6 @@ def test_the_host_section_reads_the_host_around_the_refused_call() -> None:
     # The verify's 64 MiB of fresh memory faults pages in, so a window that
     # measured nothing would show here.
     assert deltas and int(deltas[1]) > 0, report
-    assert readings["native threads"], report
-    assert not any(value.startswith("unavailable") for value in readings.values())
 
 
 def test_unreadable_host_state_does_not_break_the_report(
