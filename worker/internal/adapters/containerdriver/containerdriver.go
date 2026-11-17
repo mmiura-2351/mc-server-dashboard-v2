@@ -1603,6 +1603,11 @@ type instance struct {
 	// survived-kill restore must not stomp (issue #392). Nil in production.
 	beforeSurvivedReset func()
 
+	// installLogSink is a test-only hook that wraps the opened forge-install.log
+	// before the install follow writes to it, so a test can stand in for a write
+	// the filesystem fails (issue #3744). Nil in production.
+	installLogSink func(f *os.File) io.Writer
+
 	// metricsMu guards the cached metrics RCON connection reused across player-count
 	// samples (issue #1622). It is a dedicated lock — never i.mu — held only for the
 	// duration of a sample's dial+"list" or the terminal close, so a slow RCON round
@@ -2149,10 +2154,6 @@ func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 	return f.scan
 }
 
-// installLogSink is what the follow writes forge-install.log through; a test
-// replaces it to stand in for a write the filesystem fails (issue #3744).
-var installLogSink = func(f *os.File) io.Writer { return f }
-
 // captureInstallOutput follows the install container's log stream and writes it to
 // logs/forge-install.log in the working dir, so an operator can read the install
 // diagnostics via the files API (issue #305). It is best-effort: a failure to open
@@ -2182,7 +2183,11 @@ func (i *instance) captureInstallOutput(ctx context.Context, installID string) *
 		return scan
 	}
 	defer func() { _ = f.Close() }()
-	demuxLogsTo(rc, &installLogTee{scan: scan, file: installLogSink(f),
+	var file io.Writer = f
+	if i.installLogSink != nil {
+		file = i.installLogSink(f)
+	}
+	demuxLogsTo(rc, &installLogTee{scan: scan, file: file,
 		logger: i.logger.With("server_id", i.spec.ServerID, "path", execution.ForgeInstallLogRelpath)})
 	return scan
 }

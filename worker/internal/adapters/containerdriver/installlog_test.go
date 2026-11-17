@@ -277,25 +277,31 @@ func (w *failingLogFile) Write(p []byte) (int, error) {
 }
 
 // A write the filesystem fails part way through the install does not cost the
-// failure diagnosis either: the log is dropped with one warning, and the rest of
-// the stream is still scanned (issue #3744).
+// failure diagnosis either: the log is dropped with one warning, and the stream is
+// still scanned, from the chunk whose write failed to its end (issue #3744).
 func TestInstallLogWriteFailureStillScansOutput(t *testing.T) {
 	dir := t.TempDir()
 	sink := &failingLogFile{limit: len(installLogOutput)}
-	prev := installLogSink
-	installLogSink = func(f *os.File) io.Writer { sink.f = f; return sink }
-	t.Cleanup(func() { installLogSink = prev })
 	docker := newForgeFakeDocker()
 	var body strings.Builder
-	for _, line := range []string{installLogOutput, "running processor\n", "java.lang.OutOfMemoryError: Java heap space\n", "exiting\n"} {
+	for _, line := range []string{
+		installLogOutput,
+		"java.lang.UnsupportedClassVersionError: x\n", // the write that fails
+		"java.lang.OutOfMemoryError: Java heap space\n",
+		"exiting\n",
+	} {
 		body.Write(frame(dockerStreamStdout, line))
 	}
 	docker.logBodies[forgeInstallID] = body.String()
 	logged := &syncBuffer{}
-	i := &instance{docker: docker, spec: forgeSpec(dir), logger: slog.New(slog.NewTextHandler(logged, nil))}
+	i := &instance{docker: docker, spec: forgeSpec(dir), logger: slog.New(slog.NewTextHandler(logged, nil)),
+		installLogSink: func(f *os.File) io.Writer { sink.f = f; return sink }}
 
 	scan := i.captureInstallOutput(context.Background(), forgeInstallID)
 
+	if !scan.javaIncompatible {
+		t.Fatal("scan missed the marker in the chunk whose install log write failed")
+	}
 	if !scan.outOfMemory {
 		t.Fatal("scan missed the out-of-memory marker printed after the install log write failed")
 	}
