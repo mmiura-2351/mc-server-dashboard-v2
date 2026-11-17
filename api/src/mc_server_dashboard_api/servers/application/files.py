@@ -876,8 +876,13 @@ def _read_capped(reader: IO[bytes], total: int, max_bytes: int) -> bytes:
     ``total`` is the bytes already accounted for across prior members; the running
     sum is checked after every chunk, so a single member that inflates past the
     budget aborts mid-decompression rather than being fully materialized first
-    (the single-entry decompression-bomb defence). The compressed member header
-    can lie about its size, so the count is over *actual* decompressed bytes.
+    (the single-entry decompression-bomb defence). Counting actual bytes is
+    defence in depth, not a guard against a lying header: neither reader
+    delivers more than the member's parsed size. ``tarfile`` stops at
+    ``member.size`` (for a GNU sparse member, the declared real size, not the
+    header's size field). ``zipfile`` stops at the central directory's
+    ``file_size`` and never reads the local header's sizes; an under-reported
+    ``file_size`` truncates the member and fails its CRC check.
     """
 
     out = bytearray()
@@ -939,9 +944,9 @@ def _tar_gz_entries(
             if count > max_entries:
                 raise FileTooLargeError(str(count))
             handle = tf.extractfile(member)
-            # member.size is a header field a hostile archive can under-report, so
-            # count actual decompressed bytes during the read rather than trusting
-            # it; the chunked drain enforces the cap mid-member.
+            # tarfile never delivers more than member.size, so counting actual
+            # bytes is defence in depth, not a header-lie guard; the chunked
+            # drain enforces the cap mid-member.
             data = b"" if handle is None else _read_capped(handle, total, max_bytes)
             total += len(data)
             yield member.name, data
