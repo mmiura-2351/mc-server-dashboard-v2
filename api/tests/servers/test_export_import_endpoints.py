@@ -83,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     SlugAlreadyTakenError,
     SlugExhaustedError,
+    UnreadableArchiveError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -101,6 +102,7 @@ from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeFileStore, FakeVersionValidator
 from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
+from tests.servers.test_export_import import _UNREADABLE_IMPORTS
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -905,6 +907,56 @@ def test_import_invalid_metadata_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_export_metadata"
+
+
+def test_import_unreadable_archive_is_422_invalid_archive() -> None:
+    app = _app(
+        member=True,
+        allow=True,
+        import_=_FakeImport(error=UnreadableArchiveError("server.zip")),
+    )
+    client = _client(app)
+    files, data = _zip_upload()
+    resp = client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files=files,
+        data=data,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+
+
+@pytest.mark.parametrize("content", _UNREADABLE_IMPORTS)
+def test_import_of_an_unreadable_archive_is_422_and_creates_nothing(
+    content: bytes,
+) -> None:
+    # The real ImportServer behind the route (issue #3769): the zip reader's own
+    # exception used to escape as a 500 internal_error.
+    uow = ServersFakeUnitOfWork()
+    file_store = FakeFileStore()
+    app = _app(
+        member=True,
+        allow=True,
+        import_=ImportServer(
+            create_server=CreateServer(
+                uow=uow,
+                clock=ServersFakeClock(_NOW),
+                version_validator=FakeVersionValidator(),
+                file_store=file_store,
+                port_range=PortRange(start=25565, end=25664),
+            ),
+            file_store=file_store,
+        ),
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files={"file": ("server.zip", content, "application/zip")},
+        data={"name": "imported"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert uow.servers.by_id == {}
+    assert file_store.files == {}
 
 
 def test_import_name_conflict_is_409() -> None:

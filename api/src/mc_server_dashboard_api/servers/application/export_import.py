@@ -53,6 +53,7 @@ from pathlib import PurePosixPath
 
 from mc_server_dashboard_api.rfc3339 import serialize_utc
 from mc_server_dashboard_api.servers.application.files import (
+    _ZIP_READ_ERRORS,
     MAX_ARCHIVE_ENTRIES,
     MAX_UPLOAD_BYTES,
     _archive_entries,
@@ -73,6 +74,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
+    UnreadableArchiveError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
@@ -278,7 +280,9 @@ class ImportServer:
 
     Parses the archive's ``export_metadata.json`` (rejecting a wrong/missing
     format version or a malformed descriptor as
-    :class:`InvalidExportMetadataError` -> 422), then composes the existing
+    :class:`InvalidExportMetadataError` -> 422, and a body or member the zip
+    reader cannot read as :class:`UnreadableArchiveError` -> 422, issue #3769),
+    then composes the existing
     :class:`CreateServer` use case so the SAME validation (server_type/version via
     the #267 validator, edition, name uniqueness) and the #243 port auto-assign
     apply -- ``accept_eula`` is left false (the imported working set carries its
@@ -444,7 +448,7 @@ class ImportServer:
                     rel_path=entry_path,
                     content=data,
                 )
-        except (FileTooLargeError, InvalidFilePathError):
+        except (FileTooLargeError, InvalidFilePathError, UnreadableArchiveError):
             # Defensive: the pre-commit validate pass already rejected these as an
             # archive property (413/422) with no row created, so they should not
             # reach here; re-raise as-is rather than mask them as a seed failure.
@@ -530,10 +534,13 @@ class _Metadata:
 def _parse_metadata(content: bytes) -> _Metadata:
     """Read and validate ``export_metadata.json`` from the zip's root.
 
-    Raises :class:`InvalidExportMetadataError` (422) for a non-zip body, a missing
-    or unreadable metadata member, malformed JSON, a wrong/missing ``format``
-    version (legacy incompatibility is loud, not silent), or a missing required
-    field. The server_type / version themselves are validated downstream by the
+    Raises :class:`InvalidExportMetadataError` (422) for a missing or oversized
+    metadata member, malformed JSON, a wrong/missing ``format`` version (legacy
+    incompatibility is loud, not silent), or a missing required field. A body the
+    zip reader cannot read -- not a zip at all, truncated, or a damaged or
+    encrypted metadata member -- is :class:`UnreadableArchiveError` (422), the
+    error the working-set extraction raises for the same reader failures (issue
+    #3769). The server_type / version themselves are validated downstream by the
     shared create path (the #267 validator), so this only shape-checks them.
     """
 
@@ -556,8 +563,8 @@ def _parse_metadata(content: bytes) -> _Metadata:
                     raw += chunk
                     if len(raw) > _MAX_METADATA_BYTES:
                         raise InvalidExportMetadataError("metadata too large")
-    except zipfile.BadZipFile as exc:
-        raise InvalidExportMetadataError("not a zip archive") from exc
+    except _ZIP_READ_ERRORS as exc:
+        raise UnreadableArchiveError("server import archive") from exc
 
     try:
         parsed = json.loads(raw)
