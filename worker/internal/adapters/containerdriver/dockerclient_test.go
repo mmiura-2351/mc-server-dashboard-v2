@@ -547,7 +547,13 @@ func TestEngineClientLogsOpenIsReleasedByCancel(t *testing.T) {
 		}
 		opened <- err
 	}()
-	<-stalled
+	select {
+	case <-stalled:
+	case err := <-opened:
+		t.Fatalf("Logs = %v before the daemon stalled", err)
+	case <-time.After(logsCancelBound):
+		t.Fatal("the logs request never reached the daemon")
+	}
 	cancel()
 
 	select {
@@ -561,8 +567,8 @@ func TestEngineClientLogsOpenIsReleasedByCancel(t *testing.T) {
 }
 
 // Cancelling the context releases a read of an open Logs stream whose body stalls
-// (issue #3667), for the same reason as the open. The read is issued as the
-// cancel lands; whichever comes first, the read must return.
+// (issue #3667), for the same reason as the open: the follow the supervisor cancels
+// is parked in a read.
 func TestEngineClientLogsReadIsReleasedByCancel(t *testing.T) {
 	const prefix = "multiplexed-bytes"
 	c, stalled := stallingLogsDaemon(t, prefix)
@@ -580,11 +586,14 @@ func TestEngineClientLogsReadIsReleasedByCancel(t *testing.T) {
 		t.Fatalf("read %q, %v, want the body sent before the stall", got, err)
 	}
 
+	reading := make(chan struct{})
 	read := make(chan error, 1)
 	go func() {
+		close(reading)
 		_, err := rc.Read(make([]byte, 1))
 		read <- err
 	}()
+	<-reading
 	cancel()
 
 	select {
