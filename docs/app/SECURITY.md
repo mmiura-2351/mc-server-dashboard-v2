@@ -119,6 +119,13 @@ re-auth check sits behind a valid access token and is therefore *not* fed into
 the Section 2 brute-force counters (those defend the unauthenticated login
 surface against username enumeration).
 
+A password the server could not check at all is not a wrong password. When the
+hasher itself fails on a stored hash it can read (argon2 running out of memory
+or threads), login and both re-auth checks answer
+`503 password_verification_unavailable` instead of the `401`. A stored hash the
+hasher cannot decode is corrupt data rather than a server failure: it is still
+refused with the uniform `401`, and the API logs a warning.
+
 ---
 
 ## 2. Brute-force protection
@@ -146,6 +153,11 @@ Section 7.2); the algorithm is:
 
 A successful authentication clears the active lockout and resets the back-off for
 that account.
+
+A login whose password could not be checked, because the hasher itself failed
+(Section 1), is not an authentication attempt: it records nothing, adds no
+lockout progress, and answers `503 password_verification_unavailable` without
+the step 5 delay.
 
 Two of these checks run *before* the password is verified: step 3's per-IP count,
 and a lookup of the lockout record that steps 2 and 4 produced. (Step 2's

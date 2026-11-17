@@ -28,4 +28,10 @@ class PasswordHasher(abc.ABC):
 
     @abc.abstractmethod
     async def verify(self, plaintext: str, password_hash: str) -> bool:
-        """Return whether ``plaintext`` matches ``password_hash`` (FR-AUTH-2)."""
+        """Return whether ``plaintext`` matches ``password_hash`` (FR-AUTH-2).
+
+        A corrupt ``password_hash`` matches nothing, so it returns ``False``. When
+        the hasher itself fails and cannot judge the password (e.g. out of
+        memory), it raises :class:`PasswordVerificationUnavailableError` instead
+        of returning ``False`` (#3749).
+        """
