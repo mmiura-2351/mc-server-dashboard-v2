@@ -3803,25 +3803,28 @@ def _deflated_zip() -> bytes:
     return buf.getvalue()
 
 
-def _zip_with_a_damaged_member() -> bytes:
-    """``b.txt``'s deflate stream opens with block type 3, which deflate reserves."""
+def _with_a_damaged_member(archive: bytes, name: str) -> bytes:
+    """``archive`` with ``name``'s deflate stream opening on block type 3.
 
-    archive = bytearray(_deflated_zip())
+    Deflate reserves that block type, so the stream fails on its first byte.
+    """
+
+    damaged = bytearray(archive)
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
-        header = zf.getinfo("b.txt").header_offset
+        header = zf.getinfo(name).header_offset
     # The local file header is 30 fixed bytes, then the name and the extra field.
-    name_len, extra_len = struct.unpack_from("<HH", archive, header + 26)
-    archive[header + 30 + name_len + extra_len] = 0xFF  # BFINAL=1, BTYPE=0b11
-    return bytes(archive)
+    name_len, extra_len = struct.unpack_from("<HH", damaged, header + 26)
+    damaged[header + 30 + name_len + extra_len] = 0xFF  # BFINAL=1, BTYPE=0b11
+    return bytes(damaged)
 
 
-def _zip_with_an_encrypted_member() -> bytes:
-    """``b.txt`` is flagged encrypted, so no read without its password opens it."""
+def _with_its_last_member_encrypted(archive: bytes) -> bytes:
+    """``archive`` with its last member flagged encrypted: no read opens it."""
 
-    archive = bytearray(_deflated_zip())
-    entry = archive.rfind(b"PK\x01\x02")  # the last central entry: b.txt
-    archive[entry + 8] |= 0x01  # general-purpose flag bit 0: encrypted
-    return bytes(archive)
+    damaged = bytearray(archive)
+    entry = damaged.rfind(b"PK\x01\x02")  # the last central directory entry
+    damaged[entry + 8] |= 0x01  # general-purpose flag bit 0: encrypted
+    return bytes(damaged)
 
 
 def _zip_with_an_offset_no_seek_reaches() -> bytes:
@@ -3848,8 +3851,8 @@ _GARBAGE = b"not an archive " * 256
 _UNREADABLE_ARCHIVES = [
     pytest.param("pack.zip", _ZIP[: len(_ZIP) // 2], id="truncated-zip"),
     pytest.param("pack.zip", _GARBAGE, id="garbage-zip"),
-    pytest.param("pack.zip", _zip_with_a_damaged_member(), id="damaged-zip-member"),
-    pytest.param("pack.zip", _zip_with_an_encrypted_member(), id="encrypted-zip"),
+    pytest.param("pack.zip", _with_a_damaged_member(_ZIP, "b.txt"), id="damaged-zip"),
+    pytest.param("pack.zip", _with_its_last_member_encrypted(_ZIP), id="encrypted-zip"),
     pytest.param("pack.zip", _zip_with_an_offset_no_seek_reaches(), id="zip64-offset"),
     # Cut inside b.txt's data, past an intact a.txt.
     pytest.param("pack.tar.gz", _TAR_GZ[: len(_TAR_GZ) // 2], id="truncated-tar-gz"),
