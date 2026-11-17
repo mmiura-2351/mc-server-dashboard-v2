@@ -564,6 +564,7 @@ class RunScheduleTick:
     # notified for the incident: a FAILURE or UNKNOWN notifies only when the id is
     # absent, or as the escalation of an UNKNOWN to a FAILURE (issue #3781), then
     # records it; the next SUCCESS clears it and fires one recovery notification.
+    # A deleted schedule's entry goes at the next tick's poll at the latest.
     # In-memory — same accepted "lost on api restart" trade as _backup_retry /
     # _warned above (a restart may re-notify one failure).
     _notifying: dict[ScheduleId, ScheduleRunOutcome] = field(default_factory=dict)
@@ -584,10 +585,21 @@ class RunScheduleTick:
         self._last_tick_at = now
         async with self.uow:
             due = await self.uow.schedules.list_due(now)
+            # A schedule deleted between ticks never reaches the claim or the record
+            # that forget it, so look up each one still notifying: the due poll
+            # lists only the due ones, and a failing schedule outlives the ticks
+            # between its occurrences (issue #3799).
+            gone = [
+                schedule_id
+                for schedule_id in list(self._notifying)
+                if await self.uow.schedules.get_ref(schedule_id) is None
+            ]
             # Commit the poll transaction: list_due may have quarantined a corrupt
             # row (disabled it), and without this commit that write would roll back
             # and respool every tick (issue #2150). A read-only poll commits nothing.
             await self.uow.commit()
+        for schedule_id in gone:
+            self._forget(schedule_id)
         handled: set[ScheduleId] = set()
 
         # Group due schedules by server so same-server schedules stay serial,

@@ -1817,7 +1817,8 @@ def _titles(env: _Env) -> list[str]:
 async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
     # The incident escalates from "may have run" to "failed", which the operator
     # must hear about. Within each level #2269's suppression still holds: a
-    # repeated unknown or failure is silent, and one success recovers.
+    # repeated unknown or failure is silent, and one success recovers, ending the
+    # incident: the next failure is a new one and notifies again.
     control_plane = _TimesOut("command")
     env = _env(control_plane=control_plane)
     server = _running_server()
@@ -1843,6 +1844,9 @@ async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
     control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.OK)
     env.clock.set(_NOW + dt.timedelta(minutes=4))
     await env.runner.tick()  # success
+    control_plane._outcomes["command"] = CommandOutcome(status=CommandStatus.INTERNAL)
+    env.clock.set(_NOW + dt.timedelta(minutes=5))
+    await env.runner.tick()  # failure: a new incident
 
     assert _runs(env, schedule) == [
         ScheduleRunOutcome.UNKNOWN,
@@ -1850,11 +1854,13 @@ async def test_a_failure_after_an_unknown_outcome_notifies_once_more() -> None:
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SUCCESS,
+        ScheduleRunOutcome.FAILURE,
     ]
     assert _titles(env) == [
         "Scheduled command: outcome unknown",
         "Scheduled command failed",
         "Scheduled command recovered",
+        "Scheduled command failed",
     ]
 
 
@@ -1889,6 +1895,68 @@ async def test_an_unknown_outcome_after_a_failure_stays_silent() -> None:
         ScheduleRunOutcome.FAILURE,
     ]
     assert _titles(env) == ["Scheduled command failed"]
+
+
+async def test_a_failing_schedule_stays_silent_across_ticks_it_is_not_due() -> None:
+    # The incident lasts until a success, not until the next tick: a failing
+    # schedule that is not due on a tick is still failing, and its next failure
+    # is the same incident's (#2269).
+    refuse = FakeControlPlane(
+        outcomes={"command": CommandOutcome(status=CommandStatus.INTERNAL)}
+    )
+    env = _env(control_plane=refuse)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()  # failure
+    later = _NOW + dt.timedelta(minutes=30)
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], later
+    )
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()  # not due
+    env.clock.set(later)
+    await env.runner.tick()  # failure again
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+    assert _titles(env) == ["Scheduled command failed"]
+
+
+async def test_a_schedule_deleted_between_ticks_leaves_no_toast_state() -> None:
+    # A schedule deleted while it was failing never reaches the claim or the
+    # record that would forget it; the next tick drops its toast state, or the
+    # entry would stay until the API restarts (issue #3799).
+    refuse = FakeControlPlane(
+        outcomes={"command": CommandOutcome(status=CommandStatus.INTERNAL)}
+    )
+    env = _env(control_plane=refuse)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # failure
+    assert schedule.id in env.runner._notifying
+
+    await env.uow.schedules.delete(schedule.id)
+    env.clock.set(_NOW + dt.timedelta(minutes=1))
+    await env.runner.tick()
+
+    assert schedule.id not in env.runner._notifying
 
 
 class _UnknownExecute(ExecuteScheduleAction):
