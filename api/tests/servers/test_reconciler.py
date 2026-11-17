@@ -1047,6 +1047,20 @@ async def test_expired_stop_replays_on_the_short_grace_past_a_running_report() -
     assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
 
 
+async def test_plain_refusal_is_superseded_by_a_newer_running_report() -> None:
+    # The exemption is EXPIRED-only. Any other refusal says the Worker answered but
+    # not that the stop was never applied, so a later ``running`` report is news
+    # about the row and the full grace returns (#2478). Identical row and timing to
+    # the test above; only the refusal's kind differs.
+    uow = FakeUnitOfWork()
+    server = _reported_after_the_refusal(ObservedState.RUNNING)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, stop_refusals=_refused(server, _REFUSAL)).tick()
+    assert cp.dispatched == []
+
+
 async def test_expired_stop_waits_the_short_grace_from_the_newer_report() -> None:
     uow = FakeUnitOfWork()
     server = _reported_after_the_refusal(ObservedState.RUNNING)
@@ -1098,14 +1112,16 @@ async def test_expired_refusal_is_superseded_by_a_newer_non_running_report(
 
 
 async def test_expired_refusal_does_not_shorten_a_stale_assignment_clear() -> None:
-    # A newer ``stopped`` report owes ``clear_stale_assignment``, which carries the
-    # #847 stale-snapshot floor that no stop refusal speaks to: full grace.
+    # A ``stopped`` report owes ``clear_stale_assignment``, which carries the #847
+    # stale-snapshot floor that no stop refusal speaks to: full grace. The refusal
+    # ties the report, so it would count as the latest thing known about the row:
+    # only the action gate in ``_grace_for`` keeps the short grace away.
     uow = FakeUnitOfWork()
     server = _reported_after_the_refusal(ObservedState.STOPPED)
     uow.servers.seed(server)
     cp = FakeControlPlane()
     clock = FakeClock(_NOW)
-    await _reconciler(uow, cp, clock, stop_refusals=_expired(server, _REFUSAL)).tick()
+    await _reconciler(uow, cp, clock, stop_refusals=_expired(server, _REPORT)).tick()
     assert cp.dispatched == []
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 

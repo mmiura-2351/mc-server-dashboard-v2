@@ -148,8 +148,7 @@ snapshot can still be uploading (#847). Both stop-side floors are therefore met,
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
 The record is dropped before every stop or final-snapshot dispatch, and any newer
 intent commit or Worker report supersedes it, with no ``EXPIRED`` exception. It is
-not persisted, so after an API restart the full
-grace applies again.
+not persisted, so after an API restart the full grace applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
@@ -609,13 +608,18 @@ class RunReconcilerTick:
         # answers, and the two read the same clock, so equal instants are that same
         # stop — never a later event the refusal predates.
         #
-        # One report does not supersede (issue #3682): a later ``running`` report
-        # after an EXPIRED refusal. The Worker answers EXPIRED in time only once the
-        # server's lane frees, usually as the command ahead of it reports, so that
-        # report lands with the refusal rather than after it. EXPIRED proves the stop
-        # was never applied, so "still running" tells nothing new, and only a newer
-        # intent commit supersedes. Any other report keeps the rule above. The grace
-        # itself is still measured from the report (``_since``).
+        # The one exception (issue #3682): an EXPIRED refusal on a row whose CURRENT
+        # observed state is ``running`` is superseded only by a newer intent commit,
+        # whatever reports came in between. The Worker answers EXPIRED in time only
+        # once the server's lane frees, usually as the command ahead of it reports,
+        # so a report lands with the refusal rather than after it. EXPIRED proves
+        # the stop was never applied, so "still running" tells nothing new. Reading
+        # the current state rather than the reports since is safe: both stop
+        # dispatch sites and the clear leg's final snapshot forget the entry first,
+        # so a surviving entry means this process has dispatched no stop and no
+        # final snapshot for the server since the stop that expired. A row observed
+        # in any other state keeps the rule above. The grace itself is still
+        # measured from the latest report (``_since``).
         refused_at = self.stop_refusals.refused_at(server.id)
         if refused_at is None:
             return False

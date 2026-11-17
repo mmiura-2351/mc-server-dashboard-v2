@@ -121,9 +121,11 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // start is compensated back to stopped, and a restart commits no state change
 // and left the server as it was, so nothing is pending on either. A stop keeps
 // desired=stopped committed over a server that is still running. Its refusal is
-// recorded (stop_dispatch_refusals.py), so while it stays the latest thing known
-// about the row the reconciler's `redispatch_stop` replays the stop on its own
-// after the short refused-stop grace. "Try again" still holds there, and it is
+// recorded (stop_dispatch_refusals.py), so the reconciler's `redispatch_stop`
+// replays the stop on its own after the short refused-stop grace, even past the
+// `running` report that usually arrives with the answer. A newer intent commit,
+// another observed state or an API restart returns it to the full grace (issue
+// #3682). "Try again" still holds there, and it is
 // kept over stopPending: an operator stop of that row skips the grace and
 // replays the stop at once (StopServer's `redispatch_stop`), whereas the
 // `worker_busy` stop that stopPending also covers would only collect another
