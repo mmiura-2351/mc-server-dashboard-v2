@@ -36,11 +36,14 @@ is refused at the edge before any dispatch or Storage write.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import io
 import logging
+import lzma
 import tarfile
 import uuid
 import zipfile
+import zlib
 from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -66,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFilesUnsettledError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UnreadableArchiveError,
     UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import (
@@ -149,6 +153,42 @@ MAX_ARCHIVE_ENTRIES = 10_000
 # fully materialized in memory before the guard trips (the single-entry
 # decompression-bomb defence).
 _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
+
+# What each archive reader raises when an uploaded archive's own bytes do not read
+# back (issue #3769), found by fuzzing both readers with truncated, garbage and
+# byte-flipped archives. A tar.gz fails in ``tarfile`` (``ReadError``: not gzip,
+# a bad header, damaged deflate data under a header; ``ValueError`` for a GNU
+# sparse PAX field that is not a number, which it converts with a bare ``int()``)
+# or, inside a member's data, in the gzip layer (``EOFError`` for a cut,
+# ``zlib.error`` for damaged deflate data, ``BadGzipFile``). Only damage a reader
+# reaches is caught: ``tarfile`` stops at the end-of-archive marker and the gzip
+# CRC is never checked, so a tar.gz damaged elsewhere reads "successfully"
+# (issue #3778). ``zipfile`` raises far more than ``BadZipFile``:
+# ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
+# ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
+# (as its ``NotImplementedError`` subclass) for an unsupported compression method,
+# ``ValueError`` (``UnicodeDecodeError`` among them) for a corrupt offset or name,
+# and ``OverflowError`` for a zip64 offset past any seekable position (2**63 and
+# up). Catching the builtins is safe only because the readers run over an
+# in-memory ``BytesIO``, so no I/O fault can hide among them, and because the
+# extraction's own refusals are ``ServerError`` s, never one of these.
+_TAR_GZ_READ_ERRORS: tuple[type[Exception], ...] = (
+    tarfile.TarError,
+    EOFError,
+    zlib.error,
+    gzip.BadGzipFile,
+    ValueError,
+)
+_ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+    OSError,
+    EOFError,
+    RuntimeError,
+    ValueError,
+    OverflowError,
+)
 
 # The default result cap for a file search. A search walks the whole authoritative
 # subtree, so an unbounded match list could return a giant response; 500 matches
@@ -817,7 +857,9 @@ def _archive_entries(
     is the zip-slip vector), and only regular files are accepted — a symlink,
     device, or other special member is refused outright rather than materialized.
     Directory members carry no bytes and are skipped (their files re-create them).
-    Raises :class:`InvalidFilePathError` for an unsafe or special member.
+    Raises :class:`InvalidFilePathError` for an unsafe or special member, and
+    :class:`UnreadableArchiveError` when the reader itself fails on the archive's
+    bytes (truncated, not an archive, damaged, encrypted; issue #3769).
 
     The cumulative extracted size is capped at ``max_bytes`` and the member count
     at ``max_entries`` (both decompression-bomb guards); raises
@@ -834,13 +876,15 @@ def _archive_entries(
     """
 
     if filename.endswith(".zip"):
-        yield from _zip_entries(content, max_bytes=max_bytes, max_entries=max_entries)
+        entries, read_errors = _zip_entries, _ZIP_READ_ERRORS
     elif filename.endswith((".tar.gz", ".tgz")):
-        yield from _tar_gz_entries(
-            content, max_bytes=max_bytes, max_entries=max_entries
-        )
+        entries, read_errors = _tar_gz_entries, _TAR_GZ_READ_ERRORS
     else:
         raise InvalidFilePathError(filename)
+    try:
+        yield from entries(content, max_bytes=max_bytes, max_entries=max_entries)
+    except read_errors as exc:
+        raise UnreadableArchiveError(filename) from exc
 
 
 def _validate_archive(
@@ -852,10 +896,11 @@ def _validate_archive(
     (traversal / symlink / special-member, cumulative size, entry count) and
     discards the yielded bytes — nothing is persisted. If the whole archive
     validates this returns; otherwise it raises the same
-    :class:`InvalidFilePathError` / :class:`FileTooLargeError` the write pass
-    would. Running this first makes extraction atomic: a mid-archive rejection
-    (zip-slip / size cap / entry-count) leaves NOTHING written (issue #269), and
-    on import it fires before the server row is committed (issue #277).
+    :class:`InvalidFilePathError` / :class:`FileTooLargeError` /
+    :class:`UnreadableArchiveError` the write pass would. Running this first makes
+    extraction atomic: a mid-archive rejection (zip-slip / size cap / entry-count /
+    an archive that stops reading, issue #3769) leaves NOTHING written (issue
+    #269), and on import it fires before the server row is committed (issue #277).
     """
 
     for _entry_path, _data in _archive_entries(

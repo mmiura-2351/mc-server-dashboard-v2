@@ -10,14 +10,17 @@ length-mismatch uploads never published, and the Content-Length gate.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import io
 import logging
+import lzma
 import os
 import shutil
 import tarfile
 import tempfile
 import threading
 import uuid
+import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -2768,6 +2771,78 @@ def test_snapshot_with_a_link_member_is_refused_and_not_published(
     assert resp.json()["reason"] == "invalid_archive"
     assert _read_tar(_published(storage, community, server)) == {"keep.txt": b"prior"}
     assert list(tmp_path.rglob("incoming/*")) == []
+
+
+# A member long enough that its last bytes lie past what the reader decompresses
+# to open the archive, yet compressing to a body under the anonymous body limit.
+_LONG_MEMBER = bytes(range(256)) * 1024
+
+
+def _tar_gz_cut_inside_its_member(tail: bytes = b"") -> bytes:
+    """A tar.gz whose deflate stream stops in its member's last block, then ``tail``."""
+
+    tar = _tar_bytes({"world/level.dat": _LONG_MEMBER})
+    deflate = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    stream = deflate.compress(tar[: len(_LONG_MEMBER)])
+    stream += deflate.flush(zlib.Z_SYNC_FLUSH)
+    gzip_header = gzip.compress(b"", mtime=0)[:10]
+    return gzip_header + stream + tail
+
+
+# The trailer cases leave out the end-of-archive marker: the reader then looks for
+# a next header at the end of the compressed stream, which is where the trailer is
+# checked.
+def _tar_without_end_marker() -> bytes:
+    return _tar_bytes({"world/level.dat": _LONG_MEMBER})[: 512 + len(_LONG_MEMBER)]
+
+
+def _tar_gz_with_a_wrong_crc() -> bytes:
+    body = bytearray(gzip.compress(_tar_without_end_marker(), mtime=0))
+    body[-8:-4] = bytes(b ^ 0xFF for b in body[-8:-4])  # the trailer's CRC-32
+    return bytes(body)
+
+
+def _tar_xz_with_a_damaged_footer() -> bytes:
+    body = bytearray(lzma.compress(_tar_without_end_marker()))
+    body[-1] ^= 0xFF  # the last byte of the stream footer's magic
+    return bytes(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(_tar_gz_cut_inside_its_member(), id="EOFError"),
+        # After the cut, a deflate block of the reserved type 3.
+        pytest.param(_tar_gz_cut_inside_its_member(b"\xff"), id="zlib.error"),
+        pytest.param(_tar_gz_with_a_wrong_crc(), id="BadGzipFile"),
+        pytest.param(_tar_xz_with_a_damaged_footer(), id="LZMAError"),
+    ],
+)
+def test_snapshot_whose_compression_breaks_is_refused_and_not_published(
+    tmp_path: Path, body: bytes
+) -> None:
+    # The object backend reads a compressed body with ``tarfile``'s random-access
+    # reader, which lets the decompressor's own error out when it breaks inside a
+    # member rather than a ``TarError``: that used to answer 500 (issue #3779).
+    # The fs backend's stream reader reports the first, second and last as a
+    # ``ReadError`` already; it never checks the gzip trailer, so it publishes
+    # the ``BadGzipFile`` body (issue #3786).
+    storage = _object_storage(tmp_path)
+    client, _ = _setup(tmp_path)
+    _shared_app.dependency_overrides[get_storage] = lambda: storage
+    community, server = _scope()
+    c, s = CommunityId(community), ServerId(server)
+    asyncio.run(_publish_to(storage, c, s, {"keep.txt": b"prior"}))
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"), content=body, headers=_auth()
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert asyncio.run(_hydrate(storage, c, s)) == {"keep.txt": b"prior"}
+    assert asyncio.run(_staging_left(storage, c, s)) == []
 
 
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(

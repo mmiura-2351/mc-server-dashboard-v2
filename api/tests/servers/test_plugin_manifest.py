@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import json
+import struct
 import zipfile
 
 import pytest
@@ -33,6 +34,93 @@ def _make_jar(entries: dict[str, str | bytes]) -> bytes:
         for name, data in entries.items():
             zf.writestr(name, data)
     return buf.getvalue()
+
+
+_MANIFEST = json.dumps({"id": "examplemod", "description": "lorem ipsum " * 60})
+
+
+def _manifest_jar(method: int = zipfile.ZIP_DEFLATED) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", method) as zf:
+        zf.writestr("fabric.mod.json", _MANIFEST)
+        zf.writestr("Main.class", b"x")
+    return buf.getvalue()
+
+
+def _central_entry(jar: bytearray, name: bytes) -> int:
+    """The offset of ``name``'s central-directory header in ``jar``."""
+    at = jar.find(b"PK\x01\x02")
+    while jar[at + 46 : at + 46 + struct.unpack_from("<H", jar, at + 28)[0]] != name:
+        at = jar.find(b"PK\x01\x02", at + 4)
+    return at
+
+
+def _damaged_manifest(method: int) -> bytes:
+    """A jar whose manifest's compressed bytes are overwritten past their start."""
+    jar = bytearray(_manifest_jar(method))
+    entry = _central_entry(jar, b"fabric.mod.json")
+    (local,) = struct.unpack_from("<I", jar, entry + 42)
+    name_len, extra_len = struct.unpack_from("<HH", jar, local + 26)
+    start = local + 30 + name_len + extra_len
+    jar[start + 4 : start + 20] = b"\xff" * 16
+    return bytes(jar)
+
+
+def _manifest_with_a_bad_local_header() -> bytes:
+    """A jar whose manifest's local header has lost its signature."""
+    jar = bytearray(_manifest_jar())
+    jar[0:4] = b"XXXX"  # the manifest's local header is the jar's first bytes
+    return bytes(jar)
+
+
+def _encrypted_manifest() -> bytes:
+    """A jar whose manifest is flagged encrypted (general-purpose bit 0)."""
+    jar = bytearray(_manifest_jar())
+    jar[_central_entry(jar, b"fabric.mod.json") + 8] |= 0x01
+    jar[6] |= 0x01  # the manifest's local header is the jar's first bytes
+    return bytes(jar)
+
+
+def _zip64_offset_past_any_seek() -> bytes:
+    """A jar whose manifest's zip64 local-header offset is 2**63."""
+    jar = bytearray(_manifest_jar())
+    entry = _central_entry(jar, b"fabric.mod.json")
+    extra = struct.pack("<HHQ", 0x0001, 8, 2**63)
+    jar[entry + 42 : entry + 46] = struct.pack("<I", 0xFFFFFFFF)
+    jar[entry + 30 : entry + 32] = struct.pack("<H", len(extra))
+    after_name = entry + 46 + len(b"fabric.mod.json")
+    jar[after_name:after_name] = extra
+    eocd = jar.rfind(b"PK\x05\x06")
+    (cd_size,) = struct.unpack_from("<I", jar, eocd + 12)
+    jar[eocd + 12 : eocd + 16] = struct.pack("<I", cd_size + len(extra))
+    return bytes(jar)
+
+
+def _utf8_flagged_undecodable_name() -> bytes:
+    """A jar with a member flagged UTF-8 (bit 11) whose name is not UTF-8."""
+    jar = bytearray(_manifest_jar())
+    entry = _central_entry(jar, b"Main.class")
+    jar[entry + 46 : entry + 50] = b"\xff\xfe\xfd\xfc"
+    jar[entry + 9] |= 0x08
+    return bytes(jar)
+
+
+def _manifest_running_past_the_end() -> bytes:
+    """A jar whose manifest claims more stored bytes than the jar holds.
+
+    The other member's entry points at the manifest's local header too, so
+    ``zipfile`` only warns about the overlap and reads on to the end.
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("fabric.mod.json", _MANIFEST)
+        zf.writestr("Main.class", b"x")
+    jar = bytearray(buf.getvalue())
+    other = _central_entry(jar, b"Main.class")
+    jar[other + 42 : other + 46] = struct.pack("<I", 0)
+    manifest = _central_entry(jar, b"fabric.mod.json")
+    jar[manifest + 20 : manifest + 28] = struct.pack("<II", 100_000, 100_000)
+    return bytes(jar)
 
 
 class TestFabric:
@@ -504,6 +592,30 @@ class TestInvalidJar:
     def test_empty_bytes_raise(self) -> None:
         with pytest.raises(InvalidModJarError):
             parse_manifest(b"", server_type="fabric")
+
+    # Each jar passes ``is_zipfile`` but does not read back (issue #3779): the
+    # class ``zipfile`` raises for it is in its id. All but ``BadZipFile`` used
+    # to escape.
+    @pytest.mark.parametrize(
+        "jar",
+        [
+            pytest.param(_manifest_with_a_bad_local_header(), id="BadZipFile"),
+            pytest.param(_damaged_manifest(zipfile.ZIP_DEFLATED), id="zlib.error"),
+            pytest.param(_damaged_manifest(zipfile.ZIP_BZIP2), id="OSError-bzip2"),
+            pytest.param(_damaged_manifest(zipfile.ZIP_LZMA), id="LZMAError"),
+            pytest.param(_encrypted_manifest(), id="RuntimeError-encrypted"),
+            pytest.param(_zip64_offset_past_any_seek(), id="OverflowError"),
+            pytest.param(_utf8_flagged_undecodable_name(), id="UnicodeDecodeError"),
+            pytest.param(
+                _manifest_running_past_the_end(),
+                id="EOFError",
+                marks=pytest.mark.filterwarnings("ignore:Overlapped entries"),
+            ),
+        ],
+    )
+    def test_unreadable_zip_raises(self, jar: bytes) -> None:
+        with pytest.raises(InvalidModJarError):
+            parse_manifest(jar, server_type="fabric")
 
 
 class TestZipSafety:
