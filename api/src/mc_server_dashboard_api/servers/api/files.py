@@ -698,10 +698,12 @@ async def upload_file(
     traversal validation (zip-slip defence) and a total-extracted-size cap.
 
     **An archive that does not read (issue #3769).** With ``extract=true``, a body
-    that does not read back as the zip / tar.gz its filename names (truncated, not
-    an archive at all, damaged, an encrypted member or an unsupported compression
-    method) is 422 ``invalid_archive``. The whole archive is read before the first
-    write, so nothing is written.
+    the zip / tar.gz reader fails on (not an archive at all, cut short, damage the
+    reader detects, an encrypted member or an unsupported compression method) is
+    422 ``invalid_archive``. The whole archive is read before the first write, so
+    nothing is written. A tar.gz is read only up to its end-of-archive marker and
+    its gzip CRC is not checked, so damage the reader never reaches goes
+    undetected and the archive extracts (issue #3778).
 
     **Platform-managed keys (issue #2809).** An upload landing on the root
     ``server.properties`` — directly, or as an archive member — may not change

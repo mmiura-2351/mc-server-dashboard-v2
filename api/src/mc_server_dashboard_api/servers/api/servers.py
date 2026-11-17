@@ -553,10 +553,10 @@ async def import_server(
     caps -> 413 / 422). A publish failure after the row commits is 503
     ``seed_failed`` (the row is repairable via the files API).
 
-    **An archive that does not read (issue #3769).** A body the zip reader cannot
-    read — not a zip at all, truncated, or a damaged or encrypted member, the
-    metadata included — is 422 ``invalid_archive``, refused before the row is
-    created, so nothing is left behind.
+    **An archive that does not read (issue #3769).** A body the zip reader fails
+    on — not a zip at all, cut short, damage the reader detects in a member, or an
+    encrypted member, the metadata included — is 422 ``invalid_archive``, refused
+    before the row is created, so nothing is left behind.
 
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A member named ``server.properties/…`` would publish that name as a
