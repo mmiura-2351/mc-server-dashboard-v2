@@ -48,6 +48,7 @@ behind:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 
 from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackNotFoundError,
@@ -97,8 +98,9 @@ class ObjectResourcePackStore(ResourcePackStore):
         key = _key(pack_id, filename)
         try:
             async with self._client_factory() as client:
-                async for chunk in await client.get_object(key):
-                    yield chunk
+                async with aclosing(await client.get_object(key)) as body:
+                    async for chunk in body:
+                        yield chunk
         except NotFoundError as exc:
             # ``open`` does no I/O itself, so this fires on the first iteration.
             # The download routes begin the stream before writing the headers
