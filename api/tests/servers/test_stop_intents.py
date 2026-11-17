@@ -333,6 +333,32 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
     assert world.cp.live == set()
 
 
+async def test_a_re_sent_start_reads_the_counter_before_it_finds_the_intent() -> None:
+    # The re-sent start's first read finds the intent it re-sends. A stop and a
+    # newer start on the same Worker can land while that read's unit of work
+    # closes. Read after it, the counter would already include the stop, and the
+    # re-sent start would go out next to the newer start's.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+
+    async def stop_then_restart() -> None:
+        await world.stop()
+        await world.start()
+
+    world.repo.after_next_read = stop_then_restart
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server().redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+
+    # The stop and its release, then the newer start. The re-sent start skips its
+    # hydrate (the newer one's left the Worker holding the store's generation)
+    # and sends nothing.
+    assert world.kinds() == ["stop", "snapshot", "hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+
+
 async def test_a_start_whose_server_was_re_placed_on_its_worker_is_not_sent() -> None:
     # The re-read cannot see this one: a stop released the row during the start's
     # hydrate, and a newer start put it back on the SAME Worker. The row reads
