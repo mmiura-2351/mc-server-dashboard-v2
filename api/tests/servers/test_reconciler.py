@@ -1615,6 +1615,47 @@ async def test_busy_start_refusal_keeps_an_existing_backoff() -> None:
     assert len(cp.dispatched) == 3
 
 
+class _StopLandsDuringHydrate(FakeControlPlane):
+    """A Worker whose hydrate answers only after a stop intent committed."""
+
+    def __init__(self, *, uow: FakeUnitOfWork, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._uow = uow
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        self._uow.servers.by_id[server_id].desired_state = DesiredState.STOPPED
+        return await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+
+
+async def test_start_overtaken_by_a_stop_intent_is_skipped_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A stop committed while the redispatched start hydrated (issue #3737): the
+    # start answers a transition conflict without sending the start. Nothing
+    # failed — the stop intent is newer and owns the row — so the tick neither
+    # counts a failure nor warns.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=_WORKER,
+    )
+    uow.servers.seed(server)
+    cp = _StopLandsDuringHydrate(uow=uow)
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    assert server.id not in reconciler._attempts
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
 async def test_backoff_grows_exponentially() -> None:
     uow = FakeUnitOfWork()
     server = _server(

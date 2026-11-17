@@ -591,6 +591,16 @@ Notes:
   server is stop-then-delete, and config edits on a running server go through the
   `ReadFile` / `EditFile` file-access commands above (ARCHITECTURE.md
   Section 7.2).
+- **A stop intent committed during a start wins.** A stop takes no lock
+  against a start, so one can commit while the start's `HydrateTrigger` runs.
+  The Worker answers that stop `SERVER_NOT_FOUND`, because nothing runs yet,
+  and the stop releases the server. So the API re-reads the server just before
+  it sends `StartServer`. If the server is now `desired=stopped`, or assigned
+  to another Worker, the API does not send the start and answers it
+  `409 transition_conflict`. The start compensates nothing, because the stop
+  owns the release. The reconciler skips such a start without counting it
+  toward its backoff (CONFIGURATION.md Section 5.6). A stop that commits after
+  that re-read can still be overtaken (issue #3739).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

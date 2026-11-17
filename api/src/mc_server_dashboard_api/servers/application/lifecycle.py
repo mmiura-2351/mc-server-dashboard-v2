@@ -911,6 +911,12 @@ class StartServer:
         the caller's — this helper makes no DB write — so the normal start and the
         reconciler's re-dispatch paths can each react differently to a failure.
 
+        Just before the start is sent, the server row is re-read in its own unit of
+        work (issue #3737). If a stop intent committed meanwhile, or the row now
+        names another Worker, this raises :class:`LifecycleTransitionConflictError`
+        without sending the start. Every caller lets it propagate as is: the stop
+        owns the decrement and the release, so nothing is compensated.
+
         ``skip_hydrate`` SKIPS the hydrate and goes straight to start (issue #696).
         Both ``__call__`` and ``redispatch_start`` perform a generation-gated check
         (#763/#1007): when the placed Worker reports holding a generation at least as
@@ -978,6 +984,24 @@ class StartServer:
                     server_id=server_id,
                     generation=recorded_generation,
                 )
+        # Re-read the intent right before the start goes out (issue #3737). A stop
+        # takes no exclusion against a launch, so one can commit while this launch
+        # hydrates (which can take minutes) or reads the store generation. The
+        # Worker answers that stop SERVER_NOT_FOUND, because nothing runs yet, and
+        # the stop releases the row; a start sent after it would launch an instance
+        # under a stopped, unassigned row that nothing reconciles. The stop intent
+        # wins: answer the conflict and send nothing. Nothing is compensated or
+        # unassigned here, because the stop owns the placement decrement and the
+        # release. A row re-placed on another Worker meanwhile is refused the same
+        # way. What is left is the window between this read and the start.
+        async with self.uow:
+            current = await self.uow.servers.get_by_id(server_id)
+        if (
+            current is None
+            or current.desired_state is not DesiredState.RUNNING
+            or current.assigned_worker_id != worker_id
+        ):
+            raise LifecycleTransitionConflictError(str(server_id.value))
         if dispatch is not None:
             dispatch.attempted = True
         # Source the per-server memory limit from the config blob (#705 helper) and
