@@ -84,6 +84,7 @@ from tests.servers.fakes import (
     FakeFileStore,
     FakeJarProvisioner,
     FakeServerNotifier,
+    FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
 )
@@ -1691,6 +1692,60 @@ async def test_a_start_the_worker_refused_failed() -> None:
 
     assert env.uow.servers.by_id[server.id].desired_state is DesiredState.STOPPED
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+
+class _ReadsFail(FakeServerRepository):
+    """A server store whose reads raise once ``failing`` is set, as in an outage."""
+
+    failing = False
+
+    async def get_by_id(self, server_id: ServerId) -> Server | None:
+        if self.failing:
+            raise ConnectionError("database unavailable")
+        return await super().get_by_id(server_id)
+
+
+class _BusyStartThenReadsFail(FakeControlPlane):
+    """Answers the start ``BUSY``, then fails every later server read."""
+
+    def __init__(self, servers: _ReadsFail) -> None:
+        super().__init__(
+            place_to=_WORKER,
+            outcomes={"start": CommandOutcome(status=CommandStatus.BUSY)},
+        )
+        self._servers = servers
+
+    async def _record(
+        self, kind: str, worker_id: WorkerId, server_id: ServerId
+    ) -> CommandOutcome:
+        outcome = await super()._record(kind, worker_id, server_id)
+        if kind == "start":
+            self._servers.failing = True
+        return outcome
+
+
+async def test_a_start_whose_outcome_check_raised_fails_and_advances() -> None:
+    # The start's row re-read decides unknown from failure. When it raises, the
+    # occurrence is still recorded and advanced, or it would re-execute every tick
+    # (issue #3799).
+    servers = _ReadsFail()
+    env = _env(control_plane=_BusyStartThenReadsFail(servers))
+    env.uow.servers = servers
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["outcome check failed"]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
 
 
 async def test_a_stop_the_worker_answered_busy_is_unknown() -> None:

@@ -42,6 +42,8 @@ Outcome taxonomy (owner-confirmed):
   whose intent was reverted (its hydrate failed or went unanswered, or it was
   refused and compensated), and a backup whose snapshot failed or went unanswered
   (the archive is written only after the snapshot returns, so no backup exists).
+  So is a start whose row re-read, which tells those apart, raised: it records
+  ``outcome check failed`` and advances rather than re-execute every tick.
   ``COMMAND_DROPPED`` stays a failure too, though whether the command ran is
   uncertain (CONTROL_PLANE.md Section 7): the Worker answered, its usual cause is
   a packet the game server dropped without running it, and the run history shows
@@ -403,9 +405,23 @@ class ExecuteScheduleAction:
                 server_id.value,
                 exc,
             )
+            try:
+                may_have_run = await self._may_have_run(server_id, action, exc)
+            except Exception:  # noqa: BLE001 - the occurrence must still be recorded
+                # The start's row re-read raised (canonically a database error).
+                # Escaping would leave no run row and no advance, and the
+                # occurrence would re-execute every tick (issue #3799).
+                _LOG.exception(
+                    "scheduled %s for server %s: its outcome check raised",
+                    action.value,
+                    server_id.value,
+                )
+                return ActionResult(
+                    ScheduleRunOutcome.FAILURE, "outcome check failed", community_id
+                )
             outcome = (
                 ScheduleRunOutcome.UNKNOWN
-                if await self._may_have_run(server_id, action, exc)
+                if may_have_run
                 else ScheduleRunOutcome.FAILURE
             )
             return ActionResult(
