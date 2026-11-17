@@ -124,7 +124,6 @@ _DEFAULT_VERSION_RETENTION = 10
 # because every write refreshes the mtime and each writer fills its spool from a
 # local source without pausing (the leased ``current/``, an upload body already in
 # memory, a local file), so a live spool is never this stale.
-# ``prune_to_final_snapshot`` applies the same threshold to its ``.final.*.tmp``.
 _SPOOL_SWEEP_MIN_AGE_S = 3600
 
 # Decompressed-size cap for restore extraction. The compressed archive body is
@@ -2304,14 +2303,16 @@ class FsStorage(Storage):
         # Sweep any ``.final.*.tmp`` left by an earlier crash mid-pack (the
         # BaseException cleanup never ran), mirroring the tmp hygiene the publish
         # path applies to its staging dirs. Keeps a crash-loop from leaking spools.
-        # This runs on every prune, not in ``sweep()``. No live prune can be filling
-        # one: only a prune writes them, and each holds the in-process server lock
-        # for its whole run, pack included. The mtime age threshold (issue #903) is
-        # only a backstop to that lock.
+        # This runs on every prune, not in ``sweep()``, and reclaims every such
+        # spool regardless of age (issue #3718): none can belong to a live prune.
+        # Only a prune writes them, each holds the in-process server lock for its
+        # whole run, pack included, and the API is a single process. This prune's
+        # own spool is only created below. An age threshold here would leak a young
+        # leftover forever once a retried delete succeeds, since nothing else globs
+        # the server root for these.
         if server_root.is_dir():
             for stale in server_root.glob(".final.*.tmp"):
-                if _is_stale_spool(stale):
-                    stale.unlink(missing_ok=True)
+                stale.unlink(missing_ok=True)
         try:
             current = self._current_dir(community_id, server_id)
         except NotFoundError:
