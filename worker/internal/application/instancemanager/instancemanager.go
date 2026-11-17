@@ -2972,9 +2972,9 @@ var removeScratchTree = os.RemoveAll
 //     at most one at-rest working set per stopped server, never an unbounded leak.
 //   - A server DELETED while its scratch was live is reclaimed at the next
 //     registration via ReclaimDeletedScratches (issue #924). The API computes the
-//     unknown subset of held_servers and returns it in RegisterAck; the Worker
-//     removes the scratch dir and hydrate leftovers but NOT .displaced-<id> trees
-//     (issue #911).
+//     unknown subset of the held and unheld ids the Worker lists (issue #3794)
+//     and returns it in RegisterAck; the Worker removes the scratch dir and
+//     hydrate leftovers but NOT .displaced-<id> trees (issue #911).
 func (m *Manager) removeScratch(serverID string) {
 	// The leftovers go FIRST, and the order is load-bearing (issue #3167, the same
 	// hazard issue #2934 closed on the deleted-server reclaim). <scratch>/<id> is what
@@ -3344,7 +3344,9 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // dir, so the next registration offers it again; a recorded container with no dir
 // is left to the next boot's sweep.
 func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.CommandResult {
-	info, err := os.Stat(filepath.Join(m.scratchDir, cmd.ServerID))
+	// Lstat, as the listings' DirEntry.IsDir does: a symlink named like the id is
+	// no scratch dir, and no registration would list it again.
+	info, err := os.Lstat(filepath.Join(m.scratchDir, cmd.ServerID))
 	if hasDir := err == nil && info.IsDir(); !hasDir && !m.recordsLeftovers(cmd.ServerID) {
 		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 	}

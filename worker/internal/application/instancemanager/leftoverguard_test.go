@@ -812,6 +812,47 @@ func TestReclaimDeletedServerCommandEndsALeftoverWithNoScratchDir(t *testing.T) 
 	}
 }
 
+// A symlink named like a server id is not a scratch dir: a delete report does not
+// admit it, just as neither registration listing lists it (issue #3794). Read
+// through the link, it would be a dir, so the gate must not follow it. s2,
+// reported after it, is the positive control.
+func TestReclaimDeletedServerCommandDoesNotAdmitASymlinkedScratch(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	target := t.TempDir()
+	link := filepath.Join(m.scratchDir, s1)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	control := seedMarkerOnly(t, m, s2)
+
+	for _, id := range []string{s1, s2} {
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(control)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the control scratch was never reclaimed: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s2 + " " + control, "busy " + s2}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want only the control's %v", g.callLog(), want)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the link: lstat = %v, %v; want it left as a symlink", info, err)
+	}
+	if info, err := os.Stat(target); err != nil || !info.IsDir() {
+		t.Fatalf("the link's target: stat = %v, %v; want it untouched", info, err)
+	}
+}
+
 // Widening the report's gate to any scratch dir does not widen what the reclaim
 // touches (issue #3794): a running id and a reserved one, each with a marker-only
 // dir, are queued but skipped at reserve(), before the leftover check, and keep
