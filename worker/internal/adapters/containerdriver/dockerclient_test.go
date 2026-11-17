@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -568,34 +569,88 @@ func TestEngineClientLogsOpenIsReleasedByCancel(t *testing.T) {
 
 // Cancelling the context releases a read of an open Logs stream whose body stalls
 // (issue #3667), for the same reason as the open: the follow the supervisor cancels
-// is parked in a read.
+// is usually parked in a read, but may also reach its next read only after the
+// cancel. Both halves of the contract are checked.
 func TestEngineClientLogsReadIsReleasedByCancel(t *testing.T) {
+	// A read parked on the stall is not observable from outside net/http: the read
+	// goroutine announces itself just before it calls Read, so the cancel lands on a
+	// parked read with high probability rather than by construction.
+	t.Run("in progress", func(t *testing.T) {
+		rc, cancel := openStalledLogsStream(t)
+		reading := make(chan struct{})
+		read := make(chan error, 1)
+		go func() {
+			close(reading)
+			_, err := rc.Read(make([]byte, 1))
+			read <- err
+		}()
+		<-reading
+		cancel()
+		assertReadCancelled(t, read)
+	})
+	// A read issued after the cancel is checked by construction.
+	t.Run("after cancel", func(t *testing.T) {
+		rc, cancel := openStalledLogsStream(t)
+		cancel()
+		read := make(chan error, 1)
+		go func() {
+			_, err := rc.Read(make([]byte, 1))
+			read <- err
+		}()
+		assertReadCancelled(t, read)
+	})
+}
+
+// openStalledLogsStream opens a Logs stream whose body stalls after its first
+// bytes, which it has read, and returns it with the cancel of its context. Every
+// step is bounded, so a regression in the open fails rather than hangs.
+func openStalledLogsStream(t *testing.T) (io.ReadCloser, context.CancelFunc) {
+	t.Helper()
 	const prefix = "multiplexed-bytes"
 	c, stalled := stallingLogsDaemon(t, prefix)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
-	rc, err := c.Logs(ctx, "abc123")
-	if err != nil {
-		t.Fatalf("Logs: %v", err)
+	type opened struct {
+		rc  io.ReadCloser
+		err error
 	}
-	defer func() { _ = rc.Close() }()
-	<-stalled
-	got := make([]byte, len(prefix))
-	if _, err := io.ReadFull(rc, got); err != nil || string(got) != prefix {
-		t.Fatalf("read %q, %v, want the body sent before the stall", got, err)
-	}
-
-	reading := make(chan struct{})
-	read := make(chan error, 1)
+	open := make(chan opened, 1)
 	go func() {
-		close(reading)
-		_, err := rc.Read(make([]byte, 1))
-		read <- err
+		rc, err := c.Logs(ctx, "abc123")
+		if err == nil {
+			got := make([]byte, len(prefix))
+			if _, err = io.ReadFull(rc, got); err == nil && string(got) != prefix {
+				err = fmt.Errorf("read %q, want %q", got, prefix)
+			}
+			if err != nil {
+				_ = rc.Close()
+			}
+		}
+		open <- opened{rc, err}
 	}()
-	<-reading
-	cancel()
+	var o opened
+	select {
+	case o = <-open:
+	case <-time.After(logsCancelBound):
+		t.Fatal("the logs stream never sent the body before its stall")
+	}
+	if o.err != nil {
+		t.Fatalf("open the logs stream and read its first bytes: %v", o.err)
+	}
+	t.Cleanup(func() { _ = o.rc.Close() })
+	select {
+	case <-stalled:
+	case <-time.After(logsCancelBound):
+		t.Fatal("the logs request never reached its stall")
+	}
+	return o.rc, cancel
+}
 
+// assertReadCancelled fails unless the read reports the cancellation within
+// logsCancelBound.
+func assertReadCancelled(t *testing.T, read <-chan error) {
+	t.Helper()
 	select {
 	case err := <-read:
 		if !errors.Is(err, context.Canceled) {

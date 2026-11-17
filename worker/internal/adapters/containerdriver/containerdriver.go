@@ -2132,7 +2132,11 @@ func (i *instance) followInstallOutput(installID string) *installLogFollow {
 // the exit, then cancels it and waits for it to return, and reports what the
 // attempt's output said. The wait after the cancel has no bound of its own: the
 // dockerAPI.Logs contract is that cancelling the follow's context releases its
-// open and its reads (issue #3667).
+// open and its reads (issue #3667). The follow's write to forge-install.log does
+// not watch the context, but openInstallLog only hands back a regular file with a
+// single name, so that write blocks only if the filesystem under the working dir
+// stalls. Bounding the wait instead would leave a goroutine holding the log open
+// while the next attempt appends to it.
 func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 	timer := time.NewTimer(drain)
 	defer timer.Stop()
