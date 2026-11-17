@@ -48,3 +48,9 @@ class StartIntentLock:
             lock = self._locks[server_id] = asyncio.Lock()
         async with lock:
             yield
+
+    def is_held(self, server_id: ServerId) -> bool:
+        """Whether someone holds the lock for ``server_id`` now."""
+
+        lock = self._locks.get(server_id)
+        return lock is not None and lock.locked()

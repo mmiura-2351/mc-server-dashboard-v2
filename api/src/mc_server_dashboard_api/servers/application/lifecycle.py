@@ -1373,6 +1373,13 @@ class StartServer:
                     finally:
                         if reverted:
                             self.stop_intents.bump(server_id)
+                    # Still under the lock, as the commit returns: a newer start
+                    # queued on it confirms its own placement only after this, so
+                    # the decrement cannot drop the newer start's entry.
+                    if reverted:
+                        self.control_plane.decrement_assignment(
+                            worker_id=worker_id, server_id=server_id
+                        )
         except Exception as compensation_error:
             _LOG.error(
                 "failed to compensate start intent after a failed dispatch; "
@@ -1382,10 +1389,6 @@ class StartServer:
                 exc_info=compensation_error,
             )
             raise compensation_error from original
-        if reverted:
-            self.control_plane.decrement_assignment(
-                worker_id=worker_id, server_id=server_id
-            )
 
     async def _unassign(
         self,
@@ -1448,6 +1451,11 @@ class StartServer:
                     finally:
                         if reverted:
                             self.stop_intents.bump(server_id)
+                    # Under the lock, as in ``_compensate``.
+                    if reverted:
+                        self.control_plane.decrement_assignment(
+                            worker_id=worker_id, server_id=server_id
+                        )
         except Exception as compensation_error:
             _LOG.error(
                 "failed to undo orphan re-placement after a failed dispatch; the "
@@ -1456,10 +1464,6 @@ class StartServer:
                 exc_info=compensation_error,
             )
             raise compensation_error from original
-        if reverted:
-            self.control_plane.decrement_assignment(
-                worker_id=worker_id, server_id=server_id
-            )
 
 
 @dataclass(frozen=True)

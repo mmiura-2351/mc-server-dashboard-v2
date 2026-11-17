@@ -299,8 +299,7 @@ class _IntentLock(StartIntentLock):
         hook, self.on_next_hold = self.on_next_hold, None
         if hook is not None:
             await hook()
-        lock = self._locks.get(server_id)
-        if lock is not None and lock.locked():
+        if self.is_held(server_id):
             self.waited.set()
         async with super().hold(server_id):
             yield
@@ -316,15 +315,25 @@ class _Worker(FakeControlPlane):
     Each start takes the next entry of ``start_hooks`` the same way; a start whose
     answer is replaced launches nothing. ``stop_sent`` is set once a stop has run
     on the Worker; while ``hold_stop_answer`` is set, its answer waits for it.
+    ``load`` is the placement load's confirms and drops, in the order made.
     """
 
     def __init__(self, *, place_to: WorkerId | None = None) -> None:
         super().__init__(place_to=place_to)
+        self.load: list[str] = []
         self.live: set[ServerId] = set()
         self.hydrate_hooks: list[Callable[[], Awaitable[CommandOutcome | None]]] = []
         self.start_hooks: list[Callable[[], Awaitable[CommandOutcome | None]]] = []
         self.stop_sent = asyncio.Event()
         self.hold_stop_answer: asyncio.Event | None = None
+
+    def increment_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        super().increment_assignment(worker_id=worker_id, server_id=server_id)
+        self.load.append("confirm")
+
+    def decrement_assignment(self, *, worker_id: WorkerId, server_id: ServerId) -> None:
+        super().decrement_assignment(worker_id=worker_id, server_id=server_id)
+        self.load.append("drop")
 
     async def hydrate(
         self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
@@ -1138,6 +1147,9 @@ async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
     # the lock once the revert is done, and must read the count only then, after
     # the revert's bump. Read before, the count would move under it, and its own
     # check before it sends would hold it back, though the intent is its own.
+    # The revert's drop of F's load entry must come before the newer start
+    # confirms its own, too: the registry keys the entry by Worker and server, so
+    # a drop after the confirm would remove the newer start's.
     world = _seeded(kind)
     lock = _intent_lock(world)
     revert = _CommitLandsThenWaits(servers=world.repo, at=2)
@@ -1167,7 +1179,45 @@ async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
     assert world.kinds() == ["hydrate", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
-    assert world.cp.decremented == [world.worker]
+    # F's confirm, F's revert dropping it, then the newer start's confirm.
+    assert world.cp.load == ["confirm", "drop", "confirm"]
+
+
+@pytest.mark.parametrize(
+    ("kind", "untouched"),
+    [("start", DesiredState.STOPPED), ("placement", DesiredState.RUNNING)],
+    ids=["start", "placement"],
+)
+async def test_a_start_cancelled_while_it_waits_for_the_lock_releases_its_slot(
+    kind: str, untouched: DesiredState
+) -> None:
+    # A start reserves its slot on the Worker when it places the server, and asks
+    # for the start-intent lock only then. A start cancelled during that wait (a
+    # client disconnect) must release the reservation, or the slot leaks for
+    # good: an intent that never committed is in no tally a reconnect rebuilds
+    # from (issue #778). The lock must not stay held by the cancelled start.
+    world = _seeded(kind)
+    lock = _intent_lock(world)
+    holder = _Holder(world)
+    await holder.take()
+    start = asyncio.create_task(world.start() if kind == "start" else world.place())
+    await _either(start, lock.waited)
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    await holder.release()
+
+    assert world.cp.reserved == [(world.worker, world.server_id)]
+    assert world.cp.released == [(world.worker, world.server_id)]
+    assert world.cp.incremented == []
+    assert world.stored() == (untouched, None)
+    assert world.kinds() == []
+    assert not lock.is_held(world.server_id)
+
+    # A later start still gets the lock, and goes out.
+    await (world.start() if kind == "start" else world.place())
+
+    assert world.cp.live == {world.server_id}
 
 
 @_REVERTS
