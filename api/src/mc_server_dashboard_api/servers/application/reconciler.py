@@ -33,7 +33,7 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   snapshot (if the Worker is connected) THEN clear the assignment (issue #847 bug 2,
   issue #1004). A stop whose deferred unassign never ran (an API crash or an
   HTTP-task cancellation mid final-snapshot) wedges here; no other path converges it
-  (``StartServer`` 409s on ``require_unassigned`` before flipping desired, and the
+  (``StartServer`` 409s on the unassigned-only CAS before flipping desired, and the
   sink no longer unassigns). The snapshot leg dispatches to a connected Worker so the
   store generation advances before a cross-worker re-placement can hydrate; a
   disconnected Worker skips the snapshot and clears directly (same exposure as
@@ -56,7 +56,7 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   This arm is the one whose absence WEDGED a server: ``crashed`` is terminal, so
   no further Worker report follows and the API-restart reset leaves it alone as
   still-truthful, while ``is_at_rest()`` reads true so nothing else flagged it —
-  the row sat unstartable (every start 409'd on ``require_unassigned``) for as
+  the row sat unstartable (every start 409'd on the unassigned-only CAS) for as
   long as the owning Worker stayed connected.
 - ``desired=stopped``, observed ``stopping``, still assigned (issue #2452): a stop
   whose DISPATCH failed after the Worker emitted ``stopping`` on entry to its
