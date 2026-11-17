@@ -8,13 +8,14 @@ so an export/download that walks the tree mid-restore gets a consistent zip.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.storage.conftest import BACKENDS, StorageHarness, build_harness
-from tests.storage.helpers import new_scope
+from tests.storage.helpers import drain, new_scope
 
 
 @pytest.fixture(params=BACKENDS)
@@ -74,6 +75,34 @@ async def test_view_lease_survives_publish_and_sweep(
     names = [e.name for e in entries]
     assert "g.txt" in names
     assert "f.txt" not in names
+
+
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
+async def test_a_view_stream_outliving_its_view_keeps_its_snapshot_leased(
+    harness: StorageHarness,
+) -> None:
+    """A stream left open past its view's exit pins the snapshot until it closes.
+
+    The stream takes a lease of its own on its first iteration (issues #3618,
+    #3670), so the view's exit does not leave it reading an unleased snapshot.
+    """
+    community, server = new_scope()
+    await harness.publish(community, server, {"f.txt": b"CONTENT"})
+    storage = cast(Any, harness.storage)
+
+    async with harness.storage.open_working_set_view(community, server) as view:
+        stream = view.open_file_stream(RelPath("f.txt"))
+        first = await stream.__anext__()
+        [pinned] = storage._leases
+
+    # Publish + sweep: the old snapshot is reclaimed unless something leases it.
+    await harness.publish(community, server, {"g.txt": b"NEW"})
+    await harness.sweep()
+    assert storage._is_leased(pinned)
+
+    assert first + await drain(stream) == b"CONTENT"
+    assert not storage._is_leased(pinned)
 
 
 async def test_view_walks_subdirectory(harness: StorageHarness) -> None:
