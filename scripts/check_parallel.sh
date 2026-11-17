@@ -36,6 +36,9 @@
 #
 # That budget assumes the run owns the host, so the run takes a host-global
 # flock first and waits, naming the holder, when another gate has it (#2513).
+#
+# Beside chain A runs the argon2 canary (scripts/argon2_canary.py, #3748), a
+# watcher rather than a check: it never fails the run.
 
 set -uo pipefail
 
@@ -167,6 +170,38 @@ export MCSD_CHECK_LOGDIR="$LOGDIR"
 # On INT/TERM: kill background jobs first, then exit.
 trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
 
+# --- The argon2 canary beside the api chain (#3748) ---
+#
+# A correct password has intermittently failed to verify inside the api suite,
+# only ever during a gate, and only a process that shares nothing with the suite
+# but the host can tell a fault of the host from one of the suite's own process.
+# scripts/argon2_canary.py is that process: fixed Argon2id answers and a 64 MiB
+# memory control, rechecked for as long as the api chain runs, into
+# argon2-canary.log beside the chain logs (docs/dev/AGENTS.md Section 3 says how
+# to read it). It runs at nice 19, one check every ~2 s, and it can never fail
+# the run: its exit status is ignored, and it does not inherit fd 9, so it never
+# holds the gate lock. It is stopped as the api chain ends, and by the EXIT trap
+# on every other way out of this script; a SIGKILL runs no trap, so the canary
+# also stops on its own once this script is gone.
+canary_pid=
+start_argon2_canary() {
+    local python=api/.venv/bin/python log="$LOGDIR/argon2-canary.log"
+    if [ ! -x "$python" ]; then
+        echo "argon2 canary not started: no $python (make bootstrap)" >"$log"
+        return 0
+    fi
+    nice -n 19 "$python" -I scripts/argon2_canary.py </dev/null >"$log" 2>&1 9>&- &
+    canary_pid=$!
+}
+stop_argon2_canary() {
+    if [ -n "$canary_pid" ]; then
+        kill -TERM "$canary_pid" 2>/dev/null
+        wait "$canary_pid" 2>/dev/null
+        canary_pid=
+    fi
+}
+trap stop_argon2_canary EXIT
+
 failed_chains=()
 
 # Run a named chain: chain_name target1 [target2 ...]
@@ -211,6 +246,7 @@ run_chain relay-lint  relay-lint  || failed_chains+=(relay-lint)
 # --- Phase 1b: reader chains in parallel ---
 echo "=== Phase 1b: reader chains (parallel) ==="
 
+start_argon2_canary
 run_chain api      api-lint api-test &
 pids[0]=$!; names[0]=api
 
@@ -248,6 +284,10 @@ pids[10]=$!; names[10]=image-pins
 for i in "${!pids[@]}"; do
     if ! wait "${pids[$i]}"; then
         failed_chains+=("${names[$i]}")
+    fi
+    # The api chain is waited for first, so the canary stops as it ends.
+    if [ "${names[$i]}" = api ]; then
+        stop_argon2_canary
     fi
 done
 
