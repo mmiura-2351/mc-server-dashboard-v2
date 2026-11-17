@@ -218,11 +218,14 @@ testpaths = ["tests"]
 # tests, while `make bench-api` still collects the directory explicitly.
 norecursedirs = ["benchmarks"]
 asyncio_mode = "auto"
+# Every async fixture is function-scoped, so each runs on its test's loop. Unset,
+# pytest-asyncio falls back to the fixture's own scope and warns on every run.
+asyncio_default_fixture_loop_scope = "function"
 # Suite-wide timeout safety net (#158, pytest-timeout). A per-test cap turns an
 # unbounded await (a wrongly-accepted gRPC session hanging call.code() forever,
 # PR #153 review) into a loud failure instead of a hung run. 120s is generous:
-# the full suite runs ~75s in CI and the slowest DB-gated test is well under the
-# cap, so this only fires on genuine hangs. The default "signal" method (SIGALRM
+# the slowest DB-gated test is well under the cap, so this only fires on genuine
+# hangs. The default "signal" method (SIGALRM
 # on the main thread) is used deliberately: it interrupts the running coroutine
 # and dumps a real traceback at the hang point. The "thread" method is avoided —
 # it abandons the event loop from a watchdog thread, masking async-cleanup bugs.
