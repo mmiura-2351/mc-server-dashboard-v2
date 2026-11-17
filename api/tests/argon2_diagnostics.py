@@ -2,8 +2,8 @@
 
 A correct password has intermittently failed to verify against a hash the same
 process had just produced, about once per 200 exposed tests, without
-reproducing in isolation. The tests that log in or verify with the real
-:class:`Argon2PasswordHasher` fail that way with :func:`argon2_mismatch_report`
+reproducing in isolation. When it happens, the tests that log in or verify with
+the real :class:`Argon2PasswordHasher` fail with :func:`argon2_mismatch_report`
 as the message, which tells apart a verify-time transient, a bad stored hash
 and a persistently bad process state. docs/dev/AGENTS.md Section 3 says how to
 read it.
