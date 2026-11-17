@@ -136,7 +136,9 @@ type TunnelSpec struct {
 // while it drops; Close tears it down gracefully (CONNECTION_CLOSE plus every
 // per-flow socket). Both run off the caller: Open returns once the tunnel is
 // registered, not once the handshake completes, and Close only signals
-// teardown, so neither blocks the calling command.
+// teardown, so neither blocks the calling command. A crash calls Close with the
+// Manager's mu held (forwardStatus, issue #3729), so Close must not call back
+// into the Manager.
 type BedrockTunneler interface {
 	Open(spec BedrockTunnelSpec) error
 	Close(serverID string)
@@ -4724,8 +4726,11 @@ func (m *Manager) pump(serverID string, inst execution.Instance, done chan struc
 // nothing re-sends it. Only the release closes it: a crash that comes after a
 // stop or restart took inst over leaves the tunnel to that stop, and to the
 // relaunch that may have reopened it since. The close stays under mu, so an
-// OpenBedrockTunnel, whose running check takes mu, sees the release or opens for
-// a replacement only after the close.
+// OpenBedrockTunnel whose running check, under mu, comes after the release sees
+// the release, or opens for a replacement only after the close. An Open that
+// passed its running check before the crash can still reopen the tunnel after
+// this close, since the handler calls the tunneler once mu is released (tracked
+// in issue #3729).
 func (m *Manager) forwardStatus(serverID string, inst execution.Instance, ev execution.StatusEvent) {
 	crashed := ev.State == execution.StateCrashed
 	if crashed {

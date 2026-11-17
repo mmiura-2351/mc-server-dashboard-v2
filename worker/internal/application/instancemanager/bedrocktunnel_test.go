@@ -255,12 +255,16 @@ func TestStaleCloseBedrockTunnelDoesNotCloseReopenedTunnel(t *testing.T) {
 
 // An instance that crashes closes its server's Bedrock tunnel (issue #3729):
 // nothing else is sure to, since the API's CloseBedrockTunnel for the crash is
-// lost if the session drops first. The close shares the section that releases
-// the id, before the crash is queued, so the crash on the stream proves it.
+// lost if the session drops first. The close shares the section, under mu,
+// that releases the id, and comes before the crash is queued:
+// beforeCrashReport runs in that section, after the release and before the
+// queueing, so the close must already be recorded when the hook runs.
 func TestCrashClosesBedrockTunnel(t *testing.T) {
 	d := &fakeDriver{}
 	bt := &fakeBedrockTunneler{}
 	m := newManager(t, d, nil).WithBedrockTunneler(bt)
+	var atReport []string
+	m.beforeCrashReport = func(string) { atReport = bt.closeCalls() }
 	startRunning(t, m)
 	if res := m.Handle(context.Background(), openBedrockCmd()); !res.Success {
 		t.Fatalf("OpenBedrockTunnel = %+v, want success", res)
@@ -269,8 +273,8 @@ func TestCrashClosesBedrockTunnel(t *testing.T) {
 	d.inst.end(classifiedCrash)
 	collectUntil(t, m, execution.StateCrashed.String())
 
-	if calls := bt.closeCalls(); len(calls) != 1 || calls[0] != s1 {
-		t.Fatalf("Close calls = %v, want [s1]", calls)
+	if len(atReport) != 1 || atReport[0] != s1 {
+		t.Fatalf("Close calls when the crash was queued = %v, want [s1]", atReport)
 	}
 }
 
