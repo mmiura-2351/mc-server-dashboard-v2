@@ -67,7 +67,8 @@ class _Refusal:
 
 @dataclass
 class StopDispatchRefusals:
-    """The instant each server's last stop dispatch was refused, if it was."""
+    """When each server's last stop dispatch was refused, if it was, and whether
+    that refusal was ``EXPIRED``."""
 
     _refusals: dict[ServerId, _Refusal] = field(default_factory=dict)
 
@@ -80,6 +81,9 @@ class StopDispatchRefusals:
         would inherit the previous attempt's "settled" verdict and hand the
         reconciler a short grace for a command that really may be in flight, which
         is the #930 floor's own failure mode.
+
+        Also called before every final-snapshot dispatch: the process is gone by
+        then, so the refused stop no longer describes the row (issue #3682).
         """
 
         self._refusals.pop(server_id, None)

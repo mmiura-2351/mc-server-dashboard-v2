@@ -146,8 +146,9 @@ stop's round trip has ended or the process was reported gone (#930), and no fina
 snapshot can still be uploading (#847). Both stop-side floors are therefore met, so
 ``redispatch_stop`` and ``clear_stale_assignment`` both take
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
-The record is dropped before every stop or final-snapshot dispatch, and it is
-superseded like a refusal. It is not persisted, so after an API restart the full
+The record is dropped before every stop or final-snapshot dispatch, and any newer
+intent commit or Worker report supersedes it, with no ``EXPIRED`` exception. It is
+not persisted, so after an API restart the full
 grace applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
@@ -628,8 +629,8 @@ class RunReconcilerTick:
     def _stop_finished_unrecorded(self, server: Server) -> bool:
         # True when a stop finished but its write failed, and that is still the most
         # recent thing known about the row (issue #3441). Superseded, and tied, the
-        # same way as a refusal: the record is made after the intent commit it
-        # follows, on the same clock.
+        # same way as a refusal that is not EXPIRED: the record is made after the
+        # intent commit it follows, on the same clock.
         recorded_at = self.unrecorded_stops.recorded_at(server.id)
         return recorded_at is not None and recorded_at >= self._since(server)
 
