@@ -5,7 +5,8 @@ a real client channel, so the full stream lifecycle is exercised end to end
 (CONTROL_PLANE.md Section 4) without any database (NFR-TEST-1):
 
 - register -> RegisterAck{heartbeat_interval};
-- a wrong/missing credential is rejected with UNAUTHENTICATED;
+- a wrong/missing credential is rejected with UNAUTHENTICATED, as is a
+  non-ASCII presented one or a configured one with no UTF-8 encoding (#3695);
 - a non-Register first message is rejected with FAILED_PRECONDITION;
 - Event{Heartbeat} refreshes liveness in the shared registry;
 - closing the stream marks the Worker offline (FR-WRK-4).
@@ -96,7 +97,9 @@ class _Harness:
         state_sink: FakeServerStateSink | None = None,
         control_plane: ControlPlaneState | None = None,
         real_time_events: RecordingRealTimeEvents | None = None,
+        worker_credential: str = _CREDENTIAL,
     ) -> None:
+        self.worker_credential = worker_credential
         self.registry = registry
         self.clock = clock
         # The servicer derives its watchdog poll interval from this (timeout/3),
@@ -118,7 +121,7 @@ class _Harness:
         servicer = WorkerSessionServicer(
             registry=self.registry,
             clock=self.clock,
-            worker_credential=_CREDENTIAL,
+            worker_credential=self.worker_credential,
             heartbeat_timeout=self.heartbeat_timeout,
             transfer_deadline=_TRANSFER_DEADLINE,
             control_plane=self.control_plane,
@@ -280,6 +283,77 @@ async def test_wrong_credential_is_rejected(harness: _Harness) -> None:
     code = await _terminal_code(harness, _auth("wrong"))
 
     assert code == grpc.StatusCode.UNAUTHENTICATED
+
+
+async def test_unencodable_configured_credential_rejects_every_session() -> None:
+    # A configured credential with no UTF-8 encoding (a lone surrogate, as an
+    # undecodable environment byte becomes) matches nothing: the session is
+    # rejected as unauthenticated rather than raised (issue #3695).
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        worker_credential="\udcff",
+    )
+    try:
+        await h.start()
+
+        code = await _terminal_code(h, _auth(_CREDENTIAL))
+
+        assert code == grpc.StatusCode.UNAUTHENTICATED
+        assert h.registry.list_workers() == []
+    finally:
+        await h.stop()
+
+
+class _Aborted(Exception):
+    """Raised by :class:`_FakeContext.abort`, as the real ``abort`` raises."""
+
+
+class _FakeContext:
+    """A servicer context presenting ``metadata``; records the abort it gets.
+
+    grpcio's client refuses a non-ASCII value under a non-``-bin`` key, but the
+    server hands one through to ``invocation_metadata()`` from any other client
+    (UTF-8, falling back to Latin-1), so the servicer is driven directly here.
+    """
+
+    def __init__(self, metadata: list[tuple[str, str]]) -> None:
+        self._metadata = metadata
+        self.aborted: tuple[grpc.StatusCode, str] | None = None
+
+    def invocation_metadata(self) -> list[tuple[str, str]]:
+        return self._metadata
+
+    async def abort(self, code: grpc.StatusCode, details: str = "") -> None:
+        self.aborted = (code, details)
+        raise _Aborted
+
+
+async def test_non_ascii_presented_credential_is_rejected() -> None:
+    async def _requests() -> AsyncIterator[pb.WorkerMessage]:
+        yield _register_message()
+
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    servicer = WorkerSessionServicer(
+        registry=registry,
+        clock=FakeClock(_T0),
+        worker_credential=_CREDENTIAL,
+        heartbeat_timeout=_TIMEOUT,
+        transfer_deadline=_TRANSFER_DEADLINE,
+        control_plane=ControlPlaneState(),
+        state_sink=FakeServerStateSink(),
+        real_time_events=RecordingRealTimeEvents(),
+    )
+    context = _FakeContext(_auth("\u00e9"))
+
+    with pytest.raises(_Aborted):
+        await anext(servicer.Session(_requests(), context))
+
+    assert context.aborted == (
+        grpc.StatusCode.UNAUTHENTICATED,
+        "worker credential rejected",
+    )
+    assert registry.list_workers() == []
 
 
 async def test_non_register_first_message_is_rejected(harness: _Harness) -> None:

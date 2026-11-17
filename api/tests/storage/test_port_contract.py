@@ -699,10 +699,10 @@ async def test_commit_allows_full_dimension_delete(harness: StorageHarness) -> N
     assert read_tar(blob) == after
 
 
-# 55 real fsyncs on the fs backend. Under IO load each can stall 1.3-2.7 s, so
-# the suite-wide 120 s cap fails a correct run (issue #3638). Budget: 4 s per
-# fsync plus 30 s of other work.
-@pytest.mark.timeout(250)
+# 55 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
+@pytest.mark.timeout(55 * 10 + 30)
 async def test_restore_of_a_backup_with_fewer_regions_bypasses_the_missing_region_gate(
     harness: StorageHarness,
 ) -> None:
@@ -2339,17 +2339,17 @@ async def test_file_history_isolated_from_same_named_directory_children(
     )
 
 
-# 61 real fsyncs on the fs backend. Under IO load each can stall 1.3-2.7 s, so
-# the suite-wide 120 s cap fails a correct run (issue #3638). Budget: 4 s per
-# fsync plus 30 s of other work.
-@pytest.mark.timeout(275)
+# 49 real fsyncs on the fs backend. Under heavy IO load a 12-fsync test hit
+# the suite-wide 120 s cap: at least 10 s per fsync on average (issue #3651).
+# Budget: 10 s per fsync plus 30 s of other work.
+@pytest.mark.timeout(49 * 10 + 30)
 async def test_child_ring_does_not_count_against_parent_retention(
     backend: str, tmp_path: Path
 ) -> None:
     """A child ring's versions must not inflate the parent's count in pruning.
 
-    With retention=3, writing the parent 6 times (4 versions retained from the
-    first 4 edits, then pruned to 3) must leave exactly 3 newest parent versions
+    With retention=3, writing the parent 5 times (4 versions retained from the
+    4 edits, then pruned to 3) must leave exactly 3 newest parent versions
     regardless of how many child-ring objects exist under the same prefix.
     """
 
@@ -2360,9 +2360,6 @@ async def test_child_ring_does_not_count_against_parent_retention(
     await harness.publish(community, server, {"config/paper.yml": b"child-v0"})
     await harness.storage.write_file(
         community, server, RelPath("config/paper.yml"), b"child-v1"
-    )
-    await harness.storage.write_file(
-        community, server, RelPath("config/paper.yml"), b"child-v2"
     )
 
     # Remove the child file and its parent directory from the live tree so
@@ -2375,7 +2372,7 @@ async def test_child_ring_does_not_count_against_parent_retention(
 
     # Now create the parent file and write it multiple times.
     await harness.storage.write_file(community, server, RelPath("config"), b"p1")
-    for i in range(2, 7):
+    for i in range(2, 6):
         await harness.storage.write_file(
             community, server, RelPath("config"), f"p{i}".encode()
         )
@@ -2388,15 +2385,15 @@ async def test_child_ring_does_not_count_against_parent_retention(
         await harness.storage.read_file_version(community, server, RelPath("config"), v)
         for v in parent_versions
     ]
-    # Newest-first: p5, p4, p3 (the edits that produced retained versions are
+    # Newest-first: p4, p3, p2 (the edits that produced retained versions are
     # one behind the write that triggered the retain).
-    assert parent_contents == [b"p5", b"p4", b"p3"]
+    assert parent_contents == [b"p4", b"p3", b"p2"]
 
-    # Child ring must be intact (3 versions: two from writes + one from delete).
+    # Child ring must be intact (2 versions: one from the write + one from delete).
     child_versions = await harness.storage.list_file_versions(
         community, server, RelPath("config/paper.yml")
     )
-    assert len(child_versions) == 3
+    assert len(child_versions) == 2
 
 
 async def test_retain_dedup_ignores_child_ring_versions(
