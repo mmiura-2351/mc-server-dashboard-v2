@@ -271,11 +271,13 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 // generic message asks for a retry, which is wrong wherever the verb already
 // committed its intent:
 //
-// - stop    — the only way StopServer can raise it is the `control_plane.stop`
-//             call, which happens AFTER desired=stopped is committed and the
-//             placement load decremented, and nothing is compensated
-//             (lifecycle.py StopServer). So the stop intent is pending on every
-//             worker-unavailable stop, with no ambiguity.
+// - stop    — StopServer raises it from one of two dispatches, both AFTER
+//             desired=stopped is committed and the placement load decremented,
+//             and nothing is compensated (lifecycle.py StopServer): the
+//             `control_plane.stop` call, or, converging a server already
+//             desired-stopped (`_clear_stale_assignment`), the final snapshot
+//             whose timeout raises WorkerUnavailableError. So the stop intent is
+//             pending on every worker-unavailable stop, with no ambiguity.
 // - restart — desired stays running (restart commits no state change), so a
 //             Worker that stopped the server and failed to relaunch it (its
 //             relaunch answered UNAVAILABLE among the rest) leaves the server
