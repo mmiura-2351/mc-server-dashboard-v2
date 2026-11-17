@@ -138,11 +138,13 @@ Each one succeeds, or appears to; the damage surfaces later.
   `AssertionError` whose message is a diagnostic report, in the gate log's
   failure section. Paste the whole report into #3748 before re-running. To
   read it: if the stored hash verifies `True` on every re-verify, the refusal
-  was a verify-time transient. If the re-verifies fail but the fresh round
-  trips pass, the stored hash is bad; `equals the hash the test produced` then
-  says whether it went bad in storage or was made bad. If the fresh round
-  trips fail too, the process state is persistently bad, and the thread list
-  and the tests that process ran before it are where to look.
+  was a verify-time transient (for a login, only when the chained traceback
+  shows `reason = 'wrong_password'`; a `locked` one is not this flake). If the
+  re-verifies fail but the fresh round trips pass, the stored hash is bad;
+  `equals the hash the test produced` then says whether it went bad in storage
+  or was made bad. If the fresh round trips fail too, the process state is
+  persistently bad, and the thread list and the tests that process ran before
+  it are where to look.
 - **`pgrep -f <pattern>` matches the waiting shell itself.** `pgrep` omits only
   its own process, not the shell that invoked it — whose command line contains
   the pattern. So `until ! pgrep -f "make check"; do sleep 30; done` never

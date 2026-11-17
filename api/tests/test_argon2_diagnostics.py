@@ -38,8 +38,9 @@ def test_a_refused_password_reports_every_section(
     assert repr(stored) in report
     assert "equals the hash the test produced: True" in report
     # Each of the 8 probes of the stored hash saw the wrong password refused.
-    assert report.count("VerifyMismatchError") == 8
+    # The report's own round trips are exposed to #3748, so it is the message.
+    assert report.count("VerifyMismatchError") == 8, report
     # The executor probes ran on the hasher's own KDF threads.
-    assert len(re.findall(r"\[password-kdf_\d+\]$", report, re.MULTILINE)) == 6
+    assert len(re.findall(r"\[password-kdf_\d+\]$", report, re.MULTILINE)) == 6, report
     # The conftest hook recorded this test as the last one this process started.
     assert request.node.nodeid in report
