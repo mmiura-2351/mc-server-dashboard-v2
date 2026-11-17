@@ -3540,17 +3540,26 @@ async def test_upload_extract_zip_symlink_entry_is_invalid_path() -> None:
 async def test_upload_extract_over_size_cap_is_too_large() -> None:
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
-    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    # Inject a tiny cap so the fixture stays small: deflating hundreds of MiB to
+    # get past the production cap is CPU-bound and slow (#3755).
+    cap = 1024 * 1024
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=cap,
+    )
 
     # A highly compressible payload: the archive is tiny (passes the raw-upload
     # cap) but the cumulative extracted size exceeds it: the decompression-bomb
-    # guard. Use deflate so the zeros compress to almost nothing.
+    # guard. Each member alone is under the cap, so only the running total trips
+    # it. Use deflate so the zeros compress to almost nothing.
+    member = cap // 4
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for i in range(600):
-            zf.writestr(f"f{i}.bin", b"\x00" * (1024 * 1024))
+        for i in range(6):
+            zf.writestr(f"f{i}.bin", b"\x00" * member)
     archive = buf.getvalue()
-    assert len(archive) <= MAX_UPLOAD_BYTES  # raw upload is under the cap
+    assert len(archive) <= cap  # raw upload is under the cap
     with pytest.raises(FileTooLargeError):
         await use_case(
             community_id=CommunityId(community),
