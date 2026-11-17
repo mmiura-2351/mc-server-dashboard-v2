@@ -172,7 +172,7 @@ updates:
         versions: [">=3.14"]
       # Skip the Node 25 "Current" (non-LTS) line; the next LTS (26) still gets a PR.
       - dependency-name: "node"
-        versions: [">=25 <26"]
+        versions: ["~> 25.0"]
     groups:
       docker:
         patterns:
