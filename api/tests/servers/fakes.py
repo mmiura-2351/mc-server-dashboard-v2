@@ -880,6 +880,27 @@ class FakeServerRepository(ServerRepository):
         if server is not None:
             server.backup_retention = deepcopy(retention)
 
+    def lifecycle_matches(
+        self,
+        server_id: ServerId,
+        *,
+        expected_from: DesiredState,
+        expected_assigned_worker_id: WorkerId | None,
+    ) -> bool:
+        """Whether the stored row passes the lifecycle compare-and-set.
+
+        Mirrors the real adapter's predicate (issue #3792): the desired state and
+        the assignment the caller read, an expected ``None`` matching an unassigned
+        row only. One copy, for this fake and the doubles built on it.
+        """
+
+        current = self.by_id.get(server_id)
+        return (
+            current is not None
+            and current.desired_state is expected_from
+            and current.assigned_worker_id == expected_assigned_worker_id
+        )
+
     async def update_lifecycle(
         self,
         server: Server,
@@ -890,13 +911,10 @@ class FakeServerRepository(ServerRepository):
     ) -> bool:
         self.events.append((server.id, "flip"))
         current = self.by_id.get(server.id)
-        # Mirror the real adapter's compare-and-set (issue #3792): the desired
-        # state and the assignment the caller read, an expected ``None`` matching
-        # an unassigned row only.
-        if (
-            current is None
-            or current.desired_state is not expected_from
-            or current.assigned_worker_id != expected_assigned_worker_id
+        if current is None or not self.lifecycle_matches(
+            server.id,
+            expected_from=expected_from,
+            expected_assigned_worker_id=expected_assigned_worker_id,
         ):
             return False
         # Mirror the real adapter's narrow column set (issue #2520): the UPDATE

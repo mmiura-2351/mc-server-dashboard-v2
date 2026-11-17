@@ -166,11 +166,10 @@ class _Repository(FakeServerRepository):
             self.flip_paused.set()
             await gate.wait()
         if self.stage_flips:
-            current = self.by_id.get(server.id)
-            if (
-                current is None
-                or current.desired_state is not expected_from
-                or current.assigned_worker_id != expected_assigned_worker_id
+            if not self.lifecycle_matches(
+                server.id,
+                expected_from=expected_from,
+                expected_assigned_worker_id=expected_assigned_worker_id,
             ):
                 return False
             self._staged.append(
