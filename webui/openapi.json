@@ -3293,7 +3293,7 @@
         "type": "object"
       },
       "ScheduleRunOutcome": {
-        "description": "How one execution ended (``ck_schedule_run_outcome`` CHECK enum).\n\n``SKIPPED`` records a fired occurrence whose precondition was unmet (e.g.\nstopping a server that is not running) \u2014 an honest history entry, not a\nfailure. ``UNKNOWN`` records an action sent to the Worker that did not answer\nin time (issue #3660): it may still have run, so it is not a failure either.",
+        "description": "How one execution ended (``ck_schedule_run_outcome`` CHECK enum).\n\n``SKIPPED`` records a fired occurrence whose precondition was unmet (e.g.\nstopping a server that is not running) \u2014 an honest history entry, not a\nfailure. ``UNKNOWN`` records an action whose result the Worker did not confirm\n(issues #3660, #3781): it may have run, or may still take effect, so it is not\na failure either.",
         "enum": [
           "success",
           "failure",
@@ -10608,7 +10608,7 @@
     },
     "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}/runs": {
       "get": {
-        "description": "List a schedule's recorded executions, newest first.\n\nRequires `schedule:read`. Each run carries the outcome\n(`success`/`failure`/`skipped`/`unknown`) and an optional sanitized `detail`\nnote. `unknown` is an action the Worker did not answer in time: it may still\nhave run.",
+        "description": "List a schedule's recorded executions, newest first.\n\nRequires `schedule:read`. Each run carries the outcome\n(`success`/`failure`/`skipped`/`unknown`) and an optional sanitized `detail`\nnote. `unknown` is an action whose result the Worker did not confirm: it may\nhave run, or may still take effect.",
         "operationId": "list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get",
         "parameters": [
           {
