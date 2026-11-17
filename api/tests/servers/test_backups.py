@@ -1242,8 +1242,10 @@ def test_validate_counts_the_zeros_past_the_end_marker_toward_the_cap() -> None:
 
 def test_validate_accepts_safe_archive_within_caps() -> None:
     content = _targz({"server.properties": b"k=v", "world/level.dat": b"w"})
-    # No raise: a benign archive within both the entry and decompressed caps.
-    _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=1024)
+    # No raise: a benign archive within both the entry and decompressed caps. The
+    # cap covers the zeros past the end-of-archive marker too (issue #3778), and
+    # ``tarfile`` pads its archive to a 10 KiB record.
+    _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=10 * 1024)
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------

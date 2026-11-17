@@ -49,6 +49,10 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import IO, cast
 
+from mc_server_dashboard_api.archive_member import (
+    EndCheckedTarInfo,
+    read_past_end_marker,
+)
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
 )
@@ -975,7 +979,9 @@ def _tar_gz_entries(
 ) -> Iterator[tuple[str, bytes]]:
     total = 0
     count = 0
-    with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
+    with tarfile.open(
+        fileobj=io.BytesIO(content), mode="r:gz", tarinfo=EndCheckedTarInfo
+    ) as tf:
         for member in tf:
             if member.isdir():
                 continue
@@ -994,6 +1000,10 @@ def _tar_gz_entries(
             data = b"" if handle is None else _read_capped(handle, total, max_bytes)
             total += len(data)
             yield member.name, data
+        for chunk in read_past_end_marker(tf):
+            total += len(chunk)
+            if total > max_bytes:
+                raise FileTooLargeError(str(total))
 
 
 @dataclass(frozen=True)

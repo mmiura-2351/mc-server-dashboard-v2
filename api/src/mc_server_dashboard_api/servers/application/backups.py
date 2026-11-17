@@ -51,6 +51,8 @@ from pathlib import PurePosixPath
 from typing import IO
 
 from mc_server_dashboard_api.archive_member import (
+    EndCheckedTarInfo,
+    read_past_end_marker,
     unrestorable_reason,
     without_tar_root_prefix,
 )
@@ -1504,7 +1506,9 @@ def _validate_backup_archive(
     """
 
     try:
-        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
+        with tarfile.open(
+            fileobj=io.BytesIO(content), mode="r:gz", tarinfo=EndCheckedTarInfo
+        ) as tar:
             count = 0
             total = 0
             for read in tar:
@@ -1542,6 +1546,10 @@ def _validate_backup_archive(
                     handle = tar.extractfile(member)
                     if handle is not None:
                         total = _drain_capped(handle, total, max_decompressed_bytes)
+            for chunk in read_past_end_marker(tar):
+                total += len(chunk)
+                if total > max_decompressed_bytes:
+                    raise InvalidBackupArchiveError("decompressed size exceeds cap")
     except _TAR_GZ_READ_ERRORS as exc:
         # Not ``tarfile.TarError`` alone: a cut or damage inside a member's data
         # surfaces from the gzip layer as ``EOFError`` / ``zlib.error``, and a bad

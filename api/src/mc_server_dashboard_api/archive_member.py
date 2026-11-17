@@ -8,12 +8,24 @@ or sweep. It is a neutral root-level module, standard library only, so both
 contexts' inward layers may import it. That is the ``rfc3339`` precedent in the
 root-level import contract. Every caller first reads a member through
 :func:`without_tar_root_prefix`.
+
+How a member walk ends lives here too (issue #3778): :class:`EndCheckedTarInfo`
+ends it only at the end-of-archive marker, and :func:`read_past_end_marker`
+reads the stream on from that marker to its end. The servers upload gates read
+an uploaded ``tar.gz`` through both.
 """
 
 from __future__ import annotations
 
 import tarfile
+from collections.abc import Iterator
 from pathlib import PurePosixPath
+from typing import Self
+
+# How much of the stream past the end-of-archive marker to read at a time. The
+# caller counts each chunk toward its decompressed-size cap before the next one
+# is read, so a long run of zeros cannot be materialized whole.
+_TAIL_CHUNK_BYTES = 1024 * 1024
 
 
 def without_tar_root_prefix(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -70,3 +82,47 @@ def unrestorable_reason(member: tarfile.TarInfo) -> str | None:
     if not is_canonical_name(member.name, is_dir=member.isdir()):
         return "has an empty or '.' segment"
     return None
+
+
+class EndCheckedTarInfo(tarfile.TarInfo):
+    """A ``TarInfo`` read that ends a tar only at its end-of-archive marker (#3778).
+
+    ``tarfile`` reads a header that fails to parse past the archive's first, and
+    a stream that stops where a header should start, as the end of the archive,
+    so a damaged header silently cuts the member list short. Opened with
+    ``tarinfo=EndCheckedTarInfo``, only an all-zero block (the marker) ends it;
+    any other header failure is a ``ReadError``.
+    """
+
+    @classmethod
+    def frombuf(cls, buf: bytes | bytearray, encoding: str, errors: str) -> Self:
+        try:
+            return super().frombuf(buf, encoding, errors)
+        except tarfile.HeaderError as exc:
+            if buf.count(0) == tarfile.BLOCKSIZE:
+                raise
+            raise tarfile.ReadError(f"bad tar header: {exc}") from exc
+
+
+def read_past_end_marker(tar: tarfile.TarFile) -> Iterator[bytes]:
+    """Read a tar on from its end-of-archive marker to the end of the stream (#3778).
+
+    Call it once iteration over ``tar`` has ended. What the stream holds past
+    the marker must be zeros: the marker's second block and the producer's
+    record padding. Anything else, such as a second tar after the first, is a
+    ``ReadError``. POSIX leaves the rest of the last record undefined; this is
+    stricter on purpose, since restore never reads what lies there.
+
+    Over a ``tar.gz`` opened ``r:gz``, reading to the end is also what makes the
+    gzip reader check the trailer (CRC32 and ISIZE), which ``tarfile`` never
+    reaches when it stops at the marker. The gzip reader then refuses whatever
+    follows the gzip stream unless it is another gzip member or zero padding.
+
+    The chunks are yielded so the caller counts them toward its decompressed-size
+    cap, under its own refusal.
+    """
+
+    while chunk := tar.fileobj.read(_TAIL_CHUNK_BYTES):
+        if chunk.count(0) != len(chunk):
+            raise tarfile.ReadError("data past the end-of-archive marker")
+        yield chunk
