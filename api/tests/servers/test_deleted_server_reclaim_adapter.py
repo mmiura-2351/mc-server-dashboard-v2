@@ -41,12 +41,15 @@ async def test_reports_the_delete_to_every_connected_worker() -> None:
     control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
     registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
     queues = {}
-    for worker in _CONNECTED:
-        session = registry.register(make_worker(worker_id=worker, at=_T0))
-        queues[worker] = state.open_session(WorkerId(worker), session)
-    # Registered but with no session: skipped, and its next registration's
+    first, second = _CONNECTED
+    session = registry.register(make_worker(worker_id=first, at=_T0))
+    queues[first] = state.open_session(WorkerId(first), session)
+    # Registered but with no session, and listed before a connected Worker: it is
+    # skipped without ending the report, and its next registration's
     # unknown_held_server_ids is the backstop.
     registry.register(make_worker(worker_id=_DISCONNECTED, at=_T0))
+    session = registry.register(make_worker(worker_id=second, at=_T0))
+    queues[second] = state.open_session(WorkerId(second), session)
     server_id = ServerId.new()
 
     await FleetDeletedServerReclaim(
