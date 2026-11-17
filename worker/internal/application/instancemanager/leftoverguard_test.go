@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager/goroutineleak"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -390,6 +392,140 @@ func TestReclaimDeletedServerCommandReclaimsWithoutReconnecting(t *testing.T) {
 	}
 	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
 		t.Fatalf("hydrate leftover not reclaimed: stat err = %v", err)
+	}
+}
+
+// Delete reports reclaim single-flight per Worker (issue #3679): a report that
+// arrives while the reclaim runs is queued for it, and the running reclaim takes
+// every queued id in one more pass. So a burst of deletes costs one goroutine and
+// two passes, never one goroutine per report, and no reported id is dropped.
+func TestReclaimDeletedServerReportsDuringAReclaimJoinItsNextPass(t *testing.T) {
+	h := &syncSlogHandler{}
+	m, g, _ := newGuardedManager(t)
+	m.WithLogger(slog.New(h))
+	first := seedScratch(t, m, s1)
+	var later []string
+	for i := range 4 {
+		later = append(later, fmt.Sprintf("53000000-0000-4000-8000-%012d", i))
+	}
+	dirs := []string{first}
+	for _, id := range later {
+		dirs = append(dirs, seedScratch(t, m, id))
+	}
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	g.onEnd = func() {
+		mu.Lock()
+		inFlight++
+		maxInFlight = max(maxInFlight, inFlight)
+		mu.Unlock()
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	}
+	report := func(id string) {
+		t.Helper()
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	report(s1)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first reclaim never asked the driver to end the server's leftovers")
+	}
+	for _, id := range later {
+		report(id)
+	}
+	// A reclaim started per report would be inside the driver beside the first
+	// one by now.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for _, dir := range dirs {
+		for {
+			_, err := os.Stat(dir)
+			if os.IsNotExist(err) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("a reported scratch was never reclaimed: %s: stat err = %v", dir, err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInFlight != 1 {
+		t.Fatalf("%d reclaims ran at once, want 1", maxInFlight)
+	}
+	if passes := logged(h, slog.LevelDebug, reclaimPassMsg); passes != 2 {
+		t.Fatalf("the reclaim made %d passes over the reported ids, want 2", passes)
+	}
+}
+
+// A Worker reclaims on a delete report only an id it holds a working set for:
+// the set its registration advertises, which is all a registration's reclaim is
+// offered (issue #3679). The API reports a delete to every connected Worker, so
+// one that holds nothing for the id does nothing for it, not even ask the driver.
+func TestReclaimDeletedServerCommandLeavesAnIDThisWorkerDoesNotHold(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	held := seedScratch(t, m, s2)
+
+	for _, id := range []string{s1, s2} {
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	// One reclaim takes the reported ids in order, so s2's removal means s1 has
+	// had its turn.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(held)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the held scratch was never reclaimed: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if want := []string{"end " + s2 + " " + held, "busy " + s2}; !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want only the held id's %v", g.callLog(), want)
+	}
+}
+
+// A closed manager starts no reclaim, so it does not answer a delete report as if
+// it had (issue #3679). The scratch stays, and the next registration offers it.
+func TestReclaimDeletedServerCommandRefusedOnAClosedManager(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	m.Close()
+
+	res := m.Handle(context.Background(), session.Command{CommandID: "reclaim", ServerID: s1, Kind: "ReclaimDeletedServer"})
+	if res.Success || res.ErrorCode != session.CommandErrorInternal {
+		t.Fatalf("ReclaimDeletedServer on a closed manager = %+v, want an internal error", res)
+	}
+	if live, stacks := goroutineleak.Settle(0, 200*time.Millisecond); live != 0 {
+		t.Fatalf("a delete report on a closed manager started %d goroutine(s):\n%s", live, stacks)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("scratch stat err = %v, want it kept", err)
+	}
+	if calls := g.callLog(); len(calls) != 0 {
+		t.Fatalf("guard calls = %v, want none", calls)
 	}
 }
 
