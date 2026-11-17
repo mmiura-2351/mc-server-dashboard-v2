@@ -1408,7 +1408,8 @@ class StopServer:
             # the EULA, issue #197): stopping a not-running server is a no-op, not a
             # failure. The Worker's handleStop returns SERVER_NOT_FOUND (no live
             # instance on this Worker), never INVALID_STATE, for this case
-            # (worker/internal/application/instancemanager/instancemanager.go:308-312).
+            # (worker/internal/application/instancemanager/instancemanager.go,
+            # handleStop, its takeNotFound arm).
             # The stop intent already landed (desired=stopped committed above), so
             # this is the RELEASE half of the stop path — identical to the one the
             # reconciler's crashed arm runs (issue #2448); see

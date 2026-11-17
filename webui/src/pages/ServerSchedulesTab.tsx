@@ -39,6 +39,7 @@ type ServerResponse = components["schemas"]["ServerResponse"];
 type ScheduleResponse = components["schemas"]["ScheduleResponse"];
 type ScheduleRunResponse = components["schemas"]["ScheduleRunResponse"];
 type ScheduleAction = components["schemas"]["ScheduleAction"];
+type ScheduleRunOutcome = components["schemas"]["ScheduleRunOutcome"];
 type CreateScheduleRequest = components["schemas"]["CreateScheduleRequest"];
 type UpdateScheduleRequest = components["schemas"]["UpdateScheduleRequest"];
 
@@ -77,10 +78,11 @@ const ACTION_LABEL: Record<ScheduleAction, TranslationKey> = {
   backup: "schedules.action.backup",
 };
 
-const OUTCOME_LABEL: Record<string, TranslationKey> = {
+const OUTCOME_LABEL: Record<ScheduleRunOutcome, TranslationKey> = {
   success: "schedules.runs.outcome.success",
   failure: "schedules.runs.outcome.failure",
   skipped: "schedules.runs.outcome.skipped",
+  unknown: "schedules.runs.outcome.unknown",
 };
 
 /** Curated short list of major IANA zones for the timezone select. */
@@ -1198,7 +1200,13 @@ function RunHistoryBody({
                   {label !== undefined ? t(label) : run.outcome}
                 </span>
               </td>
-              <td>{run.detail ?? t("schedules.none")}</td>
+              <td>
+                {/* The host did not answer in time (issue #3660): say what that
+                    means rather than echo the bare category. */}
+                {run.outcome === "unknown"
+                  ? t("schedules.runs.unknownDetail")
+                  : (run.detail ?? t("schedules.none"))}
+              </td>
               <td>{formatDateTime(run.started_at)}</td>
               <td>{formatDateTime(run.finished_at)}</td>
             </tr>

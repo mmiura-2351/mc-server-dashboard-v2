@@ -56,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
     CommandStatus,
+    WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.schedule import (
@@ -190,7 +191,8 @@ def _env(
                 clock=the_clock,
                 jar_provisioner=FakeJarProvisioner(),
                 store_generation=FakeStoreGenerationReader(),
-                file_store=FakeFileStore(),
+                # An accepted EULA, so a scheduled start reaches its dispatch.
+                file_store=FakeFileStore(seed_eula=True),
             ),
             stop_server=StopServer(uow=uow, control_plane=cp, clock=the_clock),
             restart_server=RestartServer(uow=uow, control_plane=cp, clock=the_clock),
@@ -1281,6 +1283,278 @@ async def test_corrupt_backup_failure_is_not_retried() -> None:
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
     # Secondary (weaker under #2269 dedup): still exactly one notification.
     assert len(env.notifier.notifications) == 1
+
+
+# --- a dispatch that timed out: outcome unknown (issue #3660) ---------------
+
+
+class _TimesOut(FakeControlPlane):
+    """Times out each dispatch of the given kinds, as the adapter reports it.
+
+    The control-plane adapter turns a ``CommandTimedOutError`` into a
+    ``WorkerUnavailableError`` flagged ``upload_may_be_live``: the command was sent
+    on a healthy session and not answered in time, so the Worker may still apply it.
+    """
+
+    def __init__(self, *kinds: str, place_to: WorkerId | None = None) -> None:
+        super().__init__(place_to=place_to)
+        self._timing_out = set(kinds)
+
+    async def _record(
+        self, kind: str, worker_id: WorkerId, server_id: ServerId
+    ) -> CommandOutcome:
+        if kind in self._timing_out:
+            self.dispatched.append((kind, worker_id, server_id))
+            raise WorkerUnavailableError(str(worker_id.value), upload_may_be_live=True)
+        return await super()._record(kind, worker_id, server_id)
+
+
+@pytest.mark.parametrize(
+    ("action", "command"),
+    [
+        (ScheduleAction.COMMAND, "say hi"),
+        (ScheduleAction.STOP, None),
+        (ScheduleAction.RESTART, None),
+    ],
+)
+async def test_a_timed_out_dispatch_records_an_unknown_outcome(
+    action: ScheduleAction, command: str | None
+) -> None:
+    # The command, stop or restart was sent and not answered in time, so it may
+    # still have run: recorded as unknown, not as a failure.
+    env = _env(control_plane=_TimesOut(action.value))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=action,
+        command=command,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == ["worker timed out"]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+
+
+async def test_an_unknown_outcome_is_audited_as_an_error_and_not_called_failed() -> (
+    None
+):
+    env = _env(control_plane=_TimesOut("command"))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        command="say hi",
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert [e.outcome for e in env.audit.events] == [Outcome.ERROR]
+    assert len(env.notifier.notifications) == 1
+    _server_id, _kind, title, detail = env.notifier.notifications[0]
+    assert title == "Scheduled command: outcome unknown"
+    assert detail == "worker timed out"
+
+
+async def test_a_start_whose_start_command_timed_out_is_unknown() -> None:
+    # The start was sent, so StartServer keeps the intent and the assignment for
+    # the reconciler: the server may well come up.
+    env = _env(control_plane=_TimesOut("start", place_to=_WORKER))
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.RUNNING
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+
+
+async def test_a_start_whose_hydrate_timed_out_failed() -> None:
+    # The hydrate runs before the start command, so the start was never sent and
+    # StartServer reverted its intent: the start definitely did not happen.
+    env = _env(control_plane=_TimesOut("hydrate", place_to=_WORKER))
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert env.uow.servers.by_id[server.id].desired_state is DesiredState.STOPPED
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["worker timed out"]
+
+
+async def test_a_backup_whose_snapshot_timed_out_failed_and_retries_once() -> None:
+    # CreateBackup archives only after the snapshot returns, so a snapshot that
+    # timed out leaves no backup behind, whatever the Worker does with it later.
+    # The occurrence failed, and its one-shot retry is the only backup it gets.
+    store = FakeBackupArchiveStore()
+    env = _env(control_plane=_TimesOut("snapshot"), backup_store=store)
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["worker timed out"]
+    assert env.uow.backups.by_id == {}
+    assert store.archives == set()
+    # Isolate the retry from the interval grid (see the retry tests above).
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+
+
+async def test_a_backup_whose_worker_disconnected_still_fails_and_retries() -> None:
+    # A disconnect is not a timeout: it stays the failure it always was.
+    env = _env(control_plane=FakeControlPlane(unavailable_kinds={"snapshot"}))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["worker unavailable"]
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+
+
+async def test_an_expired_backup_snapshot_fails_and_retries() -> None:
+    # EXPIRED means the Worker definitely did not take the snapshot (issue #3305):
+    # a failure, and the one-shot retry still follows.
+    env = _env(
+        control_plane=FakeControlPlane(
+            outcomes={"snapshot": CommandOutcome(status=CommandStatus.EXPIRED)}
+        )
+    )
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["command_expired"]
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.FAILURE,
+    ]
+
+
+class _UnknownExecute(ExecuteScheduleAction):
+    """Executor whose every action ends with an unknown outcome."""
+
+    async def __call__(
+        self,
+        *,
+        server_id: ServerId,
+        action: ScheduleAction,
+        command: str | None,
+        only_when_running: bool | None,
+    ) -> ActionResult:
+        return ActionResult(ScheduleRunOutcome.UNKNOWN, "worker timed out", None)
+
+
+async def test_an_unknown_backup_outcome_arms_no_retry() -> None:
+    # An action that may still have run is never retried: a retry could repeat it.
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    base_factory = env.runner.make_execute
+
+    def _make_unknown() -> ExecuteScheduleAction:
+        base = base_factory()
+        return _UnknownExecute(
+            uow=base.uow,
+            send_command=base.send_command,
+            start_server=base.start_server,
+            stop_server=base.stop_server,
+            restart_server=base.restart_server,
+            create_backup=base.create_backup,
+        )
+
+    env.runner.make_execute = _make_unknown
+
+    await env.runner.tick()
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
 
 
 # --- history cap + tick isolation -----------------------------------------

@@ -69,6 +69,9 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
     ScheduleAction,
     ScheduleId,
+    ScheduleRun,
+    ScheduleRunId,
+    ScheduleRunOutcome,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -373,6 +376,39 @@ def test_runs_missing_schedule_is_404() -> None:
     client = _client(app)
     resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()) + "/runs")
     assert resp.status_code == 404
+
+
+def test_runs_report_an_unknown_outcome() -> None:
+    # Issue #3660: an action the Worker did not answer in time may still have run,
+    # and the run history says so instead of calling it a failure.
+    run = ScheduleRun(
+        id=ScheduleRunId.new(),
+        schedule_id=ScheduleId.new(),
+        started_at=_NOW,
+        finished_at=_NOW,
+        outcome=ScheduleRunOutcome.UNKNOWN,
+        detail="worker timed out",
+    )
+    app = _app(member=True, allow=True, runs=_FakeUseCase(result=[run]))
+    client = _client(app)
+    resp = client.get(_url(uuid.uuid4(), uuid.uuid4(), schedule=uuid.uuid4()) + "/runs")
+    assert resp.status_code == 200
+    assert [(r["outcome"], r["detail"]) for r in resp.json()] == [
+        ("unknown", "worker timed out")
+    ]
+
+
+def test_openapi_enumerates_every_run_outcome() -> None:
+    schemas = _shared_app.openapi()["components"]["schemas"]
+    assert schemas["ScheduleRunResponse"]["properties"]["outcome"] == {
+        "$ref": "#/components/schemas/ScheduleRunOutcome"
+    }
+    assert schemas["ScheduleRunOutcome"]["enum"] == [
+        "success",
+        "failure",
+        "skipped",
+        "unknown",
+    ]
 
 
 # --- happy paths + audit ----------------------------------------------------

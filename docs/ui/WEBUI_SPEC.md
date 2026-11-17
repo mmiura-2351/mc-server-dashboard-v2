@@ -824,8 +824,11 @@ numbers): the UI for the general scheduler.
   `invalid_payload`) and the 409 duplicate name (`schedule_name_exists`).
 - Delete: confirm dialog (run history cascades away with the schedule).
 - Run history: per-schedule dialog, newest first — outcome badge
-  (`success`/`failure`/`skipped`), sanitized detail, started/finished
-  timestamps. Capped at 50 rows per schedule server-side.
+  (`success`/`failure`/`skipped`/`unknown`), sanitized detail, started/finished
+  timestamps. Capped at 50 rows per schedule server-side. An `unknown` run is an
+  action the host did not answer in time (issue #3660): it gets its own amber
+  badge, and in place of the detail the row says the action may still have run,
+  so it is not read as a failure.
 - Permission gating (7.3): the tab body needs `schedule:read`; writes are
   two-layer — `schedule:manage` **and** the action's own permission gates the
   create button's action options and each row's edit/toggle/delete
@@ -833,7 +836,8 @@ numbers): the UI for the general scheduler.
   read-only view (run history stays available).
 - Failure surfacing: `schedule_failed` NOTIFICATION frames from the community
   events socket (7.2) render as error toasts (title + sanitized detail) while
-  the dashboard is open.
+  the dashboard is open. An `unknown` run raises the same frame, titled
+  "Scheduled <action>: outcome unknown" rather than "failed".
 
 ### 6.14 Server detail — Plugins
 
