@@ -256,9 +256,9 @@ func TestSignalPhaseWaitsWhileTheWorldIsWritten(t *testing.T) {
 	}
 
 	docker.exit(143, nil) // the save completes and the JVM exits
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after the server exited")
-	}
+	// The exit alone ends the wait, but only once the supervisor has closed the
+	// instance's exited channel, so wait for the return itself (issue #3685).
+	r.awaitReturn()
 	if r.err != nil || docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want a clean stop with no kill", r.err, docker.killWasCalled())
 	}
@@ -597,9 +597,9 @@ func TestInstanceStopSignalsWithoutDockerStop(t *testing.T) {
 	docker := newFakeDocker()
 	world := &fakeWorld{}
 	r := startStopRun(t, docker, nil, errors.New("rcon unavailable"), world)
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after SIGTERM ended the server")
-	}
+	// SIGTERM ends the server, and the exit alone ends the wait once the
+	// supervisor has seen it, so wait for the return itself (issue #3685).
+	r.awaitReturn()
 	if r.err != nil {
 		t.Fatalf("Stop: %v", r.err)
 	}
@@ -636,9 +636,7 @@ func TestShutdownMidStopHandsTheKillToTheDaemon(t *testing.T) {
 
 	// The Worker's own stop keeps running while the process does.
 	docker.exit(143, nil)
-	if !r.awaitWaiting() && !r.step(testPoll) {
-		t.Fatal("Stop still waiting after the server exited")
-	}
+	r.awaitReturn() // the exit alone ends the wait (issue #3685)
 	if r.err != nil || docker.killWasCalled() {
 		t.Fatalf("Stop = %v, kill = %v; want a clean stop", r.err, docker.killWasCalled())
 	}
