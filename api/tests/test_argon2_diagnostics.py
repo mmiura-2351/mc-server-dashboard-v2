@@ -9,15 +9,17 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
+import resource
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 import argon2
 import pytest
 
 from mc_server_dashboard_api.identity.adapters.password_hasher import _KDF_EXECUTOR
 from tests import argon2_diagnostics
-from tests.argon2_diagnostics import argon2_mismatch_report
+from tests.argon2_diagnostics import RusageWindow, argon2_mismatch_report
 
 _PASSWORD = "Wm7!qz#Lp2vT"
 _WRONG_PASSWORD = "Np4@xZ#Lq9wR"
@@ -26,6 +28,14 @@ _STORED_ON_THREAD = "stored hash verified 5x on this thread"
 _STORED_ON_EXECUTOR = "stored hash verified 3x on the KDF executor"
 _FRESH_ON_THREAD = "fresh hash+verify round trips 3x on this thread"
 _FRESH_ON_EXECUTOR = "fresh hash+verify round trips 3x on the KDF executor"
+_HOST_KEYS = [
+    "pressure cpu",
+    "pressure memory",
+    "pressure io",
+    "vmstat",
+    "rusage over the refused call",
+    "native threads",
+]
 
 
 def _sections(report: str) -> dict[str, list[str]]:
@@ -53,6 +63,7 @@ def test_a_refused_password_reports_every_section(
     sections = _sections(report)
     assert list(sections) == [
         "stored hash",
+        "host",
         _STORED_ON_THREAD,
         _STORED_ON_EXECUTOR,
         _FRESH_ON_THREAD,
@@ -64,6 +75,7 @@ def test_a_refused_password_reports_every_section(
     assert re.search(r"taken at \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00", report)
     assert f"value: {stored!r}" in sections["stored hash"]
     assert "equals the hash the test produced: True" in sections["stored hash"]
+    assert "rusage over the refused call: not measured" in sections["host"]
     # Each probe of the stored hash saw the wrong password refused, and the
     # executor's ran on the hasher's own KDF threads.
     refusals = sections[_STORED_ON_THREAD] + sections[_STORED_ON_EXECUTOR]
@@ -203,3 +215,53 @@ def test_unreadable_build_info_does_not_break_the_report(
     assert _sections(report)["argon2 build"] == [
         "unavailable: RuntimeError('metadata gone')"
     ]
+
+
+def test_the_host_section_reads_the_host_around_the_refused_call() -> None:
+    # Whether the host was swapping, stalled or preempting the process when
+    # argon2 went wrong (#3748), read before the probes add their own load.
+    stored = argon2.PasswordHasher().hash(_PASSWORD)
+    with RusageWindow() as window:
+        argon2.PasswordHasher().verify(stored, _PASSWORD)
+
+    report = argon2_mismatch_report(
+        password=_PASSWORD, stored_hash=stored, rusage=window
+    )
+
+    host = _sections(report)["host"]
+    assert [line.split(": ", 1)[0] for line in host] == _HOST_KEYS, report
+    readings = dict(line.split(": ", 1) for line in host)
+    assert re.fullmatch(r"pswpin=\d+ pswpout=\d+", readings["vmstat"]), report
+    deltas = re.fullmatch(
+        r"ru_majflt=\d+ ru_minflt=(\d+) ru_nivcsw=\d+ ru_nvcsw=\d+",
+        readings["rusage over the refused call"],
+    )
+    # The verify's 64 MiB of fresh memory faults pages in, so a window that
+    # measured nothing would show here.
+    assert deltas and int(deltas[1]) > 0, report
+    assert readings["native threads"], report
+    assert not any(value.startswith("unavailable") for value in readings.values())
+
+
+def test_unreadable_host_state_does_not_break_the_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A report that raised would replace the failure it was meant to explain.
+    def unreadable(who: int) -> resource.struct_rusage:
+        raise OSError("getrusage gone")
+
+    monkeypatch.setattr(argon2_diagnostics, "_PROC", tmp_path / "no-proc")
+    monkeypatch.setattr(resource, "getrusage", unreadable)
+    stored = argon2.PasswordHasher().hash(_PASSWORD)
+    with RusageWindow() as window:
+        pass
+
+    report = argon2_mismatch_report(
+        password=_PASSWORD, stored_hash=stored, rusage=window
+    )
+
+    host = _sections(report)["host"]
+    assert [line.split(": ", 1)[0] for line in host] == _HOST_KEYS, report
+    assert all(line.split(": ", 1)[1].startswith("unavailable: ") for line in host), (
+        report
+    )
