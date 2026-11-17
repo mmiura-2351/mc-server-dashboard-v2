@@ -31,8 +31,8 @@ Outcome taxonomy (owner-confirmed):
   intent still stands after the error: an unreachable Worker, a lost answer or a
   ``BUSY`` refusal at the start command, after which the reconciler re-sends the
   start once the assigned Worker is connected (it skips the row while that
-  Worker is gone). A stop the Worker refused ``BUSY``, whose intent stands too:
-  the reconciler re-sends the stop (issue #3799). Audited and notified like a
+  Worker is gone). A stop the Worker refused ``BUSY``, whose intent stands too,
+  which the reconciler converges (issue #3799). Audited and notified like a
   failure, under its own title, and never retried. It shares the failing edge,
   but a failure after an unknown notifies once more as an escalation; an unknown
   after a failure stays silent.
@@ -469,9 +469,8 @@ class ExecuteScheduleAction:
         these apart.
 
         A stop the Worker refused ``BUSY`` can: :class:`StopServer` never reverts
-        its intent, so ``desired=stopped`` stands and the reconciler's
-        ``redispatch_stop`` re-sends the stop once the command holding the id
-        settles (issue #3799).
+        its intent, so ``desired=stopped`` stands, which the reconciler
+        converges (issue #3799).
 
         A command, stop or restart can otherwise only when the Worker left its
         command unanswered: it did not answer in time (``upload_may_be_live``) or
