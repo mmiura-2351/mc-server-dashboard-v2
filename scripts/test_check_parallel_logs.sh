@@ -19,10 +19,11 @@
 #      targets it runs, and `make api-test` turns it into the pytest option that
 #      writes the per-worker run order there. Either half can regress silently
 #      -- the gate stays green without the record.
-#   3. A rotation step that fails stops the run with a message before any
-#      target runs. Otherwise the run would go on in the old check-logs and
-#      append to the previous run's chain logs, or move check-logs into the
-#      undeletable check-logs.prev as check-logs.prev/check-logs.
+#   3. A rotation step that fails stops the run, non-zero and with a message,
+#      before any target runs. Otherwise the run would go on in the old
+#      check-logs and append to the previous run's chain logs, or move
+#      check-logs into the undeletable check-logs.prev as
+#      check-logs.prev/check-logs.
 #   4. A run that finds check-logs.prev but no check-logs -- the previous run
 #      was killed between moving its predecessor's logs aside and creating its
 #      own -- keeps check-logs.prev: there is nothing newer to replace it with.
@@ -75,10 +76,11 @@ logdir="$fake_worktree/.git/check-logs"
 cat > "$stub_dir/make" << 'STUB'
 #!/usr/bin/env bash
 # Stub `make`: report this run's marker and the exported log dir, then fail so
-# the run stops before Phase 1a spawns anything.
+# the run stops before Phase 1a spawns anything. STUB_STATUS=0 passes every
+# target instead, so that only the script itself can fail the run.
 echo "marker=$RUN_MARKER"
 echo "logdir=${MCSD_CHECK_LOGDIR:-<unset>}"
-exit 1
+exit "${STUB_STATUS:-1}"
 STUB
 chmod +x "$stub_dir/make"
 
@@ -149,11 +151,13 @@ marker_in() {
 # 3. A failed rotation step stops the run. check-logs.prev holds a read-only
 #    dir with a file in it, so it cannot be removed but would still take a
 #    move into it. Needs a non-root user: root can delete from a read-only dir.
+#    The stub passes every target here, so a run that went on past the failed
+#    rotation would pass: only the rotation can fail it (#3774).
 if [ "$(id -u)" -eq 0 ]; then
 	echo "  SKIP: the failed-rotation case needs a non-root user"
 else
 	mkdir "$logdir.prev/stuck" && touch "$logdir.prev/stuck/file" && chmod a-w "$logdir.prev/stuck"
-	if run_gate fourth; then
+	if STUB_STATUS=0 run_gate fourth; then
 		fail_test "a run whose check-logs.prev cannot be removed did not fail"
 	else
 		ok "a run whose check-logs.prev cannot be removed fails"
