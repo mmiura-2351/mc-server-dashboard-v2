@@ -907,6 +907,8 @@ export const en = {
     "server.properties is managed by the platform; a directory cannot stand at that path.",
   "files.error.reservedName":
     "Names starting with .mcsd_generation are reserved for the platform at the top level of the server's files. Choose another name.",
+  "files.error.invalidArchive":
+    "The archive could not be read. It may be damaged, incomplete or password-protected. Nothing was extracted.",
   // A save into a file read as latin-1: it is not UTF-8, or it is a pre-1.20
   // server's server.properties (issue #2851).
   "files.error.unencodableText":

@@ -853,6 +853,8 @@ export const ja: Record<TranslationKey, string> = {
     "server.properties はプラットフォームが管理しているため、そのパスにディレクトリを置くことはできません。",
   "files.error.reservedName":
     "サーバーファイルの最上位では、.mcsd_generation で始まる名前はプラットフォームが使用するため予約されています。別の名前を指定してください。",
+  "files.error.invalidArchive":
+    "アーカイブを読み取れませんでした。破損している、途中で切れている、またはパスワードで保護されている可能性があります。何も展開されていません。",
   "files.error.unencodableText":
     "このファイルは UTF-8 ではないか、このバージョンの Minecraft が Latin-1 でしか読まないため、Latin-1（ISO-8859-1）で保存します。入力された文字の一部は Latin-1 で表せません。該当する文字を削除してから保存し直してください。",
   "files.error.editTooLarge":

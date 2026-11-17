@@ -76,6 +76,10 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.platformManagedPath" };
         case "reserved_name":
           return { key: "files.error.reservedName" };
+        case "invalid_archive":
+          // An extract upload whose archive does not read back (issue #3769):
+          // the generic message would not say the file itself is the problem.
+          return { key: "files.error.invalidArchive" };
         default:
           return { key: "files.error.invalidInput" };
       }
