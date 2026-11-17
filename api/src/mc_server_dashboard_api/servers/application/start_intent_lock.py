@@ -6,10 +6,16 @@ its Worker (``stop_intents.py``). A newer start must not commit an intent betwee
 that check and the revert's write, or the revert would undo the newer intent. So
 the two writes that create a start intent (the compare-and-set and commit in
 ``StartServer.__call__`` and ``place_and_start``, from the count read before
-them) and the two reverts (``_compensate`` and ``_unassign``: read, check,
-compare-and-set, commit and bump) hold this lock for the server. Stops and drains
-do not take it. They only withdraw an intent, and a revert's compare-and-set
-already loses to one that lands in between.
+them through the load confirmation after the commit) and the two reverts
+(``_compensate`` and ``_unassign``: read, check, compare-and-set, commit, bump
+and load decrement) hold this lock for the server. Stops and drains do not take
+it. They only withdraw an intent, and a revert's compare-and-set already loses to
+one that lands in between.
+
+The lock also orders the load. The registry keys a committed entry by Worker and
+server, so a revert's decrement after a newer start's confirmation on the same
+Worker would drop the newer start's entry. Under the lock, the revert decrements
+before a newer start can confirm.
 
 This is not the lifecycle lock. Operations that can never create a start intent
 hold that lock across Storage I/O: a backup upload or delete, a prune, the

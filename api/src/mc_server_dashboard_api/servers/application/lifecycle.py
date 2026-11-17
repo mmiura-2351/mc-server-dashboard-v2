@@ -1322,15 +1322,14 @@ class StartServer:
         ``place_and_start``) hold it too, from their count read on, so no newer
         intent can land in between, and a newer start reads its count only after
         this revert's bump and confirms its load only after this revert's
-        decrement. A stop or
-        a drain takes no such lock, but it only withdraws: one that lands in
-        between moves the row out of running, and the compare-and-set below then
-        matches nothing. The revert does not take the lifecycle lock. Operations
-        that cannot create an intent hold that one across Storage I/O (a backup
-        upload or delete, a prune, the integrity sweep), and a revert waiting
-        behind one would give up busy and leave the row running with no start
-        sent. A count that has already moved skips the revert without taking any
-        lock: nothing of this start's is left to undo.
+        decrement. A stop or a drain takes no such lock, but it only withdraws:
+        one that lands in between moves the row out of running, and the
+        compare-and-set below then matches nothing. The revert does not take the
+        lifecycle lock. Operations that cannot create an intent hold that one
+        across Storage I/O (a backup upload or delete, a prune, the integrity
+        sweep), and a revert waiting behind one would give up busy and leave the
+        row running with no start sent. A count that has already moved skips the
+        revert without taking any lock: nothing of this start's is left to undo.
 
         Placement-load decrement semantics (symmetric with StartServer's
         increment): decrement **iff** the revert compare-and-set actually
@@ -1341,6 +1340,10 @@ class StartServer:
         unknown, so we do **not** decrement and log loudly — the reconnect
         assignment rebuild reconciles the count from the authoritative tally. It
         still bumps, as a stop does (issue #3739): the commit may have landed.
+        Once the commit has returned, the row is released and the decrement
+        stands, even if the unit of work's exit (its rollback and close) then
+        raises or is cancelled: the decrement runs before that exit, as the
+        start's own confirmation does (#840).
 
         If the compensation itself fails, the original dispatch failure
         (``original``) must not be masked: we log both errors explicitly and
@@ -1351,6 +1354,7 @@ class StartServer:
         if self.stop_intents.current(server_id) != stop_intent_count:
             return
         reverted = False
+        released = False
         try:
             async with self.start_intent_lock.hold(server_id), self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
@@ -1382,11 +1386,14 @@ class StartServer:
                         self.control_plane.decrement_assignment(
                             worker_id=worker_id, server_id=server_id
                         )
+                        released = True
         except Exception as compensation_error:
             _LOG.error(
-                "failed to compensate start intent after a failed dispatch; "
-                "the server record is left with desired=running (original "
-                "dispatch failure: %r)",
+                "failed to compensate start intent after a failed dispatch; %s "
+                "(original dispatch failure: %r)",
+                "the server record was released, but closing its unit of work failed"
+                if released
+                else "the server record is left with desired=running",
                 original,
                 exc_info=compensation_error,
             )
@@ -1427,12 +1434,15 @@ class StartServer:
         left assigned + desired=running, so the next tick sees an assigned orphan and
         takes the ``redispatch_start`` path to the SAME Worker — exactly the
         post-dispatch behavior, which is safe. We do not decrement the load in that
-        case (the DB state is unknown; the reconnect rebuild reconciles it).
+        case (the DB state is unknown; the reconnect rebuild reconciles it). Once
+        the commit has returned, the decrement stands even if the unit of work's
+        exit then fails, as in :meth:`_compensate`.
         """
 
         if self.stop_intents.current(server_id) != stop_intent_count:
             return
         reverted = False
+        released = False
         try:
             async with self.start_intent_lock.hold(server_id), self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
@@ -1458,10 +1468,14 @@ class StartServer:
                         self.control_plane.decrement_assignment(
                             worker_id=worker_id, server_id=server_id
                         )
+                        released = True
         except Exception as compensation_error:
             _LOG.error(
-                "failed to undo orphan re-placement after a failed dispatch; the "
-                "server record is left assigned (original dispatch failure: %r)",
+                "failed to undo orphan re-placement after a failed dispatch; %s "
+                "(original dispatch failure: %r)",
+                "the server record was unassigned, but closing its unit of work failed"
+                if released
+                else "the server record is left assigned",
                 original,
                 exc_info=compensation_error,
             )

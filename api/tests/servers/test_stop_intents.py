@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -1179,6 +1180,7 @@ async def test_a_start_queued_behind_a_revert_reads_the_count_after_it(
     assert world.kinds() == ["hydrate", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == [world.worker]
     # F's confirm, F's revert dropping it, then the newer start's confirm.
     assert world.cp.load == ["confirm", "drop", "confirm"]
 
@@ -1341,6 +1343,70 @@ async def test_a_revert_whose_commit_landed_but_raised_still_bumps(
     assert world.stored() == (reverted, None)
     assert world.intents.current(world.server_id) == 1
     assert world.cp.decremented == []
+
+
+@pytest.mark.parametrize(
+    ("kind", "reverted"),
+    [("start", DesiredState.STOPPED), ("placement", DesiredState.RUNNING)],
+    ids=["start", "placement"],
+)
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionError("close failed"), asyncio.CancelledError()],
+    ids=["close-failed", "cancelled"],
+)
+async def test_a_revert_whose_commit_returned_drops_the_load_though_the_exit_fails(
+    kind: str,
+    reverted: DesiredState,
+    error: BaseException,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The revert's commit returned, so the row is released, and only the unit of
+    # work's exit (its rollback and close) then raises or is cancelled. The drop
+    # of the start's load entry stands: it runs before that exit, as the start's
+    # own confirm does (#840). Made after the exit, it would be skipped, and the
+    # entry would stay counted on the Worker for a released row until a reconnect
+    # rebuild.
+    world = _seeded(kind)
+    uow = _ExitRunsHook(servers=world.repo)
+    use_case = world.start_server(uow)
+
+    async def close_fails() -> None:
+        raise error
+
+    async def fail() -> CommandOutcome:
+        # The start's own block has closed, so this fires as the revert's closes.
+        uow.on_next_exit = close_fails
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(fail)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(type(error)):
+        if kind == "start":
+            await use_case(community_id=world.community, server_id=world.server_id)
+        else:
+            await use_case.place_and_start(
+                community_id=world.community, server_id=world.server_id
+            )
+
+    assert world.stored() == (reverted, None)
+    assert world.intents.current(world.server_id) == 1
+    assert not _intent_lock(world).is_held(world.server_id)
+    assert world.cp.decremented == [world.worker]
+    # The log says the row was released, not that it is left as the start set it.
+    # A cancellation is not logged.
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "mc_server_dashboard_api.servers.application.lifecycle"
+        and record.levelno == logging.ERROR
+    ]
+    if isinstance(error, asyncio.CancelledError):
+        assert logged == []
+    else:
+        [message] = logged
+        assert "but closing its unit of work failed" in message
+        assert "left" not in message
 
 
 @_REVERTS
