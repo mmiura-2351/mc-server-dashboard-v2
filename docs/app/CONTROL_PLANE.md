@@ -158,7 +158,7 @@ a WARN that names the command kind and server id (never the payload):
 | `CommandError.message` | a short sentence, plus the command's quoted path | The failure keeps its code (and file-access reason); the text is replaced. |
 | `Event{LogLine}` | 8 KiB + a truncation marker (capped at the source) | The line is dropped. |
 | `Event{StatusChange}.detail` | a Worker-authored sentence or a daemon error (≤ a few KiB) | The transition is sent without its detail. |
-| `Register.held_servers`, `Register.leftover_server_ids`, `RegisterAck.unknown_held_server_ids` | ~45 B per scratch directory on the Worker | Not guarded — operator-scale (tens of thousands of scratch directories on one Worker), not tenant-sized. |
+| `Register.held_servers`, `Register.unheld_scratch_server_ids`, `RegisterAck.unknown_held_server_ids` | ~45 B per scratch directory on the Worker | Not guarded — operator-scale (tens of thousands of scratch directories on one Worker), not tenant-sized. |
 | `Metrics`, `Heartbeat`, `StartServer`, `StopServer`, triggers, tunnel commands | fixed, well under 1 KiB (a tunnel CA bundle is operator configuration) | — |
 
 A command that arrives over the limit despite this — only a peer that does not
@@ -237,11 +237,10 @@ destructive hydrate on a same-worker restart **only when the held generation is
 fresh enough** — hydrating a live, newer set would unpack the last authoritative
 snapshot over it and roll the world back, while a *stale* held set (e.g. an
 A→B→A leftover scratch B has advanced past) must still hydrate (Section 5.1).
-It also carries `leftover_server_ids`: each server whose scratch dir holds no working
-set but for which the Worker's driver records a container a failed start left
-behind. A server that never published anything hydrates to a dir holding only its
-generation marker, which a start accepts, so a start the daemon did not answer can
-leave such a container for a server `held_servers` does not list. The API only
+It also carries `unheld_scratch_server_ids`: each server whose scratch dir exists but
+holds no working set. The dir is empty, or holds only the generation marker, which is
+what a server that never published anything hydrates to; a start accepts such a dir,
+so a start the daemon did not answer can also leave a container for it. The API only
 checks these ids for a delete (below). It never records them as held: they hold no
 world a start could skip its hydrate for.
 
@@ -305,21 +304,21 @@ that reports nothing held, or one
 that does not set the field, always hydrates. The
 API answers `RegisterAck`: the `heartbeat_interval` it expects,
 the `transfer_deadline` that bounds a hydrate download and a whole snapshot
-command Worker-side (Section 5.2), and `unknown_held_server_ids` — the subset of `held_servers` and
-`leftover_server_ids` whose server the API has since deleted. For each listed id the
-Worker ends a container a failed start left behind, then reclaims the
-`.hydrate-<id>-*` leftovers and then the scratch dir, but does **not** reclaim
-`.displaced-<id>` trees (retained for operator recovery, STORAGE.md Section 4.6). That reclaim is **best-effort**: the
+command Worker-side (Section 5.2), and `unknown_held_server_ids` — the subset of
+`held_servers` and `unheld_scratch_server_ids` whose server the API has since deleted.
+For each listed id the Worker ends a container a failed start left behind, then
+reclaims the `.hydrate-<id>-*` leftovers and then the scratch dir, but does **not**
+reclaim `.displaced-<id>` trees (retained for operator recovery, STORAGE.md
+Section 4.6). That reclaim is **best-effort**: the
 Worker skips any id that is running, that has a failed-stop orphan pending, or that
 another mutating lifecycle command holds in flight, and once shutdown is signalled it
-stops after the id it is on, leaving the rest untouched. The next registration lists
-an id it does not reclaim again, in `held_servers` or `leftover_server_ids`, while the
-id still holds a working set or a recorded container, and the API re-derives
-`unknown_held_server_ids` from that listing. A Worker restart drops the record of a
-container, and the boot's sweep removes the container instead.
+stops after the id it is on, leaving the rest untouched. An id it does not reclaim
+keeps its scratch dir, so the next registration lists it in `held_servers` or
+`unheld_scratch_server_ids` again and the API re-derives `unknown_held_server_ids`
+from that listing.
 A Worker that stays connected does not wait for a registration: once a delete commits,
 the API sends `ReclaimDeletedServer` to every connected Worker (Section 5), and one that
-holds a working set for the id, or whose driver records a container a failed start of it
+has a scratch dir for the id, or whose driver records a container a failed start of it
 left behind, runs the same reclaim for it. The ack's list is the backstop, for a Worker
 that was not connected then or that skipped the id. The API looks the listed servers up
 only after it has opened the new session for commands, so a delete that commits while
@@ -329,7 +328,8 @@ only `control.command_timeout_seconds` (CONFIGURATION.md Section 5.1): a lookup 
 than that leaves it to be dropped unsent, and the id then waits for the Worker's next
 registration.
 The two removals happen **in that order** for the same reason: the scratch dir is
-what keeps the id in `held_servers`, and the held-set scans skip `.hydrate-` names,
+what keeps the id listed (`held_servers` or `unheld_scratch_server_ids`), and both
+scans skip `.hydrate-` names,
 so removing the dir first would leave any leftover unreachable by every **per-id**
 pass — no later one is ever offered the id again, and only a Worker boot, which sweeps
 `.hydrate-*` trees wholesale (STORAGE.md Section 4.6), still reclaims it. The
@@ -576,7 +576,7 @@ directories named this way.
 | `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no Worker-side config). | none | RELAY.md Section 5 |
 | `OpenBedrockTunnel` | Open a Bedrock relay tunnel for a server that reached running state. Carries `relay_endpoint`, `bedrock_port`, a `token` valid for the tunnel's whole lifetime (relay-validated against the API, not matched locally), and optional `tls_ca_pem`. Dispatched once per running transition, not per player. The Worker dials the relay's Bedrock QUIC tunnel listener, handshakes, and forwards RakNet datagrams to the container's Geyser port, reconnecting with backoff while the tunnel drops; a repeated Open with the same credential is idempotent. | none | BEDROCK_TUNNEL.md |
 | `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. The Worker also closes the tunnel locally, without waiting for this command, when a stop (a StopServer or a restart's stop leg) confirms termination or fails, and when the instance crashes. | none | BEDROCK_TUNNEL.md |
-| `ReclaimDeletedServer` | Report that the server has been deleted. Sent once the delete has committed, to every connected Worker, fire-and-forget: the server is unassigned by then, and any Worker may still hold its scratch. A Worker that holds no working set for the id, and whose driver records no container a failed start of it left behind, does nothing for it. Otherwise it runs the reclaim it runs for an id in `unknown_held_server_ids` (Section 4.1): it ends a container a failed start left behind, then removes the `.hydrate-<id>-*` leftovers and the scratch dir. The reclaim runs in the background, one at a time per Worker: a report that arrives while it runs is taken by its next pass. It is best-effort, so the result says only that the id was queued for it, and a Worker that is shutting down answers `INTERNAL` instead. The next registration lists an id the reclaim skips (running, reserved, a failed-stop orphan, a leftover it cannot end) again while the id still holds a working set or a recorded container; a Worker restart drops that record, and the boot's sweep removes the container. Server ids are never reused, so the report cannot reach a later server. | none | Section 4.1 |
+| `ReclaimDeletedServer` | Report that the server has been deleted. Sent once the delete has committed, to every connected Worker, fire-and-forget: the server is unassigned by then, and any Worker may still hold its scratch. A Worker that has no scratch dir for the id, and whose driver records no container a failed start of it left behind, does nothing for it. Otherwise it runs the reclaim it runs for an id in `unknown_held_server_ids` (Section 4.1): it ends a container a failed start left behind, then removes the `.hydrate-<id>-*` leftovers and the scratch dir. The reclaim runs in the background, one at a time per Worker: a report that arrives while it runs is taken by its next pass. It is best-effort, so the result says only that the id was queued for it, and a Worker that is shutting down answers `INTERNAL` instead. An id the reclaim skips (running, reserved, a failed-stop orphan, a leftover it cannot end) keeps its scratch dir, so the next registration lists it again; a recorded container with no dir is left to the Worker's next boot sweep. Server ids are never reused, so the report cannot reach a later server. | none | Section 4.1 |
 
 Notes:
 

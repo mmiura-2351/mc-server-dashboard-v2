@@ -591,20 +591,36 @@ func seedMarkerOnly(t *testing.T, m *Manager, serverID string) string {
 	return dir
 }
 
-// The manager lists for a recorded leftover exactly the server-id dirs that hold
-// no working set and whose id a driver records a leftover for (issue #3794). A
-// marker-only dir with no leftover is not listed, and a held dir with one is
-// advertised as held instead, never as both.
-func TestLeftoverServerIDsListsOnlyUnheldScratchesWithALeftover(t *testing.T) {
+// seedEmptyScratch makes the scratch dir of a server with nothing in it, not even
+// the generation marker.
+func seedEmptyScratch(t *testing.T, m *Manager, serverID string) string {
+	t.Helper()
+	dir := filepath.Join(m.scratchDir, serverID)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// s3 is a third server id, for the tests that need one beside s1 and s2.
+const s3 = "53000000-0000-4000-8000-000000000003"
+
+// The manager lists as unheld every server-id scratch dir that holds no working
+// set, empty or marker-only, whether or not a driver records a leftover for it
+// (issue #3794). A held dir is advertised as held instead, never as both, and a
+// dir whose name is not a server id is not listed at all.
+func TestUnheldScratchServerIDsListsEveryServerIDDirWithNoWorkingSet(t *testing.T) {
 	m, g, _ := newGuardedManager(t)
 	seedMarkerOnly(t, m, s1)
 	g.recordLeftover(s1)
 	seedMarkerOnly(t, m, s2)
+	seedEmptyScratch(t, m, s3)
 	seedScratch(t, m, ghost)
 	g.recordLeftover(ghost)
+	seedMarkerOnly(t, m, "not-a-server-id")
 
-	if got := m.LeftoverServerIDs(); !slices.Equal(got, []string{s1}) {
-		t.Fatalf("LeftoverServerIDs = %v, want [%s]", got, s1)
+	if got, want := m.UnheldScratchServerIDs(), []string{s1, s2, s3}; !slices.Equal(got, want) {
+		t.Fatalf("UnheldScratchServerIDs = %v, want %v", got, want)
 	}
 	held := m.HeldServers()
 	if len(held) != 1 || held[0].ServerID != ghost {
@@ -616,8 +632,8 @@ func TestLeftoverServerIDsListsOnlyUnheldScratchesWithALeftover(t *testing.T) {
 }
 
 // registrationAPI stands in for the API's side of a Worker's registration: it
-// answers a Register with the ids it listed, held or for a recorded leftover,
-// that the API has deleted, as the API's servicer does, and then sends nothing.
+// answers a Register with the ids it listed, held or unheld, that the API has
+// deleted, as the API's servicer does, and then sends nothing.
 type registrationAPI struct {
 	deleted map[string]bool
 
@@ -637,7 +653,7 @@ func (a *registrationAPI) SendRegister(_ context.Context, caps session.Capabilit
 func (a *registrationAPI) RecvRegisterAck(context.Context) (session.RegisterAck, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	listed := a.caps.LeftoverServerIDs
+	listed := a.caps.UnheldScratchServerIDs
 	for _, hs := range a.caps.HeldServers {
 		listed = append(listed, hs.ServerID)
 	}
@@ -665,8 +681,8 @@ func (a *registrationAPI) Close() error                                         
 // A deleted server whose scratch holds only its generation marker, and whose
 // failed start left a container the driver records, is reclaimed when the Worker
 // registers (issue #3794), not left until its next boot. The manager lists the id
-// for its leftover, the API answers it deleted, and the session hands it to the
-// reclaim, which ends the container and then removes the dir.
+// as unheld, the API answers it deleted, and the session hands it to the reclaim,
+// which ends the container and then removes the dir.
 func TestRegistrationReclaimsALeftoverOfAnUnheldScratch(t *testing.T) {
 	m, g, _ := newGuardedManager(t)
 	dir := seedMarkerOnly(t, m, s1)
@@ -696,10 +712,133 @@ func TestRegistrationReclaimsALeftoverOfAnUnheldScratch(t *testing.T) {
 	}
 }
 
-// A Worker reclaims on a delete report only an id it holds a working set for:
-// the set its registration advertises, which is all a registration's reclaim is
-// offered (issue #3679). The API reports a delete to every connected Worker, so
-// one that holds nothing for the id does nothing for it, not even ask the driver.
+// A deleted server whose scratch dir holds no working set, empty or marker-only,
+// is reclaimed when the Worker registers even with no leftover recorded (issue
+// #3794): the dir is removed, after the leftover check every reclaimed id gets. A
+// live server's marker-only dir is listed too, but the API does not answer it
+// deleted, so it is left as it is.
+func TestRegistrationReclaimsADeletedServersUnheldScratch(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	markerOnly := seedMarkerOnly(t, m, s1)
+	empty := seedEmptyScratch(t, m, s2)
+	live := seedMarkerOnly(t, m, ghost)
+	api := &registrationAPI{deleted: map[string]bool{s1: true, s2: true}}
+	r := session.NewRunner(api, session.Capabilities{WorkerID: "w1"}, systemClock{},
+		slog.New(slog.DiscardHandler), session.WithCommandHandler(m))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = r.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	// One reclaim takes the acked ids in order, so s2's removal means s1 has had
+	// its turn.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(empty)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the registration never reclaimed the empty scratch: stat err = %v; guard calls = %v", err, g.callLog())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(markerOnly); !os.IsNotExist(err) {
+		t.Fatalf("the marker-only scratch of a deleted server: stat err = %v, want it removed", err)
+	}
+	if _, err := os.Stat(filepath.Join(live, generationFile)); err != nil {
+		t.Fatalf("the live server's marker-only scratch: stat err = %v, want it untouched", err)
+	}
+	want := []string{"end " + s1 + " " + markerOnly, "busy " + s1, "end " + s2 + " " + empty, "busy " + s2}
+	if !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+}
+
+// A delete report reclaims a scratch dir that holds no working set, empty or
+// marker-only, with no leftover recorded (issue #3794), as a registration does:
+// any scratch dir of the deleted server admits the id, not only a held one.
+func TestReclaimDeletedServerCommandRemovesAnUnheldScratchWithNoLeftover(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	markerOnly := seedMarkerOnly(t, m, s1)
+	empty := seedEmptyScratch(t, m, s2)
+
+	for _, id := range []string{s1, s2} {
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(empty)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the report never reclaimed the empty scratch: stat err = %v; guard calls = %v", err, g.callLog())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := os.Stat(markerOnly); !os.IsNotExist(err) {
+		t.Fatalf("the marker-only scratch: stat err = %v, want it removed", err)
+	}
+	want := []string{"end " + s1 + " " + markerOnly, "busy " + s1, "end " + s2 + " " + empty, "busy " + s2}
+	if !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+}
+
+// Widening the report's gate to any scratch dir does not widen what the reclaim
+// touches (issue #3794): a running id and a reserved one, each with a marker-only
+// dir, are queued but skipped at reserve(), before the leftover check, and keep
+// their dirs. s3, reported after them, is the positive control.
+func TestReclaimDeletedServerCommandLeavesARunningOrReservedUnheldScratch(t *testing.T) {
+	m, g, _ := newGuardedManager(t)
+	running := seedMarkerOnly(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("StartServer = %+v, want success", res)
+	}
+	reserved := seedMarkerOnly(t, m, s2)
+	if ok, _, _ := m.reserve(s2, legNone); !ok {
+		t.Fatal("could not reserve s2 for test setup")
+	}
+	defer m.release(s2)
+	control := seedMarkerOnly(t, m, s3)
+	before := len(g.callLog())
+
+	for _, id := range []string{s1, s2, s3} {
+		if res := m.Handle(context.Background(), session.Command{CommandID: "reclaim-" + id, ServerID: id, Kind: "ReclaimDeletedServer"}); !res.Success {
+			t.Fatalf("ReclaimDeletedServer(%s) = %+v, want success", id, res)
+		}
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(control)
+		if os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the control scratch was never reclaimed: stat err = %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	for _, dir := range []string{running, reserved} {
+		if _, err := os.Stat(filepath.Join(dir, generationFile)); err != nil {
+			t.Fatalf("%s: stat err = %v, want it untouched", dir, err)
+		}
+	}
+	if got, want := g.callLog()[before:], []string{"end " + s3 + " " + control, "busy " + s3}; !slices.Equal(got, want) {
+		t.Fatalf("guard calls = %v, want only the control's %v", got, want)
+	}
+}
+
+// A Worker reclaims on a delete report only an id it has a scratch dir or a
+// recorded leftover for (issues #3679, #3794). The API reports a delete to every
+// connected Worker, so one with neither for the id does nothing for it, not even
+// ask the driver.
 func TestReclaimDeletedServerCommandLeavesAnIDThisWorkerDoesNotHold(t *testing.T) {
 	m, g, _ := newGuardedManager(t)
 	held := seedScratch(t, m, s2)

@@ -59,7 +59,7 @@ type fakeServer struct {
 	registers   int
 	heartbeats  int
 	heldServers []*controlplanev1.HeldServer
-	leftoverIDs []string
+	unheldIDs   []string
 	resources   *controlplanev1.HostResources
 	// messages records every WorkerMessage received on the stream, in order.
 	messages []*controlplanev1.WorkerMessage
@@ -82,7 +82,7 @@ func (s *fakeServer) Session(stream controlplanev1.WorkerService_SessionServer) 
 	s.mu.Lock()
 	s.registers++
 	s.heldServers = first.GetRegister().GetHeldServers()
-	s.leftoverIDs = first.GetRegister().GetLeftoverServerIds()
+	s.unheldIDs = first.GetRegister().GetUnheldScratchServerIds()
 	s.resources = first.GetRegister().GetCapabilities().GetResources()
 	s.messages = append(s.messages, first)
 	s.mu.Unlock()
@@ -143,10 +143,10 @@ func (s *fakeServer) reportedHeldServers() []*controlplanev1.HeldServer {
 	return s.heldServers
 }
 
-func (s *fakeServer) reportedLeftoverIDs() []string {
+func (s *fakeServer) reportedUnheldIDs() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.leftoverIDs
+	return s.unheldIDs
 }
 
 func (s *fakeServer) reportedResources() *controlplanev1.HostResources {
@@ -286,10 +286,11 @@ func TestRegisterAdvertisesHeldServers(t *testing.T) {
 	}
 }
 
-// TestRegisterListsLeftoverServerIDs proves the adapter maps the domain
-// Capabilities.LeftoverServerIDs onto the wire Register.leftover_server_ids
-// (issue #3794), so the API checks those servers for a delete too.
-func TestRegisterListsLeftoverServerIDs(t *testing.T) {
+// TestRegisterListsUnheldScratchServerIDs proves the adapter maps the domain
+// Capabilities.UnheldScratchServerIDs onto the wire
+// Register.unheld_scratch_server_ids (issue #3794), so the API checks those
+// servers for a delete too.
+func TestRegisterListsUnheldScratchServerIDs(t *testing.T) {
 	srv := &fakeServer{
 		wantCredential: "the-secret",
 		heartbeatEvery: 20 * time.Millisecond,
@@ -297,7 +298,7 @@ func TestRegisterListsLeftoverServerIDs(t *testing.T) {
 	conn := startServer(t, srv)
 
 	caps := testCaps()
-	caps.LeftoverServerIDs = []string{"server-a", "server-b"}
+	caps.UnheldScratchServerIDs = []string{"server-a", "server-b"}
 	dialer := controlplane.NewDialer(conn, "the-secret", realClock{})
 	runner := session.NewRunner(dialer, caps, realClock{}, testLogger())
 
@@ -307,12 +308,12 @@ func TestRegisterListsLeftoverServerIDs(t *testing.T) {
 	go func() { _ = runner.Run(ctx); close(done) }()
 
 	waitFor(t, func() bool { return srv.registerCount() == 1 })
-	got := srv.reportedLeftoverIDs()
+	got := srv.reportedUnheldIDs()
 	cancel()
 	<-done
 
 	if !slices.Equal(got, []string{"server-a", "server-b"}) {
-		t.Fatalf("leftover_server_ids = %v, want [server-a server-b]", got)
+		t.Fatalf("unheld_scratch_server_ids = %v, want [server-a server-b]", got)
 	}
 }
 

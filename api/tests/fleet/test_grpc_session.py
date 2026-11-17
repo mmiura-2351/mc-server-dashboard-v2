@@ -69,7 +69,7 @@ _WORKER_ID = "22222222-2222-2222-2222-222222222222"
 def _register_message(
     worker_id: str = _WORKER_ID,
     held_servers: dict[str, int] | None = None,
-    leftover_server_ids: list[str] | None = None,
+    unheld_scratch_server_ids: list[str] | None = None,
 ) -> pb.WorkerMessage:
     caps = pb.WorkerCapabilities(
         drivers=[pb.EXECUTION_DRIVER_KIND_CONTAINER],
@@ -86,7 +86,7 @@ def _register_message(
                 pb.HeldServer(server_id=sid, generation=gen)
                 for sid, gen in (held_servers or {}).items()
             ],
-            leftover_server_ids=leftover_server_ids or [],
+            unheld_scratch_server_ids=unheld_scratch_server_ids or [],
         ),
     )
 
@@ -1285,14 +1285,14 @@ async def test_register_ack_carries_unknown_held_server_ids() -> None:
         await h.stop()
 
 
-async def test_register_ack_carries_an_unknown_leftover_server_id() -> None:
-    """A deleted id listed only for its recorded leftover is in the ack (#3794).
+async def test_register_ack_carries_an_unknown_unheld_scratch_server_id() -> None:
+    """A deleted id the Worker lists as an unheld scratch is in the ack (#3794).
 
-    Its scratch holds no working set, so the Worker lists it apart from the held
-    ones. The API checks it for a delete like a held id, but never records it as
-    held: a start must not skip its hydrate for a world the Worker does not hold.
+    Its scratch dir holds no working set, so the Worker lists it apart from the
+    held ones. The API checks it for a delete like a held id, but never records it
+    as held: a start must not skip its hydrate for a world the Worker does not hold.
     """
-    # _SERVER_B is deleted; _SERVER_A (held) and _SERVER_C (leftover) are known.
+    # _SERVER_B is deleted; _SERVER_A (held) and _SERVER_C (unheld) are known.
     sink = FakeServerStateSink(known_server_ids={_SERVER_A, _SERVER_C})
     registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
     h = _Harness(registry, FakeClock(_T0), state_sink=sink)
@@ -1302,7 +1302,7 @@ async def test_register_ack_carries_an_unknown_leftover_server_id() -> None:
         await call.write(
             _register_message(
                 held_servers={_SERVER_A: 1},
-                leftover_server_ids=[_SERVER_B, _SERVER_C],
+                unheld_scratch_server_ids=[_SERVER_B, _SERVER_C],
             )
         )
         response = await call.read()

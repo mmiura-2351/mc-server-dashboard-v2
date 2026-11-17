@@ -456,7 +456,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # heartbeats lapse, ending the Session through the normal teardown.
             watchdog = asyncio.ensure_future(self._watch_liveness(worker_id, session))
             # Compute which servers the Worker listed no longer exist: the held ones
-            # (issue #924) and the ones it lists for a recorded leftover container
+            # (issue #924) and the ones whose scratch dir holds no working set
             # (issue #3794). Fail-safe: any exception returns an empty list so a DB
             # error never misclassifies a live server as deleted. The lookup runs
             # with the session already open (issue #3679): a delete that commits
@@ -810,11 +810,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         _LOG.info("worker registered", extra={"worker_id": worker_id.value})
         # The ids checked for a delete: the held ones, and the ones whose scratch
-        # holds no working set but whose failed start left a container the Worker
-        # records (issue #3794). Those are checked only, never recorded as held
-        # above: they hold no world a start could skip its hydrate for.
+        # dir holds no working set (issue #3794). Those are checked only, never
+        # recorded as held above: they hold no world a start could skip its
+        # hydrate for.
         checked_ids = list(
-            dict.fromkeys([*held_servers, *register.leftover_server_ids])
+            dict.fromkeys([*held_servers, *register.unheld_scratch_server_ids])
         )
         return worker_id, first.correlation_id, session, checked_ids
 

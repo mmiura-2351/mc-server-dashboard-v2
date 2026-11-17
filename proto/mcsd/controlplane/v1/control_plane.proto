@@ -106,15 +106,17 @@ message Register {
   // never silently booting a fresh/empty world.
   repeated HeldServer held_servers = 4;
 
-  // leftover_server_ids lists the servers whose scratch dir holds no working set
-  // but for which the Worker's driver records a container a failed start left
-  // behind (issue #3794): a server that never published anything hydrates to a
-  // dir holding only the generation marker, which a start accepts. The API only
-  // checks them for a delete, and lists a deleted one in
-  // RegisterAck.unknown_held_server_ids. It never records them as held: they hold
-  // no world a start could skip its hydrate for. An API that does not read the
-  // field lists none of them, and their containers wait for the Worker's next boot.
-  repeated string leftover_server_ids = 5;
+  // unheld_scratch_server_ids lists the servers whose scratch dir exists but
+  // holds no working set (issue #3794): it is empty, or holds only the
+  // generation marker, which is what a server that never published anything
+  // hydrates to. A start accepts such a dir, so a start the daemon did not
+  // answer can also leave a container for it. The API only checks these ids for
+  // a delete, and lists a deleted one in RegisterAck.unknown_held_server_ids, so
+  // the Worker removes the dir. It never records them as held: they hold no world
+  // a start could skip its hydrate for. An API that does not read the field
+  // lists none of them; a Worker connected when the delete commits still
+  // reclaims the dir on ReclaimDeletedServer.
+  repeated string unheld_scratch_server_ids = 5;
 }
 
 // HeldServer is one working set the Worker holds in local scratch, with the
@@ -187,13 +189,12 @@ message RegisterAck {
   google.protobuf.Duration transfer_deadline = 4;
 
   // unknown_held_server_ids is the subset of Register.held_servers and
-  // Register.leftover_server_ids whose server no longer exists in the API
-  // (deleted while the scratch was live, issue #924, or while a failed start's
-  // container was recorded, issue #3794). For each id listed here the Worker
-  // ends a container a failed start left behind, then reclaims the
-  // .hydrate-<id>-* leftovers and the scratch dir, but does NOT reclaim
-  // .displaced-<id> trees (issue #911: those are intentionally retained for
-  // operator recovery). An empty list means every id the Worker listed is still
+  // Register.unheld_scratch_server_ids whose server no longer exists in the API
+  // (deleted while the scratch dir was there, issues #924, #3794). For each id
+  // listed here the Worker ends a container a failed start left behind, then
+  // reclaims the .hydrate-<id>-* leftovers and the scratch dir, but does NOT
+  // reclaim .displaced-<id> trees (issue #911: those are intentionally retained
+  // for operator recovery). An empty list means every id the Worker listed is still
   // known (or that the API could not compute the subset, e.g. a DB error — the
   // empty list is the fail-safe default so a transient failure never
   // misclassifies a live server as deleted).
@@ -469,16 +470,16 @@ message CloseBedrockTunnel {
 // ReclaimDeletedServer reports that the API has deleted the server named by
 // ApiCommand.server_id (issue #3679). The API sends it to every connected
 // Worker once the delete has committed, without waiting for the result. A
-// Worker that holds no working set for the id, and records no container a
-// failed start of it left behind, does nothing. Otherwise it reclaims the id as
+// Worker that has no scratch dir for the id, and records no container a failed
+// start of it left behind, does nothing. Otherwise it reclaims the id as
 // it does one listed in RegisterAck.unknown_held_server_ids: it ends a container
 // a failed start left behind, then removes the .hydrate-<id>-* leftovers and
 // the scratch dir, and keeps .displaced-<id>. The reclaim runs in the
 // background, one at a time per Worker, and the Worker answers once the id is
 // queued for it (a Worker shutting down answers COMMAND_ERROR_CODE_INTERNAL).
-// The reclaim is best-effort. The next registration offers an id it skips
-// again while the id still holds a working set or a recorded container; a
-// Worker restart drops that record, and the boot's sweep removes the container.
+// The reclaim is best-effort. An id it skips keeps its scratch dir, so the next
+// registration lists it again; a recorded container with no dir is left to the
+// Worker's next boot sweep.
 message ReclaimDeletedServer {}
 
 // ---------------------------------------------------------------------------

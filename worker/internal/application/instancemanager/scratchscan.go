@@ -287,16 +287,15 @@ func (m *Manager) HeldServers() []session.HeldServer {
 	return held
 }
 
-// LeftoverServerIDs returns the servers whose scratch dir holds no working set
-// but for which a driver records a container a failed start left behind (issue
-// #3794). HeldServers leaves such a dir out: a server that never published
-// anything hydrates to a dir holding only its generation marker, which the launch
-// guard accepts, so a start the daemon did not answer can leave a container
-// recorded for an id that is not held. The session lists these ids on each
-// registration, the API checks them for a delete, and a deleted one is reclaimed
-// as a held one is: its container ended, then its dir removed. Like the delete
-// report's gate (handleReclaimDeletedServer), it asks the backend nothing.
-func (m *Manager) LeftoverServerIDs() []string {
+// UnheldScratchServerIDs returns the servers whose scratch dir exists but holds no
+// working set: it is empty, or holds only the generation marker, which is what a
+// server that never published anything hydrates to (issue #3794). HeldServers
+// leaves such a dir out, since it holds no world a start could skip its hydrate
+// for. The session lists these ids on each registration as well, the API checks
+// them for a delete, and a deleted one is reclaimed as a held one is: a container
+// a failed start left behind ended first, then the dir removed. Like HeldServers,
+// it lists only a directory named by a server id.
+func (m *Manager) UnheldScratchServerIDs() []string {
 	entries, err := os.ReadDir(m.scratchDir)
 	if err != nil {
 		return nil
@@ -306,7 +305,7 @@ func (m *Manager) LeftoverServerIDs() []string {
 		if !entry.IsDir() || !isServerIDName(entry.Name()) {
 			continue
 		}
-		if !hasWorkingSet(filepath.Join(m.scratchDir, entry.Name())) && m.recordsLeftovers(entry.Name()) {
+		if !hasWorkingSet(filepath.Join(m.scratchDir, entry.Name())) {
 			ids = append(ids, entry.Name())
 		}
 	}
