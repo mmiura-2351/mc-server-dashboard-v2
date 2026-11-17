@@ -1347,12 +1347,15 @@ Global___CloseBedrockTunnel: _TypeAlias = CloseBedrockTunnel  # noqa: Y015
 class ReclaimDeletedServer(_message.Message):
     """ReclaimDeletedServer reports that the API has deleted the server named by
     ApiCommand.server_id (issue #3679). The API sends it to every connected
-    Worker once the delete has committed, without waiting for the result. The
-    Worker reclaims what it holds for the id exactly as it does for an id listed
-    in RegisterAck.unknown_held_server_ids: it ends a container a failed start
-    left behind, then removes the .hydrate-<id>-* leftovers and the scratch dir,
-    and keeps .displaced-<id>. It answers once it has started that reclaim. The
-    reclaim is best-effort; an id it skips keeps its scratch, so the next
+    Worker once the delete has committed, without waiting for the result. A
+    Worker that holds no working set for the id does nothing. One that does
+    reclaims it as it does an id listed in RegisterAck.unknown_held_server_ids,
+    which the Worker likewise acts on only for ids it holds: it ends a container
+    a failed start left behind, then removes the .hydrate-<id>-* leftovers and
+    the scratch dir, and keeps .displaced-<id>. The reclaim runs in the
+    background, one at a time per Worker, and the Worker answers once the id is
+    queued for it (a Worker shutting down answers COMMAND_ERROR_CODE_INTERNAL).
+    The reclaim is best-effort; an id it skips keeps its scratch, so the next
     registration offers it again.
     """
 

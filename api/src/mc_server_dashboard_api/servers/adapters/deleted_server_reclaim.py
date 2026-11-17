@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from mc_server_dashboard_api.fleet.adapters.control_plane import GrpcControlPlane
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     ReclaimDeletedServerCommand,
@@ -12,6 +14,8 @@ from mc_server_dashboard_api.servers.domain.deleted_server_reclaim import (
     DeletedServerReclaim,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+_LOG = logging.getLogger(__name__)
 
 
 class FleetDeletedServerReclaim(DeletedServerReclaim):
@@ -39,4 +43,10 @@ class FleetDeletedServerReclaim(DeletedServerReclaim):
                 )
             except WorkerNotConnectedError:
                 # Its next registration reports the id as deleted.
-                continue
+                _LOG.info(
+                    "deleted-server reclaim not sent: worker not connected",
+                    extra={
+                        "worker_id": worker.id.value,
+                        "server_id": str(server_id.value),
+                    },
+                )

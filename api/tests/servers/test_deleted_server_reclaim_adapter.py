@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
+import pytest
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine
 from starlette.requests import Request
@@ -32,7 +34,9 @@ _CONNECTED = (
 _DISCONNECTED = "33333333-3333-3333-3333-333333333333"
 
 
-async def test_reports_the_delete_to_every_connected_worker() -> None:
+async def test_reports_the_delete_to_every_connected_worker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # The delete has no Worker to address: a server is deleted only while
     # unassigned, and any Worker may still hold its scratch, including one the
     # API never recorded as holding it (a hydrate whose dispatch timed out). So
@@ -52,9 +56,19 @@ async def test_reports_the_delete_to_every_connected_worker() -> None:
     queues[second] = state.open_session(WorkerId(second), session)
     server_id = ServerId.new()
 
-    await FleetDeletedServerReclaim(
-        registry=registry, control_plane=control_plane
-    ).reclaim(server_id)
+    with caplog.at_level(logging.INFO):
+        await FleetDeletedServerReclaim(
+            registry=registry, control_plane=control_plane
+        ).reclaim(server_id)
+
+    # The skip is logged, so a scratch that outlived its delete can be traced to
+    # a Worker that was not connected when it was reported.
+    skipped = [
+        r for r in caplog.records if getattr(r, "worker_id", None) == _DISCONNECTED
+    ]
+    assert len(skipped) == 1
+    assert skipped[0].levelno == logging.INFO
+    assert getattr(skipped[0], "server_id", None) == str(server_id.value)
 
     for worker, queue in queues.items():
         msg = queue.get_nowait()

@@ -309,12 +309,15 @@ stops after the id it is on, leaving the rest untouched. An id it does not recla
 keeps its scratch, so the next registration advertises it in `held_servers` again and
 the API re-derives `unknown_held_server_ids` from that advertisement.
 A Worker that stays connected does not wait for a registration: once a delete commits,
-the API sends `ReclaimDeletedServer` to every connected Worker (Section 5), which runs
-the same reclaim for that id. The ack's list is the backstop, for a Worker that was not
-connected then or that skipped the id. The API looks the held servers up only after it
-has opened the new session for commands, so a delete that commits while the lookup runs
-reaches the Worker either way: in the ack if the lookup sees it, or as a
-`ReclaimDeletedServer` queued behind the ack if it does not.
+the API sends `ReclaimDeletedServer` to every connected Worker (Section 5), and one that
+holds a working set for the id runs the same reclaim for it. The ack's list is the
+backstop, for a Worker that was not connected then or that skipped the id. The API looks
+the held servers up only after it has opened the new session for commands, so a delete
+that commits while the lookup runs reaches the Worker either way: in the ack if the
+lookup sees it, or as a `ReclaimDeletedServer` queued behind the ack if it does not. The
+queued report waits only `control.command_timeout_seconds` (CONFIGURATION.md
+Section 5.1): a lookup slower than that leaves it to be dropped unsent, and the id then
+waits for the Worker's next registration.
 The two removals happen **in that order** for the same reason: the scratch dir is
 what keeps the id in `held_servers`, and the held-set scans skip `.hydrate-` names,
 so removing the dir first would leave any leftover unreachable by every **per-id**
@@ -470,9 +473,9 @@ sent during a restart's stop leg waits for the whole restart. Long-running
 commands also share a small Worker-wide concurrency cap, so a command can wait
 for a slot behind other servers' work. `ServerCommand`, `TunnelDial`,
 `OpenBedrockTunnel`, `CloseBedrockTunnel` and `ReclaimDeletedServer` skip the cap
-but still wait their turn in their server's order. The API waits only a bounded time for each result,
-so each command it waits for, except a stop's final snapshot, carries an expiry,
-`expires_after`. A command still
+but still wait their turn in their server's order. The API waits only a bounded
+time for each result, so each command it waits for, except a stop's final
+snapshot, carries an expiry, `expires_after`. A command still
 waiting when its expiry runs out is answered `EXPIRED` and is never executed
 (Section 5, "Expiry").
 
@@ -561,7 +564,7 @@ directories named this way.
 | `TunnelDial` | Dial back the relay's tunnel listener for one player session and splice it to the running server's loopback game port. Carries `endpoint`, single-use `token`, and optional `tls_ca_pem` (everything in-band — no Worker-side config). | none | RELAY.md Section 5 |
 | `OpenBedrockTunnel` | Open a Bedrock relay tunnel for a server that reached running state. Carries `relay_endpoint`, `bedrock_port`, a `token` valid for the tunnel's whole lifetime (relay-validated against the API, not matched locally), and optional `tls_ca_pem`. Dispatched once per running transition, not per player. The Worker dials the relay's Bedrock QUIC tunnel listener, handshakes, and forwards RakNet datagrams to the container's Geyser port, reconnecting with backoff while the tunnel drops; a repeated Open with the same credential is idempotent. | none | BEDROCK_TUNNEL.md |
 | `CloseBedrockTunnel` | Close a server's Bedrock relay tunnel; dispatched when its observed state leaves running. The Worker also closes the tunnel locally, without waiting for this command, when a stop (a StopServer or a restart's stop leg) confirms termination or fails, and when the instance crashes. | none | BEDROCK_TUNNEL.md |
-| `ReclaimDeletedServer` | Report that the server has been deleted. Sent once the delete has committed, to every connected Worker, fire-and-forget: the server is unassigned by then, and any Worker may still hold its scratch. The Worker runs the reclaim it runs for an id in `unknown_held_server_ids` (Section 4.1): it ends a container a failed start left behind, then removes the `.hydrate-<id>-*` leftovers and the scratch dir. The reclaim runs in the background and is best-effort, so the result says only that it started. An id it skips (running, reserved, a failed-stop orphan, a leftover it cannot end) keeps its scratch, and the next registration reports it again. Server ids are never reused, so the report cannot reach a later server. | none | Section 4.1 |
+| `ReclaimDeletedServer` | Report that the server has been deleted. Sent once the delete has committed, to every connected Worker, fire-and-forget: the server is unassigned by then, and any Worker may still hold its scratch. A Worker that holds no working set for the id does nothing for it. One that does runs the reclaim it runs for an id in `unknown_held_server_ids` (Section 4.1), whose ids are likewise only the ones it holds: it ends a container a failed start left behind, then removes the `.hydrate-<id>-*` leftovers and the scratch dir. The reclaim runs in the background, one at a time per Worker: a report that arrives while it runs is taken by its next pass. It is best-effort, so the result says only that the id was queued for it, and a Worker that is shutting down answers `INTERNAL` instead. An id the reclaim skips (running, reserved, a failed-stop orphan, a leftover it cannot end) keeps its scratch, and the next registration reports it again. Server ids are never reused, so the report cannot reach a later server. | none | Section 4.1 |
 
 Notes:
 
