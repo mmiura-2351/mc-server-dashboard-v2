@@ -808,10 +808,10 @@ class StartServer:
         ``BUSY``, handled by the arm below.
         """
 
-        # Read before the read that finds the intent (issue #3739). Another start
-        # committed it, so a stop of it may already be past its own read; its bump
-        # follows its commit, and a commit this read did not precede is one the
-        # read below sees.
+        # Read before the load that finds the intent (issue #3739). Another start
+        # committed it, so a stop of it may already be under way. A stop bumps only
+        # once its commit has returned, so a bump made before this read belongs to
+        # a commit the load below sees.
         stop_intent_count = self.stop_intents.current(server_id)
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
