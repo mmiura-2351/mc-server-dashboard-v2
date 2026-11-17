@@ -1430,8 +1430,9 @@ class ObjectStorage(Storage):
         async with self._client_factory() as client:
             if await client.head_object(self._jar_key(key)) is None:
                 raise NotFoundError(f"jar not found: {key.sha256}")
-            async for chunk in await client.get_object(self._jar_key(key)):
-                yield chunk
+            async with aclosing(await client.get_object(self._jar_key(key))) as body:
+                async for chunk in body:
+                    yield chunk
 
     async def jar_pool_stats(self) -> JarPoolStats:
         # One prefix scan over the content-addressed ``jars/`` namespace (Section
@@ -1723,8 +1724,11 @@ class ObjectStorage(Storage):
         read = 0
         try:
             with _translating_io_faults():
-                async with _writing_off_loop(spool) as out:
-                    async for chunk in await client.get_object(backup_key):
+                async with (
+                    _writing_off_loop(spool) as out,
+                    aclosing(await client.get_object(backup_key)) as body,
+                ):
+                    async for chunk in body:
                         read += len(chunk)
                         gzip_probe.feed(chunk)
                         await out.write(chunk)
@@ -1867,8 +1871,11 @@ class ObjectStorage(Storage):
             # head was a redundant network round-trip and the check-then-act shape
             # the fs adapter shed (#2341/#2394); dropping it removes the round-trip
             # without moving where any caller sees the miss.
-            async for chunk in await client.get_object(backup_key, byte_range):
-                yield chunk
+            async with aclosing(
+                await client.get_object(backup_key, byte_range)
+            ) as body:
+                async for chunk in body:
+                    yield chunk
 
     async def put_backup(
         self,
@@ -2586,8 +2593,8 @@ async def _spool_stream(
 async def _spool_object(client: S3Client, key: str, prefix: str, suffix: str) -> Path:
     """Spool one object's body to a local temp file (bounded disk)."""
 
-    stream = await client.get_object(key)
-    return await _spool_stream(stream, prefix, suffix)
+    async with aclosing(await client.get_object(key)) as body:
+        return await _spool_stream(body, prefix, suffix)
 
 
 # --- tar streaming (bounded memory, one member-chunk at a time) -------------
