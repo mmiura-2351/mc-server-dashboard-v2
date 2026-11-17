@@ -25,6 +25,10 @@ from pathlib import PurePosixPath
 # The tar format's block size. The end-of-archive marker is a block of zeros.
 _END_BLOCK = bytes(512)
 
+# What a walk reads after its last member when it stops at the marker: the block,
+# or first the one byte tarfile reads where it seeks to the next header.
+_END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
+
 # How much of the stream past the end-of-archive marker to read at a time. The
 # caller counts each chunk toward its decompressed-size cap before the next one
 # is read, so a long run of zeros cannot be materialized whole.
@@ -176,17 +180,7 @@ class EndCheckedReader(io.RawIOBase):
         decompressed-size cap, under its own refusal.
         """
 
-        # The block, or the byte tarfile reads before the header it seeks to
-        # and then the block.
-        stopped_at_marker = (
-            self._last_read == _END_BLOCK
-            and self._read_since_member
-            in (
-                len(_END_BLOCK),
-                len(_END_BLOCK) + 1,
-            )
-        )
-        if not stopped_at_marker:
+        if self._last_read != _END_BLOCK or self._read_since_member not in _END_READS:
             raise tarfile.ReadError(
                 "the archive does not end at its end-of-archive marker"
             )
