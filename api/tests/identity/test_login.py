@@ -15,7 +15,10 @@ import pytest
 
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.domain.brute_force import backoff_cap_count
-from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidCredentialsError,
+    PasswordVerificationUnavailableError,
+)
 from tests.identity.fakes import (
     FakeClock,
     FakeLoginAttemptStore,
@@ -200,6 +203,35 @@ async def test_credentials_changed_while_verifying_refuse_the_login(
     assert uow.refresh_tokens.by_hash == {}
     assert uow.commits == 0
     assert [a[3] for a in attempts.attempts] == [reason]
+
+
+class _FailingHasher(StubHasher):
+    """A hasher whose verifier itself fails, as argon2 does out of memory."""
+
+    async def verify(self, plaintext: str, password_hash: str) -> bool:
+        await super().verify(plaintext, password_hash)
+        raise PasswordVerificationUnavailableError
+
+
+@pytest.mark.parametrize("username", ["alice", "ghost"])
+async def test_verifier_failure_is_no_failed_attempt(username: str) -> None:
+    # The password was never judged, so the attempt is not a credential failure:
+    # nothing is recorded, no lockout advances, and no failure delay runs; the
+    # error propagates for the edge to answer 503 (issue #3749). "ghost" is the
+    # unknown-user path, which verifies against the dummy hash.
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    delay = RecordingFailureDelay()
+    login = _login(uow, delay, attempts, hasher=_FailingHasher())
+
+    with pytest.raises(PasswordVerificationUnavailableError):
+        await login(username=username, password=_PASSWORD, ip="203.0.113.7")
+
+    assert attempts.attempts == []
+    assert attempts.lockouts == {}
+    assert delay.calls == 0
+    assert uow.refresh_tokens.by_hash == {}
 
 
 async def test_failure_records_attempt_with_username_and_ip() -> None:

@@ -77,6 +77,16 @@ class InvalidCredentialsError(IdentityError):
         self.retry_after = retry_after
 
 
+class PasswordVerificationUnavailableError(IdentityError):
+    """The password could not be checked: the verifier itself failed (#3749).
+
+    A server-side failure, such as the KDF running out of memory or threads, not
+    a verdict on the password. It is never a credential failure: a login that
+    hits it records no failed attempt and makes no lockout progress, and the
+    edge maps it to a transient 503 instead of the uniform 401.
+    """
+
+
 class UserNotFoundError(IdentityError):
     """A user referenced by id was not found (e.g. deleted concurrently)."""
 

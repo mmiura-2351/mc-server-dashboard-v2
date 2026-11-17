@@ -10,7 +10,9 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import Callable
+from typing import Literal
 
+import argon2
 import httpx2
 import pytest
 from fastapi import FastAPI
@@ -24,6 +26,7 @@ from mc_server_dashboard_api.dependencies import (
     get_restore_session,
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
+    Argon2PasswordHasher,
     BcryptPasswordHasher,
     build_dummy_password_hash,
 )
@@ -260,6 +263,57 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
 
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_credentials"
+
+
+class _OutOfMemoryArgon2(argon2.PasswordHasher):
+    """argon2-cffi whose libargon2 call fails to allocate its memory."""
+
+    def verify(self, hash: str | bytes, password: str | bytes) -> Literal[True]:
+        raise argon2.exceptions.VerificationError("Memory allocation error")
+
+
+def test_login_answers_503_when_argon2_runs_out_of_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for #3749: argon2 failing to allocate memory while verifying a
+    # well-formed hash is a server failure. The correct password must not be
+    # refused with the uniform 401 and counted as a failed attempt; the route
+    # answers a transient 503. Wires the real Login + real Argon2PasswordHasher.
+    hasher = Argon2PasswordHasher()
+    monkeypatch.setattr(hasher, "_hasher", _OutOfMemoryArgon2())
+    now = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
+    user = User(
+        id=UserId.new(),
+        username=Username("alice"),
+        email=EmailAddress("alice@example.com"),
+        password_hash=build_dummy_password_hash("argon2", "Wm7!qz#Lp2vT"),
+        created_at=now,
+        updated_at=now,
+    )
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    attempts = FakeLoginAttemptStore()
+    login = Login(
+        uow=uow,
+        attempts=attempts,
+        brute_force=make_brute_force_config(),
+        hasher=hasher,
+        dummy_password_hash=build_dummy_password_hash("argon2", "dummy"),
+        tokens=FakeTokenService(),
+        clock=FakeClock(now),
+        failure_delay=RecordingFailureDelay(),
+        refresh_ttl=dt.timedelta(days=14),
+    )
+    client = _client(login=login)
+
+    resp = client.post(
+        "/api/auth/login", json={"username": "alice", "password": "Wm7!qz#Lp2vT"}
+    )
+
+    assert resp.status_code == 503
+    assert resp.headers["content-type"] == "application/problem+json"
+    assert resp.json()["reason"] == "password_verification_unavailable"
+    assert attempts.attempts == []
 
 
 def test_refresh_returns_new_pair() -> None:

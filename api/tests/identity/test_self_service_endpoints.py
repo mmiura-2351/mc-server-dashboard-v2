@@ -30,6 +30,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     LastPlatformAdminError,
     PasswordPolicyError,
+    PasswordVerificationUnavailableError,
     UsernameAlreadyExistsError,
     UserNotFoundError,
 )
@@ -121,6 +122,20 @@ def test_change_password_wrong_current_returns_uniform_401() -> None:
     )
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_credentials"
+
+
+def test_change_password_verifier_failure_returns_503() -> None:
+    # The current password could not be checked at all (#3749): a transient
+    # server failure, not the uniform 401 of a wrong password.
+    user = make_user()
+    fake = _Fake(error=PasswordVerificationUnavailableError())
+    client = _client(user, change_password=fake)
+    resp = client.put(
+        "/api/users/me/password",
+        json={"current_password": "old", "new_password": _VALID_PASSWORD},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "password_verification_unavailable"
 
 
 def test_change_password_weak_new_returns_422_with_reason_no_echo() -> None:
@@ -258,6 +273,17 @@ def test_delete_account_wrong_password_returns_uniform_401() -> None:
     resp = client.request("DELETE", "/api/users/me", json={"password": "wrong"})
     assert resp.status_code == 401
     assert resp.json()["reason"] == "invalid_credentials"
+
+
+def test_delete_account_verifier_failure_returns_503() -> None:
+    # The password could not be checked at all (#3749): a transient server
+    # failure, not the uniform 401 of a wrong password.
+    user = make_user()
+    fake = _Fake(error=PasswordVerificationUnavailableError())
+    client = _client(user, delete_account=fake)
+    resp = client.request("DELETE", "/api/users/me", json={"password": "pw"})
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "password_verification_unavailable"
 
 
 def test_delete_account_missing_password_returns_422() -> None:
