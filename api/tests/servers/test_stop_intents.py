@@ -86,6 +86,7 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -329,9 +330,13 @@ class _Worker(FakeControlPlane):
     handleStop). Each hydrate takes the next entry of ``hydrate_hooks``, if any:
     it runs before the hydrate answers, and a returned outcome replaces the answer.
     Each start takes the next entry of ``start_hooks`` the same way; a start whose
-    answer is replaced launches nothing. ``stop_sent`` is set once a stop has run
-    on the Worker; while ``hold_stop_answer`` is set, its answer waits for it.
-    ``load`` is the placement load's confirms and drops, in the order made.
+    answer is replaced launches nothing. Each stop takes the next entry of
+    ``stop_refusals``, if any, as its answer, and leaves any instance running.
+    ``stop_sent`` is set once a stop has run on the Worker; while
+    ``hold_stop_answer`` is set, its answer waits for it. Each snapshot runs the
+    next entry of ``snapshot_hooks``, if any, before it answers; one that raises
+    fails the snapshot. ``load`` is the placement load's confirms and drops, in
+    the order made.
     """
 
     def __init__(self, *, place_to: WorkerId | None = None) -> None:
@@ -340,6 +345,8 @@ class _Worker(FakeControlPlane):
         self.live: set[ServerId] = set()
         self.hydrate_hooks: list[Callable[[], Awaitable[CommandOutcome | None]]] = []
         self.start_hooks: list[Callable[[], Awaitable[CommandOutcome | None]]] = []
+        self.stop_refusals: list[CommandOutcome] = []
+        self.snapshot_hooks: list[Hook] = []
         self.stop_sent = asyncio.Event()
         self.hold_stop_answer: asyncio.Event | None = None
 
@@ -394,7 +401,9 @@ class _Worker(FakeControlPlane):
         self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
     ) -> CommandOutcome:
         await super().stop(worker_id=worker_id, server_id=server_id, force=force)
-        if server_id in self.live:
+        if self.stop_refusals:
+            outcome = self.stop_refusals.pop(0)
+        elif server_id in self.live:
             self.live.discard(server_id)
             outcome = CommandOutcome(status=CommandStatus.OK)
         else:
@@ -407,6 +416,24 @@ class _Worker(FakeControlPlane):
             await self.hold_stop_answer.wait()
         return outcome
 
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        outcome = await super().snapshot(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            final=final,
+        )
+        if self.snapshot_hooks:
+            await self.snapshot_hooks.pop(0)()
+        return outcome
+
 
 class _World:
     """One server, one Worker, and the use cases that race over them."""
@@ -416,12 +443,17 @@ class _World:
         *,
         desired: DesiredState = DesiredState.STOPPED,
         assigned: bool = False,
+        observed: ObservedState | None = None,
     ) -> None:
         self.community = CommunityId(uuid.uuid4())
         self.server_id = ServerId(uuid.uuid4())
         self.worker = WorkerId(uuid.uuid4())
         self.repo = _Repository()
-        self.repo.seed(self.row(self.server_id, desired=desired, assigned=assigned))
+        self.repo.seed(
+            self.row(
+                self.server_id, desired=desired, assigned=assigned, observed=observed
+            )
+        )
         self.cp = _Worker(place_to=self.worker)
         self.intents = StopIntentCounter()
         # The starts' lifecycle lock and start-intent lock. No exclusion by
@@ -431,8 +463,19 @@ class _World:
         self.intent_lock: StartIntentLock | None = None
 
     def row(
-        self, server_id: ServerId, *, desired: DesiredState, assigned: bool
+        self,
+        server_id: ServerId,
+        *,
+        desired: DesiredState,
+        assigned: bool,
+        observed: ObservedState | None = None,
     ) -> Server:
+        if observed is None:
+            observed = (
+                ObservedState.UNKNOWN
+                if desired is DesiredState.RUNNING
+                else ObservedState.STOPPED
+            )
         return Server(
             id=server_id,
             community_id=self.community,
@@ -442,11 +485,7 @@ class _World:
             server_type=ServerType.VANILLA,
             config={},
             desired_state=desired,
-            observed_state=(
-                ObservedState.UNKNOWN
-                if desired is DesiredState.RUNNING
-                else ObservedState.STOPPED
-            ),
+            observed_state=observed,
             observed_at=None,
             assigned_worker_id=self.worker if assigned else None,
             created_at=_NOW,
@@ -1726,6 +1765,327 @@ async def test_a_revert_keeps_a_config_edit_made_after_its_read(kind: str) -> No
 
     assert world.stored()[1] is None
     assert _kept_the_edit(world)
+
+
+# Issue #3766: a stop convergence owed for a row whose intent is already stopped,
+# run at once by an operator stop (issue #3491). For a row that reads
+# observed=stopped or crashed, that convergence used to take the final snapshot and
+# release the row, trusting the cached state. It did so under a start the Worker
+# had not reported on yet, and before the write that stopped the row had moved the
+# count.
+
+
+def _launches_then(world: _World, *writes: Hook) -> None:
+    """The next start launches its instance, then ``writes`` run before it answers.
+
+    The instance is up, but the Worker has reported nothing yet, so the row's
+    observed state is still the one the server had before the start.
+    """
+
+    async def launch() -> CommandOutcome:
+        world.cp.live.add(world.server_id)
+        for write in writes:
+            await write()
+        return CommandOutcome(status=CommandStatus.OK)
+
+    world.cp.start_hooks.append(launch)
+
+
+async def _withdraw_raising(
+    world: _World, withdrawal: str, error: BaseException
+) -> None:
+    """Withdraw the intent with a drain or a stop whose commit raises ``error``.
+
+    Neither sends a stop: a drain never does, and a stop whose commit raises
+    does not get as far.
+    """
+
+    uow = _CommitLandsThenRaises(servers=world.repo, error=error)
+    with pytest.raises(type(error)):
+        if withdrawal == "drain":
+            await world.drain(uow)
+        else:
+            await StopServer(
+                uow=uow,
+                control_plane=world.cp,
+                clock=FakeClock(_NOW),
+                stop_intents=world.intents,
+            )(community_id=world.community, server_id=world.server_id)
+
+
+@pytest.mark.parametrize("withdrawal", ["drain", "stop-lost-response"])
+async def test_an_operator_stop_after_a_silent_withdrawal_stops_the_launching_start(
+    withdrawal: str,
+) -> None:
+    # The issue's sequence. The start is out, and a drain, or a stop whose commit
+    # lands but raises, withdraws its intent after it compared. Neither sends a
+    # stop. The operator then stops the (stopped, stopped, W) row. Its convergence
+    # used to release the row under the launching instance. It now sends a stop,
+    # which the Worker runs behind the start, as a real stop.
+    world = _World()
+
+    async def withdraw() -> None:
+        if withdrawal == "drain":
+            assert await world.drain() == [world.server_id]
+        else:
+            await _withdraw_raising(world, "stop", ConnectionError("response lost"))
+
+    async def operator_stop() -> None:
+        await world.stop()
+
+    _launches_then(world, withdraw, operator_stop)
+
+    await world.start()
+
+    assert world.cp.live == set()
+    assert world.kinds() == ["hydrate", "start", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
+async def test_a_refused_stop_does_not_count_as_stopping_the_start() -> None:
+    # The stop that withdrew the intent was sent behind the start, but the Worker
+    # refused it: it waited behind the start past its expiry. The start is still
+    # launching, so the operator's retry must send a stop again, not release.
+    world = _World()
+    world.cp.stop_refusals.append(
+        CommandOutcome(status=CommandStatus.EXPIRED, message="expired in the lane")
+    )
+
+    async def stop_refused() -> None:
+        with pytest.raises(CommandDispatchError):
+            await world.stop()
+
+    async def operator_retries() -> None:
+        await world.stop()
+
+    _launches_then(world, stop_refused, operator_retries)
+
+    await world.start()
+
+    assert world.cp.live == set()
+    assert world.kinds() == ["hydrate", "start", "stop", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
+async def test_a_release_leaves_a_row_the_worker_reported_on_since_its_read() -> None:
+    # What no in-process record sees: a start sent before an API restart, say,
+    # whose instance reports starting while the convergence takes its final
+    # snapshot. The release compares the row's observed_at with the one it read,
+    # so it leaves the row assigned, and the reconciler acts on the report.
+    world = _World(assigned=True)
+    reported = _NOW + dt.timedelta(seconds=1)
+
+    async def report_starting() -> None:
+        assert await world.repo.record_observed_state(
+            world.server_id,
+            ObservedState.STARTING,
+            reported,
+            expected_worker=world.worker,
+        )
+
+    world.cp.snapshot_hooks.append(report_starting)
+
+    await world.stop()
+
+    assert world.kinds() == ["snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, world.worker)
+
+
+async def _withdrawal_not_yet_visible(world: _World, withdrawal: str) -> Hook:
+    """Cancel a write's commit before its flip lands; return what lands it.
+
+    The commit raises, cancelled, while the flip is still unreadable to other
+    sessions, so the write's bump comes first (comment 1 on issue #3766).
+    """
+
+    world.repo.stage_flips = True
+    await _withdraw_raising(world, withdrawal, asyncio.CancelledError())
+
+    async def lands() -> None:
+        await world.repo.land_staged()
+
+    return lands
+
+
+@pytest.mark.parametrize("withdrawal", ["drain", "stop"])
+async def test_a_re_sent_start_out_before_its_withdrawal_was_visible_is_stopped(
+    withdrawal: str,
+) -> None:
+    # Comment 1 on #3766: the cancelled commit's bump came before its flip was
+    # readable. A re-send that read the count in that gap, and the row before the
+    # flip landed, is not held back, and goes out under the stopped row. The
+    # operator stop owed for that row sends a stop behind it.
+    world = _World(
+        desired=DesiredState.RUNNING, assigned=True, observed=ObservedState.STOPPED
+    )
+    lands = await _withdrawal_not_yet_visible(world, withdrawal)
+    world.after_hydrate_and_next_read(lands)
+
+    await world.start_server().redispatch_start(
+        community_id=world.community, server_id=world.server_id
+    )
+    assert world.kinds() == ["hydrate", "start"]
+    assert world.stored() == (DesiredState.STOPPED, world.worker)
+
+    await world.stop()
+
+    assert world.cp.live == set()
+    assert world.kinds() == ["hydrate", "start", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [ObservedState.STOPPED, ObservedState.UNKNOWN],
+    ids=["clear", "redispatch-stop"],
+)
+async def test_a_re_sent_start_that_compares_during_the_owed_stop_is_not_sent(
+    observed: ObservedState,
+) -> None:
+    # The same re-send, comparing only once the operator stop's convergence is
+    # under way: paused in its final snapshot, before it releases (a row read
+    # stopped), or with its stop on the Worker (a row read unknown). The
+    # convergence withdraws the intent itself before either, so the re-send's
+    # count has moved and it sends nothing. Its stop, if any, ran first and found
+    # nothing, and the row is released with nothing under it.
+    world = _World(desired=DesiredState.RUNNING, assigned=True, observed=observed)
+    uow = _ExitRunsHook(servers=world.repo)
+    lands = await _withdrawal_not_yet_visible(world, "drain")
+    paused = asyncio.Event()
+    resume = asyncio.Event()
+    stops: list[asyncio.Task[Server]] = []
+
+    async def pause() -> None:
+        paused.set()
+        await resume.wait()
+
+    if observed is ObservedState.STOPPED:
+        world.cp.snapshot_hooks.append(pause)
+    else:
+        world.cp.hold_stop_answer = resume
+        world.cp.stop_sent = paused
+
+    async def operator_stop_under_way() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+        await _either(stops[0], paused)
+
+    async def arm() -> None:
+        world.repo.after_next_read = lands
+        uow.on_next_exit = operator_stop_under_way
+
+    world.after_hydrate(arm)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server(uow).redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    resume.set()
+    await stops[0]
+
+    assert "start" not in world.kinds()
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [ObservedState.STOPPED, ObservedState.UNKNOWN],
+    ids=["clear", "redispatch-stop"],
+)
+async def test_a_drain_still_committing_cannot_let_a_failed_start_undo_a_newer_one(
+    observed: ObservedState,
+) -> None:
+    # Comment 2 on #3766, #3791's interaction. Start A hydrates. A drain's flip has
+    # landed, but its commit has not returned, so it has not bumped. An operator
+    # stop of the drained row runs its convergence and releases the row. A newer
+    # start B then read the count, which nothing had moved since A read it, and
+    # placed the server on the same Worker. A's hydrate then failed, and A's revert
+    # found the count and the row as A had left them, and undid B's intent under
+    # B's instance. The convergence now withdraws the intent itself before it
+    # releases, so B reads a newer count and A's revert leaves B alone.
+    world = _seeded("start")
+    world.repo.by_id[world.server_id].observed_state = observed
+    drain_uow = _CommitLandsThenWaits(servers=world.repo, at=1)
+    drains: list[asyncio.Task[list[ServerId]]] = []
+
+    async def drain_lands_then_stop_and_restart() -> CommandOutcome:
+        drains.append(asyncio.create_task(world.drain(drain_uow)))
+        await _either(drains[0], drain_uow.landed)
+        await world.stop()
+        await world.start()
+        return _HYDRATE_FAILED
+
+    world.cp.hydrate_hooks.append(drain_lands_then_stop_and_restart)
+
+    await _fails(world, "start")
+    drain_uow.returns.set()
+
+    assert await drains[0] == [world.server_id]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.decremented == []
+
+
+@pytest.mark.parametrize("ending", ["refused", "crashed"])
+async def test_an_owed_stop_after_a_start_that_left_nothing_running_releases(
+    ending: str,
+) -> None:
+    # The stop sent behind a start finds nothing when the Worker refused the start,
+    # or its instance has crashed since. The Worker answers SERVER_NOT_FOUND, and
+    # the row is released as before, a crash still reading crashed.
+    world = _World()
+
+    async def drain() -> None:
+        assert await world.drain() == [world.server_id]
+
+    if ending == "refused":
+
+        async def drain_then_refuse() -> CommandOutcome:
+            await drain()
+            return CommandOutcome(status=CommandStatus.PORT_CONFLICT, message="taken")
+
+        world.cp.start_hooks.append(drain_then_refuse)
+        with pytest.raises(CommandDispatchError):
+            await world.start()
+    else:
+        _launches_then(world, drain)
+        await world.start()
+        world.cp.live.discard(world.server_id)
+        assert await world.repo.record_observed_state(
+            world.server_id,
+            ObservedState.CRASHED,
+            _NOW + dt.timedelta(seconds=1),
+            expected_worker=world.worker,
+        )
+
+    await world.stop()
+
+    assert world.kinds() == ["hydrate", "start", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.repo.by_id[world.server_id].observed_state is (
+        ObservedState.STOPPED if ending == "refused" else ObservedState.CRASHED
+    )
+
+
+async def test_a_stop_run_behind_the_start_leaves_a_later_release_plain() -> None:
+    # A stop the Worker ran behind the start has stopped it. A release still owed
+    # after that stop (its final snapshot timed out here) is the plain one again:
+    # the final snapshot and the release, with no second stop.
+    world = _World()
+    await world.start()
+
+    async def timed_out() -> None:
+        raise WorkerUnavailableError(str(world.worker.value), upload_may_be_live=True)
+
+    world.cp.snapshot_hooks.append(timed_out)
+    await world.stop()
+    assert world.stored() == (DesiredState.STOPPED, world.worker)
+
+    await world.stop()
+
+    assert world.cp.live == set()
+    assert world.kinds() == ["hydrate", "start", "stop", "snapshot", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
 
 
 async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends() -> (

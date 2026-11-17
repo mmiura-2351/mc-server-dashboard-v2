@@ -469,6 +469,45 @@ class ServerRepositoryContract:
             assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
             assert parameter.default is inspect.Parameter.empty
 
+    @pytest.mark.parametrize(
+        ("desired", "applies"),
+        [(DesiredState.STOPPED, True), (DesiredState.RUNNING, False)],
+        ids=["stopped", "running"],
+    )
+    async def test_an_observed_write_releases_only_a_stopped_intent(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        desired: DesiredState,
+        applies: bool,
+    ) -> None:
+        # Issue #3766: an observed write that also clears the assignment is a
+        # release, and like every other release it needs desired=stopped. Otherwise
+        # the whole write is dropped, the observed state with it.
+        item = server(contract_community_id)
+        item.desired_state = desired
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            written = await tx.repository.record_observed_state(
+                item.id,
+                ObservedState.UNKNOWN,
+                _LATER,
+                unassign=True,
+                expected_worker=item.assigned_worker_id,
+            )
+            await tx.commit()
+        assert written is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.observed_at, row.assigned_worker_id) == (
+            (ObservedState.UNKNOWN, _LATER, None)
+            if applies
+            else (ObservedState.CRASHED, _NOW, item.assigned_worker_id)
+        )
+
     async def test_missing_updates_do_not_insert(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
