@@ -26,9 +26,11 @@
  * 503 responses with a recognized `reason` (`no_eligible_worker`,
  * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
  * `worker_unavailable` — the API's rendering of a dispatch that timed out or lost
- * the Worker session — is verb-specific on stop and restart for the same reason
- * some 409s are: the intent was already committed, so "try again" is wrong
- * (issue #2440). All other errors fall back to the generic action-failed toast.
+ * the Worker session, and of a Worker that answered that its container backend
+ * did not cooperate (issue #3673) — is verb-specific on stop and restart for the
+ * same reason some 409s are: the intent was already committed, so "try again" is
+ * wrong (issue #2440). All other errors fall back to the generic action-failed
+ * toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
@@ -154,11 +156,11 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 //
 // - start   — compensated back to stopped wherever the start demonstrably did
 //             not happen, which is every 409 reason below EXCEPT a post-dispatch
-//             BUSY (see the worker_busy note below; a post-dispatch 503
-//             `worker_unavailable` is the same carve-out, see
-//             VERB_SPECIFIC_503_MESSAGE). So for `command_failed` nothing is
-//             pending and the verb-agnostic message is already right. Absent
-//             here.
+//             BUSY (see the worker_busy note below; a 503 `worker_unavailable`
+//             from a post-dispatch timeout or lost session is the same
+//             carve-out, see VERB_SPECIFIC_503_MESSAGE). So for `command_failed`
+//             nothing is pending and the verb-agnostic message is already right.
+//             Absent here.
 // - stop    — desired=stopped is committed over a still-running process and no
 //             stop failure class proves the stop will not take effect, so the
 //             intent stands and the reconciler's redispatch_stop keeps trying.
@@ -199,8 +201,9 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // retry on `invalid_transition` (see the invalid_transition entry below). The
 // 503 `worker_unavailable` start path has the identical pre/post ambiguity and
 // deliberately stays verb-agnostic (VERB_SPECIFIC_503_MESSAGE); the difference
-// is that a timeout answers nothing at all, whereas a BUSY at least tells us the
-// host is busy, which is what this message can honestly say.
+// is that a timeout answers nothing at all, and the Worker's own UNAVAILABLE
+// says only that its container backend did not cooperate, whereas a BUSY at
+// least tells us the host is busy, which is what this message can honestly say.
 //
 // `invalid_transition` on start is start-only for the same reason: StartServer
 // raises it only when desired_state is ALREADY running (lifecycle.py, the entry
@@ -261,25 +264,32 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 
 // The 503 counterpart of VERB_SPECIFIC_409_MESSAGE, consulted the same way and
 // falling through to SPECIFIC_503_MESSAGE (issue #2440). `worker_unavailable` is
-// the API's rendering of a dispatch that TIMED OUT or lost the Worker session
-// (servers/api/servers.py `_SERVICE_UNAVAILABLE_REASONS`); the generic message
-// asks for a retry, which is wrong wherever the verb already committed its
-// intent:
+// the API's rendering of a dispatch that TIMED OUT or lost the Worker session,
+// and of a Worker that answered UNAVAILABLE because its container backend did
+// not cooperate (issue #3673; servers/api/servers.py
+// `_SERVICE_UNAVAILABLE_REASONS`, command_dispatch.py `_SANITIZED_REASONS`); the
+// generic message asks for a retry, which is wrong wherever the verb already
+// committed its intent:
 //
-// - stop    — the only way StopServer can raise it is the `control_plane.stop`
-//             call, which happens AFTER desired=stopped is committed and the
-//             placement load decremented, and nothing is compensated
-//             (lifecycle.py StopServer). So the stop intent is pending on every
-//             worker-unavailable stop, with no ambiguity.
+// - stop    — StopServer raises it from one of two dispatches, both AFTER
+//             desired=stopped is committed and the placement load decremented,
+//             and nothing is compensated (lifecycle.py StopServer): the
+//             `control_plane.stop` call, or, converging a server already
+//             desired-stopped (`_clear_stale_assignment`), the final snapshot
+//             whose timeout raises WorkerUnavailableError. So the stop intent is
+//             pending on every worker-unavailable stop, with no ambiguity.
 // - restart — desired stays running (restart commits no state change), so a
-//             Worker that stopped the server and failed to relaunch it leaves
-//             the server down with the reconciler about to start it again —
-//             the same reasoning as the 409 entry above.
+//             Worker that stopped the server and failed to relaunch it (its
+//             relaunch answered UNAVAILABLE among the rest) leaves the server
+//             down with the reconciler about to start it again — the same
+//             reasoning as the 409 entry above.
 // - start   — absent DELIBERATELY. A PRE-dispatch unavailable (a failed hydrate,
-//             or a connect that never reached the Worker) IS compensated back to
-//             stopped, so nothing is pending and "try again" is right; a
-//             POST-dispatch one keeps desired=running plus the assignment for
-//             redispatch_start, so a start IS pending. Both arrive as a bare
+//             a hydrate the Worker answered UNAVAILABLE, or a connect that never
+//             reached the Worker) IS compensated back to stopped, and so is a
+//             start the Worker itself answered UNAVAILABLE, so nothing is
+//             pending and "try again" is right; a POST-dispatch timeout or lost
+//             session keeps desired=running plus the assignment for
+//             redispatch_start, so a start IS pending. All arrive as a bare
 //             `worker_unavailable` and the client cannot tell them apart — the
 //             same ambiguity #2445 tracks for the BUSY start, so start stays on
 //             the verb-agnostic message here too.
@@ -288,7 +298,10 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 // reported by a Worker that answered, so the toast can say what the server did;
 // a timeout answers nothing — a graceful stop simply outliving the API's
 // dispatch deadline is the commonest case, and it usually succeeds — so these
-// say the outcome is unconfirmed. What survives the failure differs by verb, and
+// say the outcome is unconfirmed. A restart whose relaunch the Worker answered
+// UNAVAILABLE shares the restart string: that answer says only that the relaunch
+// did not complete successfully, and the reconciler starts the server if it
+// stays down. What survives the failure differs by verb, and
 // the strings differ with it: the stop INTENT is re-driven (redispatch_stop
 // keeps retrying it), so that string states the retry; restart keeps only
 // desired=running — an undelivered restart is never re-sent, and the reconciler
