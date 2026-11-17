@@ -81,7 +81,12 @@ def test_action_enum_matches_check_constraint_values() -> None:
 
 
 def test_run_outcome_enum_matches_check_constraint_values() -> None:
-    assert {o.value for o in ScheduleRunOutcome} == {"success", "failure", "skipped"}
+    assert {o.value for o in ScheduleRunOutcome} == {
+        "success",
+        "failure",
+        "skipped",
+        "unknown",
+    }
 
 
 # --- cadence (cron XOR interval) ----------------------------------------------

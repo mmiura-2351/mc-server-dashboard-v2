@@ -161,7 +161,7 @@ async def test_checks_reject_bad_action_and_non_xor_cadence() -> None:
     await downgrade_base(_DB_URL)
 
 
-async def test_run_outcome_check_rejects_unknown_value() -> None:
+async def test_run_outcome_check_rejects_a_value_outside_the_enum() -> None:
     assert _DB_URL is not None
     await downgrade_base(_DB_URL)
     await upgrade_head(_DB_URL)

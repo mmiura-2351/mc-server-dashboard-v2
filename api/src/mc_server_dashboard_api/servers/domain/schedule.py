@@ -110,12 +110,14 @@ class ScheduleRunOutcome(enum.Enum):
 
     ``SKIPPED`` records a fired occurrence whose precondition was unmet (e.g.
     stopping a server that is not running) — an honest history entry, not a
-    failure.
+    failure. ``UNKNOWN`` records an action sent to the Worker that did not answer
+    in time (issue #3660): it may still have run, so it is not a failure either.
     """
 
     SUCCESS = "success"
     FAILURE = "failure"
     SKIPPED = "skipped"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)

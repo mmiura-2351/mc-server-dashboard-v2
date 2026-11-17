@@ -88,6 +88,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     ScheduleAction,
     ScheduleId,
     ScheduleRun,
+    ScheduleRunOutcome,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -210,7 +211,7 @@ class ScheduleRunResponse(BaseModel):
     schedule_id: str
     started_at: UtcDatetime
     finished_at: UtcDatetime
-    outcome: str
+    outcome: ScheduleRunOutcome
     detail: str | None
 
     @classmethod
@@ -220,7 +221,7 @@ class ScheduleRunResponse(BaseModel):
             schedule_id=str(run.schedule_id.value),
             started_at=run.started_at,
             finished_at=run.finished_at,
-            outcome=run.outcome.value,
+            outcome=run.outcome,
             detail=run.detail,
         )
 
@@ -546,7 +547,9 @@ async def list_schedule_runs(
     """List a schedule's recorded executions, newest first.
 
     Requires `schedule:read`. Each run carries the outcome
-    (`success`/`failure`/`skipped`) and an optional sanitized `detail` note.
+    (`success`/`failure`/`skipped`/`unknown`) and an optional sanitized `detail`
+    note. `unknown` is an action the Worker did not answer in time: it may still
+    have run.
     """
 
     try:

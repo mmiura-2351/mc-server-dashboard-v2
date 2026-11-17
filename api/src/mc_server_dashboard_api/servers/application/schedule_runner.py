@@ -23,6 +23,14 @@ Outcome taxonomy (owner-confirmed):
   one operator toast for the whole incident, keyed by ``schedule_id`` in the
   in-memory ``_notifying`` set (no time window), and one recovery toast when the
   next success clears it. Skips leave that state untouched.
+* **unknown** — the action was sent and the Worker did not answer in time, so it
+  may still have run (issue #3660): a command, stop or restart whose own command
+  timed out, or a start whose start command did (its intent stands, and the
+  reconciler converges it). Audited and notified like a failure, under its own
+  title, and never retried. A timeout that leaves the action definitely undone
+  stays a failure: a start whose hydrate timed out (the start was never sent, and
+  its intent is reverted), and a backup whose snapshot timed out (the archive is
+  written only after the snapshot returns, so no backup exists).
 * **success** — otherwise. Clears any ``_notifying`` state and fires exactly one
   recovery notification when it ends a run of failures.
 
@@ -49,7 +57,8 @@ tasks.
 Backup-only bounded retry: a failed ``backup`` occurrence arms one in-memory
 retry ~30 minutes later (lost on restart — accepted). The retry records (and, on
 failure, notifies) but never moves ``next_run_at``; it fires at most once, then
-the schedule waits for its next occurrence.
+the schedule waits for its next occurrence. Only a failure arms it: an unknown
+outcome may still have run, and a retry could repeat it.
 
 Delivery is at-least-once across a crash: the run executes before ``next_run_at``
 advances, so an API crash in the window between the two replays the occurrence
@@ -257,7 +266,9 @@ def _failure_detail(exc: ServerError) -> str:
     if isinstance(exc, CommandDispatchError):
         return exc.reason or "dispatch failed"
     if isinstance(exc, WorkerUnavailableError):
-        return "worker unavailable"
+        # ``upload_may_be_live`` is set only for a command that was sent and not
+        # answered in time; it is False for a Worker that is not connected.
+        return "worker timed out" if exc.upload_may_be_live else "worker unavailable"
     if isinstance(exc, NoEligibleWorkerError):
         return "no eligible worker"
     if isinstance(exc, BackupCorruptError):
@@ -368,8 +379,13 @@ class ExecuteScheduleAction:
                 server_id.value,
                 exc,
             )
+            outcome = (
+                ScheduleRunOutcome.UNKNOWN
+                if await self._may_have_run(server_id, action, exc)
+                else ScheduleRunOutcome.FAILURE
+            )
             return ActionResult(
-                ScheduleRunOutcome.FAILURE,
+                outcome,
                 _failure_detail(exc),
                 community_id,
                 retryable=not isinstance(exc, BackupCorruptError),
@@ -393,6 +409,32 @@ class ExecuteScheduleAction:
                 ScheduleRunOutcome.FAILURE, _unexpected_detail(exc), community_id
             )
         return ActionResult(ScheduleRunOutcome.SUCCESS, None, community_id)
+
+    async def _may_have_run(
+        self, server_id: ServerId, action: ScheduleAction, exc: ServerError
+    ) -> bool:
+        """Whether a failed action may still take effect (issue #3660).
+
+        Only a command the Worker did not answer in time can: the adapter flags
+        that timeout ``upload_may_be_live``, and a refusal or a Worker that is not
+        connected never ran it. A backup's timeout is its snapshot, which
+        :class:`CreateBackup` awaits before it writes the archive, so no backup
+        exists. A start's timeout is either its hydrate, after which
+        :class:`StartServer` reverts the intent and never sends the start, or the
+        start command itself, after which the intent and assignment stand for the
+        reconciler to converge. The row tells the two apart: the start can still
+        happen exactly while its intent stands.
+        """
+
+        if not isinstance(exc, WorkerUnavailableError) or not exc.upload_may_be_live:
+            return False
+        if action is ScheduleAction.BACKUP:
+            return False
+        if action is ScheduleAction.START:
+            async with self.uow:
+                server = await self.uow.servers.get_by_id(server_id)
+            return server is not None and server.desired_state is DesiredState.RUNNING
+        return True
 
     async def _dispatch(
         self, server: Server, action: ScheduleAction, command: str | None
@@ -812,17 +854,24 @@ class RunScheduleTick:
                     title=f"Scheduled {schedule.action.value} recovered",
                     detail=result.detail or "",
                 )
-        elif result.outcome is ScheduleRunOutcome.FAILURE:
+        elif result.outcome in (ScheduleRunOutcome.FAILURE, ScheduleRunOutcome.UNKNOWN):
             await self._audit(schedule, result.community_id, Outcome.ERROR)
             # State-transition suppression (issue #2269): notify only on the
             # failing edge; sustained failures record run rows every occurrence
-            # (above) but emit a single toast until the schedule recovers.
+            # (above) but emit a single toast until the schedule recovers. An
+            # unknown outcome is on the same edge, but its title must not say the
+            # action failed: it may have run (issue #3660).
             if schedule.id not in self._notifying:
                 self._notifying.add(schedule.id)
+                title = (
+                    f"Scheduled {schedule.action.value}: outcome unknown"
+                    if result.outcome is ScheduleRunOutcome.UNKNOWN
+                    else f"Scheduled {schedule.action.value} failed"
+                )
                 self.notifier.notify(
                     server_id=schedule.server_id,
                     kind=_NOTIFY_KIND,
-                    title=f"Scheduled {schedule.action.value} failed",
+                    title=title,
                     detail=result.detail or "",
                 )
         if not recorded:
@@ -875,9 +924,11 @@ class RunScheduleTick:
             self._backup_retry[schedule_id] = now + self.backup_retry_delay
         elif result.outcome is ScheduleRunOutcome.SUCCESS:
             self._backup_retry.pop(schedule_id, None)
-        # SKIPPED, or a non-retryable (deterministic) FAILURE such as a corrupt
-        # working set (#2250): leave any pending retry untouched — a skip is not a
-        # fresh failure, and a deterministic failure's re-archive can never succeed.
+        # SKIPPED, UNKNOWN, or a non-retryable (deterministic) FAILURE such as a
+        # corrupt working set (#2250): leave any pending retry untouched — a skip is
+        # not a fresh failure, an unknown outcome may still have run so a retry
+        # could repeat it (#3660), and a deterministic failure's re-archive can
+        # never succeed.
 
     def _is_stale(
         self,

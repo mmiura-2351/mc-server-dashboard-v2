@@ -115,7 +115,7 @@ class ScheduleRunModel(Base):
     __tablename__ = "schedule_run"
     __table_args__ = (
         CheckConstraint(
-            "outcome IN ('success', 'failure', 'skipped')",
+            "outcome IN ('success', 'failure', 'skipped', 'unknown')",
             name="ck_schedule_run_outcome",
         ),
         # List a schedule's runs newest-first; the leading column also serves

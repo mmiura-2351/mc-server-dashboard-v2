@@ -2111,7 +2111,9 @@ export interface paths {
          * @description List a schedule's recorded executions, newest first.
          *
          *     Requires `schedule:read`. Each run carries the outcome
-         *     (`success`/`failure`/`skipped`) and an optional sanitized `detail` note.
+         *     (`success`/`failure`/`skipped`/`unknown`) and an optional sanitized `detail`
+         *     note. `unknown` is an action the Worker did not answer in time: it may still
+         *     have run.
          */
         get: operations["list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get"];
         put?: never;
@@ -4041,6 +4043,17 @@ export interface components {
             warning_steps: components["schemas"]["WarningStepResponse"][];
         };
         /**
+         * ScheduleRunOutcome
+         * @description How one execution ended (``ck_schedule_run_outcome`` CHECK enum).
+         *
+         *     ``SKIPPED`` records a fired occurrence whose precondition was unmet (e.g.
+         *     stopping a server that is not running) — an honest history entry, not a
+         *     failure. ``UNKNOWN`` records an action sent to the Worker that did not answer
+         *     in time (issue #3660): it may still have run, so it is not a failure either.
+         * @enum {string}
+         */
+        ScheduleRunOutcome: "success" | "failure" | "skipped" | "unknown";
+        /**
          * ScheduleRunResponse
          * @description Public view of one recorded schedule execution (issue #1837).
          */
@@ -4054,8 +4067,7 @@ export interface components {
             finished_at: string;
             /** Id */
             id: string;
-            /** Outcome */
-            outcome: string;
+            outcome: components["schemas"]["ScheduleRunOutcome"];
             /** Schedule Id */
             schedule_id: string;
             /**

@@ -755,6 +755,9 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.runs.outcome.success": "成功",
   "schedules.runs.outcome.failure": "失敗",
   "schedules.runs.outcome.skipped": "スキップ",
+  "schedules.runs.outcome.unknown": "不明",
+  "schedules.runs.unknownDetail":
+    "ホストが時間内に応答しませんでした。操作は実行された可能性があります。",
 
   // Files tab (WEBUI_SPEC.md 6.6).
   "files.denied": "このサーバーのファイルを表示する権限がありません。",
