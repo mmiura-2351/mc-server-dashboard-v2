@@ -106,6 +106,11 @@ type dockerAPI interface {
 	// Logs opens a following stdout+stderr log stream for a running container
 	// (FR-MON-2). The returned reader carries Docker's multiplexed stream frames
 	// (non-TTY); the caller demuxes them. Closing the reader ends the follow.
+	//
+	// Cancelling ctx must release both the open and any read of the returned
+	// reader, whether in progress or still to come, even when the daemon stalls:
+	// the install supervisor cancels a follow that has not ended by its drain bound
+	// and then waits for it to return with no bound of its own (issue #3667).
 	Logs(ctx context.Context, id string) (io.ReadCloser, error)
 	// Stats reads a one-shot resource sample for a running container (FR-MON-3).
 	Stats(ctx context.Context, id string) (ContainerStats, error)

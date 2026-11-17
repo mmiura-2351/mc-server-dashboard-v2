@@ -1792,6 +1792,14 @@ func (i *instance) superviseInstall(installID string) {
 		// the sticky stop intent: a container that survived the kill window and
 		// then died after the latch was reset is still a requested stop, so report
 		// stopped (mirrors issue #257).
+		//
+		// Observing the exit is the cutoff for stop intent, as in supervise: only a
+		// Stop latched by now makes this attempt's exit a stop. A Stop that arrives
+		// later, during the log drain below, does not turn a failure this attempt
+		// already produced (an explained one, or the last retry's) into stopped;
+		// Stop returns nil once that crash is published. It still keeps anything
+		// further from starting: the retry and launch paths re-read the stop intent
+		// and report stopped (issue #3667).
 		i.exitObserved = true
 		stopping := i.stopRequested
 		i.mu.Unlock()
@@ -2122,7 +2130,9 @@ func (i *instance) followInstallOutput(installID string) *installLogFollow {
 // finish is called once the installer's exit is observed. It gives the follow up
 // to drain to reach the end of the stream, which a healthy follow does right after
 // the exit, then cancels it and waits for it to return, and reports what the
-// attempt's output said.
+// attempt's output said. The wait after the cancel has no bound of its own: the
+// dockerAPI.Logs contract is that cancelling the follow's context releases its
+// open and its reads (issue #3667).
 func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 	timer := time.NewTimer(drain)
 	defer timer.Stop()

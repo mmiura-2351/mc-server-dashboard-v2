@@ -502,6 +502,101 @@ func TestEngineClientLogsStreamsBody(t *testing.T) {
 	}
 }
 
+// logsCancelBound is how long a cancelled Logs open or read may take to return.
+// Cancellation releases it at once; the bound only turns a broken contract into a
+// failure rather than a hang.
+const logsCancelBound = 10 * time.Second
+
+// stallingLogsDaemon serves a logs request that stalls, before its response
+// header or, with prefix set, after sending prefix as the start of the body. Each
+// request reaching the stall is announced on the returned channel. A stalled
+// handler returns once the client goes away or the test ends.
+func stallingLogsDaemon(t *testing.T, prefix string) (*EngineClient, <-chan struct{}) {
+	t.Helper()
+	stalled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	d := startFakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if prefix != "" {
+			_, _ = w.Write([]byte(prefix))
+			w.(http.Flusher).Flush()
+		}
+		stalled <- struct{}{}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	})
+	t.Cleanup(func() { close(release) })
+	return d.client(t), stalled
+}
+
+// Cancelling the context releases a Logs open whose response header stalls
+// (issue #3667): the install supervisor cancels a stalled follow and then waits for
+// it with no bound of its own, so the dockerAPI.Logs contract is that cancellation
+// alone ends the open.
+func TestEngineClientLogsOpenIsReleasedByCancel(t *testing.T) {
+	c, stalled := stallingLogsDaemon(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	opened := make(chan error, 1)
+	go func() {
+		rc, err := c.Logs(ctx, "abc123")
+		if err == nil {
+			_ = rc.Close()
+		}
+		opened <- err
+	}()
+	<-stalled
+	cancel()
+
+	select {
+	case err := <-opened:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Logs = %v, want the cancellation", err)
+		}
+	case <-time.After(logsCancelBound):
+		t.Fatal("a cancelled Logs open is still waiting for the response header")
+	}
+}
+
+// Cancelling the context releases a read of an open Logs stream whose body stalls
+// (issue #3667), for the same reason as the open. The read is issued as the
+// cancel lands; whichever comes first, the read must return.
+func TestEngineClientLogsReadIsReleasedByCancel(t *testing.T) {
+	const prefix = "multiplexed-bytes"
+	c, stalled := stallingLogsDaemon(t, prefix)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rc, err := c.Logs(ctx, "abc123")
+	if err != nil {
+		t.Fatalf("Logs: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	<-stalled
+	got := make([]byte, len(prefix))
+	if _, err := io.ReadFull(rc, got); err != nil || string(got) != prefix {
+		t.Fatalf("read %q, %v, want the body sent before the stall", got, err)
+	}
+
+	read := make(chan error, 1)
+	go func() {
+		_, err := rc.Read(make([]byte, 1))
+		read <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-read:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Read = %v, want the cancellation", err)
+		}
+	case <-time.After(logsCancelBound):
+		t.Fatal("a read of a cancelled Logs stream is still waiting for the body")
+	}
+}
+
 func TestEngineClientNonUnixHostRejected(t *testing.T) {
 	if _, err := NewEngineClient("tcp://127.0.0.1:2375"); err == nil {
 		t.Fatal("expected NewEngineClient to reject a non-unix host")
