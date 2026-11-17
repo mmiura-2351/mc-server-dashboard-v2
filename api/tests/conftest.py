@@ -26,6 +26,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
     Authentication,
 )
+from tests.argon2_diagnostics import RECENT_NODE_IDS
 from tests.client_utils import bind_exit_stack
 from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
 
@@ -149,6 +150,11 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     from tests.integration.scratch_db import drop_scratch_database
 
     drop_scratch_database(base_url, _SCRATCH_DB_URL)
+
+
+def pytest_runtest_logstart(nodeid: str) -> None:
+    """Remember each test this process starts, for the argon2 report (#3748)."""
+    RECENT_NODE_IDS.append(nodeid)
 
 
 def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
