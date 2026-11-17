@@ -34,6 +34,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.api.problems import password_hasher_unavailable
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
 from mc_server_dashboard_api.identity.application.list_sessions import ListSessions
@@ -224,7 +225,7 @@ async def change_password(
     except InvalidCredentialsError as exc:
         raise _unauthorized() from exc
     except PasswordVerificationUnavailableError as exc:
-        raise _verification_unavailable() from exc
+        raise password_hasher_unavailable() from exc
     except UserNotFoundError as exc:
         raise _user_gone() from exc
     except PasswordPolicyError as exc:
@@ -301,7 +302,7 @@ async def delete_account(
     except InvalidCredentialsError as exc:
         raise _unauthorized() from exc
     except PasswordVerificationUnavailableError as exc:
-        raise _verification_unavailable() from exc
+        raise password_hasher_unavailable() from exc
     except CommunityOwnedError as exc:
         raise problem(status.HTTP_409_CONFLICT, "owns_community") from exc
     except LastPlatformAdminError as exc:
@@ -485,14 +486,6 @@ def _session_not_found() -> ProblemException:
     # indistinguishable: a single 404 so the endpoint leaks neither the session's
     # existence nor its owner (issue #387 — 404, never 403).
     return problem(status.HTTP_404_NOT_FOUND, "session_not_found")
-
-
-def _verification_unavailable() -> ProblemException:
-    # The password could not be checked at all (the hasher itself failed, #3749):
-    # a transient server failure, not the uniform 401 of a wrong password.
-    return problem(
-        status.HTTP_503_SERVICE_UNAVAILABLE, "password_verification_unavailable"
-    )
 
 
 def _user_gone() -> ProblemException:
