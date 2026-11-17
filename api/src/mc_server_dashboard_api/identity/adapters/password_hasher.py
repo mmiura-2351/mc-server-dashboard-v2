@@ -26,6 +26,9 @@ from typing import TypeVar
 import argon2
 import bcrypt
 
+from mc_server_dashboard_api.identity.domain.errors import (
+    PasswordVerificationUnavailableError,
+)
 from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 
 _LOG = logging.getLogger(__name__)
@@ -49,6 +52,32 @@ async def _run_kdf(func: Callable[..., _T], *args: object) -> _T:
 _BCRYPT_MAX_BYTES = 72
 
 
+# libargon2's messages for a stored hash it cannot use: its decoder could not
+# parse it, or a parameter the hash encodes is out of range. A corrupt hash is
+# refused like a wrong password (a uniform 401) with a WARNING. argon2-cffi
+# raises the same VerificationError for every other failure, such as running out
+# of memory or threads, so the message is the only thing that tells them apart.
+# A message missing here is treated as a server failure (#3749).
+_MALFORMED_HASH_ERRORS = frozenset(
+    {
+        "Decoding failed",  # ARGON2_DECODING_FAIL
+        "Some of encoded parameters are too long or too short",  # ..._LENGTH_FAIL
+        "Output is too short",  # ARGON2_OUTPUT_TOO_SHORT
+        "Output is too long",  # ARGON2_OUTPUT_TOO_LONG
+        "Salt is too short",  # ARGON2_SALT_TOO_SHORT
+        "Salt is too long",  # ARGON2_SALT_TOO_LONG
+        "Memory cost is too small",  # ARGON2_MEMORY_TOO_LITTLE
+        "Memory cost is too large",  # ARGON2_MEMORY_TOO_MUCH
+        "Time cost is too small",  # ARGON2_TIME_TOO_SMALL
+        "Time cost is too large",  # ARGON2_TIME_TOO_LARGE
+        "Too few lanes",  # ARGON2_LANES_TOO_FEW
+        "Too many lanes",  # ARGON2_LANES_TOO_MANY
+        "Not enough threads",  # ARGON2_THREADS_TOO_FEW
+        "Too many threads",  # ARGON2_THREADS_TOO_MANY
+    }
+)
+
+
 class Argon2PasswordHasher(PasswordHasher):
     """:class:`PasswordHasher` adapter over argon2-cffi (library defaults)."""
 
@@ -66,15 +95,21 @@ class Argon2PasswordHasher(PasswordHasher):
             return self._hasher.verify(password_hash, plaintext)
         except argon2.exceptions.VerifyMismatchError:
             return False
-        except (argon2.exceptions.Argon2Error, argon2.exceptions.InvalidHash):
-            # A wrong password raises VerifyMismatchError (handled above). Any
-            # other argon2 failure means the stored hash is malformed/corrupt
-            # (InvalidHash is not an Argon2Error subclass in the pinned version,
-            # so it is caught explicitly). Return False for a uniform 401 rather
-            # than a 500, and warn — corrupt stored data is worth surfacing, not
-            # swallowing silently.
+        except argon2.exceptions.InvalidHashError:
+            # Not an argon2 hash at all: argon2-cffi refuses it before libargon2
+            # sees it. Corrupt stored data is refused like a wrong password (a
+            # uniform 401) and surfaced as a WARNING rather than swallowed.
             _LOG.warning("argon2 verify failed on a malformed stored hash")
             return False
+        except argon2.exceptions.Argon2Error as exc:
+            if str(exc) in _MALFORMED_HASH_ERRORS:
+                _LOG.warning("argon2 verify failed on a malformed stored hash")
+                return False
+            # Anything else, such as running out of memory or threads, failed on
+            # a hash libargon2 accepted, so the password was never judged:
+            # refusing it would count a correct password towards a lockout.
+            _LOG.error("argon2 verify failed: %s", exc)
+            raise PasswordVerificationUnavailableError from exc
 
 
 class BcryptPasswordHasher(PasswordHasher):

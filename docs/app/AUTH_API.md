@@ -150,6 +150,7 @@ Reason codes the `/auth/*` endpoints emit:
 |---|---|---|
 | `401` | `invalid_credentials` | login failure, every refresh failure (missing / unknown / expired / revoked / reused token), **and** every session-restore failure (missing / unknown / expired / revoked cookie) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh from restore |
 | `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password` or one past 1024 characters, or a present-but-empty `refresh_token` or one past 256 characters) |
+| `503` | `password_verification_unavailable` | login only: the password could not be checked because the hasher itself failed (e.g. argon2 out of memory or threads). Not a credential failure: no attempt is recorded and no lockout progresses ([`SECURITY.md`](SECURITY.md) Section 2). Retrying is the remedy. Password change `PUT /users/me/password` and account deletion `DELETE /users/me` answer the same `503` when their password re-check fails this way |
 
 Note the refresh failure path deliberately reuses the `invalid_credentials`
 reason rather than a token-specific code: the contract leaks no signal that would

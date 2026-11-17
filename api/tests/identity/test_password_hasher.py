@@ -17,6 +17,7 @@ import bcrypt
 import pytest
 
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
+    _MALFORMED_HASH_ERRORS,
     Argon2PasswordHasher,
     BcryptPasswordHasher,
 )
@@ -99,6 +100,13 @@ async def test_argon2_verify_refuses_a_corrupt_stored_hash(
         result = await hasher.verify("Wm7!qz#Lp2vT", stored)
     assert result is False
     assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+
+def test_malformed_hash_messages_are_libargon2_messages() -> None:
+    # The corrupt-hash refusal matches libargon2's messages by text; a typo would
+    # silently turn that corruption into a 503 instead of a WARNING and a 401.
+    libargon2_messages = {argon2.low_level.error_to_str(code) for code in range(-40, 0)}
+    assert _MALFORMED_HASH_ERRORS <= libargon2_messages
 
 
 class _FailingArgon2(argon2.PasswordHasher):

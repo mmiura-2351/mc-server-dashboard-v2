@@ -57,6 +57,7 @@ from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     InvalidRefreshTokenError,
+    PasswordVerificationUnavailableError,
     RefreshTokenReuseError,
 )
 
@@ -157,6 +158,12 @@ async def login(
             AuditEvent(operation=ops.AUTH_LOGIN, outcome=Outcome.DENIED)
         )
         raise _unauthorized(retry_after=exc.retry_after) from exc
+    except PasswordVerificationUnavailableError as exc:
+        # The password was never judged (the hasher itself failed, #3749): a
+        # transient server failure, not a denied login.
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "password_verification_unavailable"
+        ) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.AUTH_LOGIN,
