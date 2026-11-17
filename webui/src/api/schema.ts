@@ -2125,8 +2125,8 @@ export interface paths {
          *
          *     Requires `schedule:read`. Each run carries the outcome
          *     (`success`/`failure`/`skipped`/`unknown`) and an optional sanitized `detail`
-         *     note. `unknown` is an action the Worker did not answer in time: it may still
-         *     have run.
+         *     note. `unknown` is an action whose result the Worker did not confirm: it may
+         *     have run, or may still take effect.
          */
         get: operations["list_schedule_runs_api_communities__community_id__servers__server_id__schedules__schedule_id__runs_get"];
         put?: never;
@@ -2210,11 +2210,11 @@ export interface paths {
          *
          *     The "proven complete" gate: a missing Content-Length is 411, an oversized one
          *     is 413, a streamed-byte count that does not match Content-Length is 400 (as is
-         *     a Worker that disconnects mid-upload), a body that does not read as a tar is
-         *     422 ``invalid_archive``, and a body that stages zero files (an empty working
-         *     set) is 400 ``empty_snapshot`` — in every reject path the staged transfer is
-         *     aborted, so ``current/`` keeps the prior authoritative copy (FR-DATA-6,
-         *     STORAGE.md Section 4.1).
+         *     a Worker that disconnects mid-upload), a body that does not read as a plain,
+         *     uncompressed tar is 422 ``invalid_archive``, and a body that stages zero files
+         *     (an empty working set) is 400 ``empty_snapshot`` — in every reject path the
+         *     staged transfer is aborted, so ``current/`` keeps the prior authoritative copy
+         *     (FR-DATA-6, STORAGE.md Section 4.1).
          *
          *     The cap and the declared length are both enforced *during* streaming, not only
          *     against the header: an under-declaring client (small Content-Length, longer
@@ -4061,8 +4061,9 @@ export interface components {
          *
          *     ``SKIPPED`` records a fired occurrence whose precondition was unmet (e.g.
          *     stopping a server that is not running) — an honest history entry, not a
-         *     failure. ``UNKNOWN`` records an action sent to the Worker that did not answer
-         *     in time (issue #3660): it may still have run, so it is not a failure either.
+         *     failure. ``UNKNOWN`` records an action whose result the Worker did not confirm
+         *     (issues #3660, #3781): it may have run, or may still take effect, so it is not
+         *     a failure either.
          * @enum {string}
          */
         ScheduleRunOutcome: "success" | "failure" | "skipped" | "unknown";

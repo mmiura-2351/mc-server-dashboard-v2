@@ -1660,9 +1660,12 @@ class StopServer:
         # The graceful stop returned only once the Worker reported the process
         # gone, so converge observed=stopped, take the final snapshot, THEN clear
         # the assignment (issue #847). Recording observed=stopped here is safe — a
-        # subsequent late StatusChange(stopped) from the still-assigned Worker is
-        # dropped by the sink's ownership guard (server_state_sink.py:85), which is
-        # the acceptable outcome since this write already converged the cache.
+        # subsequent late StatusChange(stopped) from the Worker writes the same
+        # stopped state while the final snapshot holds the assignment, and once the
+        # clear releases it, is dropped by the sink's ownership guard
+        # (``ServersServerStateSink.record_observed_state``, "dropping status report
+        # from non-owning worker"). Either is acceptable, since this write already
+        # converged the cache.
         await self._record_stopped_then_final_snapshot(
             server=server,
             worker_id=worker_id,

@@ -23,6 +23,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     LaunchMode,
     ListFilesCommand,
     ReadFileCommand,
+    SessionEndedError,
     SnapshotCommand,
     StartServerCommand,
     WorkerNotConnectedError,
@@ -364,6 +365,39 @@ async def test_disconnect_maps_to_worker_unavailable_without_upload_may_be_live(
             community_id=CommunityId(uuid.uuid4()),
             server_id=ServerId(uuid.uuid4()),
         )
+    assert excinfo.value.upload_may_be_live is False
+    # Never queued: the command definitely did not run (issue #3781).
+    assert excinfo.value.session_ended_in_flight is False
+
+
+async def test_timeout_does_not_flag_a_session_ended_in_flight() -> None:
+    fleet = _RaisingFleetControlPlane(CommandTimedOutError("dispatch timed out"))
+    adapter = _adapter(fleet)
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await adapter.command(
+            worker_id=WorkerId(uuid.uuid4()),
+            server_id=ServerId(uuid.uuid4()),
+            line="say hi",
+        )
+    assert excinfo.value.session_ended_in_flight is False
+
+
+async def test_session_ended_in_flight_is_flagged_and_releases_the_upload() -> None:
+    # Issue #3781: the session ended while the command awaited its answer, so the
+    # command may have run. That is a disconnect all the same: the upload died with
+    # the session's context, so ``upload_may_be_live`` stays False and the
+    # final-stop snapshot releases the assignment as before (#847).
+    fleet = _RaisingFleetControlPlane(SessionEndedError("worker gone"))
+    adapter = _adapter(fleet)
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await adapter.command(
+            worker_id=WorkerId(uuid.uuid4()),
+            server_id=ServerId(uuid.uuid4()),
+            line="say hi",
+        )
+    assert excinfo.value.session_ended_in_flight is True
     assert excinfo.value.upload_may_be_live is False
 
 
