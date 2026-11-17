@@ -23,6 +23,12 @@ type Capabilities struct {
 	// would clobber the Worker's live, newer working set with the last authoritative
 	// snapshot). It generalizes the presence-only HeldServerIDs of issue #696.
 	HeldServers []HeldServer
+	// UnheldScratchServerIDs lists the servers whose scratch dir exists but holds
+	// no working set: empty, or holding only the generation marker (issue #3794).
+	// The adapter maps it onto the wire Register.unheld_scratch_server_ids. The
+	// API only checks them for a delete, so a deleted one's dir is removed at
+	// registration, after any container a failed start left behind is ended.
+	UnheldScratchServerIDs []string
 	// Resources advertises the host's hardware resources (CPU cores and total
 	// memory) for the API's placement logic (FR-WRK-3, issue #1218). When
 	// MemoryBytes is 0 the API skips the memory hard-gate, so this must be
@@ -58,12 +64,12 @@ type RegisterAck struct {
 	// closes the unbounded-upload case (#869). A non-positive value (an older
 	// API that does not set the field) leaves the transfer unbounded as before.
 	TransferDeadline time.Duration
-	// UnknownHeldServerIDs is the subset of Register.held_servers whose server
-	// no longer exists in the API (deleted while the scratch was live, issue
-	// #924). The Worker reclaims the scratch dir and .hydrate-<id>-* leftovers
-	// for each id listed here. .displaced-<id> trees are NOT reclaimed (issue
-	// #911). An empty list (or an older API that does not set the field) means
-	// nothing to reclaim.
+	// UnknownHeldServerIDs is the subset of Register.held_servers and
+	// Register.unheld_scratch_server_ids whose server no longer exists in the API
+	// (deleted while the scratch was live, issues #924, #3794). The Worker
+	// reclaims the scratch dir and .hydrate-<id>-* leftovers for each id listed
+	// here. .displaced-<id> trees are NOT reclaimed (issue #911). An empty list
+	// (or an older API that does not set the field) means nothing to reclaim.
 	UnknownHeldServerIDs []string
 }
 
@@ -422,9 +428,10 @@ type TransferDeadlineSetter interface {
 }
 
 // ScratchReclaimer is an optional CommandHandler capability: after registration
-// the session hands the handler the list of held server ids the API reports as
-// deleted (issue #924). The handler reclaims the scratch dir and hydrate
-// leftovers for each id, but NOT .displaced-<id> trees (issue #911).
+// the session hands the handler the server ids it listed, held or unheld, that the
+// API reports as deleted (issues #924, #3794). The handler reclaims the scratch
+// dir and hydrate leftovers for each id, but NOT .displaced-<id> trees (issue
+// #911).
 type ScratchReclaimer interface {
 	// ReclaimDeletedScratches removes scratch dirs for server ids the API
 	// confirmed no longer exist. It runs asynchronously and must not block
@@ -457,6 +464,15 @@ type HeldServerProvider interface {
 	// HeldServers returns the working sets this Worker currently holds in its
 	// local scratch, each tagged with its recorded generation.
 	HeldServers() []HeldServer
+}
+
+// UnheldScratchProvider is an optional CommandHandler capability: before each
+// registration the session asks the handler which scratch dirs it has that hold
+// no working set (issue #3794). A handler that does not implement it lists none.
+type UnheldScratchProvider interface {
+	// UnheldScratchServerIDs returns the servers whose scratch dir exists but
+	// holds no working set.
+	UnheldScratchServerIDs() []string
 }
 
 // ErrMessageTooLarge is returned by a Transport Send method for a message whose

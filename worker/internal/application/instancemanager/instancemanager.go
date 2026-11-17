@@ -696,12 +696,12 @@ func (m *Manager) goBackground(fn func()) bool {
 //   - reserved, orphans and converging are in-memory and die with the process
 //     either way — at 10 s or at 550 s.
 //   - a reclaim cut anywhere in its per-id body leaves <scratch>/<id> on disk, and
-//     that dir IS the advertisement that re-offers the id: the held-set scans
-//     report it, the API re-derives unknown_held_server_ids from that report, and
-//     the next registration's reclaim finishes the removal. The sweep order in
+//     that dir IS the listing that re-offers the id: the registration lists it,
+//     held or, once it holds no working set, unheld (issue #3794), the API
+//     re-derives unknown_held_server_ids from that listing, and the next
+//     registration's reclaim finishes the removal. The sweep order in
 //     reclaimDeletedScratches is what makes this true at every point in the body
-//     rather than most of them. The residual is a dir holding nothing but its
-//     generation marker: not advertised, and not data.
+//     rather than most of them.
 //   - a retry stop cut between the flush's save-off and restoreSaveOnAfterFailedStop
 //     leaves a SURVIVING MC container with auto-save disabled: the container is not
 //     a compose service, so nothing stops it on the way out, and
@@ -2972,9 +2972,9 @@ var removeScratchTree = os.RemoveAll
 //     at most one at-rest working set per stopped server, never an unbounded leak.
 //   - A server DELETED while its scratch was live is reclaimed at the next
 //     registration via ReclaimDeletedScratches (issue #924). The API computes the
-//     unknown subset of held_servers and returns it in RegisterAck; the Worker
-//     removes the scratch dir and hydrate leftovers but NOT .displaced-<id> trees
-//     (issue #911).
+//     unknown subset of the held and unheld ids the Worker lists (issue #3794)
+//     and returns it in RegisterAck; the Worker removes the scratch dir and
+//     hydrate leftovers but NOT .displaced-<id> trees (issue #911).
 func (m *Manager) removeScratch(serverID string) {
 	// The leftovers go FIRST, and the order is load-bearing (issue #3167, the same
 	// hazard issue #2934 closed on the deleted-server reclaim). <scratch>/<id> is what
@@ -3310,8 +3310,10 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // A reclaim requested AFTER Close is dropped whole, and silently: goBackground
 // starts nothing on a closed manager, and ScratchReclaimer is void so there is
 // nothing to report back to the session. Nothing is lost either — the API
-// recomputes the unknown subset of held_servers on every registration, so an id
-// dropped here is offered again at the next one.
+// recomputes the unknown subset of the ids the Worker lists on every registration,
+// and a scratch dir keeps its id listed (held_servers, or unheld_scratch_server_ids
+// once it holds no working set, issue #3794), so an id dropped here is offered
+// again at the next one.
 func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	m.goBackground(func() { m.reclaimDeletedScratches(serverIDs) })
 }
@@ -3320,33 +3322,39 @@ func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 // (issue #3679). Before it, a Worker that stayed connected kept a deleted server's
 // leftover container and scratch until it next registered.
 //
-// It acts only for an id this Worker holds a working set for, or one its driver
-// records a leftover container for. The first is the set HeldServers advertises,
-// and so the only ids a registration's reclaim is ever offered (the session
-// intersects the ack with it). The second covers a server that never published
-// anything: its scratch holds only the generation marker, which the launch guard
-// accepts, so a start the daemon did not answer can leave a container recorded for
-// an id that is not held. The API reports a delete to every connected Worker, and
-// one with neither for the id answers without asking the backend anything.
+// It acts only for an id this Worker has a scratch dir for, or one its driver
+// records a leftover container for (issue #3794). The dir need not hold a working
+// set: a server that never published anything hydrates to a dir holding only the
+// generation marker, which the launch guard accepts, so a start the daemon did not
+// answer can leave a container recorded for it, and a dir can be empty. A
+// registration lists every such dir (HeldServers, or UnheldScratchServerIDs once it
+// holds no working set), and the session offers a registration's reclaim only ids
+// it listed. The record alone covers a container whose dir is gone. The API
+// reports a delete to every connected Worker, and one with neither for the id
+// answers without asking the backend anything.
 //
-// A held id is queued for the reclaim, which runs as background work Close joins,
+// An admitted id is queued for the reclaim, which runs as background work Close joins,
 // so the per-id body keeps the join it relies on (issue #2878), and the command
 // answers at once. The reclaim is single-flight: one runs at a time, and a report
 // that arrives while it runs only queues its id for the running reclaim's next
 // pass. The spawn decision and the flag are taken in one critical section with the
 // WaitGroup Add, as recordOrphan does, so a report either is queued for a reclaim
 // Close will wait for or, on a closed manager, is refused. The answer therefore
-// says only that the reclaim will run. An id the reclaim skips keeps its scratch,
-// and with it the advertisement that offers the id again at the next registration.
+// says only that the reclaim will run. An id the reclaim skips keeps its scratch
+// dir, so the next registration offers it again; a recorded container with no dir
+// is left to the next boot's sweep.
 func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.CommandResult {
-	if !hasWorkingSet(filepath.Join(m.scratchDir, cmd.ServerID)) && !m.recordsLeftovers(cmd.ServerID) {
+	// Lstat, as the listings' DirEntry.IsDir does: a symlink named like the id is
+	// no scratch dir, and no registration would list it again.
+	info, err := os.Lstat(filepath.Join(m.scratchDir, cmd.ServerID))
+	if hasDir := err == nil && info.IsDir(); !hasDir && !m.recordsLeftovers(cmd.ServerID) {
 		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return fail(cmd.CommandID, session.CommandErrorInternal,
-			"instancemanager: shutting down; the deleted server's scratch is left for the next registration")
+			"instancemanager: shutting down; the deleted server is left for the next registration or boot")
 	}
 	m.reportedDeletes = append(m.reportedDeletes, cmd.ServerID)
 	if m.reclaimingReported {
@@ -3408,9 +3416,11 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// half-removed working set — safe by the same reasoning that makes Close's
 		// join safe, and it bounds Close to the id already in flight instead of
 		// every id still on the list. The ids left unreached are re-offered, not
-		// lost: they still hold their scratch dirs, so the next registration
-		// advertises them in held_servers again and the API re-derives the unknown
-		// subset from that advertisement.
+		// lost: they still have their scratch dirs, so the next registration lists
+		// them again (held_servers, or unheld_scratch_server_ids, issue #3794) and the
+		// API re-derives the unknown subset from that listing. One a delete report
+		// queued for a recorded container alone, with no dir, is left to the next
+		// boot's sweep.
 		if m.shutdown.Err() != nil {
 			return
 		}
@@ -3431,8 +3441,8 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 		// sweep (issue #3672). It is ended here, with the working set still in place
 		// for its graceful stop to watch, under the shutdown context, so a Close
 		// abandons that stop rather than waits it out. While a container may still be
-		// running, nothing is removed: the scratch would be pulled from under it. The
-		// scratch that stays keeps the id advertised, so the next registration offers
+		// running, nothing is removed: the scratch would be pulled from under it. A
+		// scratch dir that stays keeps the id listed, so the next registration offers
 		// it again, and the boot's sweep is the backstop.
 		if err := m.endLeftovers(m.shutdown, id, dir); err != nil {
 			m.logger.Warn("not reclaiming deleted-server scratch: a container the Worker does not track may be running against it",
@@ -3441,16 +3451,17 @@ func (m *Manager) reclaimDeletedScratches(serverIDs []string) {
 			continue
 		}
 		// The leftovers go FIRST, and the order is load-bearing (issue #2934).
-		// <scratch>/<id> is what keeps the id advertised — both held-set scans skip
-		// .hydrate-<id>-* (isReservedScratchName) — so the instant it is removed the
-		// id leaves held_servers, the API stops deriving it into
+		// <scratch>/<id> is what keeps the id listed — in held_servers, or in
+		// unheld_scratch_server_ids once it holds no working set (issue #3794); every
+		// scan skips .hydrate-<id>-* (isReservedScratchName) — so the instant it is
+		// removed the id leaves both lists, the API stops deriving it into
 		// unknown_held_server_ids, and this pass is the only one that would ever be
 		// offered the id again; only a Worker BOOT reclaims a .hydrate- tree
 		// (ReclaimHydrateLeftovers, issue #3167), and that is the backstop rather than
 		// the plan — a Worker runs for months between boots. Sweeping after the removal
 		// made every interruption in that window a world-sized leak nothing on this
 		// Worker's runtime ever reclaims. This way round, an interruption anywhere
-		// in the body leaves the scratch dir standing, and with it the advertisement that
+		// in the body leaves the scratch dir standing, and with it the listing that
 		// re-offers the id — which is what makes "a partial reclaim is finished
 		// idempotently by the next registration" true at EVERY point in the body,
 		// not merely at most of them. It is also what keeps this leg out of the

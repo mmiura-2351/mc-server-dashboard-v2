@@ -403,7 +403,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         handler = self._enter_handler()
         await self._authenticate(context)
 
-        worker_id, correlation_id, session, held_ids = await self._register(
+        worker_id, correlation_id, session, checked_ids = await self._register(
             request_iterator, context
         )
         # Tracks the in-flight outbound.get() so the finally can cancel it even if
@@ -455,20 +455,24 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # registry's derived liveness at heartbeat_interval; returns when
             # heartbeats lapse, ending the Session through the normal teardown.
             watchdog = asyncio.ensure_future(self._watch_liveness(worker_id, session))
-            # Compute which held servers the Worker advertised no longer exist (issue
-            # #924). Fail-safe: any exception returns an empty list so a DB error
-            # never misclassifies a live server as deleted. The lookup runs with the
-            # session already open (issue #3679): a delete that commits after the
-            # lookup read its server is reported to every connected Worker, and that
-            # report lands on this session's queue, behind the ack, instead of
-            # finding no session and being lost until the next registration.
+            # Compute which servers the Worker listed no longer exist: the held ones
+            # (issue #924) and the ones whose scratch dir holds no working set
+            # (issue #3794). Fail-safe: any exception returns an empty list so a DB
+            # error never misclassifies a live server as deleted. The lookup runs
+            # with the session already open (issue #3679): a delete that commits
+            # after the lookup read its server is reported to every connected
+            # Worker, and that report lands on this session's queue, behind the ack,
+            # instead of finding no session and being lost until the next
+            # registration.
             unknown_held_ids: list[str] = []
-            if held_ids:
+            if checked_ids:
                 try:
                     existing = await self._state_sink.existing_server_ids(
-                        server_ids=held_ids
+                        server_ids=checked_ids
                     )
-                    unknown_held_ids = [sid for sid in held_ids if sid not in existing]
+                    unknown_held_ids = [
+                        sid for sid in checked_ids if sid not in existing
+                    ]
                 except Exception:
                     _LOG.warning(
                         "failed to compute unknown held servers; sending empty list",
@@ -805,7 +809,14 @@ class WorkerSessionServicer(WorkerServiceServicer):
             held_servers=held_servers,
         )
         _LOG.info("worker registered", extra={"worker_id": worker_id.value})
-        return worker_id, first.correlation_id, session, list(held_servers.keys())
+        # The ids checked for a delete: the held ones, and the ones whose scratch
+        # dir holds no working set (issue #3794). Those are checked only, never
+        # recorded as held above: they hold no world a start could skip its
+        # hydrate for.
+        checked_ids = list(
+            dict.fromkeys([*held_servers, *register.unheld_scratch_server_ids])
+        )
+        return worker_id, first.correlation_id, session, checked_ids
 
     async def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
         payload = message.WhichOneof("payload")
