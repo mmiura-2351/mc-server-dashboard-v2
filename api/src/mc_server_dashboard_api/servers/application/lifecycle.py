@@ -107,6 +107,9 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.stop_intents import (
+    StopIntentCounter,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -348,6 +351,11 @@ class StartServer:
     file_store: FileStore
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
     bedrock_tunnel_sync: BedrockTunnelSync = NullBedrockTunnelSync()
+    # The withdrawn-intent count a start reads before its intent exists and checks
+    # right before it sends (issue #3739, ``stop_intents.py``). Process-wide in
+    # production, shared with every StopServer and the drain; the private default
+    # only serves the call sites (unit tests) that never race a stop.
+    stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
 
     async def __call__(
         self,
@@ -1320,6 +1328,11 @@ class StopServer:
     # site wires the one app-state instance; the private default only serves the
     # call sites (unit tests) that never run two flows at once.
     stop_convergence: StopConvergenceGuard = field(default_factory=StopConvergenceGuard)
+    # Bumped when this stop withdraws a start intent (issue #3739,
+    # ``stop_intents.py``). Process-wide in production, shared with every
+    # StartServer; the private default only serves the call sites that never race
+    # a start, the late-snapshot sink among them (its release withdraws nothing).
+    stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
 
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
@@ -2356,6 +2369,9 @@ class StopServersAssignedToWorker:
 
     uow: UnitOfWork
     clock: Clock
+    # Bumped for every server this drain withdraws from running (issue #3739,
+    # ``stop_intents.py``); the one process-wide instance in production.
+    stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
 
     async def __call__(self, *, worker_id: WorkerId) -> list[ServerId]:
         stopped: list[ServerId] = []

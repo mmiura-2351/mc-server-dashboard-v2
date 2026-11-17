@@ -211,6 +211,9 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.stop_intents import (
+    StopIntentCounter,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -820,6 +823,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 control_plane_state.final_snapshot_outstanding(str(server_id.value))
             )
         )
+        # Process-wide count of withdrawn start intents (issue #3739): every
+        # StartServer reads it, and every StopServer and the drain bump it, so a
+        # stop of an intent is either seen by its start before the start is sent
+        # or enqueued after that start.
+        app.state.stop_intents = StopIntentCounter()
         app.state.control_plane = GrpcControlPlane(
             control_plane_state,
             clock=FleetSystemClock(),
@@ -1067,6 +1075,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         file_store=StorageFileStoreAdapter(storage=storage),
                         lifecycle_lock=PgLifecycleLock(engine=engine),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                        stop_intents=app.state.stop_intents,
                     ),
                     stop_server=StopServer(
                         uow=ServersUnitOfWork(
@@ -1078,6 +1087,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         stop_refusals=app.state.stop_dispatch_refusals,
                         unrecorded_stops=app.state.unrecorded_stops,
                         stop_convergence=app.state.stop_convergence,
+                        stop_intents=app.state.stop_intents,
                     ),
                     restart_server=RestartServer(
                         uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -1189,6 +1199,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # the lock will contend correctly against HTTP-path holders.
                     lifecycle_lock=PgLifecycleLock(engine=engine),
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
+                    stop_intents=app.state.stop_intents,
                 ),
                 make_stop_server=lambda: StopServer(
                     uow=ServersUnitOfWork(
@@ -1200,6 +1211,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     stop_refusals=app.state.stop_dispatch_refusals,
                     unrecorded_stops=app.state.unrecorded_stops,
                     stop_convergence=app.state.stop_convergence,
+                    stop_intents=app.state.stop_intents,
                 ),
                 control_plane=reconciler_control_plane,
                 store_generation=StorageGenerationReader(storage=storage),
