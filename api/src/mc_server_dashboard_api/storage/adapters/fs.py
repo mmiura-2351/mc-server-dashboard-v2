@@ -117,10 +117,14 @@ _LOG = logging.getLogger(__name__)
 _CHUNK = 1024 * 1024
 _DEFAULT_VERSION_RETENTION = 10
 # Age threshold below which a spool temp file is left alone by the sweep (issue
-# #903). The ``.backup.*.tmp`` / ``.final.*.tmp`` spools are safe to reclaim today
-# only because ``sweep()`` runs once at startup before request handling; an mtime
-# guard keeps them safe if ``sweep()`` ever runs periodically/manually alongside a
-# live write, mirroring the ``incoming/`` lease-guard discipline (issue #183).
+# #903). ``sweep()`` runs at startup and on an interval (issue #2252), so it can
+# meet a ``.backup.*.tmp`` spool or a ``versions/`` capture temp that a live write
+# is still filling. No lease or lock pins those, so this mtime guard is what keeps
+# them safe, as the lease guard does for ``incoming/`` (issue #183). It holds
+# because every write refreshes the mtime and each writer fills its spool from a
+# local source without pausing (the leased ``current/``, an upload body already in
+# memory, a local file), so a live spool is never this stale.
+# ``prune_to_final_snapshot`` applies the same threshold to its ``.final.*.tmp``.
 _SPOOL_SWEEP_MIN_AGE_S = 3600
 
 # Decompressed-size cap for restore extraction. The compressed archive body is
@@ -2300,8 +2304,10 @@ class FsStorage(Storage):
         # Sweep any ``.final.*.tmp`` left by an earlier crash mid-pack (the
         # BaseException cleanup never ran), mirroring the tmp hygiene the publish
         # path applies to its staging dirs. Keeps a crash-loop from leaking spools.
-        # An mtime age threshold skips a spool a live prune may still be filling
-        # (issue #903), so the sweep stays safe if it ever runs outside startup.
+        # This runs on every prune, not in ``sweep()``. No live prune can be filling
+        # one: only a prune writes them, and each holds the in-process server lock
+        # for its whole run, pack included. The mtime age threshold (issue #903) is
+        # only a backstop to that lock.
         if server_root.is_dir():
             for stale in server_root.glob(".final.*.tmp"):
                 if _is_stale_spool(stale):
