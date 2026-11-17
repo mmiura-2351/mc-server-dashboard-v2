@@ -25,6 +25,7 @@ from mc_server_dashboard_api.dependencies import (
     get_revoke_other_sessions,
     get_revoke_session,
 )
+from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken
 from mc_server_dashboard_api.identity.domain.value_objects import (
     RefreshTokenId,
@@ -33,7 +34,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
-from tests.identity.fakes import make_user
+from tests.identity.fakes import FakeClock, make_user
 
 _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
 
@@ -260,3 +261,58 @@ def test_revoke_others_with_keep_session_id() -> None:
         }
     ]
     assert [e.operation for e in recorder.events] == [ops.AUTH_SESSION_REVOKE]
+
+
+# --- Request-size caps on DELETE /users/me/sessions ---------------------------
+#
+# A DoS bound of 256 characters on each field; a real refresh token is 43 and a
+# session id is a 36-character UUID.
+
+
+def _real_refresh_token() -> str:
+    """A refresh secret exactly as the adapter issues it."""
+
+    hour = dt.timedelta(hours=1)
+    service = JwtTokenService(
+        signing_key="0123456789abcdef0123456789abcdef",
+        algorithm="HS256",
+        access_ttl=hour,
+        download_grant_ttl=hour,
+        download_cookie_ttl=hour,
+        clock=FakeClock(dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)),
+    )
+    return service.issue_refresh_token().secret
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("refresh_token", _real_refresh_token()),
+        ("refresh_token", "A" * 256),
+        ("keep_session_id", str(uuid.uuid4())),
+        ("keep_session_id", "A" * 256),
+    ],
+    ids=["real-token", "token-at-cap", "real-session-id", "session-id-at-cap"],
+)
+def test_revoke_others_accepts_a_field_within_the_cap(field: str, value: str) -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = _client(user, revoke_other_sessions=fake)
+
+    resp = client.request("DELETE", "/api/users/me/sessions", json={field: value})
+
+    assert resp.status_code == 204
+    assert len(fake.calls) == 1
+
+
+@pytest.mark.parametrize("field", ["refresh_token", "keep_session_id"])
+def test_revoke_others_rejects_a_field_past_the_cap(field: str) -> None:
+    user = make_user()
+    fake = _Fake(result=None)
+    client = _client(user, revoke_other_sessions=fake)
+
+    resp = client.request("DELETE", "/api/users/me/sessions", json={field: "A" * 257})
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "validation_error"
+    assert fake.calls == []

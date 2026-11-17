@@ -102,12 +102,15 @@ class LoginRequest(BaseModel):
 
 class RefreshRequest(BaseModel):
     # Optional so cookie clients can POST an empty body; the cookie supplies the
-    # token in that case (issue #363).
-    refresh_token: str | None = Field(default=None, min_length=1)
+    # token in that case (issue #363). The 256 bound is a DoS guard only (issue
+    # #3689): an issued token is ``token_urlsafe(32)``, 43 characters, and the
+    # bound leaves room for a longer secret without tracking its exact length.
+    refresh_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class LogoutRequest(BaseModel):
-    refresh_token: str | None = Field(default=None, min_length=1)
+    # The same DoS bound as ``RefreshRequest``.
+    refresh_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 class TokenResponse(BaseModel):

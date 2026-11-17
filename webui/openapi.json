@@ -1983,6 +1983,7 @@
           "refresh_token": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -2685,6 +2686,7 @@
           "refresh_token": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -3059,6 +3061,7 @@
           "keep_session_id": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -3071,6 +3074,7 @@
           "refresh_token": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },

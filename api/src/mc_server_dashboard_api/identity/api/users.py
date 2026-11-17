@@ -345,11 +345,14 @@ class RevokeOtherSessionsRequest(BaseModel):
     # The caller's current refresh token, so its session is spared (everywhere-
     # else logout). Optional: an access-token-only caller cannot present it, in
     # which case all active sessions are revoked (see RevokeOtherSessions).
-    refresh_token: str | None = Field(default=None, min_length=1)
+    # Both fields take the 256-character DoS bound of ``RefreshRequest`` (issue
+    # #3689); a session id is a UUID, at most 45 characters in any form
+    # ``uuid.UUID`` parses.
+    refresh_token: str | None = Field(default=None, min_length=1, max_length=256)
     # The row id of the session to keep (issue #606). An alternative to
     # refresh_token for callers that know their session id (from GET
     # /users/me/sessions) but cannot present the refresh token.
-    keep_session_id: str | None = Field(default=None, min_length=1)
+    keep_session_id: str | None = Field(default=None, min_length=1, max_length=256)
 
 
 @router.get("/users/me/sessions")
