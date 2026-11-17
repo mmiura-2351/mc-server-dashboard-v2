@@ -7,6 +7,8 @@ its sections has to be there the one time it is needed.
 
 from __future__ import annotations
 
+import re
+
 import argon2
 import pytest
 
@@ -37,6 +39,7 @@ def test_a_refused_password_reports_every_section(
     assert "equals the hash the test produced: True" in report
     # Each of the 8 probes of the stored hash saw the wrong password refused.
     assert report.count("VerifyMismatchError") == 8
-    assert "password-kdf" in report
+    # The executor probes ran on the hasher's own KDF threads.
+    assert len(re.findall(r"\[password-kdf_\d+\]$", report, re.MULTILINE)) == 6
     # The conftest hook recorded this test as the last one this process started.
     assert request.node.nodeid in report
