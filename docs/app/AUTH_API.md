@@ -150,7 +150,7 @@ Reason codes the `/auth/*` endpoints emit:
 |---|---|---|
 | `401` | `invalid_credentials` | login failure, every refresh failure (missing / unknown / expired / revoked / reused token), **and** every session-restore failure (missing / unknown / expired / revoked cookie) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh from restore |
 | `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password` or one past 1024 characters, or a present-but-empty `refresh_token` or one past 256 characters) |
-| `503` | `password_verification_unavailable` | login only: the password could not be checked because the hasher itself failed (e.g. argon2 out of memory or threads). Not a credential failure: no attempt is recorded and no lockout progresses ([`SECURITY.md`](SECURITY.md) Section 2). Retrying is the remedy. Password change `PUT /users/me/password` and account deletion `DELETE /users/me` answer the same `503` when their password re-check fails this way |
+| `503` | `password_verification_unavailable` | the password hashing service is unavailable: the hasher itself failed (e.g. argon2 out of memory or threads). Among the `/auth/*` endpoints, login only: the password could not be checked, which is not a credential failure, so no attempt is recorded and no lockout progresses ([`SECURITY.md`](SECURITY.md) Section 2). Retrying is the remedy. Outside `/auth/*`, the endpoints that check or hash a password answer the same `503`: password change `PUT /users/me/password` and account deletion `DELETE /users/me` when their password re-check fails this way, and registration `POST /users`, password change and admin user creation `POST /admin/users` when hashing the new password does |
 
 Note the refresh failure path deliberately reuses the `invalid_credentials`
 reason rather than a token-specific code: the contract leaks no signal that would
@@ -535,6 +535,11 @@ status code returned to the client:
 | logout (token presented) | `auth:logout` | `SUCCESS` | — |
 | revoke one session (hit) | `auth:session_revoke` | `SUCCESS` | the caller (target: user) |
 | revoke all other sessions | `auth:session_revoke` | `SUCCESS` | the caller (target: user) |
+
+A login answered `503 password_verification_unavailable` (Section 2) records
+**no** row, and no `login_attempt` row either: the password was never judged, so
+it is neither a success nor a failure. Its trace is the ERROR line the API logs
+for the failure.
 
 A `DELETE /users/me/sessions/{id}` that misses (unknown / malformed id, or one
 owned by another user — all `404`) records **no** row: it changed nothing and is
