@@ -24,6 +24,7 @@ retry finds the blob and skips the upload, or uploads the same bytes again.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 
 from mc_server_dashboard_api.servers.domain.errors import (
     PluginCacheBlobNotFoundError,
@@ -76,8 +77,9 @@ class ObjectPluginCacheStore(PluginCacheStore):
             async with shielded_exit(self._client_factory()) as client:
                 # get_object already raises NotFoundError on a missing key, so no
                 # redundant head_object first.
-                async for chunk in await client.get_object(key):
-                    yield chunk
+                async with aclosing(await client.get_object(key)) as body:
+                    async for chunk in body:
+                        yield chunk
         except NotFoundError as exc:
             # ``open`` does no I/O itself, so this fires on the first iteration.
             # The catalog resolver catches it and downloads instead (the cache is
