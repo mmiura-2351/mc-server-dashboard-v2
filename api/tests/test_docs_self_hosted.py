@@ -6,13 +6,17 @@ page scripts to execute.
 """
 
 import base64
+import gc
 import hashlib
 import re
+import weakref
 from collections.abc import Iterator
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from mc_server_dashboard_api.app import create_app
 
 
 @pytest.fixture
@@ -192,3 +196,20 @@ def test_redoc_js_asset_accessible(client: TestClient) -> None:
     resp = client.get("/api/docs-assets/redoc.standalone.js")
     assert resp.status_code == 200
     assert "javascript" in resp.headers["content-type"]
+
+
+# -- Mounting the docs does not pin the app --
+
+
+def test_docs_enabled_app_is_freed_once_unreferenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FastAPI caches every endpoint callable in process-wide ``lru_cache``s, so a
+    docs endpoint that closed over its app kept every docs-enabled app alive for
+    the life of the process (issue #3789)."""
+    monkeypatch.setenv("MCD_API_DOCS__ENABLED", "true")
+    app = weakref.ref(create_app())
+
+    gc.collect()
+
+    assert app() is None
