@@ -9,6 +9,7 @@ import (
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager/goroutineleak"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/testsupport/tmproot"
 )
 
 // awaitManagerGoroutines asserts that exactly want manager-owned goroutines are
@@ -27,9 +28,9 @@ func awaitManagerGoroutines(t *testing.T, want int) {
 // Docker daemon and cannot import this file — asserts the same invariant off the
 // same frame list (issue #2881).
 //
-// Before any test it puts the package's temp dirs on a tmpfs (useTmpRoot).
+// Before any test it puts the package's temp dirs on a tmpfs (tmproot.Use).
 func TestMain(m *testing.M) {
-	if err := useTmpRoot(); err != nil {
+	if err := tmproot.Use(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}

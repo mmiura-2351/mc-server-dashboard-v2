@@ -386,7 +386,7 @@ async def test_crash_then_stop_then_start_again_succeeds(engine: AsyncEngine) ->
 
     The #206 regression chain. After the worker crashes, the operator stops the
     server; the stop must clear the assignment (converge + unassign) so the next
-    start's ``require_unassigned`` compare-and-set can re-place the server rather
+    start's unassigned-only compare-and-set can re-place the server rather
     than 409ing forever. Every step runs against the same persisted row.
     """
 
@@ -535,7 +535,7 @@ async def test_lost_stop_outcome_then_worker_reports_stopped_then_reconciler_cle
     write -- but that #217 sink-unassign raced the final-snapshot window (bug 1), so
     the sink no longer unassigns. The deliberate recovery is now the reconciler's
     stale-stop arm: a row wedged at (stopped, stopped, assigned) past grace has its
-    assignment cleared, after which the next start's require_unassigned CAS succeeds.
+    assignment cleared, after which the next start's unassigned-only CAS succeeds.
     """
 
     clock = _AdvancingClock(_NOW)
@@ -933,7 +933,7 @@ async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
     elapses, so the row moves to (stopped, crashed, assigned) instead. Before the
     fix that triple matched no arm of ``list_reconcilable``: the reconciler never
     touched it, the assignment was never released, and every subsequent start 409'd
-    on ``require_unassigned`` forever. ``is_at_rest()`` is true for the row, so
+    on the unassigned-only CAS forever. ``is_at_rest()`` is true for the row, so
     nothing else flagged it either. The recovery is the release half of the stop
     path: the final snapshot the crash never got, then the unassign.
     """
@@ -971,7 +971,7 @@ async def test_failed_stop_then_process_crashes_wedge_recovered_by_reconciler(
     assert wedged.observed_state is ObservedState.CRASHED
     assert wedged.assigned_worker_id == WorkerId(worker)
     # The row looks healthy to every gated operation, yet a start cannot proceed:
-    # require_unassigned 409s against the stale assignment.
+    # the unassigned-only CAS 409s against the stale assignment.
     assert wedged.is_at_rest()
     with pytest.raises(LifecycleTransitionConflictError):
         await _start_server_use_case(
@@ -1629,7 +1629,7 @@ async def test_failed_stop_left_at_stopping_recovered_by_reconciler(
     (stopped, stopping, assigned), which before the fix matched no arm of
     ``list_reconcilable``. Nor could an operator escape it then: ``StopServer`` and
     ``RestartServer`` refused (desired is already stopped), ``StartServer`` 409s on
-    ``require_unassigned``, and ``is_at_rest()`` is false so every file/backup
+    the unassigned-only CAS, and ``is_at_rest()`` is false so every file/backup
     operation 409s "unsettled". The recovery is a real retry of the stop — which,
     since issue #3491, an operator ``StopServer`` also runs at once instead of
     waiting for the reconciler's grace.

@@ -728,7 +728,9 @@ async def _write_running_intent(uow: ServersUnitOfWork, server: Server) -> None:
     row = await uow.servers.get_by_id(server.id)
     assert row is not None
     row.desired_state = DesiredState.RUNNING
-    assert await uow.servers.update_lifecycle(row, expected_from=DesiredState.STOPPED)
+    assert await uow.servers.update_lifecycle(
+        row, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
+    )
 
 
 async def test_rolled_back_intent_write_publishes_nothing(world: _World) -> None:
@@ -790,7 +792,11 @@ async def test_unit_of_work_without_the_bus_refuses_to_commit_an_intent_write(
             row = await uow.servers.get_by_id(server.id)
             assert row is not None
             row.desired_state = DesiredState.RUNNING
-            await uow.servers.update_lifecycle(row, expected_from=DesiredState.STOPPED)
+            await uow.servers.update_lifecycle(
+                row,
+                expected_from=DesiredState.STOPPED,
+                expected_assigned_worker_id=None,
+            )
             await uow.commit()
 
     async with world.uow() as uow:

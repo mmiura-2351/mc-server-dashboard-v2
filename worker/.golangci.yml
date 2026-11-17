@@ -25,6 +25,7 @@ linters:
       # checks the datatransfer adapter and instancemanager agree on the format).
       # internal/nofollow and internal/javaproperties are shared helpers outside
       # the layers. cmd/ is the edge and may import anything; nothing can import it.
+      # internal/testsupport is the exception: only test files may import it.
       rules:
         domain:
           # Pure core: the standard library and other domain packages only.
@@ -51,6 +52,16 @@ linters:
           deny:
             - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application
               desc: adapters implement domain Ports and depend on domain only (ARCHITECTURE.md Section 2.2)
+        testsupport:
+          # Test-only code shared by several packages' tests, so it cannot live in
+          # a _test.go file.
+          files:
+            - "$all"
+            - "!$test"
+            - "!**/internal/testsupport/**"
+          deny:
+            - pkg: github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/testsupport
+              desc: test-support code is for _test.go files only
   exclusions:
     # Agent worktrees are created inside the repo at .claude/worktrees/<agent>/,
     # so a sibling checkout's worker/ is a full, mid-edit Go tree. golangci-lint
