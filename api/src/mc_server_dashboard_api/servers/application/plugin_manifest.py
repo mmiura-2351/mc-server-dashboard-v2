@@ -25,8 +25,9 @@ NeoForge mods, so each family tries both of its descriptors.)
 
 Robustness contract:
 
-* Bytes that do not open as a zip, carry too many entries, or decompress past
-  the size cap raise :class:`InvalidModJarError`.
+* Bytes that do not open as a zip, do not read back as one (a damaged,
+  encrypted or truncated member, a corrupt directory entry), carry too many
+  entries, or decompress past the size cap raise :class:`InvalidModJarError`.
 * A readable zip with no recognized manifest -- or a garbled/identity-less one --
   returns :meth:`ParsedManifest.empty` rather than raising. The install still
   succeeds (the loader is known from the server type); the jar simply carries no
@@ -37,8 +38,10 @@ from __future__ import annotations
 
 import io
 import json
+import lzma
 import tomllib
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.domain.errors import InvalidModJarError
@@ -48,6 +51,27 @@ from mc_server_dashboard_api.servers.domain.plugin import PluginSide
 _MAX_MANIFEST_BYTES = 2 * 1024 * 1024  # 2 MiB (manifests are typically a few KB)
 _MAX_ENTRY_COUNT = 50_000
 _CHUNK_SIZE = 64 * 1024  # 64 KiB
+
+# What ``zipfile`` raises when a jar's own bytes do not read back (issue #3779),
+# each reproduced with a jar that still opens as a zip: ``BadZipFile``,
+# ``zlib.error`` / ``OSError`` (bzip2) / ``LZMAError`` for damaged member data,
+# ``EOFError`` for member data that runs past the end, ``RuntimeError`` for an
+# encrypted member (and, as its ``NotImplementedError`` subclass, an unsupported
+# version or method), ``ValueError`` for a corrupt offset or a name flagged UTF-8
+# that is not (``UnicodeDecodeError``), and ``OverflowError`` for a zip64 offset of
+# 2**63 or more. Catching those builtins is safe only because the jar is read from
+# an in-memory ``BytesIO``, so no I/O fault can hide among them, and because the
+# read's own refusals are ``InvalidModJarError`` s, never one of these.
+_ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+    OSError,
+    EOFError,
+    RuntimeError,
+    ValueError,
+    OverflowError,
+)
 
 # Manifest paths (case-sensitive, matched against the zip entry name).
 _FABRIC_MANIFEST = "fabric.mod.json"
@@ -129,7 +153,7 @@ def parse_manifest(jar_bytes: bytes, *, server_type: str) -> ParsedManifest:
                 if info.is_dir() or info.filename not in wanted:
                     continue
                 names[info.filename] = _read_entry_chunked(zf, info.filename)
-    except zipfile.BadZipFile as exc:
+    except _ZIP_READ_ERRORS as exc:
         raise InvalidModJarError("corrupt jar (zip)") from exc
 
     for manifest_name in manifests:
