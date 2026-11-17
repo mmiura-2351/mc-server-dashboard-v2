@@ -3566,12 +3566,16 @@ func TestStartConflictLoopRemovesOwnStoppedThenSucceeds(t *testing.T) {
 }
 
 // A foreign-labelled or running own conflict fails immediately, with no polling:
-// the driver never removes a container it does not own or a live server.
+// the driver never removes a container it does not own or a live server. A
+// running own container is a race past the start's quiescence gate, so it is the
+// backend's unavailability, as the gate's own refusal of a live container is
+// (issue #3698); a foreign one is an operator problem and stays unmarked.
 func TestStartConflictFailsImmediatelyWithoutPolling(t *testing.T) {
 	cases := []struct {
-		name       string
-		info       ContainerInfo
-		wantReason string
+		name            string
+		info            ContainerInfo
+		wantReason      string
+		wantUnavailable bool
 	}{
 		{
 			name:       "foreign label",
@@ -3579,9 +3583,15 @@ func TestStartConflictFailsImmediatelyWithoutPolling(t *testing.T) {
 			wantReason: "not owned",
 		},
 		{
-			name:       "running own",
-			info:       ContainerInfo{ID: "live-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: true},
-			wantReason: "running",
+			name:       "foreign label running",
+			info:       ContainerInfo{ID: "foreign-2", Labels: map[string]string{labelWorkerID: "other"}, Running: true},
+			wantReason: "not owned",
+		},
+		{
+			name:            "running own",
+			info:            ContainerInfo{ID: "live-1", Labels: map[string]string{labelWorkerID: "w1"}, Running: true},
+			wantReason:      "running",
+			wantUnavailable: true,
 		},
 	}
 	for _, tc := range cases {
@@ -3597,6 +3607,9 @@ func TestStartConflictFailsImmediatelyWithoutPolling(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.wantReason) {
 				t.Fatalf("err = %v, want the decline reason %q in the message", err, tc.wantReason)
+			}
+			if got := errors.Is(err, execution.ErrBackendUnavailable); got != tc.wantUnavailable {
+				t.Fatalf("errors.Is(err, ErrBackendUnavailable) = %v, want %v (err = %v)", got, tc.wantUnavailable, err)
 			}
 			docker.mu.Lock()
 			calls, removed := docker.createCalls, docker.removed

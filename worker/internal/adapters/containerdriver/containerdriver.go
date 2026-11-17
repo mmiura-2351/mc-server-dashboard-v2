@@ -1148,7 +1148,11 @@ func (d *Driver) pullImage(ctx context.Context, image string) error {
 //     progress, keep polling. Any other remove error: the watcher may still win,
 //     keep polling until the deadline.
 //   - foreign label or running: fail immediately, never removing a container we
-//     do not own or a live server (the conservative posture is unchanged).
+//     do not own or a live server (the conservative posture is unchanged). A
+//     running one of ours raced past the quiescence gate the start already
+//     passed, so it is the backend's unavailability, as the gate's own refusal of
+//     a live container is (issue #3698); a foreign one is an operator problem and
+//     is not marked.
 //   - any other inspect error: transient, keep polling until the deadline.
 //
 // On deadline expiry the original conflict is returned wrapped with the last
@@ -1190,7 +1194,7 @@ func (d *Driver) createContainer(ctx context.Context, create CreateSpec) (string
 		case info.Labels[labelWorkerID] != d.workerID:
 			return "", fmt.Errorf("declined conflict resolution: conflicting container not owned by this worker: %w", conflict)
 		case info.Running:
-			return "", fmt.Errorf("declined conflict resolution: conflicting container is running: %w", conflict)
+			return "", unavailable(fmt.Errorf("declined conflict resolution: conflicting container is running: %w", conflict))
 		default:
 			if removeErr := d.docker.Remove(loopCtx, info.ID); removeErr != nil && !errors.Is(removeErr, errRemovalInProgress) {
 				lastReason = fmt.Sprintf("remove failed: %v", removeErr)
