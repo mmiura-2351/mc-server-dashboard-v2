@@ -96,12 +96,28 @@ fail=0
 ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
-# Poll for a file to appear, up to a generous ceiling. Used instead of a fixed
-# sleep wherever the expectation is "this happens", so a slow CI runner costs
-# latency rather than a false red. The negative expectation ("this does NOT
-# happen yet") has no such formulation and pays a fixed wait below.
+# The ceiling of every wait below for something that has to happen -- a run
+# getting past the lock, printing a line, exiting, dying -- in polls of 0.1 s:
+# 120 s, the bound the Worker tests give a wait on filesystem work (#3637). It
+# only keeps a wedged run from hanging the gate, so it must never be what a
+# slow run loses to (#3788). Every run here works on disk: the lock-file write,
+# the log rotation and the stub's touch go to the suite's temp dir, which is on
+# the disk unless TMPDIR says otherwise, and every command a run spawns is
+# exec'd from the disk. Under IO load each of those can wait seconds, and one
+# wait can span several runs: after the release the four queued waiters pass
+# the lock one at a time in no fixed order, and the copy in 9 inits two
+# repositories and completes two runs before it reports its first assertion.
+# The old 10 s ceiling lost exactly those waits under heavy IO load. A passing
+# run pays none of this; a red pays it once for each wait that never ends,
+# beside an api chain that takes far longer.
+ceiling=1200
+
+# Poll for a file to appear, up to the ceiling. Used instead of a fixed sleep
+# wherever the expectation is "this happens", so a slow host costs latency
+# rather than a false red. The negative expectation ("this does NOT happen
+# yet") has no such formulation and pays a fixed wait below.
 await_file() {
-	local path=$1 limit=${2:-100} i=0
+	local path=$1 limit=${2:-$ceiling} i=0
 	while [ "$i" -lt "$limit" ]; do
 		[ -e "$path" ] && return 0
 		sleep 0.1
@@ -113,7 +129,7 @@ await_file() {
 # The same, for a line that has to appear in a run's output rather than a file
 # that has to appear on disk.
 await_grep() {
-	local needle=$1 path=$2 limit=${3:-100} i=0
+	local needle=$1 path=$2 limit=${3:-$ceiling} i=0
 	while [ "$i" -lt "$limit" ]; do
 		grep -qF "$needle" "$path" 2> /dev/null && return 0
 		sleep 0.1
@@ -177,7 +193,7 @@ stop_run() {
 # side effect, which would let the assertions after it pass on scaffolding the
 # suite itself cut short.
 reap_run() {
-	local pid=$1 limit=${2:-100} i=0
+	local pid=$1 limit=${2:-$ceiling} i=0
 	[ -n "$pid" ] || return 0
 	while [ "$i" -lt "$limit" ]; do
 		kill -0 "$pid" 2> /dev/null || { wait "$pid" 2> /dev/null || true; return 0; }
@@ -202,7 +218,7 @@ procs_under() {
 # Poll until nothing works under $1, up to a ceiling: a signalled process takes
 # a moment to die, and then to be reaped by whoever inherited it.
 await_no_procs() {
-	local dir=$1 limit=${2:-100} i=0
+	local dir=$1 limit=${2:-$ceiling} i=0
 	while [ "$i" -lt "$limit" ]; do
 		[ -z "$(procs_under "$dir")" ] && return 0
 		sleep 0.1
@@ -344,20 +360,23 @@ start_run "$waiter_wt" "$work/waiter.out" env \
 	bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
 waiter_pid=$run_pid
 
+# The waiter names the holder just before it blocks, so the line is also the
+# signal that it has reached the lock (#3788).
+if await_grep "$holder_wt" "$work/waiter.out"; then
+	ok "the waiting run names the holder's worktree"
+else
+	fail_test "the waiting run does not name the holder's worktree (output: $(cat "$work/waiter.out"))"
+fi
+
 # The one place a fixed wait is unavoidable: "has not proceeded" is only
-# observable by looking after enough time that it would have.
+# observable by looking after enough time that it would have. It starts once
+# the waiter is at the lock, so a slow start cannot use it up.
 sleep 2
 
 if [ -e "$waiter_entered" ]; then
 	fail_test "a second run started work while the first held the lock"
 else
 	ok "a second run does not start work while another holds the lock"
-fi
-
-if grep -qF "$holder_wt" "$work/waiter.out"; then
-	ok "the waiting run names the holder's worktree"
-else
-	fail_test "the waiting run does not name the holder's worktree (output: $(cat "$work/waiter.out"))"
 fi
 
 # The holder recorded a pid that is alive, so the dead-pid hint must be absent
@@ -520,7 +539,7 @@ STUB
 
 	if await_file "$stop_dir/spawned"; then
 		stop_run "$stop_pid"
-		if await_no_procs "$stop_dir" 20; then
+		if await_no_procs "$stop_dir"; then
 			ok "a stopped run leaves nothing behind, however deep its process tree"
 		else
 			fail_test "a stopped run left processes behind: $(procs_under "$stop_dir" | tr '\n' ' ')"
