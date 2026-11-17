@@ -279,6 +279,9 @@ type LeftoverGuard interface {
 	// driver recorded, and lists none alive. It ends nothing. It is bounded and
 	// fails closed: when it cannot tell, it returns an error.
 	Busy(ctx context.Context, serverID string) error
+	// HasLeftovers reports whether the driver records a leftover for serverID
+	// that EndLeftovers would end. It asks the backend nothing (issue #3679).
+	HasLeftovers(serverID string) bool
 }
 
 // Instance is a launched server handle. Its Events channel delivers state

@@ -12,6 +12,26 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
+// HasLeftovers answers from the record alone, with no Docker call (issue #3679):
+// the instance manager asks it for every delete report, on every Worker.
+func TestHasLeftoversAnswersFromTheRecord(t *testing.T) {
+	docker := newFakeDocker()
+	docker.listBlocksUntilCtxDone = true
+	docker.inspectBlocksUntilCtxDone = true
+	d := newTestDriver(docker, nil, errors.New("no rcon"))
+
+	if d.HasLeftovers("s1") {
+		t.Fatal("HasLeftovers = true with nothing recorded, want false")
+	}
+	d.unremoved.add("s1", "container-1")
+	if !d.HasLeftovers("s1") || d.HasLeftovers("s2") {
+		t.Fatalf("HasLeftovers(s1, s2) = %v, %v; want true, false", d.HasLeftovers("s1"), d.HasLeftovers("s2"))
+	}
+	if got := unremovedOf(d, "s1"); !slices.Equal(got, []string{"container-1"}) {
+		t.Fatalf("recorded = %v, want the record left as it was", got)
+	}
+}
+
 // A recorded leftover the daemon still knows makes the server busy whatever the
 // daemon lists: the start the daemon did not answer may still run the container
 // after a List showed it created. So its inspect answers, without a List. One

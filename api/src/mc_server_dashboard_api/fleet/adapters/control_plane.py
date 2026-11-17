@@ -47,6 +47,7 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ListFilesCommand,
     OpenBedrockTunnelCommand,
     ReadFileCommand,
+    ReclaimDeletedServerCommand,
     RestartServerCommand,
     ServerCommandCommand,
     SessionEndedError,
@@ -601,6 +602,8 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
         )
     elif isinstance(command, CloseBedrockTunnelCommand):
         api.close_bedrock_tunnel.CopyFrom(pb.CloseBedrockTunnel(server_id=server_id))
+    elif isinstance(command, ReclaimDeletedServerCommand):
+        api.reclaim_deleted_server.CopyFrom(pb.ReclaimDeletedServer())
     else:  # pragma: no cover - exhaustive over the Command union
         raise TypeError(f"unsupported command type: {type(command)!r}")
     return api

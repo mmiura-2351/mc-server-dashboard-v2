@@ -337,11 +337,22 @@ class CloseBedrockTunnelCommand:
     """
 
 
+@dataclass(frozen=True)
+class ReclaimDeletedServerCommand:
+    """Tell a Worker the server was deleted, so it reclaims what it holds (#3679).
+
+    Dispatched fire-and-forget to every connected Worker once a delete has
+    committed. The Worker reclaims the server's leftover container and scratch as
+    it does for an id its ``RegisterAck`` reports deleted; that registration-time
+    reclaim stays the backstop for a Worker this one does not reach.
+    """
+
+
 # The union of commands the lifecycle layer dispatches. File access (ReadFile /
 # EditFile / ListFiles) rides this stream for running servers (ARCHITECTURE.md
 # Section 7.2). TunnelDial rides it for a relay join (RELAY.md Section 5).
 # OpenBedrockTunnel/CloseBedrockTunnel ride it for the Bedrock relay tunnel
-# lifecycle (issue #1544).
+# lifecycle (issue #1544). ReclaimDeletedServer rides it for a delete (#3679).
 Command = (
     StartServerCommand
     | StopServerCommand
@@ -355,6 +366,7 @@ Command = (
     | TunnelDialCommand
     | OpenBedrockTunnelCommand
     | CloseBedrockTunnelCommand
+    | ReclaimDeletedServerCommand
 )
 
 

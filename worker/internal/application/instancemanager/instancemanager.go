@@ -394,6 +394,13 @@ type Manager struct {
 	// or observes the flag and does not happen at all — never an Add racing the
 	// Wait.
 	closed bool
+	// reportedDeletes queues the ids the API reported deleted (ReclaimDeletedServer)
+	// that the reclaim has not taken yet, and reclaimingReported says whether that
+	// reclaim is running (issue #3679). One reclaim runs at a time: a report that
+	// arrives while it runs only queues its id, and the running reclaim takes every
+	// queued id in its next pass.
+	reportedDeletes    []string
+	reclaimingReported bool
 	// reserved marks a server id as having a mutating lifecycle command in flight so
 	// a duplicate re-issued after a stream reconnect cannot overlap the original
 	// (issue #780). It is claimed under mu and held across the long operation, then
@@ -630,8 +637,9 @@ func (m *Manager) goBackground(fn func()) bool {
 
 // Close ends EVERY goroutine the manager started and waits for them to exit: the
 // failed-stop-orphan convergers (issue #2493), the status dispatcher New starts,
-// the deleted-scratch reclaim ReclaimDeletedScratches starts (issue #2878), and
-// the per-instance status/log/metrics pumps startPumps starts (issue #2777).
+// the deleted-scratch reclaims ReclaimDeletedScratches and a delete report start
+// (issues #2878, #3679), and the per-instance status/log/metrics pumps startPumps
+// starts (issue #2777).
 // Nothing joined the latter group before, and none of them ended on their own: a
 // pump parks on an instance channel that a server still running never closes, and
 // the dispatcher parks on a notify channel nothing ever closes. In the Worker that
@@ -1101,6 +1109,8 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 		return m.handleOpenBedrockTunnel(ctx, cmd)
 	case "CloseBedrockTunnel":
 		return m.handleCloseBedrockTunnel(ctx, cmd)
+	case "ReclaimDeletedServer":
+		return m.handleReclaimDeletedServer(cmd)
 	default:
 		return fail(cmd.CommandID, session.CommandErrorInternal,
 			fmt.Sprintf("instancemanager: unhandled command %q", cmd.Kind))
@@ -3283,7 +3293,9 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // Reclamation contract update (issue #924, extending #841):
 //   - The post-stop final snapshot path (removeScratch) remains the primary GC.
 //   - This method covers the gap: a server deleted while its scratch was live
-//     (the final snapshot never arrived), reclaimed at the next registration.
+//     (the final snapshot never arrived). It is reclaimed when the API reports the
+//     delete to the connected Worker (ReclaimDeletedServer, issue #3679), and at
+//     the next registration as the backstop.
 //   - Phase 2 (refresh held inventory per re-registration) is implemented:
 //     HeldServers() (issue #1711) refreshes the advertised set each register.
 //
@@ -3302,6 +3314,88 @@ func (m *Manager) sweepHydrateLeftovers(serverID string) {
 // dropped here is offered again at the next one.
 func (m *Manager) ReclaimDeletedScratches(serverIDs []string) {
 	m.goBackground(func() { m.reclaimDeletedScratches(serverIDs) })
+}
+
+// handleReclaimDeletedServer answers the API's report that the server was deleted
+// (issue #3679). Before it, a Worker that stayed connected kept a deleted server's
+// leftover container and scratch until it next registered.
+//
+// It acts only for an id this Worker holds a working set for, or one its driver
+// records a leftover container for. The first is the set HeldServers advertises,
+// and so the only ids a registration's reclaim is ever offered (the session
+// intersects the ack with it). The second covers a server that never published
+// anything: its scratch holds only the generation marker, which the launch guard
+// accepts, so a start the daemon did not answer can leave a container recorded for
+// an id that is not held. The API reports a delete to every connected Worker, and
+// one with neither for the id answers without asking the backend anything.
+//
+// A held id is queued for the reclaim, which runs as background work Close joins,
+// so the per-id body keeps the join it relies on (issue #2878), and the command
+// answers at once. The reclaim is single-flight: one runs at a time, and a report
+// that arrives while it runs only queues its id for the running reclaim's next
+// pass. The spawn decision and the flag are taken in one critical section with the
+// WaitGroup Add, as recordOrphan does, so a report either is queued for a reclaim
+// Close will wait for or, on a closed manager, is refused. The answer therefore
+// says only that the reclaim will run. An id the reclaim skips keeps its scratch,
+// and with it the advertisement that offers the id again at the next registration.
+func (m *Manager) handleReclaimDeletedServer(cmd session.Command) session.CommandResult {
+	if !hasWorkingSet(filepath.Join(m.scratchDir, cmd.ServerID)) && !m.recordsLeftovers(cmd.ServerID) {
+		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return fail(cmd.CommandID, session.CommandErrorInternal,
+			"instancemanager: shutting down; the deleted server's scratch is left for the next registration")
+	}
+	m.reportedDeletes = append(m.reportedDeletes, cmd.ServerID)
+	if m.reclaimingReported {
+		m.mu.Unlock()
+		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+	}
+	m.reclaimingReported = true
+	m.background.Add(1)
+	m.mu.Unlock()
+	go func() {
+		defer m.background.Done()
+		m.reclaimReportedDeletes()
+	}()
+	return session.CommandResult{CommandID: cmd.CommandID, Success: true}
+}
+
+// recordsLeftovers reports whether any LeftoverGuard driver records a leftover
+// for serverID. It asks the backend nothing.
+func (m *Manager) recordsLeftovers(serverID string) bool {
+	for _, d := range m.drivers {
+		if g, ok := d.(execution.LeftoverGuard); ok && g.HasLeftovers(serverID) {
+			return true
+		}
+	}
+	return false
+}
+
+// reclaimPassMsg is the DEBUG record each pass of reclaimReportedDeletes emits.
+const reclaimPassMsg = "reclaiming the scratch of servers the API reported deleted"
+
+// reclaimReportedDeletes is the single-flight reclaim handleReclaimDeletedServer
+// starts. Each pass takes every id queued so far and reclaims them with the
+// registration's body; it ends, clearing its flag, on a pass that finds nothing
+// queued. After Close nothing more is queued, and each remaining pass returns at
+// the body's shutdown check, so the loop ends and Close's join returns.
+func (m *Manager) reclaimReportedDeletes() {
+	for {
+		m.mu.Lock()
+		ids := m.reportedDeletes
+		m.reportedDeletes = nil
+		if len(ids) == 0 {
+			m.reclaimingReported = false
+			m.mu.Unlock()
+			return
+		}
+		m.mu.Unlock()
+		m.logger.Debug(reclaimPassMsg, "server_ids", ids)
+		m.reclaimDeletedScratches(ids)
+	}
 }
 
 // reclaimDeletedScratches is the synchronous body of ReclaimDeletedScratches.

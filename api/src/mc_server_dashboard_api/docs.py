@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.openapi.docs import get_swagger_ui_html
+from starlette.requests import Request
 from starlette.responses import HTMLResponse
 from starlette.staticfiles import StaticFiles
 
@@ -75,31 +76,26 @@ def _swagger_init_script_csp_hash() -> str:
 SWAGGER_INIT_SCRIPT_CSP_HASH = _swagger_init_script_csp_hash()
 
 
-def mount_docs(app: FastAPI) -> None:
-    """Mount self-hosted Swagger UI and ReDoc on *app*.
+# The page handlers read the app from the request instead of closing over it:
+# FastAPI caches endpoint callables in process-wide ``lru_cache``s, so a closure
+# would keep every docs-enabled app alive for the life of the process (#3789).
+async def swagger_ui_html(request: Request) -> HTMLResponse:
+    app = request.app
+    return _swagger_ui_response(
+        openapi_url=app.openapi_url or _OPENAPI_URL,
+        title=f"{app.title} - Swagger UI",
+    )
 
-    The caller must set ``docs_url=None, redoc_url=None`` on the ``FastAPI``
-    constructor so the default CDN-backed routes are not registered.
-    """
 
-    app.mount(_ASSETS_PATH, StaticFiles(directory=_STATIC_DIR), name="docs-assets")
-
-    @app.get("/api/docs", include_in_schema=False)
-    async def swagger_ui_html() -> HTMLResponse:
-        return _swagger_ui_response(
-            openapi_url=app.openapi_url or _OPENAPI_URL,
-            title=f"{app.title} - Swagger UI",
-        )
-
-    @app.get("/api/redoc", include_in_schema=False)
-    async def redoc_html() -> HTMLResponse:
-        title = f"{app.title} - ReDoc"
-        openapi_url = app.openapi_url or _OPENAPI_URL
-        redoc_js_url = f"{_ASSETS_PATH}/redoc.standalone.js"
-        # Render manually instead of ``get_redoc_html`` so we can pass
-        # ``hide-logo`` — ReDoc's default logo points at cdn.redoc.ly,
-        # which ``img-src 'self' data:`` correctly blocks (issue #2234).
-        html = f"""
+async def redoc_html(request: Request) -> HTMLResponse:
+    app = request.app
+    title = f"{app.title} - ReDoc"
+    openapi_url = app.openapi_url or _OPENAPI_URL
+    redoc_js_url = f"{_ASSETS_PATH}/redoc.standalone.js"
+    # Render manually instead of ``get_redoc_html`` so we can pass
+    # ``hide-logo`` — ReDoc's default logo points at cdn.redoc.ly,
+    # which ``img-src 'self' data:`` correctly blocks (issue #2234).
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -123,4 +119,16 @@ def mount_docs(app: FastAPI) -> None:
     </body>
     </html>
     """
-        return HTMLResponse(html)
+    return HTMLResponse(html)
+
+
+def mount_docs(app: FastAPI) -> None:
+    """Mount self-hosted Swagger UI and ReDoc on *app*.
+
+    The caller must set ``docs_url=None, redoc_url=None`` on the ``FastAPI``
+    constructor so the default CDN-backed routes are not registered.
+    """
+
+    app.mount(_ASSETS_PATH, StaticFiles(directory=_STATIC_DIR), name="docs-assets")
+    app.get("/api/docs", include_in_schema=False)(swagger_ui_html)
+    app.get("/api/redoc", include_in_schema=False)(redoc_html)

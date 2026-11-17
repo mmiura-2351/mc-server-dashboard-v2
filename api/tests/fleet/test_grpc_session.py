@@ -28,7 +28,10 @@ import pytest
 from grpc import aio
 
 from mc_server_dashboard_api.fleet.adapters import grpc_server
-from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneState
+from mc_server_dashboard_api.fleet.adapters.control_plane import (
+    ControlPlaneState,
+    GrpcControlPlane,
+)
 from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _MAX_CONSECUTIVE_HANDLER_FAILURES,
     _STATE_BY_PROTO,
@@ -36,6 +39,9 @@ from mc_server_dashboard_api.fleet.adapters.grpc_server import (
     _keepalive_options,
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
+from mc_server_dashboard_api.fleet.domain.control_plane import (
+    ReclaimDeletedServerCommand,
+)
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
@@ -1368,6 +1374,157 @@ async def test_register_ack_unparseable_held_id_treated_as_existing() -> None:
         # not classified as deleted.
         assert list(response.register_ack.unknown_held_server_ids) == []
         await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_delete_reported_during_the_held_lookup_reaches_the_worker() -> None:
+    """A delete that commits while a registration looks up the held servers is
+    still reported to that Worker (issue #3679).
+
+    The lookup read the server before the delete committed, so the ack does not
+    list it as deleted. The delete's report to the connected Workers is then the
+    only thing that reaches this one before its next registration, and it can
+    only if the session already takes commands while the lookup runs.
+    """
+
+    lookup_read = asyncio.Event()
+    delete_reported = asyncio.Event()
+
+    class _DeleteDuringLookupSink(FakeServerStateSink):
+        async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+            existing = await super().existing_server_ids(server_ids=server_ids)
+            lookup_read.set()
+            await delete_reported.wait()
+            return existing
+
+    state = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_DeleteDuringLookupSink(known_server_ids={_SERVER_A}),
+        control_plane=state,
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
+        await asyncio.wait_for(lookup_read.wait(), timeout=5)
+
+        await GrpcControlPlane(
+            state, clock=FakeClock(_T0), timeout_seconds=5.0
+        ).dispatch_fire_and_forget(
+            worker_id=WorkerId(_WORKER_ID),
+            server_id=_SERVER_A,
+            command=ReclaimDeletedServerCommand(),
+        )
+        delete_reported.set()
+
+        ack = await call.read()
+        assert list(ack.register_ack.unknown_held_server_ids) == []
+        msg = await asyncio.wait_for(call.read(), timeout=5)
+        assert msg.api_command.WhichOneof("command") == "reclaim_deleted_server"
+        assert msg.api_command.server_id == _SERVER_A
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_session_superseded_during_the_held_lookup_ends_like_a_later_one() -> (
+    None
+):
+    """A session a reconnect supersedes during its held lookup is not aborted
+    (issue #3679).
+
+    The lookup runs after ``open_session``, so by then the session owns the
+    Worker's queue the way any open session does, and a supersede there is handled
+    as it is later on: the newer session's ``open_session`` retires what the older
+    one had queued, and the older one's teardown is session-guarded. It yields its
+    ack on its own stream, sends nothing it had queued, and ends OK; the newer
+    session stays current and carries what follows.
+    """
+
+    lookup_started = asyncio.Event()
+    release_lookup = asyncio.Event()
+
+    class _GatedLookupSink(FakeServerStateSink):
+        """Stalls the first held-server lookup until released."""
+
+        def __init__(self) -> None:
+            super().__init__(known_server_ids={_SERVER_A})
+            self._first_call = True
+
+        async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+            if self._first_call:
+                self._first_call = False
+                lookup_started.set()
+                await release_lookup.wait()
+            return await super().existing_server_ids(server_ids=server_ids)
+
+    sink = _GatedLookupSink()
+    state = ControlPlaneState()
+    control_plane = GrpcControlPlane(state, clock=FakeClock(_T0), timeout_seconds=5.0)
+    worker = WorkerId(_WORKER_ID)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=state,
+    )
+    try:
+        stub = await h.start()
+
+        # Session A is open and stalled in its held lookup; a report lands on its
+        # queue.
+        call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_a.write(_register_message(held_servers={_SERVER_A: 1}))
+        await asyncio.wait_for(lookup_started.wait(), timeout=5)
+        queue_a = state.outbound_for(worker)
+        assert queue_a is not None
+        await control_plane.dispatch_fire_and_forget(
+            worker_id=worker, server_id=_SERVER_A, command=ReclaimDeletedServerCommand()
+        )
+
+        # Session C supersedes A while A's lookup is still stalled.
+        call_c = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_c.write(_register_message())
+        ack_c = await call_c.read()
+        assert ack_c.WhichOneof("payload") == "register_ack"
+        queue_c = state.outbound_for(worker)
+        assert queue_c is not None and queue_c is not queue_a
+
+        # A resumes: it yields its ack, sends nothing it had queued, and ends OK.
+        release_lookup.set()
+        ack_a = await asyncio.wait_for(call_a.read(), timeout=5)
+        assert ack_a.WhichOneof("payload") == "register_ack"
+        await call_a.done_writing()
+        assert await asyncio.wait_for(call_a.read(), timeout=5) is aio.EOF
+        assert await asyncio.wait_for(call_a.code(), timeout=5) == grpc.StatusCode.OK
+
+        # C stays current, the Worker online and none of its servers unknown, and a
+        # later report reaches the Worker on C.
+        assert state.outbound_for(worker) is queue_c
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        assert sink.unknown_for == []
+        await control_plane.dispatch_fire_and_forget(
+            worker_id=worker, server_id=_SERVER_B, command=ReclaimDeletedServerCommand()
+        )
+        msg = await asyncio.wait_for(call_c.read(), timeout=5)
+        assert msg.api_command.WhichOneof("command") == "reclaim_deleted_server"
+        assert msg.api_command.server_id == _SERVER_B
+        await call_c.write(
+            pb.WorkerMessage(
+                correlation_id=msg.api_command.command_id,
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        await call_c.done_writing()
     finally:
         await h.stop()
 

@@ -131,6 +131,13 @@ func TestToCommandMapsPayload(t *testing.T) {
 			want: session.Command{Kind: "CloseBedrockTunnel"},
 		},
 		{
+			// The delete-time reclaim (issue #3679) carries nothing but the
+			// envelope's server id.
+			name: "reclaim deleted server",
+			cmd:  &controlplanev1.ApiCommand{Command: &controlplanev1.ApiCommand_ReclaimDeletedServer{ReclaimDeletedServer: &controlplanev1.ReclaimDeletedServer{}}},
+			want: session.Command{Kind: "ReclaimDeletedServer"},
+		},
+		{
 			// expires_after rides beside the oneof, whatever the kind (issue #3305).
 			name: "expires after",
 			cmd: &controlplanev1.ApiCommand{

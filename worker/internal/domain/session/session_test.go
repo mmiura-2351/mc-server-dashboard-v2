@@ -1232,7 +1232,7 @@ func TestHandledKindWithEmptyServerIDRejected(t *testing.T) {
 	handledKinds := []string{
 		"StartServer", "StopServer", "RestartServer", "ServerCommand",
 		"HydrateTrigger", "SnapshotTrigger", "ReadFile", "EditFile", "ListFiles",
-		"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel",
+		"TunnelDial", "OpenBedrockTunnel", "CloseBedrockTunnel", "ReclaimDeletedServer",
 	}
 	for i, kind := range handledKinds {
 		transport.commands <- Command{
