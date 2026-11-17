@@ -433,7 +433,9 @@ func (c *EngineClient) List(ctx context.Context, labelKey, labelValue string) ([
 // Logs opens a following stdout+stderr log stream for a running container
 // (FR-MON-2). The container has no TTY, so the body carries Docker's multiplexed
 // stream frames; demuxReader (logdemux.go) splits them back into stdout/stderr.
-// Closing the returned reader ends the follow.
+// Closing the returned reader ends the follow. The request is bound to ctx for its
+// whole life, so cancelling ctx releases a stalled open or read (the dockerAPI.Logs
+// contract, issue #3667).
 func (c *EngineClient) Logs(ctx context.Context, id string) (io.ReadCloser, error) {
 	q := url.Values{
 		"follow":     {"true"},
