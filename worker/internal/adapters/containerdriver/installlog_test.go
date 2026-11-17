@@ -3,6 +3,7 @@ package containerdriver
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -254,6 +255,65 @@ func TestInstallLogRefusalStillScansOutput(t *testing.T) {
 
 	if !scan.outOfMemory {
 		t.Fatal("scan missed the out-of-memory marker when the install log was refused")
+	}
+}
+
+// failingLogFile passes the first limit bytes through to the log file and fails
+// every write after that, the way a filesystem that has run out of space does.
+type failingLogFile struct {
+	f       io.Writer
+	limit   int
+	written int
+	failed  int
+}
+
+func (w *failingLogFile) Write(p []byte) (int, error) {
+	if w.written+len(p) > w.limit {
+		w.failed++
+		return 0, unix.ENOSPC
+	}
+	w.written += len(p)
+	return w.f.Write(p)
+}
+
+// A write the filesystem fails part way through the install does not cost the
+// failure diagnosis either: the log is dropped with one warning, and the stream is
+// still scanned, from the chunk whose write failed to its end (issue #3744).
+func TestInstallLogWriteFailureStillScansOutput(t *testing.T) {
+	dir := t.TempDir()
+	sink := &failingLogFile{limit: len(installLogOutput)}
+	docker := newForgeFakeDocker()
+	var body strings.Builder
+	for _, line := range []string{
+		installLogOutput,
+		"java.lang.UnsupportedClassVersionError: x\n", // the write that fails
+		"java.lang.OutOfMemoryError: Java heap space\n",
+		"exiting\n",
+	} {
+		body.Write(frame(dockerStreamStdout, line))
+	}
+	docker.logBodies[forgeInstallID] = body.String()
+	logged := &syncBuffer{}
+	i := &instance{docker: docker, spec: forgeSpec(dir), logger: slog.New(slog.NewTextHandler(logged, nil)),
+		installLogSink: func(f *os.File) io.Writer { sink.f = f; return sink }}
+
+	scan := i.captureInstallOutput(context.Background(), forgeInstallID)
+
+	if !scan.javaIncompatible {
+		t.Fatal("scan missed the marker in the chunk whose install log write failed")
+	}
+	if !scan.outOfMemory {
+		t.Fatal("scan missed the out-of-memory marker printed after the install log write failed")
+	}
+	if sink.failed != 1 {
+		t.Fatalf("log file writes failed %d times, want the log dropped after its first failure", sink.failed)
+	}
+	if got := readInstallLog(t, dir); got != installLogOutput {
+		t.Fatalf("install log = %q, want the output written before the failure", got)
+	}
+	warns := strings.Count(logged.String(), "level=WARN")
+	if warns != 1 || !strings.Contains(logged.String(), execution.ForgeInstallLogRelpath) || !strings.Contains(logged.String(), unix.ENOSPC.Error()) {
+		t.Fatalf("worker log = %q, want one warning naming the log and the write error", logged.String())
 	}
 }
 
