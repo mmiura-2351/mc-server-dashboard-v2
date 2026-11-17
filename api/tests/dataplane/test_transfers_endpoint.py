@@ -436,6 +436,8 @@ def test_snapshot_matching_base_generation_publishes(tmp_path: Path) -> None:
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"gen2"}
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 def test_snapshot_base_above_current_cannot_move_the_store_generation(
     tmp_path: Path,
 ) -> None:
@@ -464,6 +466,8 @@ def test_snapshot_base_above_current_cannot_move_the_store_generation(
     assert asyncio.run(storage.current_generation(*scope)) == current + 1
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 def test_snapshot_stale_base_from_different_publisher_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -516,6 +520,8 @@ def test_snapshot_stale_base_from_different_publisher_is_refused(
     assert _read_tar(asyncio.run(_read())) == {"k": b"g2"}
 
 
+# 19 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(19 * 10 + 30)
 def test_snapshot_stale_base_from_same_publisher_self_heals(tmp_path: Path) -> None:
     # Issue #847 publish-time generation guard (bug 3): a LOST publish response. The
     # worker published gen N+1 (store advanced) but the HTTP response was lost, so its
@@ -562,6 +568,8 @@ def test_snapshot_stale_base_from_same_publisher_self_heals(tmp_path: Path) -> N
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"republished"}
 
 
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 def test_snapshot_in_flight_stale_publish_refused_after_restore(
     tmp_path: Path,
 ) -> None:
@@ -611,6 +619,8 @@ def test_snapshot_in_flight_stale_publish_refused_after_restore(
     assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 def test_snapshot_in_flight_stale_publish_refused_after_edit(tmp_path: Path) -> None:
     # Issue #889 edit-clobber window (the issue's direction 2): a worker published the
     # current generation, then an authoritative API file edit mutated ``current/`` in
@@ -657,6 +667,8 @@ def test_snapshot_in_flight_stale_publish_refused_after_edit(tmp_path: Path) -> 
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited"}
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 def test_snapshot_refused_when_edit_lands_during_upload_window(
     tmp_path: Path,
 ) -> None:
@@ -719,6 +731,8 @@ def test_snapshot_refused_when_edit_lands_during_upload_window(
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_header(
     tmp_path: Path,
 ) -> None:
@@ -776,6 +790,8 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     assert _read_tar(asyncio.run(_read())) == {"k": b"edited-mid-upload"}
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     tmp_path: Path,
 ) -> None:
@@ -958,6 +974,8 @@ async def _prune(
     await storage.prune_to_final_snapshot(c, s)
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 @pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
 @pytest.mark.parametrize(
     "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
@@ -1160,6 +1178,8 @@ _FS_STEP_ERRORS: dict[str, type[BaseException]] = {
 _FS_STEPS = list(_FS_STEP_ERRORS)
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 @pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
 @pytest.mark.parametrize("step", _FS_STEPS)
 def test_upload_refused_when_delete_prunes_fs_staging_mid_step(
@@ -1206,6 +1226,8 @@ def test_upload_with_fs_staging_gone_mid_step_and_no_prune_keeps_error(
     assert _unhandled_error(caplog) is _FS_STEP_ERRORS[step]
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 @pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
 def test_upload_refused_when_delete_prune_empties_staging_before_rmdir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, published: bool
@@ -1399,6 +1421,8 @@ def _object_storage_failing_pointer_removal(
     return ObjectStorage(fake_s3_factory(FakeS3Store()))
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 @pytest.mark.parametrize(
     "make_storage",
     [_fs_storage_failing_pointer_removal, _object_storage_failing_pointer_removal],
@@ -1723,6 +1747,8 @@ def test_snapshot_refuses_genuinely_corrupt_working_set(tmp_path: Path) -> None:
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
     tmp_path: Path,
 ) -> None:
@@ -1780,6 +1806,8 @@ def test_snapshot_partial_region_loss_is_refused_with_machine_readable_reason(
     }
 
 
+# 36 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(36 * 10 + 30)
 def test_snapshot_partial_region_loss_report_dir_list_over_cap_is_truncated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1826,6 +1854,8 @@ def test_snapshot_partial_region_loss_report_dir_list_over_cap_is_truncated(
     assert payload["truncated"] is True
 
 
+# 24 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(24 * 10 + 30)
 def test_snapshot_partial_region_loss_report_name_list_over_cap_is_truncated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1879,6 +1909,8 @@ def test_snapshot_partial_region_loss_report_name_list_over_cap_is_truncated(
     assert payload["truncated"] is True
 
 
+# 29 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(29 * 10 + 30)
 def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1923,6 +1955,8 @@ def test_snapshot_partial_region_loss_report_exactly_at_cap_not_truncated(
     assert payload["truncated"] is False
 
 
+# 23 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(23 * 10 + 30)
 def test_snapshot_partial_region_loss_report_name_list_exactly_at_cap_not_truncated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2116,6 +2150,8 @@ def test_snapshot_chunk_idle_timeout_aborts_staging_and_returns_408(
     assert _read_tar(published) == {"keep.txt": b"prior"}
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 def test_hydrate_resolved_jar_supersedes_stale_embedded_jar(tmp_path: Path) -> None:
     """The resolved JAR must overwrite the stale embedded server.jar in the snapshot.
 
@@ -2150,6 +2186,8 @@ def test_hydrate_resolved_jar_supersedes_stale_embedded_jar(tmp_path: Path) -> N
     assert members["world/level.dat"] == b"\x00\x01"
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 def test_hydrate_generation_header_matches_leased_snapshot(tmp_path: Path) -> None:
     """Issue #1954: the generation header must match the served content.
 
@@ -2197,6 +2235,8 @@ def test_hydrate_generation_header_on_204_is_zero(tmp_path: Path) -> None:
 # --- assignment-aware publisher guard (issue #1703) ----------------------------
 
 
+# 19 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(19 * 10 + 30)
 def test_snapshot_stale_base_from_assigned_worker_is_allowed(tmp_path: Path) -> None:
     # Issue #1703 unwedge: worker A published the current generation (a late final
     # snapshot after being re-placed). Worker B is now the assigned worker and tries
@@ -2292,6 +2332,8 @@ def test_snapshot_commit_fenced_when_assignment_moved_during_upload(
     assert _read_tar(asyncio.run(_read())) == {"k": b"g1"}
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 @pytest.mark.parametrize(
     "spell",
     [
@@ -2379,6 +2421,8 @@ def test_snapshot_malformed_publisher_is_422_and_publishes_nothing(
     )
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 def test_snapshot_late_publish_after_clear_with_no_replacement_still_lands(
     tmp_path: Path,
 ) -> None:
@@ -2579,6 +2623,8 @@ def test_commit_refused_when_server_is_re_placed_while_it_stalls(
     assert asyncio.run(_staging_left(storage, c, s)) == []
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 @pytest.mark.parametrize(
     ("make_storage", "stall"),
     [(_fs_storage, _stall_fs_fsync), (_object_storage, _stall_object_copy)],
@@ -3213,6 +3259,8 @@ async def _no_hook() -> None:
     pass
 
 
+# 22 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(22 * 10 + 30)
 @pytest.mark.parametrize("mutation", list(_MUTATIONS))
 @pytest.mark.parametrize(
     "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
@@ -3242,6 +3290,8 @@ def test_a_mutation_completing_after_the_guard_observes_refuses_the_upload(
     assert live == world
 
 
+# 26 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(26 * 10 + 30)
 @pytest.mark.parametrize("mutation", list(_MUTATIONS))
 @pytest.mark.parametrize(
     "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]

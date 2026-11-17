@@ -22,6 +22,8 @@ def harness(request: pytest.FixtureRequest, tmp_path: Path) -> StorageHarness:
     return build_harness(request.param, tmp_path)
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_view_pins_snapshot_across_concurrent_publish(
     harness: StorageHarness,
 ) -> None:
@@ -44,6 +46,8 @@ async def test_view_pins_snapshot_across_concurrent_publish(
         assert content == b"OLD_A"
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_view_lease_survives_publish_and_sweep(
     harness: StorageHarness,
 ) -> None:
@@ -130,6 +134,8 @@ async def test_view_unpublished_server_returns_empty(
             await stream.__anext__()
 
 
+# 15 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(15 * 10 + 30)
 async def test_concurrent_restore_does_not_tear_export_walk(
     harness: StorageHarness,
 ) -> None:

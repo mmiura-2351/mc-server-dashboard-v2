@@ -92,6 +92,8 @@ async def test_crash_before_flip_keeps_old_snapshot_live(
     await _assert_current_resolves_complete(tmp_path, community, server, [OLD])
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("phase", _AFTER_FLIP)
 async def test_crash_after_flip_keeps_new_snapshot_live(
     tmp_path: Path, phase: PublishPhase
@@ -109,6 +111,8 @@ async def test_crash_after_flip_keeps_new_snapshot_live(
     await _assert_current_resolves_complete(tmp_path, community, server, [NEW])
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("phase", _BEFORE_FLIP + _AFTER_FLIP)
 async def test_sweep_reclaims_orphan_after_crash_idempotently(
     tmp_path: Path, phase: PublishPhase
@@ -187,6 +191,8 @@ def _prune_server_root(
     )
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     tmp_path: Path,
 ) -> None:
@@ -195,8 +201,6 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     # tree GC leaves: final present + no current symlink + a leftover snapshots/
     # tree. The retried DeleteServer must finish the GC WITHOUT re-packing, so it
     # never overwrites the good final.tar.gz with a partial pack from the leftover.
-    import time
-
     storage = FsStorage(tmp_path)
     community, server = new_scope()
     handle = await storage.begin_snapshot(community, server)
@@ -219,12 +223,8 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     (stale / "level.dat").write_bytes(b"stale")
     leaked_tmp = server_root / ".final.deadbeef.tmp"
     leaked_tmp.write_bytes(b"junk")
-    # Age the leaked spool past the sweep threshold (issue #903) so it is reclaimed;
-    # a young one a live prune may still be filling would be spared.
-    import os
-
-    old = time.time() - 7200
-    os.utime(leaked_tmp, (old, old))
+    # The spool is left young: a retry within the hour must still reclaim it, as no
+    # live prune can own it while this prune holds the server lock (issue #3718).
 
     # The retry takes the no-current branch: GC completes, the leaked tmp is swept,
     # final is byte-for-byte untouched (no partial re-pack), nothing republished.
@@ -237,6 +237,105 @@ async def test_prune_retry_after_crash_keeps_final_and_finishes_gc(
     assert not list(server_root.glob(".final.*.tmp"))
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+async def test_prune_reclaims_young_crash_left_final_spool_while_packing(
+    tmp_path: Path,
+) -> None:
+    # Issue #3718: a crash mid-pack leaves a ``.final.*.tmp`` and keeps ``current``,
+    # so the retried DeleteServer packs again. The leftover is younger than the
+    # sweep age threshold, yet no live prune can own it while this one holds the
+    # server lock, so it must go; nothing else would ever reclaim it once the
+    # server is deleted.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+    server_root = _prune_server_root(tmp_path, community, server)
+    leaked_tmp = server_root / ".final.deadbeef.tmp"
+    leaked_tmp.write_bytes(b"junk")
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    assert not list(server_root.glob(".final.*.tmp"))
+    assert read_tar((server_root / "final.tar.gz").read_bytes()) == NEW
+
+
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
+async def test_prune_never_removes_a_live_prunes_spool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Issue #3718: the prune reclaims ``.final.*.tmp`` spools without an age guard,
+    # so it must never reach one a prune is still filling: neither its own nor a
+    # concurrent prune's. The first prune is held mid-pack while a second prune of
+    # the same server is started; the first's spool must survive until it is
+    # renamed into place.
+    import asyncio
+    import threading
+    from collections.abc import Callable
+
+    import mc_server_dashboard_api.storage.adapters.fs as fs_module
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    handle = await storage.begin_snapshot(community, server)
+    await storage.write_snapshot(handle, tar_stream(NEW))
+    await storage.commit_snapshot(handle)
+    server_root = _prune_server_root(tmp_path, community, server)
+
+    entered = threading.Event()
+    release = threading.Event()
+    spool_present: list[bool] = []
+    real_write_tar_gz = fs_module._write_tar_gz
+
+    def gated_write_tar_gz(directory: Path, archive: Path) -> None:
+        spool_present.append(archive.exists())
+        entered.set()
+        release.wait(timeout=10)
+        spool_present.append(archive.exists())
+        real_write_tar_gz(directory, archive)
+
+    monkeypatch.setattr(fs_module, "_write_tar_gz", gated_write_tar_gz)
+
+    # Observe the server-lock attempts so the test knows the second prune actually
+    # found the lock held, instead of guessing with a sleep.
+    contended = threading.Event()
+    real_run_if_unlocked = storage._run_if_unlocked
+
+    def observed_run_if_unlocked(
+        community_id: CommunityId,
+        server_id: ServerId,
+        work: Callable[[], object],
+    ) -> object:
+        outcome = real_run_if_unlocked(community_id, server_id, work)
+        if outcome is fs_module._LockHeld.LOCK_HELD:
+            contended.set()
+        return outcome
+
+    monkeypatch.setattr(storage, "_run_if_unlocked", observed_run_if_unlocked)
+
+    first = asyncio.create_task(storage.prune_to_final_snapshot(community, server))
+    second: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        second = asyncio.create_task(storage.prune_to_final_snapshot(community, server))
+        assert await asyncio.to_thread(contended.wait, 10)
+        assert not second.done()
+    finally:
+        release.set()
+    await first
+    assert second is not None
+    await second
+
+    assert spool_present == [True, True]
+    assert read_tar((server_root / "final.tar.gz").read_bytes()) == NEW
+    assert not list(server_root.glob(".final.*.tmp"))
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_prune_fsyncs_final_before_unlinking_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,6 +389,8 @@ async def test_prune_fsyncs_final_before_unlinking_current(
     assert "fsync-dir" in events and events.index("fsync-dir") < unlink_at
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_prune_advances_generation_marker(tmp_path: Path) -> None:
     # Issue #3434: the prune advances the generation instead of dropping its marker,
     # so a row that survives a failed delete commit never reads a lower generation
@@ -527,6 +628,8 @@ async def test_commit_snapshot_fsyncs_staged_data_before_flip(
     )
 
 
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_restore_backup_fsyncs_staged_data_before_flip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -744,6 +847,8 @@ async def test_sweep_skips_dot_tmp_shaped_version_directory(
     assert version_file.exists()
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_version_capture_fsyncs_before_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

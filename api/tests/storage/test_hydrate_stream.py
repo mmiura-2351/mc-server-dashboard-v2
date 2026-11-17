@@ -54,6 +54,8 @@ async def test_producer_failure_surfaces_as_stream_error_not_silent_eof(
         await drain(storage.open_hydrate_source(community, server))
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_open_but_never_iterated_does_not_lease_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -77,6 +79,8 @@ async def test_open_but_never_iterated_does_not_lease_snapshot(
     assert not old_snapshot.exists()
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_first_chunk_then_publish_completes_old_content(
     tmp_path: Path,
 ) -> None:
@@ -97,6 +101,8 @@ async def test_first_chunk_then_publish_completes_old_content(
     assert read_tar(first_chunk + rest) == {"f": b"OLD"}
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_aclose_releases_lease_and_sweep_reclaims(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = new_scope()
@@ -314,6 +320,8 @@ async def test_a_writer_that_fails_to_start_closes_the_pipe_and_releases_once(
 # so the same lease-lifecycle properties are asserted here.
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_open_file_stream_open_but_never_iterated_does_not_lease(
     tmp_path: Path,
 ) -> None:
@@ -334,6 +342,8 @@ async def test_open_file_stream_open_but_never_iterated_does_not_lease(
     assert not old_snapshot.exists()  # never leased -> reclaim removed it
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_open_file_stream_first_chunk_then_publish_completes_old_content(
     tmp_path: Path,
 ) -> None:
@@ -359,6 +369,8 @@ async def test_open_file_stream_first_chunk_then_publish_completes_old_content(
     assert first_chunk + rest == b"OLD"
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_open_file_stream_aclose_releases_lease_and_sweep_reclaims(
     tmp_path: Path,
 ) -> None:

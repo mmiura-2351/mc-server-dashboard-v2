@@ -660,6 +660,8 @@ async def _publish(storage: Storage, server: Server, files: dict[str, bytes]) ->
     await storage.commit_snapshot(handle)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 @_REAL_BACKENDS
 async def test_a_store_fault_listing_the_content_dir_keeps_plugin_rows(
     build: _BuildStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -690,6 +692,8 @@ async def test_a_store_fault_listing_the_content_dir_keeps_plugin_rows(
     assert await plugins.list_for_server(server.id) == [tracked]
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 @_REAL_BACKENDS
 async def test_an_absent_content_dir_still_removes_orphan_rows(
     build: _BuildStorage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

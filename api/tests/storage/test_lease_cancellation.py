@@ -126,6 +126,8 @@ async def _until(predicate: Callable[[], bool]) -> None:
         await asyncio.sleep(0.01)
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 @pytest.mark.parametrize(
     "read", [r for _, r in _FS_READS], ids=[n for n, _ in _FS_READS]
 )

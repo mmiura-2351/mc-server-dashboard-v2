@@ -82,6 +82,8 @@ class FileStoreContract:
             "region/r.0.0.mca": b"region",
         }
 
+    # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+    @pytest.mark.timeout(10 * 10 + 30)
     async def test_export_appends_extra_entries_after_the_subtree(
         self, file_store_harness: FileStoreHarness
     ) -> None:
@@ -149,6 +151,8 @@ class FileStoreContract:
         with pytest.raises(ServerFileNotFoundError):
             await _archive(stream)
 
+    # 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+    @pytest.mark.timeout(16 * 10 + 30)
     @pytest.mark.parametrize(
         "method",
         [

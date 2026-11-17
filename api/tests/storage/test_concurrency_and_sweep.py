@@ -501,6 +501,8 @@ async def test_backup_pack_survives_concurrent_publish_reclaim(
         assert handle.read() == b"OLD"
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_backup_stream_that_has_begun_survives_a_delete(tmp_path: Path) -> None:
     """A delete after the first chunk cannot shorten the archive stream (#2415).
 
@@ -682,6 +684,8 @@ _LOCK_WAITERS = [
 ]
 
 
+# 26 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(26 * 10 + 30)
 @pytest.mark.parametrize(("waiter", "expected"), _LOCK_WAITERS)
 async def test_lock_waiter_leaves_the_executor_to_a_publish_fence(
     tmp_path: Path, waiter: _Waiter, expected: object

@@ -439,6 +439,8 @@ async def test_crash_then_stop_then_start_again_succeeds(engine: AsyncEngine) ->
 # --- Chain 2: EULA repair (issue #197 + #205 + #208) -----------------------
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_crash_then_stop_then_write_eula_at_rest_then_start(
     engine: AsyncEngine, tmp_path: Path
 ) -> None:

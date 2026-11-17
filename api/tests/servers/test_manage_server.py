@@ -2487,6 +2487,8 @@ async def test_delete_other_communitys_server_is_not_found() -> None:
 # --- create EULA seeding over real fs Storage ------------------------------
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_create_with_accept_eula_lands_at_rest_and_hydrates(
     tmp_path: Path,
 ) -> None:
@@ -2568,6 +2570,8 @@ async def test_create_without_accept_eula_seeds_properties_at_rest(
 # --- update game port over real fs Storage (#311) --------------------------
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> None:
     # End-to-end over real FsStorage: create seeds server.properties on the
     # assigned port, then a port update rewrites server-port in place so the

@@ -595,10 +595,10 @@ after the flip, so `current` never resolves to a tree whose data blocks are
 unflushed while the prior copy is already deleted.
 
 The sweep also reclaims the **spool temp files** a crash leaves at a backup
-write site — the fs adapter's `.backup.*.tmp` (create / upload) and
-`.final.*.tmp` (prune) siblings — and, on the object backend, the **in-progress
-multipart upload parts** a crash mid-`put_backup` (or mid-snapshot-member upload)
-leaves behind. Multipart parts never list as objects, so the prefix scan cannot
+write site — the fs adapter's `.backup.*.tmp` (create / upload) siblings — and,
+on the object backend, the **in-progress multipart upload parts** a crash
+mid-`put_backup` (or mid-snapshot-member upload) leaves behind. Multipart parts
+never list as objects, so the prefix scan cannot
 see them; the object sweep lists them via `ListMultipartUploads` and aborts them
 via `AbortMultipartUpload`. Both reclaim paths apply an **mtime / `Initiated` age
 threshold** (1 h): a spool or upload younger than the threshold may belong to a
@@ -619,6 +619,11 @@ residual micro-gap holds no part bytes and is left to the operator-side
 does not support `ListMultipartUploads` at all (build-dependent), the sweep logs
 a WARN and continues the rest of the sweep — orphan-part hygiene degrades rather
 than failing recovery.
+
+The fs prune's `.final.*.tmp` siblings are not the sweep's: every prune removes
+them when it starts, regardless of age. Only a prune writes them, and it holds
+the in-process server lock for its whole run, so none can belong to a live
+prune.
 
 ### 4.4 Single-file writes
 

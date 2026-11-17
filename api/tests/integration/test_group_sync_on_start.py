@@ -220,6 +220,8 @@ async def _attached_op_group(world: _World, player: uuid.UUID) -> GroupId:
     return group.id
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_operator_removed_while_running_is_gone_from_the_next_launch(
     world: _World,
 ) -> None:
@@ -253,6 +255,8 @@ async def test_operator_removed_while_running_is_gone_from_the_next_launch(
         assert await uow.groups.list_sync_pending(world.server_id) == []
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_group_deleted_while_running_empties_the_next_launch(
     world: _World,
 ) -> None:
@@ -270,6 +274,8 @@ async def test_group_deleted_while_running_empties_the_next_launch(
     assert json.loads((await world.hydrated())["ops.json"]) == []
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_start_after_an_at_rest_edit_writes_nothing_more(world: _World) -> None:
     # The at-rest edit already wrote the file; the start finds it current, so it
     # neither advances the generation again nor forces a hydrate of its own.

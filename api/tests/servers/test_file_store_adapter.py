@@ -143,6 +143,8 @@ async def test_open_file_stream_missing_translates_to_file_not_found(
         await anext(stream)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_open_file_stream_delete_racing_the_open_translates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -175,6 +177,8 @@ async def test_open_file_stream_delete_racing_the_open_translates(
         await anext(stream)
 
 
+# 24 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(24 * 10 + 30)
 async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()
@@ -220,6 +224,8 @@ async def test_edit_history_rollback_round_trip(tmp_path: Path) -> None:
     assert rolled == b"motd=original"
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_read_version_returns_retained_bytes(tmp_path: Path) -> None:
     """read_version serves a retained version's exact bytes (preview pre-rollback)."""
 
@@ -335,6 +341,8 @@ async def test_rollback_malformed_version_id_is_invalid_version_id(
         )
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_edit_round_trips_against_populated_snapshot(tmp_path: Path) -> None:
     """An at-rest edit on a populated snapshot persists and reads back (issue #542).
 
@@ -1073,6 +1081,8 @@ async def test_rename_onto_a_directory_under_a_directory_link_is_refused(
     assert (live / "real" / "sub" / "f.txt").read_bytes() == b"F"
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
 async def test_delete_of_a_directory_link_removes_the_link_not_its_target(
     tmp_path: Path,
 ) -> None:
@@ -1111,6 +1121,8 @@ async def test_delete_of_a_directory_link_removes_the_link_not_its_target(
     assert (live / "real" / "inner.txt").read_bytes() == b"INNER"
 
 
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
 async def test_delete_file_removes_and_retains_version(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()
@@ -1168,6 +1180,8 @@ async def test_retain_if_changed_dedups_repeated_identical_snapshots(
     )
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_retain_if_changed_retains_again_when_authoritative_changes(
     tmp_path: Path,
 ) -> None:
@@ -1255,6 +1269,8 @@ async def test_delete_missing_file_is_file_not_found(tmp_path: Path) -> None:
         )
 
 
+# 13 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(13 * 10 + 30)
 async def test_delete_dir_removes_subtree(tmp_path: Path) -> None:
     storage = FsStorage(tmp_path)
     community, server = _scope()
@@ -1345,6 +1361,8 @@ def test_validate_rel_path_rejects_traversal(tmp_path: Path) -> None:
             adapter.validate_rel_path(bad)
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_rename_file_moves_without_version_capture(tmp_path: Path) -> None:
     """rename_file moves a file atomically without version retention (#1164)."""
     storage = FsStorage(tmp_path)
@@ -1422,6 +1440,8 @@ def test_validate_rel_path_accepts_clean_path(tmp_path: Path) -> None:
     adapter.validate_rel_path("world/level.dat")
 
 
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
 async def test_download_dir_pins_snapshot_across_concurrent_publish(
     tmp_path: Path,
 ) -> None:
