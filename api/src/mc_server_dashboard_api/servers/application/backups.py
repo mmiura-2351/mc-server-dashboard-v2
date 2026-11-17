@@ -1493,11 +1493,11 @@ def _validate_backup_archive(
 
     The archive must also read to its end (issue #3778). The tar is walked
     through :class:`EndCheckedReader` over ``gzip.GzipFile``: the walk must stop
-    at the end-of-archive marker, so a damaged header past the first is refused
-    rather than cutting the member list short, and the stream is then read on to
-    the gzip end. Only zeros may follow the marker, the gzip CRC32 and ISIZE must
-    match, and only another gzip member or zero padding may follow the gzip
-    stream. The zeros read there count toward ``max_decompressed_bytes`` too.
+    at the end-of-archive marker, so a header past the first that does not read
+    is refused rather than cutting the member list short, and the stream is then
+    read on to the gzip end. Only zeros may follow the marker, the gzip CRC32 and
+    ISIZE must match, and only another gzip member or zero padding may follow the
+    gzip stream. The zeros read there count toward ``max_decompressed_bytes`` too.
 
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses

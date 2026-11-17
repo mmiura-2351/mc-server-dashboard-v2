@@ -702,7 +702,7 @@ async def upload_file(
     reader detects, an encrypted member or an unsupported compression method) is
     422 ``invalid_archive``. The whole archive is read before the first write, so
     nothing is written. A tar.gz is read to its gzip end (issue #3778), so these
-    are ``invalid_archive`` too: a damaged header past the first, no
+    are ``invalid_archive`` too: a header past the first that does not read, no
     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
     that does not match, and bytes after the gzip stream that are neither
     another gzip member nor zero padding. The zeros past the marker count toward

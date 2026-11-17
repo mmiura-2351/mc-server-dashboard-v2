@@ -354,10 +354,10 @@ ordinary name character. The gate reads the archive whole, which restore and the
 probe do not (issue #3778, `archive_member.EndCheckedReader`): the member walk
 must stop at the end-of-archive marker, only zeros may follow it, the gzip
 CRC32 and ISIZE must match, and only another gzip member or zero padding may
-follow the gzip stream. So the gate refuses a damaged header that cuts the
-member list short, a missing or cut marker, a second tar after the first and
-bytes after the gzip stream, all of which restore and the probe accept today
-(issue #3798). Each member is first read without the conventional
+follow the gzip stream. So the gate refuses a header past the first that does
+not read, which restore takes for the end and so cuts the member list short, a
+missing or cut marker, a second tar after the first and bytes after the gzip
+stream, all of which restore and the probe accept today (issue #3798). Each member is first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
 every other member, so `./world/level.dat` is judged, restored and checked
@@ -1495,8 +1495,10 @@ rotted, but a stored object whose bytes have changed is damaged regardless — t
 next flipped bit lands in the payload, which restore *does* reject. The upload
 gate is stricter than both (One archive member rule, above): it refuses what
 the probe reads as padding, a second tar after the end-of-archive marker or
-bytes after the gzip stream, so an archive it accepted passes the probe until
-its stored bytes change.
+bytes after the gzip stream. Like gzip, it accepts a `tar.gz` of several gzip
+members, which the object backend's restore and health walk (`r|gz`) read only
+the first of: such an archive restores in part there, or not at all when the
+split falls inside a tar member (issue #3798).
 
 Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or

@@ -767,10 +767,10 @@ export interface paths {
          *     member, its name and the reason; a name over 256 characters is cut to its
          *     first 256 and marked ``…(truncated, N chars)``); an over-cap archive is 413.
          *     The archive is read to its gzip end (issue #3778), so a damaged one is
-         *     ``invalid_archive`` too: a damaged header past the first, no end-of-archive
-         *     marker, anything but zeros past it, a gzip CRC32 or ISIZE that does not
-         *     match, or bytes after the gzip stream that are neither another gzip member
-         *     nor zero padding.
+         *     ``invalid_archive`` too: a header past the first that does not read, no
+         *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
+         *     that does not match, or bytes after the gzip stream that are neither another
+         *     gzip member nor zero padding.
          *
          *     **No directory may stand at the root ``server.properties`` path (issue
          *     #2869).** A restore republishes the archive's members verbatim as the working
@@ -1587,7 +1587,7 @@ export interface paths {
          *     reader detects, an encrypted member or an unsupported compression method) is
          *     422 ``invalid_archive``. The whole archive is read before the first write, so
          *     nothing is written. A tar.gz is read to its gzip end (issue #3778), so these
-         *     are ``invalid_archive`` too: a damaged header past the first, no
+         *     are ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
          *     that does not match, and bytes after the gzip stream that are neither
          *     another gzip member nor zero padding. The zeros past the marker count toward
