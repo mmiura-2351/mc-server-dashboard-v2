@@ -92,6 +92,22 @@ func awaitAnswer(t *testing.T, done <-chan session.CommandResult) session.Comman
 	}
 }
 
+// awaitCompleted fails the test unless a snapshot command none of whose calls is
+// held answers within 120 s. It runs every phase, so its answer waits on
+// filesystem work, the marker stamp's fsyncs among it: the I/O bound (#3637)
+// fits that, and awaitAnswer's 5 s for an answer given while the body is held
+// does not (issue #3770).
+func awaitCompleted(t *testing.T, done <-chan session.CommandResult) session.CommandResult {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(120 * time.Second):
+		t.Fatal("the snapshot command did not answer within 120s")
+		return session.CommandResult{}
+	}
+}
+
 // awaitFinished fails the test unless c receives within bound. It waits for a
 // held call's caller to finish after the test released it, which awaitEnter's 2 s
 // arrival bound does not fit (issue #3685): a finish behind filesystem work gets
@@ -232,7 +248,8 @@ func (c *redialControl) redialedLines() []string {
 
 // newRunningManager starts s1 on a manager whose RCON open hands out ctrl once and
 // stalls any later open, as a read of server.properties on stuck storage would.
-func newRunningManager(t *testing.T, ctrl *redialControl, tr *fakeTransfer) *Manager {
+// The returned channel is closed when a later open reaches that stall.
+func newRunningManager(t *testing.T, ctrl *redialControl, tr *fakeTransfer) (*Manager, <-chan struct{}) {
 	t.Helper()
 	m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 	m.fsckRetryDelay = 0 // the restore's redial backoff
@@ -250,7 +267,7 @@ func newRunningManager(t *testing.T, ctrl *redialControl, tr *fakeTransfer) *Man
 		}
 		return ctrl, nil
 	}
-	return m
+	return m, reopen.entered
 }
 
 // abandonRunningSnapshot runs s1's snapshot until st is entered, ends its
@@ -291,7 +308,7 @@ func abandonRunningSnapshot(t *testing.T, m *Manager, ctrl *redialControl, st *s
 
 func TestRunningSnapshotAnswersWhileTheSettleScanIsStuck(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
-	m := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
+	m, _ := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
 	st := newStall(t)
 	m.scanRegion = func(root string) (regionState, error) {
 		st.wait()
@@ -303,21 +320,21 @@ func TestRunningSnapshotAnswersWhileTheSettleScanIsStuck(t *testing.T) {
 func TestRunningSnapshotAnswersWhileThePackIsStuck(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
 	st := newStall(t)
-	m := newRunningManager(t, ctrl, &fakeTransfer{gen: 7, stallPack: st.wait})
+	m, _ := newRunningManager(t, ctrl, &fakeTransfer{gen: 7, stallPack: st.wait})
 	abandonRunningSnapshot(t, m, ctrl, st)
 }
 
 func TestRunningSnapshotAnswersWhileTheUploadIsStuck(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
 	st := newStall(t)
-	m := newRunningManager(t, ctrl, &fakeTransfer{gen: 7, stallUpload: st.wait})
+	m, _ := newRunningManager(t, ctrl, &fakeTransfer{gen: 7, stallUpload: st.wait})
 	abandonRunningSnapshot(t, m, ctrl, st)
 }
 
 func TestRunningSnapshotAnswersWhileTheSpoolUnlinkIsStuck(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
 	st := newStall(t)
-	m := newRunningManager(t, ctrl, &fakeTransfer{uploadErr: errors.New("upload boom"), stallCleanup: st.wait})
+	m, _ := newRunningManager(t, ctrl, &fakeTransfer{uploadErr: errors.New("upload boom"), stallCleanup: st.wait})
 	abandonRunningSnapshot(t, m, ctrl, st)
 }
 
@@ -326,10 +343,18 @@ func TestRunningSnapshotAnswersWhileTheSpoolUnlinkIsStuck(t *testing.T) {
 // restore, and the command with it.
 func TestRunningSnapshotRestoreDoesNotReopenFromTheWorkingDir(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok", failLines: map[string]error{"save-on": errors.New("save-on boom")}}}
-	m := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
-	res := awaitAnswer(t, goHandle(m, snapshotCmd()))
-	if !res.Success {
-		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	m, reopened := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
+	done := goHandle(m, snapshotCmd())
+	// A reopen stalls for good, so it fails at once rather than at the bound.
+	select {
+	case res := <-done:
+		if !res.Success {
+			t.Fatalf("SnapshotTrigger = %+v, want success", res)
+		}
+	case <-reopened:
+		t.Fatal("the restore reopened from the working dir")
+	case <-time.After(120 * time.Second): // the I/O bound, as in awaitCompleted
+		t.Fatal("the snapshot command did not answer within 120s")
 	}
 	if !containsLine(ctrl.redialedLines(), "save-on") {
 		t.Fatalf("redialed rcon lines = %v, want save-on retried on a redialed connection", ctrl.redialedLines())
@@ -341,7 +366,7 @@ func TestRunningSnapshotRestoreDoesNotReopenFromTheWorkingDir(t *testing.T) {
 // under its claim. The marker stamp is held here on the working-set lock.
 func TestRunningSnapshotCommittedBeforeTheDeadlineAnswersSuccess(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
-	m := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
+	m, _ := newRunningManager(t, ctrl, &fakeTransfer{gen: 7})
 	contended := make(chan struct{}, 1)
 	m.workingSetLockContended = func(string) { contended <- struct{}{} }
 	lock := m.workingSetLock(s1)
@@ -393,7 +418,7 @@ func TestStoppedSnapshotAnswersAtTheTransferDeadline(t *testing.T) {
 func TestRunningSnapshotAnswersWithinTheTransferDeadline(t *testing.T) {
 	ctrl := &redialControl{fakeControl: &fakeControl{reply: "ok"}}
 	st := newStall(t)
-	m := newRunningManager(t, ctrl, &fakeTransfer{stallPack: st.wait})
+	m, _ := newRunningManager(t, ctrl, &fakeTransfer{stallPack: st.wait})
 	exited := awaitSnapshotReleased(m)
 	m.SetTransferDeadline(restoreSaveTimeout + 100*time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
@@ -440,7 +465,7 @@ func TestRunningSnapshotMarkCoversTheCommandsSaveOnRecovery(t *testing.T) {
 	dialHeld.unblock()
 	assertFailed(t, awaitAnswer(t, first))
 	awaitFinished(t, released, 10*time.Second) // a fake redial and save-on, no files
-	if res := awaitAnswer(t, goHandle(m, snapshotCmd())); !res.Success {
+	if res := awaitCompleted(t, goHandle(m, snapshotCmd())); !res.Success {
 		t.Fatalf("SnapshotTrigger once the recovery finished = %+v, want it admitted", res)
 	}
 }
