@@ -8,16 +8,16 @@ with the suite but the host. It repeats one check, then sleeps, and each check
 computes:
 
 * Argon2id at the production cost (64 MiB, 3 passes, 4 lanes on 4 threads)
-  over a fixed password and salt, compared with the tag it computed at
-  start-up and with the hard-coded one;
+  over a fixed password and salt, compared with the hard-coded tag;
 * the same with 1 lane, which runs on one thread;
 * a control without argon2: a 64 MiB pattern written, then read back twice.
 
-Each line it prints starts with a UTC timestamp: a start line, a summary every
---summary-every checks, a MISMATCH line for any computation that disagrees, an
-ERROR line for one that raised, and a last line when it stops. It stops, with
-exit status 0, on SIGTERM or SIGINT or once its parent is gone, without waiting
-for the check in hand.
+Both tags are also computed once at start-up, as check 0. Each line it prints
+starts with a UTC timestamp: a start line, a summary every --summary-every
+checks, a MISMATCH line for any computation that disagrees, an ERROR line for
+one that raised, and a last line when it stops. It stops, with exit status 0,
+on SIGTERM or SIGINT or once the --parent pid is no longer its parent, without
+waiting for the check in hand.
 
 scripts/check_parallel.sh runs it for as long as the api chain runs, with the
 api venv's interpreter, isolated (-I) and at nice 19, into
@@ -127,26 +127,16 @@ class _Canary:
             )
 
     def run(self) -> None:
-        startup = {lanes: _tag(lanes).hex() for lanes in self._expected}
         self._emit(
             f"start pid={os.getpid()} interval_s={self._interval}"
-            f" summary_every={self._summary_every} p4={startup[4]} p1={startup[1]}"
+            f" summary_every={self._summary_every}"
         )
-        for lanes, tag in startup.items():
-            if tag != self._expected[lanes]:
-                self._mismatches += 1
-                self._emit(
-                    f"MISMATCH check=0 kind=p{lanes} startup={tag}"
-                    f" expected={self._expected[lanes]}"
-                )
 
         def argon2_check(lanes: int) -> str:
             tag = _tag(lanes).hex()
-            if tag == startup[lanes] == self._expected[lanes]:
+            if tag == self._expected[lanes]:
                 return ""
-            return (
-                f"tag={tag} startup={startup[lanes]} expected={self._expected[lanes]}"
-            )
+            return f"tag={tag} expected={self._expected[lanes]}"
 
         def control_check() -> str:
             first, second = _control_readbacks()
@@ -154,6 +144,8 @@ class _Canary:
                 return ""
             return f"first={first} second={second} expected={_CONTROL_SHA256}"
 
+        for lanes in self._expected:
+            self._compute(0, f"p{lanes}", lambda: argon2_check(lanes))
         while True:
             check = self._checks + 1
             self._compute(check, "p4", lambda: argon2_check(4))
@@ -178,6 +170,13 @@ def main(argv: list[str] | None = None) -> NoReturn:
     # rather than kill the process mid-line; the checks' threads inherit this.
     signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--parent",
+        type=int,
+        required=True,
+        metavar="PID",
+        help="the gate's pid: the canary stops once that is no longer its parent",
+    )
     parser.add_argument("--interval", type=float, default=2.0, metavar="SECONDS")
     parser.add_argument("--summary-every", type=int, default=30, metavar="CHECKS")
     parser.add_argument(
@@ -193,13 +192,15 @@ def main(argv: list[str] | None = None) -> NoReturn:
         expected={4: args.expected_p4, 1: _EXPECTED_TAGS[1]},
     )
     threading.Thread(target=canary.run, name="checks", daemon=True).start()
-    parent = os.getppid()
     while True:
+        # A SIGKILL of the gate runs no trap. The gate passes its pid because
+        # it may die before this starts, when os.getppid() would already name
+        # whatever adopted the canary.
+        if os.getppid() != args.parent:
+            canary.stop("stopped: its parent is gone")
         received = signal.sigtimedwait(_STOP_SIGNALS, 1.0)
         if received is not None:
             canary.stop(f"stopped by {signal.Signals(received.si_signo).name}")
-        if os.getppid() != parent:  # SIGKILL of the gate runs no trap
-            canary.stop("stopped: its parent is gone")
 
 
 if __name__ == "__main__":
