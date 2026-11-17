@@ -10,6 +10,10 @@ actually serves, then proven closed after lifespan exit.
 
 from __future__ import annotations
 
+import gc
+import threading
+import weakref
+
 import grpc
 import pytest
 from grpc import aio
@@ -108,6 +112,34 @@ async def test_lifespan_starts_and_stops_grpc_server(
         with pytest.raises(aio.AioRpcError) as exc:
             await call.read()
         assert exc.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
+def _grpc_pollers() -> set[threading.Thread]:
+    return {t for t in threading.enumerate() if t.name.endswith("(_poll_wrapper)")}
+
+
+async def test_lifespan_exit_releases_the_stopped_grpc_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # grpc.aio runs one process-wide poller thread for as long as any aio server
+    # or channel object is alive, so a stopped server the app still references
+    # keeps that thread running for the app's lifetime (issue #3775). The poller
+    # is shared, so only one this test started must go; collecting first keeps
+    # an earlier test's unreclaimed garbage out of the baseline.
+    monkeypatch.setenv("MCD_API_CONTROL__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_CONTROL__WORKER_CREDENTIAL", _CREDENTIAL)
+    monkeypatch.setenv("MCD_API_SERVER__GRPC_PORT", "0")
+    monkeypatch.setenv("MCD_API_SERVER__HOST", "127.0.0.1")
+    gc.collect()
+    pollers_before = _grpc_pollers()
+
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        server = weakref.ref(app.state.grpc_server)
+    gc.collect()
+
+    assert server() is None
+    assert _grpc_pollers() <= pollers_before
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
