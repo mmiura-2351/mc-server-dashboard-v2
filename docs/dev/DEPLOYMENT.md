@@ -596,12 +596,12 @@ enforced normally for every registration after the first user exists.
 
 From here on, that admin manages all further accounts through the authenticated,
 audited admin API (granting/revoking the admin flag, deactivating/reactivating,
-deleting, and listing users; `PUT /api/users/{id}/platform-admin`,
-`POST /api/users/{id}/deactivate` and friends) — for example,
+deleting, and listing users; `PUT /api/admin/users/{id}/platform-admin`,
+`POST /api/admin/users/{id}/deactivate` and friends) — for example,
 promoting an additional admin:
 
 ```sh
-curl -X PUT http://localhost:8000/api/users/<user-id>/platform-admin \
+curl -X PUT http://localhost:8000/api/admin/users/<user-id>/platform-admin \
   -H 'Authorization: Bearer <admin-access-token>' \
   -H 'Content-Type: application/json' \
   -d '{"grant": true}'

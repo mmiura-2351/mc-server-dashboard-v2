@@ -170,14 +170,20 @@ table.
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid PK | |
-| `username` | text | unique; case-insensitive uniqueness recommended |
-| `email` | text | unique |
+| `username` | text | unique; case-insensitive uniqueness recommended; at most 64 characters on write |
+| `email` | text | unique; at most 254 characters on write |
 | `password_hash` | text | bcrypt/argon2 output incl. per-user salt (FR-AUTH-3) |
 | `is_platform_admin` | bool | the admin axis (FR-AUTH-6, FR-AUTHZ-5); default false, **except** the first user created on an empty table, which is auto-granted true at registration to bootstrap the platform admin — no manual DB step |
 | `active` | bool | account lifecycle flag; default true. A deactivated account keeps its row but cannot authenticate: login refuses it with the uniform 401, and an outstanding access token is rejected on its next request |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(username)`, `UNIQUE(email)`.
+
+The length caps (issue #3689) are application-level: the domain enforces them
+on a value being created or changed, and the API schemas declare them on
+creation. The columns stay unconstrained, so a row written before the caps may
+exceed them; it still loads, signs in, and can be resubmitted unchanged beside
+an edit to the other field (`PATCH /users/me`).
 
 > The brute-force / lockout state from FR-AUTH-4 (per-username and per-IP failure
 > counters over sliding windows, lockout with back-off) is **auth-hardening

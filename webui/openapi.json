@@ -38,6 +38,7 @@
           "username": {
             "anyOf": [
               {
+                "maxLength": 1024,
                 "minLength": 1,
                 "type": "string"
               },
@@ -140,6 +141,7 @@
       "AdminCreateUserRequest": {
         "properties": {
           "email": {
+            "maxLength": 254,
             "minLength": 1,
             "title": "Email",
             "type": "string"
@@ -151,6 +153,7 @@
             "type": "string"
           },
           "username": {
+            "maxLength": 64,
             "minLength": 1,
             "title": "Username",
             "type": "string"
@@ -1165,6 +1168,7 @@
       "ChangePasswordRequest": {
         "properties": {
           "current_password": {
+            "maxLength": 1024,
             "minLength": 1,
             "title": "Current Password",
             "type": "string"
@@ -1479,6 +1483,7 @@
       "DeleteAccountRequest": {
         "properties": {
           "password": {
+            "maxLength": 1024,
             "minLength": 1,
             "title": "Password",
             "type": "string"
@@ -1954,11 +1959,13 @@
       "LoginRequest": {
         "properties": {
           "password": {
+            "maxLength": 1024,
             "minLength": 1,
             "title": "Password",
             "type": "string"
           },
           "username": {
+            "maxLength": 1024,
             "minLength": 1,
             "title": "Username",
             "type": "string"
@@ -1976,6 +1983,7 @@
           "refresh_token": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -2678,6 +2686,7 @@
           "refresh_token": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -2711,6 +2720,7 @@
       "RegisterUserRequest": {
         "properties": {
           "email": {
+            "maxLength": 254,
             "minLength": 1,
             "title": "Email",
             "type": "string"
@@ -2722,6 +2732,7 @@
             "type": "string"
           },
           "username": {
+            "maxLength": 64,
             "minLength": 1,
             "title": "Username",
             "type": "string"
@@ -3050,6 +3061,7 @@
           "keep_session_id": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -3062,6 +3074,7 @@
           "refresh_token": {
             "anyOf": [
               {
+                "maxLength": 256,
                 "minLength": 1,
                 "type": "string"
               },
@@ -3689,6 +3702,7 @@
           "email": {
             "anyOf": [
               {
+                "maxLength": 1024,
                 "minLength": 1,
                 "type": "string"
               },
@@ -3701,6 +3715,7 @@
           "username": {
             "anyOf": [
               {
+                "maxLength": 1024,
                 "minLength": 1,
                 "type": "string"
               },

@@ -17,6 +17,8 @@ from mc_server_dashboard_api.identity.application.admin_create_user import (
     AdminCreateUser,
 )
 from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidEmailError,
+    InvalidUsernameError,
     PasswordPolicyError,
     UsernameAlreadyExistsError,
 )
@@ -127,3 +129,44 @@ async def test_first_user_via_admin_path_becomes_platform_admin() -> None:
         username="alice", email="alice@example.com", password=_VALID_PASSWORD
     )
     assert user.is_platform_admin is True
+
+
+# --- Write caps (issue #3689) ------------------------------------------------
+
+
+def _email(length: int) -> str:
+    return "a" * (length - len("@example.com")) + "@example.com"
+
+
+async def test_creates_a_username_at_64_characters() -> None:
+    uow = FakeUnitOfWork()
+    user = await _use_case(uow)(
+        username="a" * 64, email="alice@example.com", password=_VALID_PASSWORD
+    )
+    assert user.username.value == "a" * 64
+
+
+async def test_rejects_a_username_past_64_characters() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(InvalidUsernameError):
+        await _use_case(uow)(
+            username="a" * 65, email="alice@example.com", password=_VALID_PASSWORD
+        )
+    assert uow.users.by_id == {}
+
+
+async def test_creates_an_email_at_254_characters() -> None:
+    uow = FakeUnitOfWork()
+    user = await _use_case(uow)(
+        username="alice", email=_email(254), password=_VALID_PASSWORD
+    )
+    assert user.email.value == _email(254)
+
+
+async def test_rejects_an_email_past_254_characters() -> None:
+    uow = FakeUnitOfWork()
+    with pytest.raises(InvalidEmailError):
+        await _use_case(uow)(
+            username="alice", email=_email(255), password=_VALID_PASSWORD
+        )
+    assert uow.users.by_id == {}
