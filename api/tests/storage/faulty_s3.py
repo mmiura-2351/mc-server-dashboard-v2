@@ -10,8 +10,8 @@ backend 5xx or a transport failure.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, aclosing
 from typing import Any
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -75,12 +75,18 @@ class _FaultyClient:
         return _call
 
 
-async def _stalling(body: AsyncIterator[bytes], faults: Faults) -> AsyncIterator[bytes]:
-    """Deliver ``body``'s first chunk, then leave the next read pending forever."""
+async def _stalling(
+    body: AsyncGenerator[bytes, None], faults: Faults
+) -> AsyncIterator[bytes]:
+    """Deliver ``body``'s first chunk, then leave the next read pending forever.
 
-    yield await anext(body)
-    faults.stalled.set()
-    await asyncio.Event().wait()
+    Closing this stream closes ``body``, as closing a real body does (#3671).
+    """
+
+    async with aclosing(body):
+        yield await anext(body)
+        faults.stalled.set()
+        await asyncio.Event().wait()
 
 
 class _FaultyContext(AbstractAsyncContextManager[S3Client]):

@@ -92,6 +92,19 @@ func awaitAnswer(t *testing.T, done <-chan session.CommandResult) session.Comman
 	}
 }
 
+// awaitFinished fails the test unless c receives within bound. It waits for a
+// held call's caller to finish after the test released it, which awaitEnter's 2 s
+// arrival bound does not fit (issue #3685): a finish behind filesystem work gets
+// the 120 s I/O bound (#3637), one without gets 10 s.
+func awaitFinished(t *testing.T, c <-chan struct{}, bound time.Duration) {
+	t.Helper()
+	select {
+	case <-c:
+	case <-time.After(bound):
+		t.Fatalf("the released snapshot attempt did not finish within %v", bound)
+	}
+}
+
 func assertFailed(t *testing.T, res session.CommandResult) {
 	t.Helper()
 	if res.Success || res.ErrorCode != session.CommandErrorTransferFailed {
@@ -136,7 +149,8 @@ func abandonStoppedSnapshot(t *testing.T, m *Manager, st *stall) {
 	assertBusy(t, m, startCmd(), hydrateCmd(), snapshotCmd())
 
 	st.unblock()
-	awaitEnter(t, exited)
+	// A released listing or marker read still has its filesystem call to make.
+	awaitFinished(t, exited, 120*time.Second)
 	for _, path := range []string{dir, displaced} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("the abandoned snapshot deleted %s: %v", path, err)
@@ -265,7 +279,8 @@ func abandonRunningSnapshot(t *testing.T, m *Manager, ctrl *redialControl, st *s
 	}
 
 	st.unblock()
-	awaitEnter(t, exited)
+	// A released settle scan still reads the region directory.
+	awaitFinished(t, exited, 120*time.Second)
 	if _, err := os.Stat(displaced); err != nil {
 		t.Fatalf("the abandoned snapshot swept the displaced tree: %v", err)
 	}
@@ -368,7 +383,8 @@ func TestStoppedSnapshotAnswersAtTheTransferDeadline(t *testing.T) {
 	m.SetTransferDeadline(100 * time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
 	st.unblock()
-	awaitEnter(t, exited)
+	// The released fake Snapshot still lists the working dir (hasWorkingSet).
+	awaitFinished(t, exited, 120*time.Second)
 }
 
 // With the real clock: a running snapshot's phases end restoreSaveTimeout before
@@ -382,7 +398,7 @@ func TestRunningSnapshotAnswersWithinTheTransferDeadline(t *testing.T) {
 	m.SetTransferDeadline(restoreSaveTimeout + 100*time.Millisecond)
 	assertFailed(t, awaitAnswer(t, goHandle(m, snapshotCmd())))
 	st.unblock()
-	awaitEnter(t, exited)
+	awaitFinished(t, exited, 10*time.Second) // no filesystem read or write after the release
 }
 
 // heldRedialControl is a redialControl whose reconnect is held until released.
@@ -418,12 +434,12 @@ func TestRunningSnapshotMarkCoversTheCommandsSaveOnRecovery(t *testing.T) {
 	expire()
 	awaitEnter(t, dialHeld.entered)
 	packHeld.unblock()
-	awaitEnter(t, bodyExited)
+	awaitFinished(t, bodyExited, 10*time.Second) // no filesystem read or write after the release
 	assertBusy(t, m, snapshotCmd())
 
 	dialHeld.unblock()
 	assertFailed(t, awaitAnswer(t, first))
-	awaitEnter(t, released)
+	awaitFinished(t, released, 10*time.Second) // a fake redial and save-on, no files
 	if res := awaitAnswer(t, goHandle(m, snapshotCmd())); !res.Success {
 		t.Fatalf("SnapshotTrigger once the recovery finished = %+v, want it admitted", res)
 	}
@@ -461,7 +477,7 @@ func TestRunningSnapshotRestoresASaveOffWhoseReplyWasLost(t *testing.T) {
 	awaitEnter(t, reply.entered)
 	reply.unblock()
 	assertFailed(t, awaitAnswer(t, done))
-	awaitEnter(t, released)
+	awaitFinished(t, released, 10*time.Second) // a fake redial and save-on, no files
 	if !containsLine(ctrl.redialedLines(), "save-on") {
 		t.Fatalf("redialed rcon lines = %v, want save-on restored for the save-off that may have landed", ctrl.redialedLines())
 	}

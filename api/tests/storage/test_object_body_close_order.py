@@ -158,11 +158,14 @@ async def _hydrate_stream(
 async def _view_stream(
     storage: ObjectStorage, community: CommunityId, server: ServerId, rig: _Rig
 ) -> AsyncIterator[AsyncIterator[bytes]]:
-    # The view's lease is the one the view stream reads under; it goes on the
-    # view's exit, so the stream's body must be closed by then.
+    # The view stream reads under a lease of its own (issue #3670); the view's
+    # release, on its exit, is not part of the stream's order.
     async with storage.open_working_set_view(community, server) as view:
         rig.armed = True
-        yield view.open_file_stream(RelPath(_NAME))
+        try:
+            yield view.open_file_stream(RelPath(_NAME))
+        finally:
+            rig.armed = False
 
 
 _STREAMS = pytest.mark.parametrize(
