@@ -1750,8 +1750,7 @@ async def test_a_start_whose_outcome_check_raised_fails_and_advances() -> None:
 
 async def test_a_stop_the_worker_answered_busy_is_unknown() -> None:
     # BUSY refuses this stop command, but StopServer never reverts its intent:
-    # desired=stopped stands and the reconciler re-sends the stop once the Worker
-    # settles (issue #3799).
+    # desired=stopped stands, which the reconciler converges (issue #3799).
     env = _env(
         control_plane=FakeControlPlane(
             outcomes={"stop": CommandOutcome(status=CommandStatus.BUSY)}
@@ -1957,6 +1956,43 @@ async def test_a_schedule_deleted_between_ticks_leaves_no_toast_state() -> None:
     await env.runner.tick()
 
     assert schedule.id not in env.runner._notifying
+
+
+async def test_a_deleted_schedules_pending_retry_still_logs_the_delete(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The toast-state prune leaves a pending backup retry alone: the retry still
+    # reaches its claim, which logs the delete once and dispatches nothing
+    # (issue #3799, as test_schedule_runner_delete_races pins against Postgres).
+    caplog.set_level(logging.INFO)
+    env = _env(control_plane=FakeControlPlane(unavailable_kinds={"snapshot"}))
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=True,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # failure: arms the retry and the toast state
+    dispatched = list(env.control_plane.dispatched)
+    await env.uow.schedules.delete(schedule.id)
+    caplog.clear()
+
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert env.control_plane.dispatched == dispatched
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and str(schedule.id.value) in record.getMessage()
+    ] == [
+        f"schedule {schedule.id.value} was deleted before its backup retry; "
+        "not dispatched"
+    ]
 
 
 class _UnknownExecute(ExecuteScheduleAction):
