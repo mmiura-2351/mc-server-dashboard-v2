@@ -260,6 +260,9 @@ INVALID_SPARSE_LAYOUTS: dict[str, bytes] = {
         b"A",
         {"GNU.sparse.size": "4", "GNU.sparse.offset": "-5", "GNU.sparse.numbytes": "1"},
     ),
+    "0.1-empty-region-at-a-negative-offset": _member(
+        _SPARSE_NAME, b"", {"GNU.sparse.size": "4", "GNU.sparse.map": "-5,0"}
+    ),
     "0.1-negative-numbytes": _member(
         _SPARSE_NAME, b"A", {"GNU.sparse.size": "4", "GNU.sparse.map": "0,-1"}
     ),
@@ -291,15 +294,18 @@ def tar_with_an_invalid_sparse_layout(layout: str, *, after: dict[str, bytes]) -
 
 
 # The files of :func:`tar_with_gnu_tar_sparse_members`, and the maps GNU tar 1.35
-# writes for them (issue #3802): data, a hole, data and a trailing hole, closed by
-# a zero-length entry at the real size; and a file that is all hole.
+# writes for the first two (issue #3802): data, a hole, data and a trailing hole,
+# closed by a zero-length entry at the real size; and a file that is all hole.
+# The third has two data regions that touch, which the map allows.
 SPARSE_FILES = {
     "world/a.dat": b"A" * 512 + b"\0" * 512 + b"B" * 512 + b"\0" * 1536,
     "world/hole.dat": b"\0" * 1024,
+    "world/touching.dat": b"C" * 512 + b"D" * 512 + b"\0" * 512,
 }
 _SPARSE_MAPS: dict[str, tuple[list[tuple[int, int]], bytes]] = {
     "world/a.dat": ([(0, 512), (1024, 512), (3072, 0)], b"A" * 512 + b"B" * 512),
     "world/hole.dat": ([(1024, 0)], b""),
+    "world/touching.dat": ([(0, 512), (512, 512), (1536, 0)], b"C" * 512 + b"D" * 512),
 }
 GNU_SPARSE_FORMATS = ["S", "0.1", "1.0"]
 

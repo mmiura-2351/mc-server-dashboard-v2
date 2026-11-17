@@ -36,7 +36,7 @@ import gzip
 import tarfile
 import zlib
 from collections.abc import Iterator
-from typing import Self
+from typing import Self, cast
 
 from mc_server_dashboard_api.archive_member import unrestorable_reason
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
@@ -183,14 +183,57 @@ class HeaderCheckedTarInfo(tarfile.TarInfo):
     the header read is covered, so a ``ValueError`` from the caller's own code is
     never mistaken for one. Not ``InvalidHeaderError``: ``TarFile.next`` takes
     that, past the first header, for the end of the archive.
+
+    A header whose numbers read can still not describe a file (issue #3802): a
+    negative size, or a GNU sparse map with a negative offset or length, an entry
+    past the member's real size, or entries that overlap or are out of order.
+    ``tarfile`` takes those numbers as they are, so the read refuses them as the
+    same ``ReadError``, by :func:`_refuse_invalid_layout`.
     """
 
     @classmethod
     def fromtarfile(cls, archive: tarfile.TarFile) -> Self:
         try:
-            return super().fromtarfile(archive)
+            member = super().fromtarfile(archive)
         except ValueError as exc:
             raise tarfile.ReadError(f"unreadable member header: {exc}") from exc
+        _refuse_invalid_layout(member)
+        return member
+
+
+def _refuse_invalid_layout(member: tarfile.TarInfo) -> None:
+    """Raise ``ReadError`` for a member whose size or sparse map cannot be a file.
+
+    The library reference documents ``TarInfo.sparse`` only as "sparse member
+    information". CPython sets it to ``None``, or to a list of ``(offset,
+    numbytes)`` data regions of a file of ``size`` bytes, its real size (typeshed's
+    ``bytes | None`` does not match). The regions must lie inside the file, in
+    order and apart. GNU tar ends a map with a zero-length region at the real size,
+    and the old ``S`` header pads it with ``(0, 0)`` slots, so a zero-length region
+    is held to the bounds but not to the order.
+    """
+
+    if member.size < 0:
+        raise tarfile.ReadError(
+            f"unreadable member header: {member.name!r} has a negative size"
+        )
+    sparse = cast("list[tuple[int, int]] | None", member.sparse)
+    if sparse is None:
+        return
+    data_end = 0
+    for offset, numbytes in sparse:
+        if offset < 0 or numbytes < 0 or offset + numbytes > member.size:
+            raise tarfile.ReadError(
+                f"unreadable member header: {member.name!r} has a sparse region "
+                f"({offset}, {numbytes}) outside its {member.size} bytes"
+            )
+        if numbytes:
+            if offset < data_end:
+                raise tarfile.ReadError(
+                    f"unreadable member header: {member.name!r} has sparse "
+                    "regions that overlap or are out of order"
+                )
+            data_end = offset + numbytes
 
 
 @contextlib.contextmanager

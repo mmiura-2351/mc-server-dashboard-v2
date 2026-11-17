@@ -1462,7 +1462,10 @@ A restore can also be the **first** read to find an archive unreadable: on eithe
 backend its extraction raises `ArchiveUnreadableError` when the bytes do not read
 back as a `tar.gz` (truncated, damaged gzip/tar framing, or a member header
 whose `GNU.sparse.size`, `GNU.sparse.realsize` or `GNU.sparse.map` field, or
-sparse format 1.0 map, is not a number, issue #3790) or
+sparse format 1.0 map, is not a number, issue #3790, or whose numbers cannot
+describe a file: a negative size, or a sparse map entry with a negative offset
+or length, one past the real size, or entries that overlap or are out of order,
+issue #3802) or
 hold a member the extraction refuses, and `ArchiveTooLargeError` when the
 members inflate past the decompressed-size cap. Neither can be overridden, so the servers seam translates
 both to `BackupUnreadableError`, for the restore and for the sweep's probe alike.
