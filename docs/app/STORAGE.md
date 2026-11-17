@@ -1710,7 +1710,7 @@ issues the stop, then — once the Worker confirms the process is gone — recor
 observed=stopped, issues the snapshot trigger, and only then clears the
 assignment. Holding the assignment across the snapshot is what keeps a release
 from discarding a capturable working set: a start racing the in-flight upload
-finds the server still assigned and 409s on its `require_unassigned`
+finds the server still assigned and 409s on its unassigned-only
 compare-and-set instead of re-placing it on a different Worker that would
 hydrate the pre-snapshot generation. Scratch is reclaimed only after the
 snapshot publishes.

@@ -169,7 +169,7 @@ async def _create_running_server(
         loaded.assigned_worker_id = WorkerId(worker_id)
         loaded.updated_at = _NOW
         applied = await uow.servers.update_lifecycle(
-            loaded, expected_from=DesiredState.STOPPED, require_unassigned=True
+            loaded, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
         )
         assert applied is True
         await uow.commit()

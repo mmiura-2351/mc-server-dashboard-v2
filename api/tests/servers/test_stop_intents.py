@@ -144,7 +144,7 @@ class _Repository(FakeServerRepository):
         self.pause_next_flip: asyncio.Event | None = None
         self.flip_paused = asyncio.Event()
         self.stage_flips = False
-        self._staged: list[tuple[Server, DesiredState, bool]] = []
+        self._staged: list[tuple[Server, DesiredState, WorkerId | None, bool]] = []
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         loaded = await super().get_by_id(server_id)
@@ -158,7 +158,8 @@ class _Repository(FakeServerRepository):
         server: Server,
         *,
         expected_from: DesiredState,
-        require_unassigned: bool = False,
+        expected_assigned_worker_id: WorkerId | None,
+        write_config: bool = False,
     ) -> bool:
         gate, self.pause_next_flip = self.pause_next_flip, None
         if gate is not None:
@@ -166,24 +167,32 @@ class _Repository(FakeServerRepository):
             await gate.wait()
         if self.stage_flips:
             current = self.by_id.get(server.id)
-            if current is None or current.desired_state is not expected_from:
+            if (
+                current is None
+                or current.desired_state is not expected_from
+                or current.assigned_worker_id != expected_assigned_worker_id
+            ):
                 return False
-            if require_unassigned and current.assigned_worker_id is not None:
-                return False
-            self._staged.append((server, expected_from, require_unassigned))
+            self._staged.append(
+                (server, expected_from, expected_assigned_worker_id, write_config)
+            )
             return True
         return await super().update_lifecycle(
-            server, expected_from=expected_from, require_unassigned=require_unassigned
+            server,
+            expected_from=expected_from,
+            expected_assigned_worker_id=expected_assigned_worker_id,
+            write_config=write_config,
         )
 
     async def land_staged(self) -> None:
         self.stage_flips = False
         staged, self._staged = self._staged, []
-        for server, expected_from, require_unassigned in staged:
+        for server, expected_from, expected_worker, write_config in staged:
             assert await super().update_lifecycle(
                 server,
                 expected_from=expected_from,
-                require_unassigned=require_unassigned,
+                expected_assigned_worker_id=expected_worker,
+                write_config=write_config,
             )
 
 

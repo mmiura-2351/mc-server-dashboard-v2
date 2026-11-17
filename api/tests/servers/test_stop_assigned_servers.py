@@ -64,7 +64,8 @@ class _LostRaceRepository(FakeServerRepository):
         server: Server,
         *,
         expected_from: DesiredState,
-        require_unassigned: bool = False,
+        expected_assigned_worker_id: WorkerId | None,
+        write_config: bool = False,
     ) -> bool:
         return False
 

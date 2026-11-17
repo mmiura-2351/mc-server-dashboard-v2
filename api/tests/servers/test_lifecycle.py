@@ -1914,7 +1914,7 @@ async def test_stop_force_forwards_force_to_control_plane() -> None:
 async def test_stop_graceful_success_unassigns_and_records_stopped() -> None:
     # A graceful stop confirms the process is gone, so the assignment is cleared
     # and observed converges to stopped in the same transaction (issue #206).
-    # Clearing the assignment lets a later start re-place (require_unassigned).
+    # Clearing the assignment lets a later start re-place (the unassigned-only CAS).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -1945,7 +1945,7 @@ async def test_stop_graceful_success_unassigns_and_records_stopped() -> None:
 
 async def test_stop_then_start_succeeds() -> None:
     # The regression that escaped (issue #206): stop must unassign so the
-    # subsequent start's require_unassigned compare-and-set can re-place the
+    # subsequent start's unassigned-only compare-and-set can re-place the
     # server instead of 409ing forever.
     community, server_id, worker = _ids()
     next_worker = uuid.uuid4()
@@ -1982,7 +1982,7 @@ async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
     # server on a DIFFERENT worker, whose hydrate pulls store generation N while the
     # final (would-be N+1) is still uploading -- the final progression goes missing
     # from the booted world. Holding the assignment across the snapshot keeps the
-    # require_unassigned compare-and-set failing, so no cross-worker re-placement can
+    # unassigned-only compare-and-set failing, so no cross-worker re-placement can
     # slip in during the snapshot window.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -2006,7 +2006,7 @@ async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
             final: bool = False,
         ) -> CommandOutcome:
             # At snapshot time the row is observed=stopped but STILL assigned, so a
-            # racing start's require_unassigned CAS cannot re-place it.
+            # racing start's unassigned-only CAS cannot re-place it.
             row = uow.servers.by_id[server_id]
             self.assignment_at_snapshot = row.assigned_worker_id
             self.observed_at_snapshot = row.observed_state
@@ -2025,7 +2025,7 @@ async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
     assert cp.observed_at_snapshot is ObservedState.STOPPED
     assert cp.assignment_at_snapshot == WorkerId(worker)
     # Once the snapshot settled, the assignment is cleared so a later start can
-    # re-place under require_unassigned.
+    # re-place under the unassigned-only CAS.
     assert result.assigned_worker_id is None
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
     assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
@@ -2034,7 +2034,7 @@ async def test_stop_holds_assignment_until_final_snapshot_settles() -> None:
 async def test_stop_start_race_cannot_replace_until_final_snapshot_settles() -> None:
     # Issue #847: a start issued WHILE the final snapshot is in flight must not be
     # able to re-place the server elsewhere -- the held assignment makes its
-    # require_unassigned CAS conflict. The start is only admitted once the snapshot
+    # unassigned-only CAS conflict. The start is only admitted once the snapshot
     # has settled and the unassign has landed.
     community, server_id, worker = _ids()
     next_worker = uuid.uuid4()
@@ -3334,7 +3334,7 @@ async def test_stop_server_not_found_on_crashed_snapshots_and_keeps_crashed() ->
     assert result.desired_state is DesiredState.STOPPED
     assert result.observed_state is ObservedState.CRASHED
     # No live instance remains, so the assignment is cleared too (issue #206),
-    # letting a later start re-place under require_unassigned.
+    # letting a later start re-place under the unassigned-only CAS.
     assert result.assigned_worker_id is None
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
