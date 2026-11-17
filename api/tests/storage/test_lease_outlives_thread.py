@@ -337,32 +337,44 @@ async def test_a_finished_file_stream_releases_its_lease_once(
     assert release.calls == 1
 
 
-class _ReadHeld:
-    """A file whose read is held by ``pause``, then returns or raises (issue #3654).
+class _OpHeld:
+    """A file whose ``op``, a read or a seek, is held by ``pause`` (issue #3654).
 
-    Like a buffered reader, its close waits for an in-flight read to finish. Each
-    finished read and close is appended to ``events``.
+    The held op then returns, or raises if ``fails``. Like a buffered reader, its
+    close waits for an op in flight. Each finished op and close is appended to
+    ``events``, and ``closed`` is set once it is closed.
     """
 
-    def __init__(self, pause: _Pause, *, fails: bool) -> None:
+    def __init__(self, pause: _Pause, op: str = "read", *, fails: bool = False):
         self.name = "held"
         self.events: list[str] = []
+        self.closed = threading.Event()
         self._pause = pause
+        self._op = op
         self._fails = fails
         self._lock = threading.Lock()
 
-    def read(self, _size: int) -> bytes:
+    def _run(self, op: str) -> None:
         with self._lock:
-            self._pause.entered.set()
-            self._pause.resume.wait()
-            self.events.append("read")
-            if self._fails:
-                raise OSError("read failed")
-            return b"late"
+            if op == self._op:
+                self._pause.entered.set()
+                self._pause.resume.wait()
+            self.events.append(op)
+            if self._fails and op == self._op:
+                raise OSError(f"{op} failed")
+
+    def read(self, _size: int) -> bytes:
+        self._run("read")
+        return b"late"
+
+    def seek(self, offset: int) -> int:
+        self._run("seek")
+        return offset
 
     def close(self) -> None:
         with self._lock:
             self.events.append("close")
+        self.closed.set()
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["read-returns", "read-fault"])
@@ -375,7 +387,7 @@ async def test_a_file_stream_cancelled_mid_read_returns_before_the_read_finishes
     released once, even when that read raises (issue #3654).
     """
 
-    handle = _ReadHeld(pause, fails=fails)
+    handle = _OpHeld(pause, fails=fails)
     release = _CountedRelease()
 
     async def _open() -> tuple[Any, Callable[[], None]]:
@@ -397,6 +409,37 @@ async def test_a_file_stream_cancelled_mid_read_returns_before_the_read_finishes
     assert await asyncio.to_thread(release.called.wait, 120)
     assert handle.events == ["read", "close"]
     assert release.calls == 1
+
+
+@pytest.mark.parametrize("op", ["read", "seek"])
+async def test_an_unleased_file_stream_cancelled_mid_op_returns_before_the_op_finishes(
+    op: str, pause: _Pause, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unleased stream's twin of the test above (issue #3654).
+
+    A JAR or backup stream cancelled during a seek or read returns at once, and
+    the op's completion closes the file, once.
+    """
+
+    handle = _OpHeld(pause, op)
+    monkeypatch.setattr(fs, "_open_readable_sync", lambda _path, _not_found: handle)
+    byte_range = (0, 2) if op == "seek" else None
+    stream = fs._file_stream(Path("held"), byte_range, not_found="not found")
+
+    task = asyncio.ensure_future(anext(stream))
+    assert await asyncio.to_thread(pause.entered.wait, 10)
+
+    task.cancel()
+    # A bound, not a delay: the cancel must not wait for the held op.
+    done, _ = await asyncio.wait({task}, timeout=10)
+    assert task in done
+    assert task.cancelled()
+    assert handle.events == []
+
+    pause.resume.set()
+    # A bound, not a delay: the op's thread can stall on a loaded host.
+    assert await asyncio.to_thread(handle.closed.wait, 120)
+    assert handle.events == [op, "close"]
 
 
 class _SweptAtClose:
