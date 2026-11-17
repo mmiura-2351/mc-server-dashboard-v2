@@ -33,11 +33,17 @@ async def publish(
     community: CommunityId,
     server: ServerId,
     files: dict[str, bytes],
+    *,
+    chunk: int = 7,
 ) -> None:
-    """Stage ``files`` as a snapshot and publish it (the common test arrange step)."""
+    """Stage ``files`` as a snapshot and publish it (the common test arrange step).
+
+    ``chunk`` is the tar stream's write size; pass a coarse one (e.g. 1 MiB) for
+    multi-MiB payloads, or the tiny default makes the spool write dominate.
+    """
 
     handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream(files))
+    await storage.write_snapshot(handle, tar_stream(files, chunk=chunk))
     await storage.commit_snapshot(handle)
 
 

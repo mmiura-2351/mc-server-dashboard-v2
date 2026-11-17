@@ -13,6 +13,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
+from collections.abc import Callable
 
 import pytest
 
@@ -2648,6 +2649,7 @@ async def test_refused_stop_dispatch_is_recorded_for_the_reconciler() -> None:
     await _stop_expecting_failure(use_case, community, server_id)
 
     assert refusals.refused_at(ServerId(server_id)) == _NOW
+    assert refusals.expired(ServerId(server_id)) is False
 
 
 async def test_expired_stop_dispatch_is_recorded_as_a_refusal() -> None:
@@ -2676,9 +2678,102 @@ async def test_expired_stop_dispatch_is_recorded_as_a_refusal() -> None:
 
     assert excinfo.value.reason == "command_expired"
     assert refusals.refused_at(ServerId(server_id)) == _NOW
+    # Recorded AS expired (issue #3682): the reconciler keeps the short grace for it
+    # past the status report that freed the lane, which a plain refusal does not get.
+    assert refusals.expired(ServerId(server_id)) is True
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.desired_state is DesiredState.STOPPED
     assert stored.assigned_worker_id == WorkerId(worker)
+
+
+async def test_expired_stop_replay_is_recorded_as_expired() -> None:
+    # The reconciler's replay records its own refusal too (#2478), so an EXPIRED
+    # replay must carry the same flag as an EXPIRED operator stop (issue #3682).
+    # Otherwise the replay's report-driven lane release would cost the next tick the
+    # full grace again.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    cp = FakeControlPlane(
+        outcomes={
+            "stop": CommandOutcome(
+                status=worker_status("StopServer", "command_expired"),
+                message="expired",
+            )
+        }
+    )
+    refusals = StopDispatchRefusals()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await use_case.redispatch_stop(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert refusals.refused_at(ServerId(server_id)) == _NOW
+    assert refusals.expired(ServerId(server_id)) is True
+
+
+async def test_stale_assignment_clear_forgets_the_refusal_before_its_snapshot() -> None:
+    # The clear leg's final snapshot is a dispatch that may outlive its caller, the
+    # same reason it already drops an unrecorded stop (issue #3441). A refusal left
+    # behind would describe a stop the row has moved past (issue #3682). The fake
+    # reads the journal AT the snapshot dispatch, which pins "before the dispatch".
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    refusals = StopDispatchRefusals()
+    refusals.record_refusal(
+        ServerId(server_id),
+        outcome=CommandOutcome(status=CommandStatus.EXPIRED),
+        at=_NOW - dt.timedelta(seconds=1),
+    )
+    seen_at_snapshot: list[dt.datetime | None] = []
+
+    class _SnapshotReadsJournal(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            seen_at_snapshot.append(refusals.refused_at(server_id))
+            return await super().snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
+            )
+
+    cp = _SnapshotReadsJournal()
+    await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert seen_at_snapshot == [None]
+    assert refusals.refused_at(ServerId(server_id)) is None
 
 
 async def test_busy_stop_dispatch_records_no_refusal() -> None:
@@ -4595,6 +4690,437 @@ async def test_start_relaunches_with_a_hydrate_when_the_working_set_is_absent() 
     # The start SUCCEEDED, so the intent stands: no compensation back to stopped.
     assert result.desired_state is DesiredState.RUNNING
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
+
+
+# --- a stop intent that lands during the launch (issue #3737) ---------------
+
+
+class _HydrateRunsHookControlPlane(FakeControlPlane):
+    """A Worker whose hydrate runs ``during_hydrate`` before it answers.
+
+    Stands in for what commits while a start's long hydrate is in flight
+    (issue #3737): a stop intent, or a stop followed by a new start that placed
+    the server on another Worker.
+    """
+
+    def __init__(self, *, during_hydrate: Callable[[], None], **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._during_hydrate = during_hydrate
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        self._during_hydrate()
+        return await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+
+
+class _RefusesFirstStartWhileStopLands(
+    _HydrateRunsHookControlPlane, _RefusesFirstStartControlPlane
+):
+    """Refuses the first start; the stop intent lands in the replay's hydrate."""
+
+
+class _GenerationReadRunsHook(FakeStoreGenerationReader):
+    """A store-generation read that runs ``during_read`` before it answers."""
+
+    def __init__(self, *, during_read: Callable[[], None], generation: int) -> None:
+        super().__init__(generation=generation)
+        self._during_read = during_read
+
+    async def current_generation(
+        self, *, community_id: CommunityId, server_id: ServerId
+    ) -> int:
+        self._during_read()
+        return await super().current_generation(
+            community_id=community_id, server_id=server_id
+        )
+
+
+def _stop_intent_lands(uow: FakeUnitOfWork, server_id: uuid.UUID) -> Callable[[], None]:
+    # What StopServer commits first: desired=stopped, assignment kept for the
+    # final snapshot (issue #847). The stop owns the decrement and the release.
+    def land() -> None:
+        stored = uow.servers.by_id[ServerId(server_id)]
+        if stored.desired_state is DesiredState.RUNNING:
+            stored.desired_state = DesiredState.STOPPED
+
+    return land
+
+
+def _assert_stop_intent_kept(
+    uow: FakeUnitOfWork, cp: FakeControlPlane, server_id: uuid.UUID, worker: uuid.UUID
+) -> None:
+    # Each caller pins its exact dispatch list itself: the #2499 replay sends one
+    # refused start before the hydrate the stop lands in.
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+
+
+async def test_start_does_not_dispatch_when_stop_intent_lands_during_hydrate() -> None:
+    # The hydrate can run for minutes, and an operator stop committed during it
+    # used to be overtaken by the start the API then sent: the Worker answered the
+    # stop SERVER_NOT_FOUND (nothing ran yet), the stop released the row, and the
+    # start launched a live instance under an unassigned desired=stopped row
+    # (issue #3737). The stop intent wins: no start goes out, and the start answers
+    # the conflict without compensating (the stop owns the decrement and release).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = _HydrateRunsHookControlPlane(
+        place_to=WorkerId(worker), during_hydrate=_stop_intent_lands(uow, server_id)
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    _assert_stop_intent_kept(uow, cp, server_id, worker)
+
+
+async def test_skip_hydrate_start_does_not_dispatch_when_stop_intent_lands() -> None:
+    # A skip-hydrate start has no hydrate to wait for, but the generation read
+    # that decides the skip still runs after the start's commit, so a stop can
+    # land there too (issue #3737).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=_GenerationReadRunsHook(
+            during_read=_stop_intent_lands(uow, server_id), generation=5
+        ),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == []
+    _assert_stop_intent_kept(uow, cp, server_id, worker)
+
+
+async def test_start_does_not_dispatch_when_the_server_was_re_placed_elsewhere() -> (
+    None
+):
+    # Worse than a stop alone: the stop released the row and a second start placed
+    # it on another Worker, all while this start's hydrate ran. This start must
+    # neither launch a second live instance nor revert the newer start's intent.
+    community, server_id, worker = _ids()
+    other = WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+
+    def re_placed() -> None:
+        stored = uow.servers.by_id[ServerId(server_id)]
+        stored.assigned_worker_id = other
+
+    cp = _HydrateRunsHookControlPlane(
+        place_to=WorkerId(worker), during_hydrate=re_placed
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == other
+    assert cp.decremented == []
+
+
+async def test_start_does_not_dispatch_when_the_server_was_deleted() -> None:
+    # A stop released the row and a delete removed it while the redispatched
+    # start hydrated. There is nothing left to start for, and nothing to revert.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+
+    def deleted() -> None:
+        del uow.servers.by_id[ServerId(server_id)]
+
+    cp = _HydrateRunsHookControlPlane(during_hydrate=deleted)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    assert ServerId(server_id) not in uow.servers.by_id
+    assert cp.decremented == []
+
+
+class _RepositoryFailingOneRead(FakeServerRepository):
+    """A repository whose next ``get_by_id`` raises once ``fail_next_read`` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_read = False
+
+    async def get_by_id(self, server_id: ServerId) -> Server | None:
+        if self.fail_next_read:
+            self.fail_next_read = False
+            raise RuntimeError("database unavailable")
+        return await super().get_by_id(server_id)
+
+
+async def test_start_does_not_compensate_when_the_re_read_fails() -> None:
+    # The re-read before the start raises (a database error). Nothing says this
+    # start still owns the row, and _compensate reverts without checking (issue
+    # #3741), so the error propagates as is: no start, no revert, and the row stays
+    # desired=running and assigned for the reconciler to redispatch.
+    community, server_id, worker = _ids()
+    repo = _RepositoryFailingOneRead()
+    uow = FakeUnitOfWork(servers=repo)
+    repo.seed(_server(community_id=community, server_id=server_id))
+
+    def read_fails() -> None:
+        repo.fail_next_read = True
+
+    cp = _HydrateRunsHookControlPlane(
+        place_to=WorkerId(worker), during_hydrate=read_fails
+    )
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    stored = repo.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert cp.decremented == []
+
+
+async def test_place_and_start_does_not_dispatch_when_stop_intent_lands() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+        )
+    )
+    cp = _HydrateRunsHookControlPlane(
+        place_to=WorkerId(worker), during_hydrate=_stop_intent_lands(uow, server_id)
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    _assert_stop_intent_kept(uow, cp, server_id, worker)
+
+
+async def test_redispatch_start_does_not_dispatch_when_stop_intent_lands() -> None:
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=worker,
+        )
+    )
+    cp = _HydrateRunsHookControlPlane(during_hydrate=_stop_intent_lands(uow, server_id))
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    _assert_stop_intent_kept(uow, cp, server_id, worker)
+
+
+async def test_start_replay_does_not_dispatch_when_stop_intent_lands() -> None:
+    # The #2499 replay hydrates before its start, so a stop can land there too.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=worker,
+        )
+    )
+    cp = _RefusesFirstStartWhileStopLands(
+        held={(WorkerId(worker), ServerId(server_id)): 5},
+        during_hydrate=_stop_intent_lands(uow, server_id),
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await _start_server(uow, cp, store_generation=5).redispatch_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    # The refused skip-hydrate start, then the replay's hydrate, and no second start.
+    assert [k for k, _, _ in cp.dispatched] == ["start", "hydrate"]
+    _assert_stop_intent_kept(uow, cp, server_id, worker)
+
+
+class _LaneWorker(FakeControlPlane):
+    """The Worker's per-server command lane, as far as issue #3737 needs it.
+
+    One FIFO lock stands in for the session's runLane: commands for the server
+    run one at a time, in arrival order. A stop with no live instance answers
+    SERVER_NOT_FOUND (instancemanager handleStop); a start registers a live
+    instance and reports ``starting`` the way the state sink writes it. The
+    hydrate holds the lane until the test releases it, so a stop can land
+    mid-hydrate.
+    """
+
+    def __init__(
+        self, *, repo: FakeServerRepository, clock: FakeClock, place_to: WorkerId
+    ) -> None:
+        super().__init__(place_to=place_to)
+        self._repo = repo
+        self._clock = clock
+        self._lane = asyncio.Lock()
+        self.hydrating = asyncio.Event()
+        self.release_hydrate = asyncio.Event()
+        self.stop_sent = asyncio.Event()
+        self.live: set[ServerId] = set()
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        async with self._lane:
+            self.hydrating.set()
+            await self.release_hydrate.wait()
+            return await super().hydrate(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        self.stop_sent.set()
+        async with self._lane:
+            await super().stop(worker_id=worker_id, server_id=server_id, force=force)
+            if server_id not in self.live:
+                return CommandOutcome(
+                    status=worker_status("StopServer", "instance_stopped"),
+                    message="instancemanager: server not running",
+                )
+            self.live.discard(server_id)
+            return CommandOutcome(status=CommandStatus.OK)
+
+    async def start(
+        self,
+        *,
+        worker_id: WorkerId,
+        server_id: ServerId,
+        server_type: ServerType,
+        jar_relpath: str,
+        minecraft_version: str,
+        memory_limit_bytes: int,
+        cpu_millis: int,
+    ) -> CommandOutcome:
+        async with self._lane:
+            self.live.add(server_id)
+            await self._repo.record_observed_state(
+                server_id,
+                ObservedState.STARTING,
+                self._clock.now(),
+                expected_worker=worker_id,
+            )
+            return await super().start(
+                worker_id=worker_id,
+                server_id=server_id,
+                server_type=server_type,
+                jar_relpath=jar_relpath,
+                minecraft_version=minecraft_version,
+                memory_limit_bytes=memory_limit_bytes,
+                cpu_millis=cpu_millis,
+            )
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        async with self._lane:
+            return await super().snapshot(
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+                final=final,
+            )
+
+
+async def test_operator_stop_during_the_start_hydrate_leaves_nothing_running() -> None:
+    # The end-to-end shape of issue #3737 against the Worker's lane: the stop
+    # queues behind the hydrate, finds nothing running, and releases the row. The
+    # start must not then launch an instance nobody owns.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    clock = FakeClock(_NOW)
+    cp = _LaneWorker(repo=uow.servers, clock=clock, place_to=WorkerId(worker))
+
+    start = asyncio.create_task(
+        _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    )
+    await cp.hydrating.wait()
+    stop = asyncio.create_task(
+        StopServer(uow=uow, control_plane=cp, clock=clock)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    )
+    await cp.stop_sent.wait()
+    cp.release_hydrate.set()
+    started, stopped = await asyncio.gather(start, stop, return_exceptions=True)
+
+    assert isinstance(started, LifecycleTransitionConflictError)
+    assert isinstance(stopped, Server)
+    assert "start" not in [k for k, _, _ in cp.dispatched]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (
+        stored.desired_state,
+        stored.observed_state,
+        stored.assigned_worker_id,
+    ) == (DesiredState.STOPPED, ObservedState.STOPPED, None)
+    assert cp.live == set()
 
 
 async def test_redispatch_start_hydrates_when_held_generation_is_stale() -> None:

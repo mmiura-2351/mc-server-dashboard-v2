@@ -24,8 +24,10 @@ Two floors make up that grace on the stop side, and this record satisfies both:
 So the reconciler can take the short ``refused_stop_grace_seconds`` for either
 stop-side action (``redispatch_stop`` or ``clear_stale_assignment``), as it does for
 a refused stop (``stop_dispatch_refusals.py``, issue #2478). The owed action itself
-is unchanged. As there, the record only counts while it is the most recent thing
-known about the row: a newer intent commit or Worker report supersedes it.
+is unchanged. Like a refusal that was not ``EXPIRED``, the record only counts while
+it is the most recent thing known about the row: a newer intent commit or Worker
+report supersedes it. The refusal record's ``EXPIRED`` exception (issue #3682) does
+not apply here.
 
 :meth:`forget` runs before every stop and every final-snapshot dispatch, so a
 recorded entry only ever follows the latest dispatch. A dispatch that then times
