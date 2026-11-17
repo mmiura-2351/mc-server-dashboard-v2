@@ -1316,11 +1316,13 @@ class StartServer:
         Worker. Otherwise the newer transition owns the row and its load, and both
         are left alone.
 
-        The check and the write run under the server's start-intent lock
-        (``start_intent_lock.py``). The two writes that create a start intent (the
-        compare-and-set and commit in ``__call__`` and ``place_and_start``) hold
-        it too, from their count read on, so no newer intent can land in between,
-        and a newer start reads its count only after this revert's bump. A stop or
+        The check, the write and the load decrement run under the server's
+        start-intent lock (``start_intent_lock.py``). The two writes that create a
+        start intent (the compare-and-set and commit in ``__call__`` and
+        ``place_and_start``) hold it too, from their count read on, so no newer
+        intent can land in between, and a newer start reads its count only after
+        this revert's bump and confirms its load only after this revert's
+        decrement. A stop or
         a drain takes no such lock, but it only withdraws: one that lands in
         between moves the row out of running, and the compare-and-set below then
         matches nothing. The revert does not take the lifecycle lock. Operations
