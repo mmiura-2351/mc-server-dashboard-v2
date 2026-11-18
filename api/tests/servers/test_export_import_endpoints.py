@@ -1090,6 +1090,25 @@ def test_import_oversized_is_413() -> None:
     assert resp.status_code == 413
 
 
+def test_import_over_cap_body_is_413_before_use_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The route checks the body it read against the cap before the use case
+    # runs. Patch the cap small so the fixture stays tiny; the request body limit
+    # was fixed when the route was declared, so only the route's own check trips.
+    monkeypatch.setattr(servers_api, "MAX_UPLOAD_BYTES", 16)
+    use_case = _FakeImport(result=_server_entity(community_id=uuid.uuid4()))
+    app = _app(member=True, allow=True, import_=use_case)
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files={"file": ("server.zip", b"x" * 1024, "application/zip")},
+        data={"name": "imported"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"
+    assert use_case.calls == []  # refused before the use case ran
+
+
 class _FailingWorldWriteStore(FakeFileStore):
     """Takes create's seed writes, then fails publishing the archive's world."""
 

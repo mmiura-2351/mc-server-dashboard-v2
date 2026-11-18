@@ -22,12 +22,14 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import os
+import threading
 import uuid
 from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import QueuePool
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -48,9 +50,12 @@ from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleL
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
+from mc_server_dashboard_api.servers.application import plugins as plugins_module
 from mc_server_dashboard_api.servers.application.backups import RestoreBackup
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.application.plugin_manifest import ParsedManifest
+from mc_server_dashboard_api.servers.application.plugins import InstallPlugin
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -73,6 +78,7 @@ from tests.servers.fakes import (
     FakeControlPlane,
     FakeFileStore,
     FakeJarProvisioner,
+    FakePluginCacheStore,
     FakeStoreGenerationReader,
     FakeVersionValidator,
 )
@@ -148,7 +154,9 @@ async def _seed_community(engine: AsyncEngine) -> uuid.UUID:
     return community.id.value
 
 
-async def _create_at_rest_server(engine: AsyncEngine) -> Server:
+async def _create_at_rest_server(
+    engine: AsyncEngine, *, server_type: str = "vanilla"
+) -> Server:
     community_id = await _seed_community(engine)
     return await CreateServer(
         uow=ServersUnitOfWork(create_session_factory(engine)),
@@ -161,7 +169,7 @@ async def _create_at_rest_server(engine: AsyncEngine) -> Server:
         name="survival",
         mc_edition="java",
         mc_version="1.21.1",
-        server_type="vanilla",
+        server_type=server_type,
         config={},
     )
 
@@ -304,3 +312,57 @@ async def test_second_acquire_raises_server_busy_when_lock_is_held(
     # not leave it stuck).
     async with lock.hold(server.id):
         pass
+
+
+async def test_a_plugin_install_holds_no_lock_and_no_connection_while_it_parses(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The manifest parse waits for an archive-validation pool thread, which can
+    # take as long as the slowest validation ahead of it (issue #3912). It holds
+    # nothing meanwhile: another operation on the server takes the lock at once,
+    # and no pooled connection is checked out. A short acquire budget turns a
+    # held lock into a prompt ServerBusyError.
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_BUDGET_SECONDS", 0.3)
+    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_POLL_SECONDS", 0.05)
+    server = await _create_at_rest_server(engine, server_type="paper")
+    lock = PgLifecycleLock(engine=engine)
+    loop = asyncio.get_running_loop()
+    parsing = asyncio.Event()
+    release = threading.Event()
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        loop.call_soon_threadsafe(parsing.set)
+        if not release.wait(60):
+            raise AssertionError("the parse was never released")
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    file_store = FakeFileStore()
+    install = asyncio.ensure_future(
+        InstallPlugin(
+            uow=ServersUnitOfWork(create_session_factory(engine)),
+            file_store=file_store,
+            cache=FakePluginCacheStore(),
+            clock=_FixedClock(),
+            lifecycle_lock=lock,
+        )(
+            community_id=server.community_id,
+            server_id=server.id,
+            filename="mod.jar",
+            display_name="Mod",
+            content=b"jar",
+        )
+    )
+    try:
+        await parsing.wait()
+        assert isinstance(engine.pool, QueuePool)
+        assert engine.pool.checkedout() == 0
+        async with lock.hold(server.id):
+            pass
+    finally:
+        release.set()
+        await asyncio.wait({install})
+    install.result()
+
+    assert file_store.files["plugins/mod.jar"] == b"jar"

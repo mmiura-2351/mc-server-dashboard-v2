@@ -98,9 +98,9 @@ async def test_a_slot_frees_when_its_upload_is_cancelled() -> None:
     _assert_free(admission)
 
 
-def test_both_doors_count_against_one_admission() -> None:
-    # The backup upload and the files extract validate on the same pool, so the
-    # limit counts their uploads together.
+def test_every_archive_door_counts_against_one_admission() -> None:
+    # The backup upload, the files extract and the server import validate on
+    # the same pool, so the limit counts their uploads together.
     app = FastAPI()
 
     def request() -> Request:

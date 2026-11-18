@@ -419,10 +419,10 @@ class UploadBusyError(ServerError):
     #3912) validate their archives on one small pool of their own, and admit only
     a few archive uploads at a time between them. One past that is refused before
     its body is read into memory, with nothing stored, written or created. That
-    says nothing about the upload, so the edge
-    maps this to 503 ``upload_busy``: the same request is worth sending again once
-    an upload ahead of it ends. No ``Retry-After`` rides along: a validation takes
-    from milliseconds to minutes, so nothing knows when a slot frees.
+    says nothing about the upload, so the edge maps this to 503 ``upload_busy``:
+    the same request is worth sending again once an upload ahead of it ends. No
+    ``Retry-After`` rides along: a validation takes from milliseconds to minutes,
+    so nothing knows when a slot frees.
     """
 
 
