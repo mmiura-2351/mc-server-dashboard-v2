@@ -1821,7 +1821,8 @@ async def test_an_operator_stop_after_a_silent_withdrawal_stops_the_launching_st
     # lands but raises, withdraws its intent after it compared. Neither sends a
     # stop. The operator then stops the (stopped, stopped, W) row. Its convergence
     # used to release the row under the launching instance. It now sends a stop,
-    # which the Worker runs behind the start, as a real stop.
+    # which the Worker runs behind the start, as a real stop, forced if the
+    # operator asked for that.
     world = _World()
 
     async def withdraw() -> None:
@@ -1831,7 +1832,9 @@ async def test_an_operator_stop_after_a_silent_withdrawal_stops_the_launching_st
             await _withdraw_raising(world, "stop", ConnectionError("response lost"))
 
     async def operator_stop() -> None:
-        await world.stop()
+        await world.stop_server()(
+            community_id=world.community, server_id=world.server_id, force=True
+        )
 
     _launches_then(world, withdraw, operator_stop)
 
@@ -1840,6 +1843,7 @@ async def test_an_operator_stop_after_a_silent_withdrawal_stops_the_launching_st
     assert world.cp.live == set()
     assert world.kinds() == ["hydrate", "start", "stop", "snapshot"]
     assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.stop_force is True
 
 
 @pytest.mark.parametrize("refused", ["withdrawing-stop", "owed-stop"])
@@ -2098,12 +2102,22 @@ async def test_an_owed_stop_on_a_disconnected_worker_releases_without_a_stop() -
     assert world.stored() == (DesiredState.STOPPED, None)
 
 
-async def test_a_stop_run_behind_the_start_leaves_a_later_release_plain() -> None:
-    # A stop the Worker ran behind the start has stopped it. A release still owed
-    # after that stop (its final snapshot timed out here) is the plain one again:
-    # the final snapshot and the release, with no second stop.
+@pytest.mark.parametrize("answer", ["ok", "not-found"])
+@pytest.mark.parametrize("stop", ["withdrawing", "owed"])
+async def test_a_stop_run_behind_the_start_leaves_a_later_release_plain(
+    stop: str, answer: str
+) -> None:
+    # A stop the Worker ran behind the start has stopped it, or found it gone:
+    # the stop that withdrew the intent, or the one an operator stop owed after a
+    # drain. A release still owed after that stop (its final snapshot timed out
+    # here) is the plain one again: the final snapshot and the release, with no
+    # second stop.
     world = _World()
     await world.start()
+    if answer == "not-found":
+        world.cp.live.discard(world.server_id)
+    if stop == "owed":
+        assert await world.drain() == [world.server_id]
 
     async def timed_out() -> None:
         raise WorkerUnavailableError(str(world.worker.value), upload_may_be_live=True)
