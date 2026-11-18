@@ -642,18 +642,34 @@ Notes:
   behind the start, and the Worker's per-server lane runs it as a real stop.
   A commit that truly failed still adds one, so an in-flight start of the
   still-running intent is refused and waits for the reconciler's re-send.
-  Not covered: a stop intent that sends no stop and lands after the start
-  compares, such as a stop commit that lands but raises, or any drain. Nothing
-  then stops the start until the reconciler acts on the Worker's report, and a
-  stop retried before that report only releases the server. Whether a
-  cancelled commit can raise before its flip is visible is also open. Both
-  are tracked in issue #3766. The count also tells a failed start's revert
-  whether the intent is still its own (issue #3741). The revert undoes the
-  intent only if the count is still the one the start read and the server is
-  still `desired=running` on the start's Worker. Otherwise a newer stop or
-  start owns the server, and the revert leaves it, and its placement count,
-  alone. The revert makes that check and its write under a per-server lock in
-  the API process, which every start also holds from reading the count to
+  Not held back: a stop intent that sends no stop and lands after the start
+  compares, such as a stop commit that lands but raises, or any drain, and a
+  re-sent start that read the count after a stop intent's commit raised but
+  read the server before that commit was readable. Nothing then stops the
+  start until the reconciler acts on the Worker's report. Until that report the
+  server still shows its last at-rest `observed`, so the convergence a stop of
+  it owes (the `StopServer` row above) does not trust that value (issue #3766).
+  The API notes each start as it queues it, and each stop the Worker ran (OK or
+  `SERVER_NOT_FOUND`), which stopped every start queued ahead of it. While a
+  start has no such stop behind it, the convergence sends a stop rather than
+  taking the final snapshot and releasing the server; a stop the Worker refused
+  does not count. Otherwise it releases only while the server's `observed_at`
+  is still the one it read, so a report that lands meanwhile keeps the server
+  assigned for the reconciler. Either way it first adds one to the count, so a
+  start that compares after it is not sent, and a start of a newer intent never
+  reads the count a failed start of the old one read. The record of starts
+  lives in the API process, so it is empty after an API restart: a start the
+  previous process queued is not in it, and the convergence releases the
+  server, with only the `observed_at` check to cover that start. A restart's
+  relaunch is not noted either; in one process, the entry the server's own
+  start left still covers it (issue #3854). The count also tells a
+  failed start's revert whether the intent is still its own (issue #3741).
+  The revert undoes the intent only if the count is still the one the start
+  read and the server is still `desired=running` on the start's Worker.
+  Otherwise a newer stop or start owns the server, and the revert leaves it,
+  and its placement count, alone. The revert makes that check and its write
+  under a per-server lock in the API process, which every start also holds
+  from reading the count to
   committing its intent. It is not the lifecycle lock: backup uploads and
   deletes, prunes and the integrity sweep hold that lock across Storage I/O,
   and a revert waiting behind them would give up. A revert adds to the count,
@@ -663,15 +679,16 @@ Notes:
   Every write of the intent (a start, a stop, a drain, a restart, a revert)
   checks, as it writes, that the server's `desired_state` and assigned Worker
   are still the ones it read (issue #3792). If either moved, it changes
-  nothing: a stop or a restart answers `409 transition_conflict` and sends
-  nothing, a drain leaves the server out, and a revert leaves the server
-  alone. None of them then adds to the count or changes a Worker's placement
-  count; the write that moved the server owns both. So a stop or a drain that
-  read the server before a failed placement released its Worker neither puts
-  that Worker back nor drops its placement count a second time, and a restart
-  does not put it back either. Only a start writes the server's config, to
-  record the JAR it resolved; the other writes leave it, so a config edit
-  made while the server runs is kept.
+  nothing: a start answers `409 transition_conflict` and releases its
+  placement reservation, a stop or a restart answers `409 transition_conflict`
+  and sends nothing, a drain leaves the server out, and a revert leaves the
+  server alone. None of them then adds to the count or changes a Worker's
+  placement count; the write that moved the server owns both. So a stop or a
+  drain that read the server before a failed placement released its Worker
+  neither puts that Worker back nor drops its placement count a second time,
+  and a restart does not put it back either. Only a start writes the
+  server's config, to record the JAR it resolved; the other writes leave it,
+  so a config edit made while the server runs is kept.
   The count lives in the API process. This holds because the API runs as a
   single instance (REQUIREMENTS.md NFR-SCALE-1).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
