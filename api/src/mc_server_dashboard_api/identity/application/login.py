@@ -27,10 +27,11 @@ same as the wrong-password path and cannot be told apart by timing.
 The per-failure reason is recorded on the ``login_attempt`` row for forensics
 only; it is never surfaced to the caller.
 
-**Session lock.** The credentials are checked without any lock, so the slow hash
-verification blocks no one; the session is then stored in a second transaction
-under the user's session lock, and only if the user re-read under that lock still
-has the verified hash and is still active -- a compare-and-set (issue #3254).
+**Session lock.** The credentials are checked outside any transaction, so the
+slow hash verification holds no lock and no pooled connection (#3861); the
+session is then stored in a second transaction under the user's session lock,
+and only if the user re-read under that lock still has the verified hash and is
+still active -- a compare-and-set (issue #3254).
 A password change, deactivation or deletion takes the same lock before it
 revokes the user's sessions, so it either committed first, and the re-check
 refuses the login, or waits for the login and revokes or deletes its new session
@@ -162,19 +163,21 @@ class Login:
         dummy_hash = await self.dummy_password_hash.get()
         async with self.uow:
             user = await self.uow.users.get_by_username(name)
-            if user is None:
-                # Verify against the dummy hash so the unknown-user path costs
-                # the same as a wrong password (timing-enumeration defence).
-                await self.hasher.verify(password, dummy_hash)
-                await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
-            if not await self.hasher.verify(password, user.password_hash):
-                await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
-            # A deactivated account fails *after* the password verify so it costs
-            # the same as a wrong password and shares the uniform error: the
-            # response and timing must not distinguish "deactivated" from "wrong
-            # password" (enumeration posture, issue #278).
-            if not user.active:
-                await self._fail(key, ip, REASON_DEACTIVATED, now=now)
+        # Verified once the read has ended: the KDF is slow and memory-hard, and
+        # no pooled connection may wait on it (#3861).
+        if user is None:
+            # Verify against the dummy hash so the unknown-user path costs the
+            # same as a wrong password (timing-enumeration defence).
+            await self.hasher.verify(password, dummy_hash)
+            await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
+        if not await self.hasher.verify(password, user.password_hash):
+            await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
+        # A deactivated account fails *after* the password verify so it costs the
+        # same as a wrong password and shares the uniform error: the response and
+        # timing must not distinguish "deactivated" from "wrong password"
+        # (enumeration posture, issue #278).
+        if not user.active:
+            await self._fail(key, ip, REASON_DEACTIVATED, now=now)
 
         async with self.uow:
             await self.uow.refresh_tokens.lock_sessions(user.id)
