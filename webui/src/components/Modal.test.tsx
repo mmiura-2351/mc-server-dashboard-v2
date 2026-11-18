@@ -259,6 +259,20 @@ describe("Modal focus outside the dialog", () => {
     expect(window.scrollY).toBe(300);
   });
 
+  it("does not apply a Tab's direction or scroll once its key is up", () => {
+    const behind = renderOverPage();
+    focusBody();
+    window.scrollTo(0, 0);
+
+    fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true });
+    fireEvent.keyUp(document.body, { key: "Tab", shiftKey: true });
+    window.scrollTo(0, 300);
+    behind.focus();
+
+    expect(document.activeElement).toBe(first());
+    expect(window.scrollY).toBe(300);
+  });
+
   it("pulls focus back to the dialog itself when it has no controls", () => {
     const behind = renderOverPage(<p>Body</p>);
 
