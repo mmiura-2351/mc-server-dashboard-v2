@@ -189,7 +189,9 @@ async def _seed(worker_id: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]:
 
 async def _observed(
     server_id: uuid.UUID,
-) -> tuple[str, dt.datetime | None, str | None, str | None]:
+) -> tuple[str, dt.datetime | None, dt.datetime, str | None, str | None]:
+    """The observed state and its stamp, ``updated_at`` and the stored crash."""
+
     assert _DB_URL is not None
     engine = create_async_engine(_DB_URL)
     try:
@@ -197,15 +199,15 @@ async def _observed(
             row = (
                 await conn.execute(
                     text(
-                        "SELECT observed_state, observed_at, crash_reason, "
-                        "crash_detail FROM server WHERE id = :id"
+                        "SELECT observed_state, observed_at, updated_at, "
+                        "crash_reason, crash_detail FROM server WHERE id = :id"
                     ),
                     {"id": server_id},
                 )
             ).one()
     finally:
         await engine.dispose()
-    return row[0], row[1], row[2], row[3]
+    return row[0], row[1], row[2], row[3], row[4]
 
 
 @pytest.mark.usefixtures("control_plane_env")
@@ -215,7 +217,10 @@ def test_graceful_api_restart_keeps_a_crashed_server_crashed(
     worker = uuid.uuid4()
     crashed, running = asyncio.run(_seed(worker))
     crash = asyncio.run(_observed(crashed))
+    # Crashed after the row's last write, so the reconciler holds it
+    # (``Server.crash_not_restarted``): both stamps must survive unchanged.
     assert crash[0] == "crashed"
+    assert crash[1] is not None and crash[1] > crash[2]
 
     with _api_process() as (client, registry):
         _connect_worker(client, registry, grpc_ports[-1], str(worker))
