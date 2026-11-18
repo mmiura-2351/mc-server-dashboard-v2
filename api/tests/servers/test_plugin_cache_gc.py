@@ -60,15 +60,22 @@ class _FakeReferences(LivePluginCacheReferences):
         # Optional: keys to add after the first live() call, simulating a new
         # plugin row committing between the initial snapshot and a re-check.
         self._add_after_first: set[str] = set()
+        self._fail_after_first: Exception | None = None
         self._calls = 0
 
     def add_after_first_call(self, key: str) -> None:
         """Schedule *key* to appear in live() only from the second call onward."""
         self._add_after_first.add(key)
 
+    def fail_after_first_call(self, error: Exception) -> None:
+        """Make every live() call after the first raise *error*."""
+        self._fail_after_first = error
+
     async def live(self) -> set[str]:
         self._calls += 1
         if self._calls > 1:
+            if self._fail_after_first is not None:
+                raise self._fail_after_first
             self._keys = self._keys | self._add_after_first
         return self._keys
 
@@ -200,6 +207,27 @@ async def test_recheck_before_delete_spares_newly_referenced_blob() -> None:
     assert result.deleted == 0
 
 
+class _DatabaseDown(Exception):
+    """The reference read failing: the database, not the cache's store."""
+
+
+async def test_a_failed_re_check_ends_the_pass_and_is_not_a_failed_delete() -> None:
+    # The re-check before each delete sits outside the per-blob ``try``: a re-read
+    # that fails says nothing about the blob, and without it no blob may be
+    # deleted. It leaves the pass rather than being counted as a failed delete
+    # (issue #3906).
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64)
+    _seed(cache, "b" * 64)
+    refs = _FakeReferences(set())
+    refs.fail_after_first_call(_DatabaseDown("re-read failed"))
+
+    with pytest.raises(_DatabaseDown):
+        await _gc(cache, refs)()
+
+    assert cache.deleted == []
+
+
 async def test_refuses_a_cache_whose_store_another_database_owns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -246,8 +274,10 @@ class _ObjectCache:
             keys.append(sha)
         return sorted(keys)
 
-    def fail_deletes_of(self, sha: str) -> None:
-        self.faults.when = lambda op, key: op == "delete_object" and sha in key
+    def fail_deletes_of(self, *shas: str) -> None:
+        self.faults.when = lambda op, key: (
+            op == "delete_object" and any(sha in key for sha in shas)
+        )
 
     async def keys(self) -> list[str]:
         return [entry.sha256 for entry in await self.cache.list_entries()]
@@ -356,3 +386,45 @@ async def test_a_store_that_gives_no_answer_ends_the_pass() -> None:
         await _gc(store.cache, _FakeReferences(set()))()
 
     assert await store.keys() == keys
+
+
+async def test_five_failed_deletes_in_a_row_end_the_pass(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A store that fails every delete costs each one its retries and a WARNING
+    # with a traceback. Five in a row end the pass, which still logs its summary,
+    # at WARNING with the reason; the blob after them is not tried (issue #3906).
+    store = _ObjectCache()
+    keys = await store.seed(6)
+    store.fail_deletes_of(*keys[:5])
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await _gc(store.cache, _FakeReferences(set()))()
+
+    assert await store.keys() == keys
+    assert (result.scanned, result.deleted, result.failed) == (6, 0, 5)
+    summary = caplog.records[-1]
+    assert summary.levelno == logging.WARNING
+    assert vars(summary).get("reason") == "stopped_after_consecutive_failures"
+    assert "6 blob(s) listed, 0 reclaimed (0 bytes), 5 failed" in summary.getMessage()
+
+
+async def test_a_reclaimed_blob_restarts_the_count_of_failed_deletes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Four failures, one success, four more: never five in a row, so the pass
+    # reaches every blob and ends as usual (issue #3906).
+    store = _ObjectCache()
+    keys = await store.seed(9)
+    reclaimed = keys.pop(4)
+    store.fail_deletes_of(*keys)
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await _gc(store.cache, _FakeReferences(set()))()
+
+    assert reclaimed not in await store.keys()
+    assert await store.keys() == keys
+    assert (result.scanned, result.deleted, result.failed) == (9, 1, 8)
+    summary = caplog.records[-1]
+    assert summary.levelno == logging.INFO
+    assert "reason" not in vars(summary)

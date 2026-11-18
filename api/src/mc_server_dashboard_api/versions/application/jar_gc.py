@@ -42,8 +42,10 @@ Section 4.3, issue #3870).
 age, and each pass ends with one summary line, at DEBUG when the pass neither
 reclaimed nor failed anything. A JAR whose delete fails is logged at WARNING and
 skipped, and the pass goes on: one JAR that keeps failing must not starve every JAR
-after it (issue #3871). A store that gives no answer at all
-(:class:`JarPoolUnreachableError`) ends the pass instead, as does a cancellation.
+after it (issue #3871). Five failed deletes in a row end the pass, and its summary
+is then at WARNING with the reason (``gc_pass``, issue #3906). A store that gives
+no answer at all (:class:`JarPoolUnreachableError`) ends the pass at once, as does a
+cancellation; neither logs a summary.
 """
 
 from __future__ import annotations
@@ -52,6 +54,10 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.gc_pass import (
+    MAX_CONSECUTIVE_FAILED_DELETES,
+    STOPPED_AFTER_CONSECUTIVE_FAILURES,
+)
 from mc_server_dashboard_api.versions.domain.clock import Clock
 from mc_server_dashboard_api.versions.domain.errors import (
     JarPoolUnreachableError,
@@ -107,6 +113,8 @@ class RunJarPoolGc:
         deleted = 0
         freed_bytes = 0
         failed = 0
+        failed_in_a_row = 0
+        stopped = False
         for entry in entries:
             if entry.sha256 in live:
                 continue
@@ -119,7 +127,9 @@ class RunJarPoolGc:
             # upload, so ``ensure_jar`` re-pooling a JAR does not refresh its
             # store time and the safety window alone cannot protect it. Between
             # the snapshot above and this point, a start may have committed the
-            # row referencing it — re-checking avoids reclaiming a live JAR.
+            # row referencing it — re-checking avoids reclaiming a live JAR. It
+            # stays outside the ``try`` below: a re-read that fails is not a
+            # failed delete, and it ends the pass (issue #3906).
             fresh_live = await self.references.live()
             if entry.sha256 in fresh_live:
                 continue
@@ -131,6 +141,7 @@ class RunJarPoolGc:
                 raise
             except Exception as exc:  # noqa: BLE001 - one JAR must not end the pass
                 failed += 1
+                failed_in_a_row += 1
                 _LOG.warning(
                     "jar-pool GC could not delete jar %s, skipped it: %s: %s",
                     entry.sha256,
@@ -138,7 +149,13 @@ class RunJarPoolGc:
                     exc,
                     exc_info=True,
                 )
+                if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_DELETES:
+                    # Likely the store rather than these JARs: stop paying each
+                    # later one its retries and a WARNING (issue #3906).
+                    stopped = True
+                    break
                 continue
+            failed_in_a_row = 0
             deleted += 1
             freed_bytes += entry.size_bytes
             _LOG.info(
@@ -148,8 +165,9 @@ class RunJarPoolGc:
                 entry.size_bytes,
                 now - entry.modified_at,
             )
+        level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(
-            logging.INFO if deleted or failed else logging.DEBUG,
+            logging.WARNING if stopped else level,
             "jar-pool GC pass: %d jar(s) listed, %d reclaimed (%d bytes), %d failed, "
             "in %.1fs",
             len(entries),
@@ -157,6 +175,7 @@ class RunJarPoolGc:
             freed_bytes,
             failed,
             (self.clock.now() - started).total_seconds(),
+            extra={"reason": STOPPED_AFTER_CONSECUTIVE_FAILURES} if stopped else None,
         )
         return JarGcResult(
             scanned=len(entries),

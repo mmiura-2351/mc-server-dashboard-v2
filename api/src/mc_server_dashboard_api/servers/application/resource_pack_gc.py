@@ -40,9 +40,11 @@ the upload's filename, and one stored before the upload refused control
 characters may carry them, so it is logged escaped (issue #3907). Each pass ends
 with one summary line, at DEBUG when the pass neither reclaimed nor failed anything.
 A pack whose delete fails is logged at WARNING and skipped, and the pass goes on:
-one pack that keeps failing must not starve every pack after it (issue #3871). A
-store that gives no answer at all (:class:`ResourcePackStorageUnreachableError`)
-ends the pass instead, as does a cancellation.
+one pack that keeps failing must not starve every pack after it (issue #3871). Five
+failed deletes in a row end the pass, and its summary is then at WARNING with the
+reason (``gc_pass``, issue #3906). A store that gives no answer at all
+(:class:`ResourcePackStorageUnreachableError`) ends the pass at once, as does a
+cancellation; neither logs a summary.
 """
 
 from __future__ import annotations
@@ -51,6 +53,10 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.gc_pass import (
+    MAX_CONSECUTIVE_FAILED_DELETES,
+    STOPPED_AFTER_CONSECUTIVE_FAILURES,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackStorageUnreachableError,
@@ -105,6 +111,8 @@ class RunResourcePackGc:
         deleted = 0
         freed_bytes = 0
         failed = 0
+        failed_in_a_row = 0
+        stopped = False
         # The window is judged per blob, while ``store.delete`` removes every blob
         # under the pack id. The two agree because each upload puts one blob under
         # a freshly minted id; a second blob per pack would need the window judged
@@ -117,7 +125,9 @@ class RunResourcePackGc:
                 # has not committed yet.
                 continue
             # Re-read the row immediately before the delete: one committed since
-            # the read above names this blob now.
+            # the read above names this blob now. It stays outside the ``try``
+            # below: a re-read that fails is not a failed delete, and it ends the
+            # pass (issue #3906).
             async with self.uow:
                 if await self.uow.resource_packs.get_by_id(entry.pack_id) is not None:
                     continue
@@ -129,6 +139,7 @@ class RunResourcePackGc:
                 raise
             except Exception as exc:  # noqa: BLE001 - one pack must not end the pass
                 failed += 1
+                failed_in_a_row += 1
                 _LOG.warning(
                     "resource-pack GC could not delete pack %s (%r), skipped it: "
                     "%s: %s",
@@ -138,7 +149,13 @@ class RunResourcePackGc:
                     exc,
                     exc_info=True,
                 )
+                if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_DELETES:
+                    # Likely the store rather than these packs: stop paying each
+                    # later one its retries and a WARNING (issue #3906).
+                    stopped = True
+                    break
                 continue
+            failed_in_a_row = 0
             deleted += 1
             freed_bytes += entry.size_bytes
             # The blob was the only copy of a user upload: say what went.
@@ -150,8 +167,9 @@ class RunResourcePackGc:
                 entry.size_bytes,
                 now - entry.modified_at,
             )
+        level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(
-            logging.INFO if deleted or failed else logging.DEBUG,
+            logging.WARNING if stopped else level,
             "resource-pack GC pass: %d blob(s) listed, %d reclaimed (%d bytes), "
             "%d failed, in %.1fs",
             len(entries),
@@ -159,6 +177,7 @@ class RunResourcePackGc:
             freed_bytes,
             failed,
             (self.clock.now() - started).total_seconds(),
+            extra={"reason": STOPPED_AFTER_CONSECUTIVE_FAILURES} if stopped else None,
         )
         return ResourcePackGcResult(
             scanned=len(entries),

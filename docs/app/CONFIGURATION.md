@@ -532,7 +532,8 @@ trigger a sweep on demand (`POST /versions/jar-pool/gc`).
 
 Each sweep logs every JAR it reclaims at INFO and ends with one summary line, at
 DEBUG when it had nothing to do. A JAR whose delete fails is logged at WARNING and
-skipped, and the sweep goes on; a store that gives no answer at all ends it. The
+skipped, and the sweep goes on; five failed deletes in a row end it, with the
+summary at WARNING, and a store that gives no answer at all ends it at once. The
 plugin-cache and resource-pack GCs do the same (STORAGE.md Section 3.2, "Record
 and failures").
 

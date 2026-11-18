@@ -206,10 +206,15 @@ _STORE_UNAVAILABLE_ERRNOS = frozenset(
 
 # The part of the set above that says the store itself is gone, not one file
 # (issue #3871): the device vanished, the remote-fs mount went stale, or its
-# transport broke. EIO and EBUSY are left out because they can be about one file (a
-# bad block, a file in use), and a GC pass skips such a file and goes on rather than
-# ending.
-_STORE_UNREACHABLE_ERRNOS = _STORE_UNAVAILABLE_ERRNOS - {errno.EIO, errno.EBUSY}
+# transport broke, so every later delete would fail too, often after a timeout. EIO
+# is one of them (issue #3906): a soft NFS mount reports a server that stopped
+# answering as EIO, and an unlink reads no file data, so a bad block in one file is
+# an unlikely cause. EBUSY is left out because it is about one file (a file in use),
+# and a GC pass skips such a file and goes on rather than ending. EROFS is not in the
+# set above at all: a read-only filesystem is a whole-filesystem state, but each
+# delete fails at once, so the pass skips the JAR and its consecutive-failure stop
+# ends it (``gc_pass``).
+_STORE_UNREACHABLE_ERRNOS = _STORE_UNAVAILABLE_ERRNOS - {errno.EBUSY}
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")

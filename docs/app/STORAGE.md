@@ -355,18 +355,29 @@ resource-pack GC (Section 4.3) run a pass the same way:
   skips that object and goes on, and the next pass tries it again, so one object
   that keeps failing does not starve the ones after it. The manual trigger counts
   these in `failed`.
-- A delete the store gave no answer to at all ends the pass instead, since every
+- Five failed deletes in a row end the pass (issue #3906); a successful delete
+  starts the count again. Each failed delete can cost botocore's retries on a
+  5xx, so a store that fails them all would otherwise cost every object its
+  retries and a WARNING with a traceback. The pass still logs its summary, at
+  WARNING with the field `reason=stopped_after_consecutive_failures`, and the
+  manual trigger returns what it did so far. The objects it never reached count
+  in neither `deleted` nor `failed`; the next pass tries them.
+- A delete the store gave no answer to at all ends the pass at once, since every
   later delete would wait out the same timeouts. On the object backend that is a
   transport failure (connection refused, a connect or read timeout, a dropped
   connection) once botocore's retries are spent. A store that answered, even with
   a 5xx or a refusal, failed only that key. On fs and remote-fs (the JAR pool
   only) it is an errno that says the device or the mount's transport is gone:
-  `ENODEV`, `ENXIO`, `ESTALE`, `ETIMEDOUT`, `ENOTCONN`, `EHOSTDOWN`, `EHOSTUNREACH`,
-  `ENETDOWN` or `ENETUNREACH`. `EIO`, `EBUSY`, `EACCES` and the rest can be about
-  one file, and only skip it. A store that answers every request with a 5xx
-  therefore reads as one failure per object, each a WARNING.
-- A cancellation (shutdown) ends the pass too. The owner marker's refusal
-  (Section 4.3) stops a pass before it lists anything, as before.
+  `EIO`, `ENODEV`, `ENXIO`, `ESTALE`, `ETIMEDOUT`, `ENOTCONN`, `EHOSTDOWN`,
+  `EHOSTUNREACH`, `ENETDOWN` or `ENETUNREACH`. `EIO` is among them because a soft
+  NFS mount reports a server that stopped answering that way. `EBUSY` and
+  `EACCES` can be about one file, and only skip it. `EROFS` is a whole-filesystem
+  state, but each delete fails at once, so it skips the JAR too, and five in a row
+  end the pass.
+- A cancellation (shutdown) ends the pass at once too. A pass that ends at once
+  logs no summary; the per-object INFO lines still record what it reclaimed. The
+  owner marker's refusal (Section 4.3) stops a pass before it lists anything, as
+  before.
 
 ### 3.3 Backup archive create / list / restore / delete / transfer
 
