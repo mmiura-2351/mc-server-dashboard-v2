@@ -14,20 +14,29 @@ Each test holds the restore at the end of its lock-free work, runs a delete
 against the real PostgreSQL advisory lock with a short acquire budget, then lets
 the restore flip. No test sleeps.
 
+The lock lives on a database session, and when that session ends the database
+releases it without telling the holder (issue #3927). The last tests end the
+holder's session mid-operation with ``pg_terminate_backend``, let the other
+operation take the lock and run, and pin that the holder then writes nothing.
+
 DB-gated: skipped unless ``MCD_TEST_DATABASE_URL`` is set.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import os
+import threading
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -69,15 +78,20 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
+from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleLockLostError,
+    ServerBusyError,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
+from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.storage.adapters import fs as fs_mod
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
     S3Client,
     S3Object,
 )
+from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from mc_server_dashboard_api.storage.domain.port import ExclusionFence, Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
@@ -88,7 +102,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeVersionValidator
-from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.storage.fake_s3 import FakeS3Client, FakeS3Store
 from tests.storage.helpers import drain, read_tar, tar_stream
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -118,11 +132,58 @@ class _Hold:
             await self.resume.wait()
 
 
+class _PruneHold:
+    """Holds a server delete's prune once its final pack is written, once armed.
+
+    The object prune waits on the event loop and the fs prune on its worker
+    thread, both still holding the per-server storage lock.
+    """
+
+    def __init__(self) -> None:
+        self.armed = False
+        self.reached = asyncio.Event()
+        self._resume = threading.Event()
+
+    def release(self) -> None:
+        self._resume.set()
+
+    async def on_loop(self) -> None:
+        if self.armed:
+            self.armed = False
+            self.reached.set()
+            await asyncio.to_thread(self._resume.wait)
+
+    def on_thread(self, loop: asyncio.AbstractEventLoop) -> None:
+        if self.armed:
+            self.armed = False
+            loop.call_soon_threadsafe(self.reached.set)
+            self._resume.wait()
+
+
+class _PruneHoldingClient(FakeS3Client):
+    def __init__(self, store: FakeS3Store, prune_hold: _PruneHold | None) -> None:
+        super().__init__(store)
+        self._prune_hold = prune_hold
+
+    async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
+        await super().upload_multipart(key, parts)
+        if key.endswith("/final.tar.gz") and self._prune_hold is not None:
+            await self._prune_hold.on_loop()
+
+
+def _client_factory(store: FakeS3Store, prune_hold: _PruneHold | None) -> Any:
+    @contextlib.asynccontextmanager
+    async def _factory() -> AsyncIterator[S3Client]:
+        yield _PruneHoldingClient(store, prune_hold)
+
+    return _factory
+
+
 class _HeldObjectStorage(ObjectStorage):
     """Holds once the copy into the new snapshot is done, before the flip's lock."""
 
-    def __init__(self, hold: _Hold) -> None:
-        super().__init__(fake_s3_factory(FakeS3Store()))
+    def __init__(self, hold: _Hold, prune_hold: _PruneHold | None = None) -> None:
+        super().__init__(_client_factory(FakeS3Store(), prune_hold))
         self._hold = hold
 
     async def _copy_into_snapshot(
@@ -310,6 +371,136 @@ async def test_server_delete_between_a_restore_copy_and_its_flip_is_refused(
         hold.resume.set()
         await asyncio.wait({restore})
 
+    assert restore.result() == RestoreResult(forced_corrupt=False, corrupt_count=0)
+    hydrated = read_tar(await drain(case.storage.open_hydrate_source(*case.scope)))
+    assert hydrated == BACKED_UP
+
+
+async def terminate_lock_session(engine: AsyncEngine, server_id: ServerId) -> None:
+    """End the session that holds ``server_id``'s lifecycle lock, and wait for it."""
+
+    async with engine.connect() as conn:
+        pid = await conn.scalar(
+            text(
+                "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                " AND objsubid = 1"
+                " AND ((classid::bigint << 32) | objid::bigint) = :key"
+            ),
+            {"key": lifecycle_lock_mod._lock_key(server_id)},
+        )
+        assert pid is not None, "no session holds the lock"
+        assert await conn.scalar(
+            text("SELECT pg_terminate_backend(:pid, 5000)"), {"pid": pid}
+        )
+
+
+async def _server_row(case: _Case) -> Server | None:
+    async with ServersUnitOfWork(case.factory) as uow:
+        return await uow.servers.get_by_id(case.server.id)
+
+
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+async def test_a_restore_whose_lock_session_ended_mid_copy_publishes_nothing(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    make_storage: Callable[[Path, _Hold], Storage],
+) -> None:
+    hold = _Hold()
+    case = await _arrange(engine, make_storage(tmp_path, hold))
+    server = case.server
+    lock = PgLifecycleLock(engine=engine)
+
+    hold.armed = True
+    restore = asyncio.create_task(
+        _restore(case, lock)(
+            community_id=server.community_id,
+            server_id=server.id,
+            backup_id=case.backup_id,
+        )
+    )
+    await hold.reached.wait()
+    try:
+        await terminate_lock_session(engine, server.id)
+        # The ended session released the lock: a delete takes it and prunes the
+        # store under the restore's staged copy.
+        await _delete(case, lock)(community_id=server.community_id, server_id=server.id)
+        pruned_generation = await case.storage.current_generation(*case.scope)
+    finally:
+        hold.resume.set()
+        await asyncio.wait({restore})
+
+    # The restore bumped and published nothing on the pruned store...
+    assert await case.storage.current_generation(*case.scope) == pruned_generation
+    with pytest.raises(NotFoundError):
+        await drain(case.storage.open_hydrate_source(*case.scope))
+    # ...and said so, while the delete it no longer excluded stands.
+    assert isinstance(restore.exception(), LifecycleLockLostError)
+    assert await _server_row(case) is None
+
+
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+async def test_a_delete_whose_lock_session_ended_mid_pack_removes_nothing(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    make_storage: Callable[[Path, _Hold], Storage],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hold, prune_hold = _Hold(), _PruneHold()
+    if make_storage is _fs_storage:
+        storage = make_storage(tmp_path, hold)
+        loop = asyncio.get_running_loop()
+        write_tar_gz = fs_mod._write_tar_gz
+
+        def _write_then_hold(directory: Path, archive: Path) -> None:
+            write_tar_gz(directory, archive)
+            prune_hold.on_thread(loop)
+
+        monkeypatch.setattr(fs_mod, "_write_tar_gz", _write_then_hold)
+    else:
+        storage = _HeldObjectStorage(hold, prune_hold)
+    case = await _arrange(engine, storage)
+    server = case.server
+    lock = PgLifecycleLock(engine=engine)
+
+    prune_hold.armed = True
+    delete = asyncio.create_task(
+        _delete(case, lock)(community_id=server.community_id, server_id=server.id)
+    )
+    restore: asyncio.Task[RestoreResult] | None = None
+    await prune_hold.reached.wait()
+    try:
+        await terminate_lock_session(engine, server.id)
+        # The ended session released the lock: a restore takes it and stages its
+        # copy while the delete's prune still holds the storage lock.
+        hold.armed = True
+        restore = asyncio.create_task(
+            _restore(case, lock)(
+                community_id=server.community_id,
+                server_id=server.id,
+                backup_id=case.backup_id,
+            )
+        )
+        await hold.reached.wait()
+        prune_hold.release()
+        await asyncio.wait({delete})
+    finally:
+        prune_hold.release()
+        hold.resume.set()
+        await asyncio.wait({delete} | ({restore} if restore else set()))
+
+    # The delete removed nothing and its row stands...
+    assert await _server_row(case) is not None
+    assert isinstance(delete.exception(), LifecycleLockLostError)
+    # ...so the restore that took the lock over published onto an intact store.
+    assert restore is not None
     assert restore.result() == RestoreResult(forced_corrupt=False, corrupt_count=0)
     hydrated = read_tar(await drain(case.storage.open_hydrate_source(*case.scope)))
     assert hydrated == BACKED_UP
