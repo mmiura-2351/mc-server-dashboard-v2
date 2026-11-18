@@ -56,6 +56,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.gc_pass import (
     MAX_CONSECUTIVE_FAILED_DELETES,
     STOPPED_AFTER_CONSECUTIVE_FAILURES,
+    ResumePoint,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -96,6 +97,7 @@ class RunResourcePackGc:
     store: ResourcePackStore
     clock: Clock
     ownership: StoreOwnership
+    resume_point: ResumePoint
 
     async def __call__(self) -> ResourcePackGcResult:
         refusal = await self.ownership.refusal()

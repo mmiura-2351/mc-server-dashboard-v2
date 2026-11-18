@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.gc_pass import (
     MAX_CONSECUTIVE_FAILED_DELETES,
     STOPPED_AFTER_CONSECUTIVE_FAILURES,
+    ResumePoint,
 )
 from mc_server_dashboard_api.versions.domain.clock import Clock
 from mc_server_dashboard_api.versions.domain.errors import (
@@ -100,6 +101,7 @@ class RunJarPoolGc:
     references: LiveJarReferences
     clock: Clock
     ownership: StoreOwnership
+    resume_point: ResumePoint
 
     async def __call__(self) -> JarGcResult:
         refusal = await self.ownership.refusal()

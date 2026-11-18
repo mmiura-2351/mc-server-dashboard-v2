@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.logging import TextFormatter
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
@@ -77,6 +78,9 @@ class _Bucket:
             faulty_s3_factory(self.backing, self.faults)
         )
         self.rows = FakeResourcePackRepository()
+        # The GC's one resume point, which every pass below shares, as the
+        # loop's passes do (issue #3934).
+        self.resume_point = ResumePoint()
 
     def blob_keys(self) -> list[str]:
         return [
@@ -117,6 +121,7 @@ class _Bucket:
             store=self.store,
             clock=self.clock,
             ownership=ownership or FakeStoreOwnership(),
+            resume_point=self.resume_point,
         )()
 
 
@@ -405,6 +410,7 @@ async def test_spares_the_blob_of_an_upload_in_flight() -> None:
         store=bucket.store,
         clock=bucket.clock,
         ownership=FakeStoreOwnership(),
+        resume_point=ResumePoint(),
     )()
 
     assert bucket.blob_keys() == [f"resource-packs/{pack_id.value}/{_FILENAME}"]
