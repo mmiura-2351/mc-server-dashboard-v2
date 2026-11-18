@@ -15,7 +15,8 @@ the Owner role assigned to the account, then the previous Owner stepping down,
 which on its own would leave the community without an Owner once the account is
 deleted. Whichever side comes second fails cleanly -- the deletion is refused as
 a community owner, or the conferral finds no such user -- and no interleaving
-leaves a community without an Owner.
+leaves a community without an Owner. Two conferrals on one account, by contrast,
+do not wait for each other.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5).
@@ -95,6 +96,7 @@ pytestmark = pytest.mark.skipif(
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _PASSWORD = "Wm7!qz#Lp2vT"
 _COMMUNITY = "guild"
+_OTHER_COMMUNITY = "outpost"
 
 
 @pytest.fixture
@@ -203,9 +205,11 @@ class _World:
     previous_owner: uuid.UUID | None = None
 
 
-async def _provision_community(uow: CommunityUnitOfWork, owner: uuid.UUID) -> Community:
+async def _provision_community(
+    uow: CommunityUnitOfWork, owner: uuid.UUID, name: str = _COMMUNITY
+) -> Community:
     return await ProvisionCommunity(uow=uow, clock=SystemClock())(
-        name=_COMMUNITY, owner_user_id=CommunityUserId(owner)
+        name=name, owner_user_id=CommunityUserId(owner)
     )
 
 
@@ -228,6 +232,10 @@ async def _delete_account(world: _World, uow: IdentityUnitOfWork) -> None:
 
 async def _provision(world: _World, uow: CommunityUnitOfWork) -> None:
     await _provision_community(uow, world.target)
+
+
+async def _provision_other(world: _World, uow: CommunityUnitOfWork) -> None:
+    await _provision_community(uow, world.target, _OTHER_COMMUNITY)
 
 
 async def _assign_owner(world: _World, uow: CommunityUnitOfWork) -> None:
@@ -463,3 +471,26 @@ async def test_deletion_racing_an_ownership_transfer_never_orphans_the_community
         "both": {world.previous_owner, world.target},
     }[_TRANSFER_OWNERS[interleaving]]
     assert owners == {_COMMUNITY: expected}
+
+
+async def test_conferrals_on_one_account_do_not_wait_for_each_other(
+    engine: AsyncEngine,
+) -> None:
+    # Conferrals share the ownership lock: a second one on the same account
+    # commits while the first, paused before its Owner write, still holds it.
+    world = await _provisioning_world(engine)
+    pause = _Pause()
+    first = asyncio.create_task(_conferring(world, _provision)(_Backend(), pause))
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    backend = _Backend()
+    second = asyncio.create_task(_conferring(world, _provision_other)(backend, None))
+    await await_settled(engine, second, lambda: backend.pid)
+    waited = not second.done()
+    pause.resume.set()
+    await asyncio.wait_for(asyncio.gather(first, second), SETTLE_TIMEOUT)
+
+    assert not waited, "the second conferral waited for the first"
+    assert await _owners(engine) == {
+        _COMMUNITY: {world.target},
+        _OTHER_COMMUNITY: {world.target},
+    }
