@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
 from mc_server_dashboard_api.storage.adapters.sweep_loop import run_storage_sweep_loop
 from mc_server_dashboard_api.versions.adapters.jar_gc_loop import run_jar_gc_loop
 from mc_server_dashboard_api.versions.application.jar_gc import RunJarPoolGc
+from tests.core.fakes import RecordingSleep
 
 _DAILY = 86400.0
 _STARTUP_WINDOW = 600.0
@@ -100,22 +101,6 @@ _LOOPS = [
 ]
 
 
-class _RecordingSleep:
-    """Fake ``asyncio.sleep``: records each delay, returns at once for the first
-    ``returns`` calls, then parks until the task is cancelled."""
-
-    def __init__(self, *, returns: int) -> None:
-        self.delays: list[float] = []
-        self.parked = asyncio.Event()
-        self._returns = returns
-
-    async def __call__(self, delay: float) -> None:
-        self.delays.append(delay)
-        if len(self.delays) > self._returns:
-            self.parked.set()
-            await asyncio.Event().wait()
-
-
 class _PassCounter:
     def __init__(self) -> None:
         self.passes = 0
@@ -130,7 +115,7 @@ class _PassCounter:
 async def test_first_pass_runs_within_the_startup_window_then_every_interval(
     monkeypatch: pytest.MonkeyPatch, start_loop: StartLoop
 ) -> None:
-    sleep = _RecordingSleep(returns=2)
+    sleep = RecordingSleep(returns=2)
     monkeypatch.setattr(asyncio, "sleep", sleep)
     counter = _PassCounter()
     task = asyncio.create_task(start_loop(counter.count, _DAILY))
@@ -150,7 +135,7 @@ async def test_first_pass_runs_within_the_startup_window_then_every_interval(
 async def test_cancelling_during_the_startup_delay_ends_the_loop_without_a_pass(
     monkeypatch: pytest.MonkeyPatch, start_loop: StartLoop
 ) -> None:
-    sleep = _RecordingSleep(returns=0)
+    sleep = RecordingSleep(returns=0)
     monkeypatch.setattr(asyncio, "sleep", sleep)
     counter = _PassCounter()
     task = asyncio.create_task(start_loop(counter.count, _DAILY))

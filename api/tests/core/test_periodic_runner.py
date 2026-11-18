@@ -9,28 +9,13 @@ import pytest
 
 from mc_server_dashboard_api.core.adapters import periodic_runner
 from mc_server_dashboard_api.core.adapters.periodic_runner import run_periodic
+from tests.core.fakes import RecordingSleep
 
 
 async def _cancel(task: asyncio.Task[None]) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-
-
-class _RecordingSleep:
-    """Fake ``asyncio.sleep``: records each delay, returns at once for the first
-    ``returns`` calls, then parks until the task is cancelled."""
-
-    def __init__(self, *, returns: int) -> None:
-        self.delays: list[float] = []
-        self.parked = asyncio.Event()
-        self._returns = returns
-
-    async def __call__(self, delay: float) -> None:
-        self.delays.append(delay)
-        if len(self.delays) > self._returns:
-            self.parked.set()
-            await asyncio.Event().wait()
 
 
 async def _noop() -> None:
@@ -55,7 +40,7 @@ async def test_first_delay_is_a_random_point_in_the_startup_window(
     first_delay: float,
 ) -> None:
     monkeypatch.setattr(periodic_runner._RNG, "random", lambda: draw)
-    sleep = _RecordingSleep(returns=0)
+    sleep = RecordingSleep(returns=0)
     monkeypatch.setattr(asyncio, "sleep", sleep)
     task = asyncio.create_task(
         run_periodic(_noop, tick_seconds=tick_seconds, on_error=Mock())
@@ -71,7 +56,7 @@ async def test_later_delays_follow_the_interval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(periodic_runner._RNG, "random", lambda: 0.5)
-    sleep = _RecordingSleep(returns=2)
+    sleep = RecordingSleep(returns=2)
     monkeypatch.setattr(asyncio, "sleep", sleep)
     task = asyncio.create_task(run_periodic(_noop, tick_seconds=86400, on_error=Mock()))
 
