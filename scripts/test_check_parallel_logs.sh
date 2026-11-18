@@ -242,19 +242,24 @@ canary_expired="$canary_stub/canary-start-expired"
 # pauses 0.3 s before it exits (#3858). The gate kills a canary 5 s after its
 # SIGTERM, and at nice 19 on a loaded host each process the stand-in starts
 # waits for the CPU, so a trap that started one before its writes could lose
-# them to that bound on a correct gate. Before the writes there is only the rest
-# of one idle `sleep 0.1`, which bash finishes before it runs the trap. The pause
-# is for a gate that sends the SIGTERM but does not wait: that run ends with the
-# canary still there. A bound that runs out during the pause costs nothing the
-# suite can see, since the writes are done by then.
+# them to that bound on a correct gate. Before the writes there is usually only
+# the rest of one idle `sleep 0.1`, which bash finishes before it runs the trap;
+# a TERM that lands just before the next one is forked waits for all of it. So
+# the writes still depend on that bound, but far less. The pause is for a gate
+# that sends the SIGTERM but does not wait: that run ends with the canary still
+# there. A bound that runs out during the pause costs nothing the suite can see,
+# since the writes are done by then. The trap ignores any further TERM first:
+# the gate's INT/TERM path sends two, and a trap re-entered during the pause
+# would write a second stopped line and pause again.
 #
 # Like the real one, it stops once the pid it was given as --parent is no
 # longer its parent, so a gate that dies without stopping it -- one killed at
 # the ceiling, say -- leaves nothing idling. A stand-in that finds its gate gone,
-# idle or in its trap, has outlived its run: it records that in .orphaned, which
-# fails the run's check that nothing of the canary is left. That record, not a
-# `kill -0` racing the stand-in's own exit, is what catches a gate that ends
-# without stopping its canary.
+# idle or at the end of its trap's pause, has outlived its run: it records that
+# in .orphaned, which fails the run's check that nothing of the canary is left.
+# That record, not a `kill -0` racing the stand-in's own exit, is what catches a
+# gate that ends without stopping its canary, or that sends the SIGTERM and
+# ends during the pause instead of waiting for it.
 mkdir -p "$canary_worktree/api/.venv/bin"
 cat > "$canary_worktree/api/.venv/bin/python" << 'STUB'
 #!/usr/bin/env bash
@@ -270,10 +275,11 @@ gate_gone() {
 if [ -n "${CANARY_IGNORE_TERM:-}" ]; then
 	trap '' TERM
 elif [ -z "${CANARY_USAGE_ERROR:-}" ]; then
-	trap 'echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
+	trap 'trap "" TERM
+		echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
 		echo TERM > "$CANARY_RECORD.stopped"
-		gate_gone && echo TERM > "$CANARY_RECORD.orphaned"
 		sleep 0.3
+		gate_gone && echo TERM > "$CANARY_RECORD.orphaned"
 		exit 0' TERM
 fi
 if [ -n "${CANARY_USAGE_ERROR:-}" ]; then
