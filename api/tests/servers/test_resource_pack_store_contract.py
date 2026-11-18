@@ -533,8 +533,9 @@ async def test_upload_completed_but_unacknowledged_leaves_a_blob_and_no_row() ->
     real object client and the adapter: the store completed the upload, the
     response was lost, and the abort had nothing left to undo. The outage still
     crosses the seam as the servers type, the completed blob SURVIVES, and no row
-    names it -- so it is unreferenced, never served, and left for issue #3277 to
-    reclaim. The retry is independent of it: a fresh pack id, hence a fresh key."""
+    names it -- so it is unreferenced, never served, and left for the
+    resource-pack GC to reclaim (``test_resource_pack_gc.py``, issue #3277). The
+    retry is independent of it: a fresh pack id, hence a fresh key."""
 
     raw = _LostCompletionS3()
 

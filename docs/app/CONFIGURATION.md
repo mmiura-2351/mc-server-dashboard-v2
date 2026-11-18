@@ -656,11 +656,12 @@ staging/snapshot prefixes plus orphan in-progress multipart aborts
 (STORAGE.md Section 4.3) — on an interval, not just once at startup. Started
 **unconditionally** for both storage backends (not gated on the control plane),
 mirroring the one-shot startup sweep. A daily default keeps the loop cold so
-overlap with a live publish stays rare.
+overlap with a live publish stays rare. The resource-pack GC (STORAGE.md
+Section 4.3) runs on the same cadence, on the object backend only.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
-| `storage_sweep.interval_seconds` | `86400` | | Loop resolution: how often the sweep wakes to reclaim orphan staging/snapshot prefixes and abort orphan in-progress multipart uploads. A daily default matches the sibling GC loops and bounds accumulation without a restart. Must be positive. |
+| `storage_sweep.interval_seconds` | `86400` | | Loop resolution: how often the sweep wakes to reclaim orphan staging/snapshot prefixes and abort orphan in-progress multipart uploads, and how often the resource-pack GC wakes to reclaim stored packs no row names. A daily default matches the sibling GC loops and bounds accumulation without a restart. Must be positive. |
 
 ---
 

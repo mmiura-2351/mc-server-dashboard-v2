@@ -33,16 +33,19 @@ behind:
   the multipart upload before it reports the outage, and an incomplete upload is
   never an object — but not always: when the store completes the upload and the
   response is lost, the abort finds nothing to undo and the completed blob
-  stays, referenced by no row and therefore never served. Reclaiming it is
-  issue #3277. Every upload mints a fresh pack id, so a retry shares no key with
-  the failed attempt either way: the upload route answers 503
-  ``storage_unavailable``.
+  stays, referenced by no row and therefore never served, until the
+  resource-pack GC reclaims it (issue #3277). Every upload mints a fresh pack id,
+  so a retry shares no key with the failed attempt either way: the upload route
+  answers 503 ``storage_unavailable``.
 - An interrupted :meth:`delete` may have removed some of the pack's objects. It
   is idempotent — it re-lists the prefix, and the store treats deleting an absent
   key as success — so re-running it finishes the job. Its one caller commits the
   row's delete first and treats this as best-effort cleanup, so the outage is
   logged there rather than answered: the pack is already gone, and a 503 would
-  invite a retry that can only find a 404.
+  invite a retry that can only find a 404. What it leaves is the GC's too.
+
+:meth:`list_entries` feeds that GC: every blob under the namespace, with the pack
+id its key names and its store time.
 """
 
 from __future__ import annotations
