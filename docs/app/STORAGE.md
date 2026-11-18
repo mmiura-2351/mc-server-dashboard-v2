@@ -370,10 +370,10 @@ resource-pack GC (Section 4.3) run a pass the same way:
   only) it is an errno that says the device or the mount's transport is gone:
   `EIO`, `ENODEV`, `ENXIO`, `ESTALE`, `ETIMEDOUT`, `ENOTCONN`, `EHOSTDOWN`,
   `EHOSTUNREACH`, `ENETDOWN` or `ENETUNREACH`. `EIO` is among them because a soft
-  NFS mount reports a server that stopped answering that way. `EBUSY` and
-  `EACCES` can be about one file, and only skip it. `EROFS` is a whole-filesystem
-  state, but each delete fails at once, so it skips the JAR too, and five in a row
-  end the pass.
+  NFS mount reports a server that stopped answering that way. `EBUSY`, `EACCES`
+  and the rest can be about one file, and only skip it. `EROFS` is a
+  whole-filesystem state, but each delete fails at once, so it skips the JAR too,
+  and five in a row end the pass.
 - A cancellation (shutdown) ends the pass at once too. A pass that ends at once
   logs no summary; the per-object INFO lines still record what it reclaimed. The
   owner marker's refusal (Section 4.3) stops a pass before it lists anything, as

@@ -81,7 +81,7 @@ GC_SAFETY_WINDOW = dt.timedelta(hours=1)
 class JarGcResult:
     """What a GC pass scanned and reclaimed (the manual endpoint's response, #293).
 
-    ``scanned`` is the pool size examined, ``deleted`` the orphans reclaimed,
+    ``scanned`` is the number of JARs listed, ``deleted`` the orphans reclaimed,
     ``freed_bytes`` their combined on-store size, and ``failed`` the orphans whose
     delete failed and were skipped (issue #3871).
     """

@@ -96,8 +96,11 @@ class JarPoolStatsResponse(BaseModel):
 class JarPoolGcResponse(BaseModel):
     """What a JAR-pool GC pass scanned and reclaimed (issue #293).
 
-    ``failed`` counts the JARs whose delete failed: the pass skipped them and went
-    on, so a 200 alone does not say every orphan went (issue #3871).
+    ``scanned`` is the number of JARs the pass listed. ``failed`` counts the JARs
+    whose delete failed: the pass skipped each one and went on, so a 200 alone does
+    not say every orphan went (issue #3871). After five failed deletes in a row the
+    pass ends early, and the orphans it never reached count in neither ``deleted``
+    nor ``failed`` (issue #3906).
     """
 
     scanned: int
@@ -167,11 +170,13 @@ async def jar_pool_gc(
     """Reclaim pooled JARs no live server row references (platform admin, #293).
 
     A bounded scan diffing the pool against the live reference set, skipping JARs
-    inside the safety window; returns what it scanned and freed, and how many JARs
-    it skipped because their delete failed (issue #3871). Audited like the
-    catalog refresh. Refused with 409 ``store_not_owned`` when the store's owner
-    marker names another database (STORAGE.md Section 4.3, issue #3870); the
-    ``detail`` names the marker and both installations, and the refusal is logged.
+    inside the safety window; returns how many JARs it listed, what it freed, and
+    how many JARs it skipped because their delete failed (issue #3871). Five failed
+    deletes in a row end the pass early, and the orphans it never reached count in
+    neither total (issue #3906). Audited like the catalog refresh. Refused with 409
+    ``store_not_owned`` when the store's owner marker names another database
+    (STORAGE.md Section 4.3, issue #3870); the ``detail`` names the marker and both
+    installations, and the refusal is logged.
     """
 
     try:

@@ -61,7 +61,7 @@ GC_SAFETY_WINDOW = dt.timedelta(hours=1)
 class PluginCacheGcResult:
     """What a GC pass scanned and reclaimed.
 
-    ``scanned`` is the cache size examined, ``deleted`` the orphans reclaimed,
+    ``scanned`` is the number of blobs listed, ``deleted`` the orphans reclaimed,
     ``freed_bytes`` their combined on-store size, and ``failed`` the orphans whose
     delete failed and were skipped (issue #3871).
     """
