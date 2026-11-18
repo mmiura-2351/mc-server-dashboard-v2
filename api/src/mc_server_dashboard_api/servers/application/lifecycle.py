@@ -1303,13 +1303,7 @@ class StartServer:
         #3865): the marks the start cleared with its intent, for a launch that did
         not happen. The instance keeps its own working set, and its snapshots
         publish that set's player files over the store, so the files are owed
-        again in this same transaction: the marks the start cleared, and every
-        file a group manages, since an earlier start that never launched on this
-        Worker may have cleared a mark the instance never applied. A file no group
-        manages is left as the game left it. That includes one whose last group
-        was detached or deleted, if an earlier start that never launched cleared
-        the mark that change left: nothing owes it any more, so the instance's
-        copy stays.
+        again in this same transaction, as :meth:`_owe_group_files_again` says.
         """
 
         observed_at = self.clock.now()
@@ -1321,12 +1315,7 @@ class StartServer:
                 expected_worker=worker_id,
             )
             if owe_again is not None:
-                attached = await self.uow.groups.list_groups_for_server(server.id)
-                owed = {mark.kind for mark in owe_again}
-                owed |= {group.kind for group in attached}
-                for kind in GroupKind:
-                    if kind in owed:
-                        await self.uow.groups.mark_sync_pending([server.id], kind)
+                await self._owe_group_files_again(server.id, owe_again)
             await self.uow.commit()
         # Keep the return honest (issue #292): reflect the observed state on the
         # entity only when the guarded write landed; if a same-instant/fresher
@@ -1364,14 +1353,21 @@ class StartServer:
         under that instance on the strength of a stale ``stopped``. The write
         asserts the row is still on ``worker_id``.
 
+        The write is stamped with the placement's instant, the ``updated_at`` of
+        the commit that put the row on ``worker_id``, not with now. The row has
+        named that Worker since then, so a report it sent during the hydrate's
+        round trip has landed already, and the #216 guard keeps that newer fact
+        rather than overwrite it, a crash reason included.
+
         ``owe_again`` is the marks the start cleared with its intent, for a launch
-        that did not happen. They are owed again in the same transaction. If the
-        Worker's instance turns out live, ``redispatch_start`` adopts it without
-        owing anything, and its snapshots publish its own player files over the
-        regenerated ones, so the next start must make the change again.
+        that did not happen. They are owed again in the same transaction, by the
+        rule :meth:`_owe_group_files_again` states for an instance adopted on this
+        Worker. That is the instance this Worker may turn out to run, and
+        ``redispatch_start`` adopts it without owing anything, so the keep owes
+        what that adoption would.
         """
 
-        observed_at = self.clock.now()
+        observed_at = server.updated_at
         async with self.uow:
             applied = await self.uow.servers.record_observed_state(
                 server.id,
@@ -1379,13 +1375,35 @@ class StartServer:
                 observed_at=observed_at,
                 expected_worker=worker_id,
             )
-            owed = {mark.kind for mark in owe_again}
-            for kind in GroupKind:
-                if kind in owed:
-                    await self.uow.groups.mark_sync_pending([server.id], kind)
+            await self._owe_group_files_again(server.id, owe_again)
             await self.uow.commit()
         if applied:
             server.observe(ObservedState.UNKNOWN, observed_at)
+
+    async def _owe_group_files_again(
+        self, server_id: ServerId, owe_again: list[PendingGroupSync]
+    ) -> None:
+        """Owe again the player files a start regenerated for no launch (#3865).
+
+        Run inside the caller's unit of work, for an instance of the server on the
+        start's Worker that it adopts (:meth:`_record_running`) or may turn out to
+        run (:meth:`_record_unknown`, issue #3890). That instance keeps its own
+        working set, and its snapshots publish that set's player files over the
+        store. So two sets of files are owed: the marks the start cleared
+        (``owe_again``), and every file a group manages, since an earlier start
+        that never launched on this Worker may have cleared a mark the instance
+        never applied. A file no group manages is left as the game left it. That
+        includes one whose last group was detached or deleted, if an earlier start
+        that never launched cleared the mark that change left: nothing owes it any
+        more, so the instance's copy stays.
+        """
+
+        attached = await self.uow.groups.list_groups_for_server(server_id)
+        owed = {mark.kind for mark in owe_again}
+        owed |= {group.kind for group in attached}
+        for kind in GroupKind:
+            if kind in owed:
+                await self.uow.groups.mark_sync_pending([server_id], kind)
 
     async def _generation_before_hydrate(
         self, community_id: CommunityId, server_id: ServerId
