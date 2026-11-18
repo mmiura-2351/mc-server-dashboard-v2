@@ -1731,6 +1731,50 @@ async def test_a_skipped_hydrate_the_worker_disproves_is_owed_again() -> None:
     assert uow.servers.by_id[ServerId(server_id)].awaiting_hydrate is True
 
 
+class _HydrateNeverAnswers(FakeControlPlane):
+    """A hydrate the Worker holds until the caller gives up on it."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.hydrating = asyncio.Event()
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        self.hydrating.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+async def test_a_start_cancelled_during_its_hydrate_leaves_the_hydrate_owed() -> None:
+    # One of main's windows the r1 review found (#3901's state): the request task
+    # is cancelled while it waits on the hydrate, so nothing undoes the start, and
+    # the Worker may then refuse that hydrate. The row keeps its Worker and the
+    # placement's mark, so nothing publishes that Worker's scratch until a hydrate
+    # lands.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = _HydrateNeverAnswers(place_to=WorkerId(worker))
+    start = asyncio.create_task(
+        _start_server(uow, cp)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    )
+    await cp.hydrating.wait()
+
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (
+        stored.desired_state,
+        stored.assigned_worker_id,
+        stored.awaiting_hydrate,
+    ) == (DesiredState.RUNNING, WorkerId(worker), True)
+
+
 async def _keep_on_refused_hydrate(
     precondition: str,
 ) -> tuple[FakeUnitOfWork, FakeControlPlane, dict[str, CommandOutcome], ServerId]:
