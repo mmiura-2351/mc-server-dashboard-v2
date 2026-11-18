@@ -224,19 +224,21 @@ class _PasswordChangedDuringVerify(StubHasher):
         return verified
 
 
-@pytest.mark.parametrize("owns_community", [False, True], ids=["plain", "owner"])
+@pytest.mark.parametrize("account", ["plain", "owner", "last-admin"])
 async def test_delete_account_refused_when_the_password_changed_after_the_verify(
-    owns_community: bool,
+    account: str,
 ) -> None:
     # The password is verified outside the deletion's transaction (#3861), so a
     # change can commit before the account is locked. The verify is then stale
-    # and the deletion is refused like a wrong password, ahead of the owner
-    # check, and the account and its sessions survive.
-    user = make_user(now=_NOW)
+    # and the deletion is refused like a wrong password, ahead of the owner and
+    # last-admin checks, and the account and its sessions survive.
+    user = make_user(now=_NOW, is_platform_admin=account == "last-admin")
     uow = FakeUnitOfWork()
     uow.users.seed(user)
     uow.refresh_tokens.seed(_active_token(user.id))
-    uow.ownership = FakeCommunityOwnership(owners={user.id} if owns_community else None)
+    uow.ownership = FakeCommunityOwnership(
+        owners={user.id} if account == "owner" else None
+    )
     use_case = DeleteAccount(
         uow=uow,
         hasher=_PasswordChangedDuringVerify(uow.users, user.id),

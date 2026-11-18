@@ -360,15 +360,16 @@ An account that holds a Community's preset Owner role cannot be deleted
 memberships and role assignments and leave the Community without an Owner. The
 refusal holds against every write that makes the account an Owner --
 provisioning a Community with it as the initial owner, assigning it a role --
-through one lock, the account's **community-ownership lock**: a
-transaction-scoped advisory lock keyed by `user_id`. A deletion takes it
-exclusively, right after its `user` row locks, then decides whether the account
-owns a Community, and holds it until the delete commits. A conferral takes it
-shared as the first statement of the transaction that writes the assignment,
-then checks that the account exists. Whichever comes second waits for the first
-to commit and decides from what it committed: the deletion is refused as a
-Community owner (`409 owns_community`), or the conferral finds no such account
-(provisioning `422 owner_not_found`, role assignment `404`).
+through one lock, the **account write lock**: a transaction-scoped advisory lock
+keyed by `user_id`. The account's deletion takes it exclusively; a conferral of
+ownership, a member addition and a grant creation for the account take it
+shared. A deletion takes it right after its `user` row locks, then decides
+whether the account owns a Community, and holds it until the delete commits. A
+conferral takes it as the first statement of the transaction that writes the
+assignment, then checks that the account exists. Whichever comes second waits
+for the first to commit and decides from what it committed: the deletion is
+refused as a Community owner (`409 owns_community`), or the conferral finds no
+such account (provisioning `422 owner_not_found`, role assignment `404`).
 
 Adding the account as a member and granting it a resource permission confer no
 ownership, but each inserts a row whose foreign key references the account, so
@@ -388,7 +389,7 @@ of them. Where it sits in each lock order is defined beside the locks: the
 identity order in the `RefreshTokenRepository` Port
 (`identity/domain/repositories.py`), the community order in
 `community/application/permission_ceiling.py`, and how the two meet in
-`core/adapters/ownership_lock.py`.
+`core/adapters/account_write_lock.py`.
 
 ---
 
@@ -428,13 +429,14 @@ member per resource (its `permissions` set is amended in place). FK
 > attach to the new one. Removing a member or deleting a server therefore removes
 > its grants in the database (Section 10), and no grant can be inserted for a
 > membership or server that is gone. Grant creation checks both up front for a
-> clean error, but those checks are not held until its INSERT; the foreign keys
-> are what keep a removal or deletion committing in between from leaving a ghost
-> grant (issue #3216), and the INSERT's violation is reported as the same
-> not-found the check would have given. `resource_id` references `server` because
-> `server` is the only `resource_type` the CHECK admits; adding a second resource
-> type means replacing this FK (e.g. with one nullable FK column per type), not
-> dropping it.
+> clean error and holds both (`FOR KEY SHARE`) until it commits (issue #3241),
+> so a removal or deletion either commits first and fails the check, or waits
+> and then cascades to the grant. The foreign keys are the backstop (issue
+> #3216): an INSERT whose parent is gone fails them, and the violation is
+> reported as the same not-found the check would have given. `resource_id`
+> references `server` because `server` is the only `resource_type` the CHECK
+> admits; adding a second resource type means replacing this FK (e.g. with one
+> nullable FK column per type), not dropping it.
 
 ---
 

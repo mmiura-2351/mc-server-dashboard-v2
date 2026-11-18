@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import tarfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -130,6 +131,7 @@ from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import FakeClock, make_user
 from tests.identity.fakes import FakeUnitOfWork as IdentityFakeUnitOfWork
+from tests.servers import archive_cap_shapes
 from tests.servers.fakes import FakeFileStore, FakeUnitOfWork
 from tests.servers.test_files import _UNREADABLE_ARCHIVES
 from tests.storage.fake_s3 import FakeS3Store
@@ -1139,6 +1141,7 @@ def test_upload_unreadable_archive_is_422_invalid_archive() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_archive"
+    assert "detail" not in resp.json()
 
 
 @pytest.mark.parametrize(("filename", "content"), _UNREADABLE_ARCHIVES)
@@ -1164,6 +1167,49 @@ def test_upload_extract_of_an_unreadable_archive_is_422_and_writes_nothing(
 
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_archive"
+    assert store.writes == []
+
+
+@pytest.mark.parametrize(
+    ("build", "detail"),
+    [
+        pytest.param(
+            archive_cap_shapes.global_pax_records,
+            "a member with more than 32 PAX records",
+            id="headers-over-the-limits",
+        ),
+        pytest.param(
+            lambda: archive_cap_shapes.extended_header_chain(
+                tarfile.GNUTYPE_LONGNAME, after_a_member=False
+            ),
+            None,
+            id="chain-of-extended-headers",
+        ),
+    ],
+)
+def test_upload_extract_of_headers_tarfile_cannot_hold_is_422_and_writes_nothing(
+    build: Callable[[], bytes], detail: str | None
+) -> None:
+    # Headers over the walk's limits are named in the detail, as at the backup
+    # upload; a chain of extended headers tarfile cannot read was a 500 (#3810).
+    community, server = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_stopped_server(community, server))
+    store = FakeFileStore()
+    upload = UploadFile(uow=uow, file_store=store)
+    app = _app(member=True, allow=True)
+    cast(FastAPI, app).dependency_overrides[get_upload_file] = lambda: upload
+    client = _client(app)
+
+    resp = client.post(
+        _url(community, server, "/upload"),
+        params={"path": ".", "extract": "true"},
+        files={"file": ("pack.tar.gz", build(), "application/gzip")},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert resp.json().get("detail") == detail
     assert store.writes == []
 
 

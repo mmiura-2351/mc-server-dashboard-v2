@@ -55,6 +55,7 @@ from tests.storage.helpers import (
     GNU_SPARSE_FORMATS,
     GZIP_MEMBER_SPLITS,
     INVALID_SPARSE_LAYOUTS,
+    OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
@@ -70,6 +71,7 @@ from tests.storage.helpers import (
     needs_gnu_tar,
     needs_pigz,
     new_scope,
+    over_the_upload_header_limits_tar,
     pigz,
     read_tar,
     region_targz,
@@ -1860,6 +1862,24 @@ async def test_backup_from_each_producer_is_healthy_and_restores(
     archive = produce(tmp_path_factory.mktemp("producer"))
 
     await _restore_and_health_accept(harness, archive, END_CHECK_FILES)
+
+
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
+async def test_backup_over_the_upload_header_limits_is_healthy_and_restores(
+    harness: StorageHarness,
+) -> None:
+    """The header limits the upload doors hold a walk to (issue #3810) are not the
+    storage walks': a backup with 2 MiB of extended headers before a member, a
+    member of 33 PAX records and more than 8 Mi characters of PAX values is
+    healthy and restores on BOTH backends. Restore and the health probe have no
+    entry cap, so a large working set would reach the character limit."""
+
+    await _restore_and_health_accept(
+        harness,
+        gzip.compress(over_the_upload_header_limits_tar()),
+        OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
+    )
 
 
 # One member per shape the single archive member rule decides (issue #3550): a

@@ -420,12 +420,17 @@ class FakeResourceExistenceChecker(ResourceExistenceChecker):
 
 
 class FakeUserExistenceChecker(UserExistenceChecker):
-    """In-memory user-existence check: every user exists unless marked absent."""
+    """In-memory user-existence check: every user exists unless marked absent.
+
+    Records each user it was asked to lock and check, in call order.
+    """
 
     def __init__(self) -> None:
         self.absent: set[UserId] = set()
+        self.checked: list[UserId] = []
 
     async def lock_and_check_exists(self, user_id: UserId) -> bool:
+        self.checked.append(user_id)
         return user_id not in self.absent
 
 

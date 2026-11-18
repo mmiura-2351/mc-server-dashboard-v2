@@ -376,9 +376,8 @@ async def user_owns_any_community(session: AsyncSession, user_id: UserId) -> boo
 
     The definition the last-Owner guard uses: a membership holding its own
     community's preset ``Owner`` role. One statement on the caller's session,
-    taking no lock: identity's account deletion runs it under the account's
-    community-ownership lock, while it holds every active admin's ``user`` row
-    (issue #3217).
+    taking no lock: identity's account deletion runs it under the account write
+    lock, while it holds every active admin's ``user`` row (issue #3217).
     """
 
     stmt = select(

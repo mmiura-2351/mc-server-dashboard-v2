@@ -154,6 +154,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import FakeClock, FakeUnitOfWork, make_user
+from tests.servers import archive_cap_shapes
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
@@ -3169,6 +3170,37 @@ def test_upload_of_an_unreadable_archive_is_422_and_stores_nothing(
 
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_archive"
+    assert store.stored == []
+    assert backups.by_id == {}
+
+
+@pytest.mark.parametrize(
+    ("build", "detail"),
+    [
+        pytest.param(
+            archive_cap_shapes.global_pax_records,
+            "a member with more than 32 PAX records",
+            id="headers-over-the-limits",
+        ),
+        pytest.param(
+            lambda: archive_cap_shapes.extended_header_chain(
+                tarfile.GNUTYPE_LONGNAME, after_a_member=False
+            ),
+            "not a gzip tar archive",
+            id="chain-of-extended-headers",
+        ),
+    ],
+)
+def test_upload_of_headers_tarfile_cannot_hold_is_422_and_stores_nothing(
+    build: Callable[[], bytes], detail: str
+) -> None:
+    # Headers over the walk's limits are named in the detail, as at the file
+    # extract; a chain of extended headers tarfile cannot read was a 500 (#3810).
+    resp, store, backups, _ = _upload_through_the_route(build())
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_archive"
+    assert resp.json()["detail"] == detail
     assert store.stored == []
     assert backups.by_id == {}
 
