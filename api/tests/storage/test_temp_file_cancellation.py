@@ -14,7 +14,6 @@ import errno
 import gc
 import gzip
 import os
-import tarfile
 import tempfile
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -26,7 +25,7 @@ from typing import Any
 import pytest
 
 from mc_server_dashboard_api.storage.adapters import object_store
-from mc_server_dashboard_api.storage.adapters.fs import _run_spool_writer
+from mc_server_dashboard_api.storage.adapters.fs import _CappedTarGz, _run_spool_writer
 from mc_server_dashboard_api.storage.adapters.object_store import _spool_stream
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
@@ -257,14 +256,15 @@ async def test_a_temp_file_is_removed_through_repeated_cancellation(
 
 
 # The operations that open their spool by path on a worker in a mode that creates
-# it: the archive build's ``tarfile.open(spool, "w:gz")``.
+# it: the archive build's ``_CappedTarGz(spool, ...)``, which opens it with
+# ``gzip.GzipFile(spool, "wb")``.
 _PATH_WRITERS = [
     op
     for op in _ACQUISITIONS
     if op.id in ("object-create_backup_from_current", "object-prune_to_final_snapshot")
 ]
 
-_REAL_TARFILE_OPEN: Any = tarfile.open
+_REAL_CAPPED_TAR_GZ: Any = _CappedTarGz
 
 
 @pytest.mark.parametrize("executor_gone", [False, True], ids=["running", "shut-down"])
@@ -291,17 +291,17 @@ async def test_a_spool_a_late_writer_recreates_is_removed(
     release = threading.Event()
     finished = threading.Event()
 
-    def _open(name: Any = None, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
-        if mode != "w:gz" or str(name) not in created:
-            return _REAL_TARFILE_OPEN(name, mode, *args, **kwargs)
+    def _open(name: Any, *args: Any) -> Any:
+        if str(name) not in created:
+            return _REAL_CAPPED_TAR_GZ(name, *args)
         reached.set()
         release.wait()  # no timeout, as in _pause_creation (issue #3600)
         try:
-            return _REAL_TARFILE_OPEN(name, mode, *args, **kwargs)
+            return _REAL_CAPPED_TAR_GZ(name, *args)
         finally:
             finished.set()
 
-    monkeypatch.setattr(tarfile, "open", _open)
+    monkeypatch.setattr(object_store, "_CappedTarGz", _open)
     task = asyncio.ensure_future(call(stream_of(op.payload)))
     try:
         assert await asyncio.to_thread(reached.wait, 10)

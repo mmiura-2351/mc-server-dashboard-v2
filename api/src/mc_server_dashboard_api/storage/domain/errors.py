@@ -200,6 +200,10 @@ class ArchiveTooLargeError(StorageError):
     refuses an archive that exceeds the adapter's ``max_restore_bytes`` before it
     can fill the disk (gzip-bomb defence, issue #287). The bound is over actual
     bytes read, so a member that under-reports its header size cannot slip past.
+    It counts every byte of the decompressed stream, as the upload gate does
+    (issue #3859), so ``create_backup_from_current`` raises it too, for a working
+    set whose archive would be past the cap: it writes no backup that could not
+    be restored or uploaded again.
     """
 
 

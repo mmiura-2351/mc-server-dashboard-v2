@@ -16,8 +16,9 @@ through it.
 
 So does what a walk may decompress (issue #3810): :class:`CappedReader`, beneath
 :class:`EndCheckedReader`, counts every byte the walk takes from the stream
-toward a cap, and :class:`EndCheckedReader` holds the upload gates' walks to
-header limits.
+toward a cap, and :class:`EndCheckedReader` holds the walk to
+:class:`HeaderLimits`: the upload gates' (issue #3810) or the storage walks'
+(issue #3859).
 
 So does how gzip is read (issue #3835): :class:`GzipReader`, beneath both,
 decompresses a ``tar.gz`` through :class:`GzipDecoder`, which the object
@@ -33,6 +34,7 @@ import sys
 import tarfile
 import zlib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 # The tar format's block size. The end-of-archive marker is a block of zeros.
@@ -42,7 +44,7 @@ _END_BLOCK = bytes(512)
 # or first the one byte tarfile reads where it seeks to the next header.
 _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 
-# The header limits, for a walk that opts in (issue #3810). How much the walk may
+# The header limits, for a walk held to them (issue #3810). How much the walk may
 # read between handing out one member and the next: that member's header blocks
 # and extended headers (PAX records, GNU long names and links, sparse maps).
 # tarfile holds extended-header data whole, so this bounds what it holds of it at
@@ -55,10 +57,11 @@ _BETWEEN_MEMBERS_BYTES = 1024 * 1024
 # and its own...
 _PAX_RECORDS_PER_MEMBER = 32
 # ...and the members' names, link names, PAX keys and PAX values together at most
-# this many characters. The count over-states some of it, which errs safe: a
-# global record is one string the members share but counts once a member, and a
-# name or link name read from a PAX record counts twice. Real archives hold a
-# dozen records and a few hundred characters a member.
+# this many characters, plus what HeaderLimits allows a member. The count
+# over-states some of it, which errs safe: a global record is one string the
+# members share but counts once a member, and a name or link name read from a PAX
+# record counts twice. Real archives hold a dozen records and a few hundred
+# characters a member.
 _HELD_CHARACTERS = 8 * 1024 * 1024
 
 # How much of the stream past the end-of-archive marker to read at a time, so a
@@ -94,14 +97,44 @@ _GZIP_SOURCE_BYTES = 1024 * 1024
 class HeaderLimitError(tarfile.ReadError):
     """A walk read or kept more header than its header limits allow.
 
-    The limits hold only a walk whose :class:`EndCheckedReader` opts in.
+    The limits hold only a walk whose :class:`EndCheckedReader` is given
+    :class:`HeaderLimits`.
 
     More than 1 MiB of headers between two members, a member with more than 32
-    PAX records, or more than 8 Mi characters held by the members handed out
-    (issue #3810). A ``ReadError``, so a caller that refuses unreadable archives
-    refuses it too; its own class lets a caller name the refusal. The message is
-    built from fixed text and the limits only.
+    PAX records, or more characters held by the members handed out than the
+    limits allow (issue #3810). A ``ReadError``, so a caller that refuses
+    unreadable archives refuses it too; its own class lets a caller name the
+    refusal. The message is built from fixed text and the limits only.
     """
+
+
+@dataclass(frozen=True)
+class HeaderLimits:
+    """The header limits a walk is held to (issues #3810, #3859).
+
+    Every such walk reads at most 1 MiB of headers between two members, and each
+    member it hands out holds at most 32 PAX records. The members may hold 8 Mi
+    characters of names, link names and PAX records in all, plus
+    ``characters_a_member`` for each member handed out: so a walk with no entry
+    cap still takes what an archive of many ordinary members holds.
+    """
+
+    characters_a_member: int
+
+
+# The upload gates' limits (issue #3810). Their entry cap is what keeps the
+# 8 Mi characters out of a real archive's reach.
+UPLOAD_HEADER_LIMITS = HeaderLimits(characters_a_member=0)
+
+# The limits restore and the health check hold a backup's walk to (issue #3859).
+# They have no entry cap: a backup the platform writes holds a member for every
+# file of the working set, however many. Such a member holds its name twice, as
+# the name and as its PAX ``path`` record, and a few short records (``mtime``,
+# and ``size``, ``uid``, ``gid``, ``uname`` or ``gname`` when out of the ustar
+# fields' range): under 9 Ki characters for a name of 4095 bytes, Linux's
+# PATH_MAX. 16 Ki a member takes every archive the backup writers write, and the
+# 8 Mi on top takes every archive the upload gates admit.
+STORAGE_HEADER_LIMITS = HeaderLimits(characters_a_member=16 * 1024)
 
 
 def without_tar_root_prefix(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -194,10 +227,10 @@ class EndCheckedReader(io.RawIOBase):
     ``r|`` ``tarfile`` reads the file in whole records, so where its walk stopped
     cannot be seen from here.
 
-    With ``header_limits`` the walk is also held to header limits (issue #3810).
-    The upload gates set it; their entry cap is what keeps the character limit
-    below out of a real archive's reach. The storage walks leave it off: they
-    have no entry cap, and a large working set would reach that limit.
+    With ``header_limits`` the walk is also held to them (:class:`HeaderLimits`):
+    the upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore
+    and the health check :data:`STORAGE_HEADER_LIMITS` (issue #3859). The
+    snapshot ingest passes none.
 
     - The same count bounds what the walk reads between handing out one member
       and the next to 1 MiB: the next member's header blocks and extended
@@ -210,14 +243,15 @@ class EndCheckedReader(io.RawIOBase):
       most member types, but not into an old-GNU sparse one, so each member
       counts as holding all of them. :meth:`members` bounds what the members
       hold: at most 32 PAX records in a member, global and its own, and at most
-      8 Mi characters of names, link names, PAX keys and PAX values in all.
-      Neither bound sees a sparse member's map (issue #3869).
+      8 Mi characters of names, link names, PAX keys and PAX values in all, plus
+      the limits' allowance for each member handed out. Neither bound sees a
+      sparse member's map (issue #3869).
 
     Going past any of them is :class:`HeaderLimitError`.
     """
 
     def __init__(
-        self, stream: io.BufferedIOBase, *, header_limits: bool = False
+        self, stream: io.BufferedIOBase, *, header_limits: HeaderLimits | None = None
     ) -> None:
         super().__init__()
         self._stream = stream
@@ -242,7 +276,7 @@ class EndCheckedReader(io.RawIOBase):
         return True
 
     def read(self, size: int = -1, /) -> bytes:
-        budgeted = self._header_limits and self._walking
+        budgeted = self._header_limits is not None and self._walking
         if budgeted:
             allowed = _BETWEEN_MEMBERS_BYTES + 1 - self._read_since_member
             size = allowed if size < 0 else min(size, allowed)
@@ -283,8 +317,9 @@ class EndCheckedReader(io.RawIOBase):
         """
 
         held = 0
+        allowed = _HELD_CHARACTERS
         for member in tar:
-            if self._header_limits:
+            if self._header_limits is not None:
                 records = {**tar.pax_headers, **member.pax_headers}
                 if len(records) > _PAX_RECORDS_PER_MEMBER:
                     raise HeaderLimitError(
@@ -295,11 +330,9 @@ class EndCheckedReader(io.RawIOBase):
                     + len(member.linkname)
                     + sum(len(key) + len(value) for key, value in records.items())
                 )
-                if held > _HELD_CHARACTERS:
-                    raise HeaderLimitError(
-                        f"more than {_HELD_CHARACTERS} characters of names, link"
-                        " names and PAX records"
-                    )
+                allowed += self._header_limits.characters_a_member
+                if held > allowed:
+                    raise HeaderLimitError(_held_too_much(self._header_limits))
             self._walking = False
             yield member
             self._read_since_member = 0
@@ -329,6 +362,15 @@ class EndCheckedReader(io.RawIOBase):
             if chunk.count(0) != len(chunk):
                 raise tarfile.ReadError("data past the end-of-archive marker")
             yield chunk
+
+
+def _held_too_much(limits: HeaderLimits) -> str:
+    message = (
+        f"more than {_HELD_CHARACTERS} characters of names, link names and PAX records"
+    )
+    if limits.characters_a_member:
+        message += f", plus {limits.characters_a_member} a member"
+    return message
 
 
 class CapExceededError(Exception):
