@@ -10,6 +10,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { Fragment, type ReactNode, useSyncExternalStore } from "react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import {
   afterEach,
@@ -24,7 +25,12 @@ import { ApiError } from "../api/client.ts";
 import { MAX_CONSOLE_LINE_BYTES } from "../api/limits.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
-import { t } from "../i18n/index.ts";
+import {
+  getLanguage,
+  setLanguage,
+  subscribeLanguage,
+  t,
+} from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { meta } from "../test/meta.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
@@ -107,6 +113,8 @@ function server(overrides: Record<string, unknown> = {}) {
     observed_state: "running",
     observed_at: null,
     assigned_worker_id: "worker-a",
+    crash_reason: null,
+    crash_detail: null,
     config: {},
     slug: "survival",
     join_hostname: null,
@@ -141,6 +149,13 @@ function routeGet(
   });
 }
 
+// The app's language boundary (main.tsx): a language switch remounts what is
+// below it, while the query cache above it stays.
+function LanguageKeyed({ children }: { children: ReactNode }) {
+  const language = useSyncExternalStore(subscribeLanguage, getLanguage);
+  return <Fragment key={language}>{children}</Fragment>;
+}
+
 function renderPage(path = `/communities/${CID}/servers/${SID}`) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -148,14 +163,16 @@ function renderPage(path = `/communities/${CID}/servers/${SID}`) {
   const result = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
-        <ToastProvider>
-          <Routes>
-            <Route
-              path="/communities/:cid/servers/:sid"
-              element={<ServerDetailPage />}
-            />
-          </Routes>
-        </ToastProvider>
+        <LanguageKeyed>
+          <ToastProvider>
+            <Routes>
+              <Route
+                path="/communities/:cid/servers/:sid"
+                element={<ServerDetailPage />}
+              />
+            </Routes>
+          </ToastProvider>
+        </LanguageKeyed>
       </QueryClientProvider>
     </MemoryRouter>,
   );
@@ -2868,6 +2885,111 @@ describe("ServerDetailPage Overview live streams", () => {
           name: t("serverDetail.installLog.view"),
         }),
       ).not.toBeInTheDocument();
+    },
+  );
+
+  // Issue #3281: the crash's reason and detail are stored with the server's
+  // state, so a page loaded after the crash explains it as an open page did.
+  it("explains a crash read after a reload, with no live frame", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "crashed",
+        crash_reason: "forge_install_out_of_memory",
+        crash_detail: "installer ran out of memory",
+      }),
+    );
+    renderPage();
+    await screen.findByText("survival");
+
+    expect(screen.getByText("installer ran out of memory")).toBeInTheDocument();
+    expect(
+      screen.getByText(t("serverDetail.crashReason.forgeInstallOutOfMemory")),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("serverDetail.installLog.view") }),
+    ).toBeInTheDocument();
+  });
+
+  // The language switch remounts the page under the query cache, which drops
+  // what the page only held from the live frame (#3281).
+  it("keeps a live crash's explanation across a language switch", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", {
+          state: "crashed",
+          detail: "java.lang.UnsupportedClassVersionError",
+          reason: "forge_install_java_incompatible",
+        }),
+      );
+    });
+    // The row as the API now stores it, for the remounted page's read.
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "crashed",
+        crash_reason: "forge_install_java_incompatible",
+        crash_detail: "java.lang.UnsupportedClassVersionError",
+      }),
+    );
+
+    try {
+      act(() => {
+        setLanguage("ja");
+      });
+
+      expect(
+        screen.getByText(
+          t("serverDetail.crashReason.forgeInstallJavaIncompatible"),
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("java.lang.UnsupportedClassVersionError"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.installLog.view") }),
+      ).toBeInTheDocument();
+    } finally {
+      act(() => {
+        setLanguage("en");
+      });
+    }
+  });
+
+  // The reconciler does not restart a crash the Worker reports without
+  // retrying, since the next install fails the same way (#3281).
+  it.each(["forge_install_out_of_memory", "forge_install_java_incompatible"])(
+    "tells the operator a %s crash under a running intent is not restarted automatically",
+    async (reason) => {
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "crashed", crash_reason: reason }),
+      );
+      renderPage();
+      await screen.findByText("survival");
+
+      expect(
+        screen.getByText(t("serverDetail.crashBanner.noAutoRestart")),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(t("serverDetail.crashBanner.autoRestart")),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([null, "forge_install_failed"])(
+    "keeps the automatic restart line for a crash with reason %s",
+    async (reason) => {
+      mockApi.get.mockResolvedValue(
+        server({ observed_state: "crashed", crash_reason: reason }),
+      );
+      renderPage();
+      await screen.findByText("survival");
+
+      expect(
+        screen.getByText(t("serverDetail.crashBanner.autoRestart")),
+      ).toBeInTheDocument();
     },
   );
 

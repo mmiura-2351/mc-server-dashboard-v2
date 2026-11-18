@@ -328,12 +328,14 @@ describe("useServerEvents", () => {
         frame("status", { desired_state: "running" }),
       );
     });
+    // The intent says nothing about the crash: its explanation still stands.
     expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
       id: SID,
       observed_state: "crashed",
       desired_state: "running",
+      crash_reason: null,
+      crash_detail: "exit 1",
     });
-    // The intent says nothing about the crash: its detail still stands.
     expect(state.statusDetail).toBe("exit 1");
   });
 
@@ -464,21 +466,27 @@ describe("useServerEvents", () => {
   });
 
   it("keeps the status detail across a snapshot of the same state", () => {
-    // A reconnect's snapshot carries no detail (it is not persisted); the crash
-    // reason the live transition carried still describes the state.
+    // Only a crash's detail is stored (#3281): a reconnect's snapshot carries
+    // none for `unknown`, and the Worker's live explanation still describes it.
     setup();
     act(() => {
       MockWebSocket.last().open();
       MockWebSocket.last().message(
-        frame("status", { state: "crashed", detail: "exit 1" }),
+        frame("status", { state: "unknown", detail: "cannot confirm" }),
       );
-      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
+      MockWebSocket.last().message(frame("snapshot", { state: "unknown" }));
     });
-    expect(state.statusDetail).toBe("exit 1");
+    expect(state.statusDetail).toBe("cannot confirm");
   });
 
-  it("carries the crash reason with the detail, and drops both together", () => {
-    setup();
+  it("patches the crash a crashed status frame explains into the detail query (#3281)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "running",
+      crash_reason: null,
+      crash_detail: null,
+    });
     act(() => {
       MockWebSocket.last().open();
       MockWebSocket.last().message(
@@ -488,21 +496,53 @@ describe("useServerEvents", () => {
           reason: "forge_install_failed",
         }),
       );
-      MockWebSocket.last().message(frame("snapshot", { state: "crashed" }));
     });
-    expect(state.statusReason).toBe("forge_install_failed");
-
-    act(() => {
-      MockWebSocket.last().message(frame("snapshot", { state: "starting" }));
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "crashed",
+      crash_reason: "forge_install_failed",
+      crash_detail: "exit 1",
     });
-    expect(state.statusReason).toBe("");
 
+    // An unclassified crash with no detail explains nothing: the earlier
+    // crash's explanation does not stand in for it.
     act(() => {
       MockWebSocket.last().message(
-        frame("status", { state: "crashed", detail: "exit 1" }),
+        frame("status", { state: "crashed", detail: "", reason: "" }),
       );
     });
-    expect(state.statusReason).toBe("");
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "crashed",
+      crash_reason: null,
+      crash_detail: null,
+    });
+  });
+
+  it("patches the crash a snapshot frame carries into the detail query (#3281)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "running",
+      crash_reason: null,
+      crash_detail: null,
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("snapshot", {
+          state: "crashed",
+          crash_reason: "forge_install_out_of_memory",
+          crash_detail: "installer ran out of memory",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "crashed",
+      crash_reason: "forge_install_out_of_memory",
+      crash_detail: "installer ran out of memory",
+    });
   });
 
   it("drops the status detail when a snapshot shows a different state", () => {
@@ -731,6 +771,8 @@ type Detail = {
   observed_state: string;
   desired_state?: string;
   assigned_worker_id?: string | null;
+  crash_reason?: string | null;
+  crash_detail?: string | null;
 };
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Detail> }) {
@@ -848,6 +890,28 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
       await respond("running");
     }
     expect(cached()).toBe("stopped");
+  });
+
+  it("keeps a crash frame's explanation over an older REST response (#3281)", async () => {
+    const { queryClient, respond } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", {
+          state: "crashed",
+          detail: "java.lang.UnsupportedClassVersionError",
+          reason: "forge_install_java_incompatible",
+        }),
+      );
+    });
+    // The cold read captured the row before the crash.
+    await respond("starting", { crash_reason: null, crash_detail: null });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "crashed",
+      crash_reason: "forge_install_java_incompatible",
+      crash_detail: "java.lang.UnsupportedClassVersionError",
+    });
   });
 
   it("keeps a release frame that arrives before the cold detail load lands (#3818)", async () => {
