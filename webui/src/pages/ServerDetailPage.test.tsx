@@ -552,6 +552,23 @@ describe("ServerDetailPage lifecycle controls", () => {
     },
   );
 
+  it("shows no held-Start reason to a caller who may not start the server", async () => {
+    mockCan = (code) => code !== "server:start";
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByText(t("serverDetail.startAwaitsRelease")),
+    ).not.toBeInTheDocument();
+  });
+
   describe("the release frame (#3818)", () => {
     let restoreWs: () => void;
     beforeEach(() => {
@@ -2755,6 +2772,7 @@ describe("ServerDetailPage Overview live streams", () => {
       server({
         observed_state: "crashed",
         desired_state: "stopped",
+        assigned_worker_id: null,
       }),
     );
     renderPage();

@@ -200,8 +200,8 @@ export function actionApplies(
 /**
  * Whether Start is held back only by the assignment: it would apply, but the
  * previous stop still holds its Worker (#3818). The controls then show a
- * disabled Start that says the stop is finishing, rather than a Start the API
- * refuses or no Start at all.
+ * disabled Start that says it waits for the release, rather than a Start the
+ * API refuses or no Start at all.
  */
 export function startAwaitsRelease(
   state: ObservedState,

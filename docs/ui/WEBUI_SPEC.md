@@ -405,10 +405,12 @@ publishes when its own commit returns, so two writes of one server's state or
 assignment made on different database connections publish in the order their
 commit acknowledgements reach the API's event loop, which can differ from the order
 the database committed them in. The frame of the earlier commit can then be
-published last, and a client is left on that older state until the next status
-frame for the server, or until the snapshot that follows a reconnect or a `gap`
-that dropped status. Closing this needs per-server sequencing of status frames,
-tracked separately in #3307.
+published last, and a client is left on that older value until the next frame
+that carries the same field for the server (a status frame for the observed
+state, an intent frame for the desired state, an assignment frame for the
+Worker), the snapshot that follows a reconnect or a `gap` that dropped status,
+or a REST refetch that starts after the stale frame. Closing this needs
+per-server sequencing of status frames, tracked separately in #3307.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
@@ -703,8 +705,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Worker assigned: a stop holds its Worker until the final snapshot settles,
   and the API refuses a start until the release (`409 transition_conflict`).
   So at rest under a stopped intent with a Worker still assigned, Start shows
-  disabled with "Finishing the previous stop…" (on a dashboard card, as the
-  button's tooltip) until the release frame frees it. Restart needs a
+  disabled with "Waiting for the previous stop to release the server…" (on a
+  dashboard card, as the button's tooltip) until the release frame frees it.
+  The reason holds whether the release is pending on a final snapshot, a
+  re-sent stop, or a Worker that has gone offline. Restart needs a
   running intent and an assigned Worker: it is hidden under a stopped intent
   even while the process still runs (a drain's grace window), and whenever no
   Worker is assigned, since the API refuses it in both cases

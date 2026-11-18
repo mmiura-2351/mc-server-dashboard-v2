@@ -430,6 +430,7 @@ describe("DashboardPage lifecycle actions", () => {
       server({
         observed_state: "crashed",
         desired_state: "stopped",
+        assigned_worker_id: null,
       }),
     ]);
     renderPage();
@@ -717,6 +718,10 @@ describe("DashboardPage live status", () => {
     expect(start).toHaveAccessibleDescription(
       t("serverDetail.startAwaitsRelease"),
     );
+    // The reason belongs to Start alone.
+    for (const name of [t("dashboard.stop"), t("dashboard.restart")]) {
+      expect(screen.getByRole("button", { name })).not.toHaveAttribute("title");
+    }
     expect(
       screen.getByRole("button", { name: t("dashboard.stop") }),
     ).toBeEnabled();

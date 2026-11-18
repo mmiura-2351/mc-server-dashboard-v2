@@ -247,7 +247,7 @@ select.community-switcher {
   gap: 8px;
   flex-shrink: 0;
 }
-/* Why Start is held, beside it: the previous stop is finishing (#3818). */
+/* Why Start is held, beside it: the previous stop has not released the server (#3818). */
 .start-held {
   align-self: center;
   color: var(--text-faint);

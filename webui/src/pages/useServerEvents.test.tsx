@@ -729,6 +729,7 @@ describe("useServerEvents", () => {
 type Detail = {
   id: string;
   observed_state: string;
+  desired_state?: string;
   assigned_worker_id?: string | null;
 };
 
@@ -883,6 +884,33 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
     await respond("unknown");
     expect(cached()).toBe("unknown");
   });
+
+  // The same supersede for the intent (#3428) and the assignment (#3818): a
+  // read that started after the frame repairs a frame that went missing since,
+  // so a lost release cannot hold Start for good.
+  it.each([
+    ["desired_state", "desired_state", "stopped", "running"],
+    ["assigned_worker_id", "assigned_worker_id", null, "w1"],
+  ] as const)(
+    "lets a REST read started after the frame supersede its %s",
+    async (_name, field, stored, live) => {
+      const { queryClient, respond } = setupDeferred();
+      act(() => {
+        MockWebSocket.last().open();
+      });
+      await respond("stopped", { [field]: stored });
+      act(() => {
+        MockWebSocket.last().message(frame("status", { [field]: live }));
+      });
+      act(() => {
+        queryClient.invalidateQueries({ queryKey: serverKey(CID, SID) });
+      });
+      await respond("stopped", { [field]: stored });
+      expect(
+        queryClient.getQueryData<Detail>(serverKey(CID, SID))?.[field],
+      ).toBe(stored);
+    },
+  );
 });
 
 describe("useServerEvents with REST retries (#3213)", () => {

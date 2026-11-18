@@ -679,6 +679,49 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toEqual([{ id: "s1", observed_state: "unknown" }]);
   });
 
+  // The same supersede for the intent (#3428) and the assignment (#3818): a
+  // read that started after the frame repairs a frame that went missing since,
+  // so a lost release cannot hold Start for good.
+  it.each([
+    [
+      "desired_state",
+      {
+        stream: "status",
+        ts: "t",
+        payload: { desired_state: "running" },
+        server_id: "s1",
+      },
+      serverRow("s1", "stopped", "stopped"),
+    ],
+    [
+      "assigned_worker_id",
+      {
+        stream: "status",
+        ts: "t",
+        payload: { assigned_worker_id: "w1" },
+        server_id: "s1",
+      },
+      { ...serverRow("s1", "stopped"), assigned_worker_id: null },
+    ],
+  ] as const)(
+    "lets a REST read started after the frame supersede its %s",
+    async (_name, liveFrame, stored) => {
+      const { queryClient, respond, cached } = setupDeferred();
+      act(() => {
+        MockWebSocket.last().open();
+      });
+      await respond([stored]);
+      act(() => {
+        MockWebSocket.last().message(JSON.stringify(liveFrame));
+      });
+      act(() => {
+        queryClient.invalidateQueries({ queryKey: serversKey(CID) });
+      });
+      await respond([stored]);
+      expect(cached()).toEqual([stored]);
+    },
+  );
+
   it("keeps a release frame that arrives before the cold list load lands (#3818)", async () => {
     const { respond, cached } = setupDeferred();
     act(() => {

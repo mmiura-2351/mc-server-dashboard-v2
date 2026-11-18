@@ -407,7 +407,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
   // Lifecycle controls.
   "serverDetail.start": "起動",
-  "serverDetail.startAwaitsRelease": "前回の停止を完了しています…",
+  "serverDetail.startAwaitsRelease":
+    "前回の停止でサーバーが切り離されるのを待っています…",
   "serverDetail.startCrashed": "再起動",
   "serverDetail.stop": "停止",
   "serverDetail.stopGraceful": "停止（通常）",

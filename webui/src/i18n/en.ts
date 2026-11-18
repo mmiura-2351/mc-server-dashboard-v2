@@ -450,7 +450,8 @@ export const en = {
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
-  "serverDetail.startAwaitsRelease": "Finishing the previous stop…",
+  "serverDetail.startAwaitsRelease":
+    "Waiting for the previous stop to release the server…",
   "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",
