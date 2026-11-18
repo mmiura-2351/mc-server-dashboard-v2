@@ -15,6 +15,7 @@ import datetime as dt
 import io
 import uuid
 from collections.abc import AsyncIterator
+from urllib.parse import quote
 
 import pytest
 from fastapi import FastAPI
@@ -39,6 +40,7 @@ from mc_server_dashboard_api.http_streaming import ShortResponseBodyError
 from mc_server_dashboard_api.servers.application.resource_packs import (
     DeleteResourcePack,
     DownloadResourcePack,
+    ListResourcePacks,
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
@@ -176,7 +178,7 @@ def _bind_shared_app(shared_app: FastAPI) -> None:
 def _app(
     *,
     upload: _FakeUseCase | None = None,
-    list_: _FakeUseCase | None = None,
+    list_: _FakeUseCase | ListResourcePacks | None = None,
     delete: _FakeUseCase | DeleteResourcePack | None = None,
     download: _FakeDownloadUseCase | DownloadResourcePack | None = None,
     recorder: RecordingAuditRecorder | None = None,
@@ -307,6 +309,143 @@ class TestUploadEndpoint:
                 files={"file": ("pack.zip", io.BytesIO(b"data"), "application/zip")},
             )
         assert resp.status_code == 403
+
+
+def _post_raw_upload(
+    client: TestClient, filename: bytes, *, charset: str | None = None
+) -> object:
+    """POST an upload whose ``filename`` parameter is exactly these bytes.
+
+    A client library cannot deliver most unsafe names: httpx percent-encodes every
+    C0 character but ESC, as browsers do. A hand-written body sends what an
+    attacker can (issue #3907): raw bytes, and a declared ``charset`` the parser
+    decodes the parameter with, which is how a CR or a lone surrogate gets in.
+    """
+
+    boundary = b"pack-boundary"
+    body = (
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="display_name"\r\n\r\n'
+        b"My Pack\r\n"
+        b"--" + boundary + b"\r\n"
+        b'Content-Disposition: form-data; name="file"; filename=' + filename + b"\r\n"
+        b"Content-Type: application/zip\r\n\r\n"
+        b"PK\x03\x04\r\n"
+        b"--" + boundary + b"--\r\n"
+    )
+    content_type = "multipart/form-data; boundary=pack-boundary"
+    if charset is not None:
+        content_type += f"; charset={charset}"
+    return client.post(
+        "/api/resource-packs", content=body, headers={"Content-Type": content_type}
+    )
+
+
+class TestUploadFilename:
+    """The upload filename ends up in the object key, the public download URL and
+    the GC's log lines, so the upload refuses one they cannot carry (issue #3907).
+    """
+
+    @pytest.mark.parametrize(
+        ("filename", "charset"),
+        [
+            pytest.param(b'"a\x00b.zip"', None, id="nul"),
+            pytest.param(b'"a\nb.zip"', None, id="lf"),
+            # A raw CR ends the header (a 400); a declared charset decodes one.
+            pytest.param(b'"a+AA0-b.zip"', "utf-7", id="cr"),
+            pytest.param(b'"a\tb.zip"', None, id="tab"),
+            pytest.param(b'"a\x1bb.zip"', None, id="esc"),
+            pytest.param(b'"a\x7fb.zip"', None, id="del"),
+            pytest.param('"a\x85b.zip"'.encode(), None, id="c1"),
+            pytest.param(b'"a+2AA-b.zip"', "utf-7", id="lone-surrogate"),
+            pytest.param(b'"a/b.zip"', None, id="slash"),
+            pytest.param(b'"../../x.zip"', None, id="traversal"),
+            pytest.param(b'"a\\\\b.zip"', None, id="backslash"),
+            pytest.param(b'""', None, id="empty"),
+            pytest.param(b'"   "', None, id="blank"),
+            pytest.param(('"' + "a" * 252 + '.zip"').encode(), None, id="256-bytes"),
+            # The limit is bytes: 88 characters, but 256 bytes in UTF-8.
+            pytest.param(
+                ('"' + "あ" * 84 + '.zip"').encode(), None, id="256-utf8-bytes"
+            ),
+        ],
+    )
+    def test_refuses_a_filename_a_key_or_url_cannot_carry(
+        self, filename: bytes, charset: str | None
+    ) -> None:
+        uc = _FakeUseCase(result=_pack())
+        app = _app(upload=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = _post_raw_upload(client, filename, charset=charset)
+        assert resp.status_code == 422  # type: ignore[attr-defined]
+        assert resp.json()["reason"] == "invalid_filename"  # type: ignore[attr-defined]
+        assert uc.calls == []
+
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            pytest.param("My Pack (v2) [1.21].zip", id="ascii"),
+            pytest.param("パック.zip", id="japanese"),
+            pytest.param("リソース　パック.zip", id="ideographic-space"),
+            pytest.param("Pokémon.zip", id="nfd"),
+            pytest.param("\U0001f468‍\U0001f469‍\U0001f467.zip", id="zwj-emoji"),
+            pytest.param("a" * 251 + ".zip", id="255-bytes"),
+            pytest.param("あ" * 83 + ".zip", id="253-utf8-bytes"),
+        ],
+    )
+    def test_accepts_a_unicode_filename(self, filename: str) -> None:
+        uc = _FakeUseCase(result=_pack(filename=filename))
+        app = _app(upload=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = _post_raw_upload(client, f'"{filename}"'.encode())
+        assert resp.status_code == 201  # type: ignore[attr-defined]
+        assert [call["filename"] for call in uc.calls] == [filename]
+
+
+def _legacy_pack(filename: str) -> tuple[FakeUnitOfWork, FakeResourcePackStore]:
+    """A pack stored before the upload refused its filename (issue #3907)."""
+
+    pack = _pack(filename=filename)
+    uow = FakeUnitOfWork()
+    uow.resource_packs.packs[pack.id] = pack
+    store = FakeResourcePackStore()
+    store.blobs[(pack.id, filename)] = b"PK\x03\x04"
+    return uow, store
+
+
+class TestLegacyFilename:
+    """A pack whose name the upload now refuses still lists and downloads.
+
+    The check is the upload's alone (issue #3907): rows stored before it keep their
+    names, and every read path serves them as before.
+    """
+
+    @pytest.mark.parametrize("filename", ["a\nb.zip", "a\x1bb.zip", "a/b.zip"])
+    def test_lists_and_downloads(self, filename: str) -> None:
+        uow, store = _legacy_pack(filename)
+        app = _app(
+            list_=ListResourcePacks(uow=uow),
+            download=DownloadResourcePack(uow=uow, store=store),
+        )
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            listed = client.get("/api/resource-packs")
+            downloaded = client.get(f"/api/resource-packs/{_PACK_ID.value}/download")
+        assert listed.status_code == 200
+        assert [p["filename"] for p in listed.json()["resource_packs"]] == [filename]
+        assert downloaded.status_code == 200
+        assert downloaded.content == b"PK\x03\x04"
+
+    @pytest.mark.parametrize("filename", ["a\nb.zip", "a\x1bb.zip"])
+    def test_public_download_serves_it(self, filename: str) -> None:
+        uow, store = _legacy_pack(filename)
+        app = _app(download=DownloadResourcePack(uow=uow, store=store))
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.get(
+                f"/api/public/resource-packs/{_PACK_ID.value}/"
+                f"{quote(filename, safe='')}"
+            )
+        assert resp.status_code == 200
+        assert resp.content == b"PK\x03\x04"
 
 
 class TestListEndpoint:
