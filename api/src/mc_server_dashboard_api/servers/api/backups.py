@@ -114,6 +114,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidFilePathError,
     InvalidRetentionPolicyError,
+    LifecycleLockLostError,
     PluginReconcileIncompleteError,
     ServerBusyError,
     ServerNotFoundError,
@@ -627,6 +628,19 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        # The lifecycle lock was lost before the store published (issue #3927):
+        # nothing was restored, and a retry takes the lock afresh.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except BackupCorruptError as exc:
         # The backup's extracted working set is structurally corrupt and force was
         # not set (#743): the restore was refused and the backup quarantined. Like
@@ -705,6 +719,11 @@ async def restore_backup(
             # working set is live: a mapped 503 the caller retries, since a
             # re-run of the restore completes it.
             raise _service_unavailable("publish_incomplete") from exc
+        if isinstance(exc.cause, LifecycleLockLostError):
+            # The lock was lost after the publish (issue #3927), before a step
+            # after it or at its release: the restored working set is live, and
+            # a re-run of the restore completes it.
+            raise _service_unavailable("lifecycle_lock_lost") from exc
         # Any other failure stays the unmapped 500 it was, now audited.
         raise
     if result.forced_corrupt:

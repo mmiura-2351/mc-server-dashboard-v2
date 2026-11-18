@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -83,7 +82,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
 from mc_server_dashboard_api.storage.adapters import fs as fs_mod
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import (
@@ -101,6 +100,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.region import WorkingSetReport
 from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.integration.test_lifecycle_lock_lost_session import terminate_lock_session
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeVersionValidator
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store
 from tests.storage.helpers import drain, read_tar, tar_stream
@@ -374,24 +374,6 @@ async def test_server_delete_between_a_restore_copy_and_its_flip_is_refused(
     assert restore.result() == RestoreResult(forced_corrupt=False, corrupt_count=0)
     hydrated = read_tar(await drain(case.storage.open_hydrate_source(*case.scope)))
     assert hydrated == BACKED_UP
-
-
-async def terminate_lock_session(engine: AsyncEngine, server_id: ServerId) -> None:
-    """End the session that holds ``server_id``'s lifecycle lock, and wait for it."""
-
-    async with engine.connect() as conn:
-        pid = await conn.scalar(
-            text(
-                "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
-                " AND objsubid = 1"
-                " AND ((classid::bigint << 32) | objid::bigint) = :key"
-            ),
-            {"key": lifecycle_lock_mod._lock_key(server_id)},
-        )
-        assert pid is not None, "no session holds the lock"
-        assert await conn.scalar(
-            text("SELECT pg_terminate_backend(:pid, 5000)"), {"pid": pid}
-        )
 
 
 async def _server_row(case: _Case) -> Server | None:
