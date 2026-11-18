@@ -3,6 +3,7 @@
 import json
 import logging
 import sys
+import weakref
 from collections.abc import Iterator
 
 import pytest
@@ -441,13 +442,17 @@ def test_text_formatter_escapes_controls_in_a_traceback_but_keeps_its_lines(
 
 def test_text_formatter_escapes_a_traceback_another_handler_rendered_first() -> None:
     # ``Formatter.format`` caches the traceback text on the record, so a handler
-    # that formatted the record first decides what every later one appends.
+    # that formatted the record first decides what every later one appends. It
+    # also leaves ``message`` and ``asctime`` on the record, which are no fields.
     exc = _raised("bad\x1bname")
     record = _record("failed")
     record.exc_info = (type(exc), exc, exc.__traceback__)
-    logging.Formatter().format(record)
+    logging.Formatter("%(asctime)s %(message)s").format(record)
 
-    assert TextFormatter().format(record).endswith("\nValueError: bad\\x1bname")
+    lines = TextFormatter().format(record).split("\n")
+
+    assert lines[0] == "INFO test failed"
+    assert lines[-1] == "ValueError: bad\\x1bname"
 
 
 def test_text_formatter_escapes_controls_in_the_stack() -> None:
@@ -474,6 +479,52 @@ def test_json_formatter_writes_no_raw_control_character() -> None:
     assert parsed["message"] == f"serving {raw}"
     assert parsed["subject"] == raw
     assert parsed["exception"].endswith(f"ValueError: {raw}")
+
+
+class _Connection:
+    def __str__(self) -> str:
+        return "conn-1"
+
+
+@pytest.mark.parametrize(
+    ("formatter", "expected"),
+    [
+        pytest.param(
+            JsonFormatter(),
+            '{"level": "info", "logger": "test.adapter", '
+            '"message": "connection open", "websocket": "conn-1"}',
+            id="json",
+        ),
+        pytest.param(
+            TextFormatter(),
+            "INFO test.adapter connection open websocket=conn-1",
+            id="text",
+        ),
+    ],
+)
+def test_an_extra_json_cannot_encode_keeps_its_line(
+    formatter: logging.Formatter, expected: str
+) -> None:
+    # uvicorn's ``websockets`` backend logs on ``uvicorn.error`` through the
+    # library's LoggerAdapter, which attaches the connection object itself;
+    # those lines reach these formatters since configure_logging routes uvicorn
+    # here.
+    connection = _Connection()
+    logger = logging.getLogger("test.adapter")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = _CapturingHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    try:
+        adapter = logging.LoggerAdapter(
+            logger, {"websocket": weakref.proxy(connection)}
+        )
+        adapter.info("connection open")
+    finally:
+        logger.removeHandler(handler)
+
+    assert handler.lines == [expected]
 
 
 def test_a_crafted_path_reaches_the_problem_error_line_escaped() -> None:

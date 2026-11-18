@@ -71,7 +71,10 @@ class JsonFormatter(logging.Formatter):
                 ei = sys.exc_info() if ei else None
         if isinstance(ei, tuple) and ei[0] is not None:
             payload["exception"] = self.formatException(ei)
-        return json.dumps(payload)
+        # An extra JSON cannot encode is written as its ``str`` rather than
+        # losing the line: uvicorn's lines come here (configure_logging), and its
+        # ``websockets`` backend attaches the connection object itself.
+        return json.dumps(payload, default=str)
 
 
 class TextFormatter(logging.Formatter):
