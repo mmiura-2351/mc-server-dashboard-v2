@@ -821,6 +821,17 @@ class PluginCacheStorageUnavailableError(ServerError):
     """
 
 
+class PluginCacheStorageUnreachableError(PluginCacheStorageUnavailableError):
+    """A plugin-cache delete got no answer from the store at all (#3871).
+
+    The seam's translation of the storage ``ObjectStoreUnreachableError``, raised by
+    ``PluginCacheStore.delete``. The plugin-cache GC ends its pass on it, since every
+    later delete would wait out the same timeouts; on the wider type it skips the
+    one blob and goes on. A subclass, so every handler of the wider type still
+    catches it.
+    """
+
+
 class CatalogUpstreamFailedError(ServerError):
     """A content catalog request failed: refused before dispatch, or answered badly.
 
@@ -920,6 +931,17 @@ class ResourcePackStorageUnavailableError(ServerError):
     route answers the same 503. A blob delete that hits it is logged by the delete
     use case instead of answered: the row is already gone by then, so there is
     nothing left for a retry to do, and the GC reclaims the blob.
+    """
+
+
+class ResourcePackStorageUnreachableError(ResourcePackStorageUnavailableError):
+    """A resource pack delete got no answer from the store at all (#3871).
+
+    The seam's translation of the storage ``ObjectStoreUnreachableError``, raised by
+    ``ResourcePackStore.delete``. The resource-pack GC ends its pass on it, since
+    every later delete would wait out the same timeouts; on the wider type it skips
+    the one pack and goes on. A subclass, so every handler of the wider type still
+    catches it.
     """
 
 

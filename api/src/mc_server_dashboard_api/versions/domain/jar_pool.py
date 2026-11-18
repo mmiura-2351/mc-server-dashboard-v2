@@ -63,4 +63,8 @@ class JarPool(abc.ABC):
 
     @abc.abstractmethod
     async def delete(self, sha256: str) -> None:
-        """Remove a pooled JAR by content key. Idempotent (no error if absent)."""
+        """Remove a pooled JAR by content key. Idempotent (no error if absent).
+
+        Raises ``JarPoolUnreachableError`` when the store gave no answer at all
+        (issue #3871); any other failure is about this JAR.
+        """

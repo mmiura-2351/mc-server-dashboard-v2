@@ -7,23 +7,40 @@ and the safety window (a too-young orphan is spared even when unreferenced).
 
 The cache double is the shared :class:`FakePluginCacheStore` every other
 plugin-cache test uses, so this file cannot drift away from the adapter's
-behaviour on its own (issue #2347).
+behaviour on its own (issue #2347). A failing delete is driven through the real
+:class:`ObjectPluginCacheStore` over the faulty S3 stub instead, so it raises
+what production raises (issue #3871).
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import hashlib
 import logging
+from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
+    ObjectPluginCacheStore,
+)
 from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     GC_SAFETY_WINDOW,
     LivePluginCacheReferences,
     RunPluginCacheGc,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.errors import (
+    PluginCacheStorageUnreachableError,
+)
+from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
+    PluginCacheStore,
+)
+from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnreachableError
 from tests.servers.fakes import FakePluginCacheStore
+from tests.storage.fake_s3 import FakeS3Store
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 from tests.store_ownership import FakeStoreOwnership
 
 _NOW = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.UTC)
@@ -74,7 +91,7 @@ def _seed(
 
 
 def _gc(
-    cache: FakePluginCacheStore,
+    cache: PluginCacheStore,
     refs: _FakeReferences,
     ownership: FakeStoreOwnership | None = None,
 ) -> RunPluginCacheGc:
@@ -203,3 +220,139 @@ async def test_refuses_a_cache_whose_store_another_database_owns(
         and str(ownership.refusal_reason) in rec.getMessage()
         for rec in caplog.records
     )
+
+
+class _ObjectCache:
+    """The real object-backed cache over a bucket whose calls a test can fail."""
+
+    def __init__(self) -> None:
+        self.faults = Faults()
+        self.cache = ObjectPluginCacheStore(
+            faulty_s3_factory(FakeS3Store(clock=_old), self.faults)
+        )
+
+    async def seed(self, count: int) -> list[str]:
+        """Cache *count* distinct old blobs; their keys, in the order a pass meets
+        them."""
+
+        async def _body(data: bytes) -> AsyncIterator[bytes]:
+            yield data
+
+        keys = []
+        for i in range(count):
+            data = b"blob-%d" % i
+            sha = hashlib.sha256(data).hexdigest()
+            await self.cache.put(sha, _body(data))
+            keys.append(sha)
+        return sorted(keys)
+
+    def fail_deletes_of(self, sha: str) -> None:
+        self.faults.when = lambda op, key: op == "delete_object" and sha in key
+
+    async def keys(self) -> list[str]:
+        return [entry.sha256 for entry in await self.cache.list_entries()]
+
+
+async def test_a_failing_delete_skips_that_blob_and_the_pass_reclaims_the_rest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # One blob whose delete keeps failing must not starve the ones after it
+    # (issue #3871). It is the first the pass meets, so a pass that stopped at the
+    # failure would reclaim nothing.
+    store = _ObjectCache()
+    failing, *others = await store.seed(3)
+    store.fail_deletes_of(failing)
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        result = await _gc(store.cache, _FakeReferences(set()))()
+
+    assert await store.keys() == [failing]
+    assert (result.scanned, result.deleted, result.failed) == (3, 2, 1)
+    assert result.freed_bytes == len(b"blob-0") * 2
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert failing in warning.getMessage()
+    assert "PluginCacheStorageUnavailableError: plugin-cache/" in warning.getMessage()
+    assert all(sha not in warning.getMessage() for sha in others)
+
+
+async def test_logs_each_reclaimed_blob_and_the_pass_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # What a pass deleted must be traceable afterwards: the key, its size and its
+    # age per blob, then one summary line (issue #3871).
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64, size=100)
+    _seed(cache, "b" * 64, size=20)  # live
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await _gc(cache, _FakeReferences({"b" * 64}))()
+
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    (reclaimed, summary) = infos
+    assert "a" * 64 in reclaimed
+    assert "100 bytes" in reclaimed
+    assert "2:00:00" in reclaimed  # stored one hour past the one-hour window
+    assert "b" * 64 not in " ".join(infos)
+    for part in ("2 blob(s) listed", "1 reclaimed (100 bytes)", "0 failed", "in 0.0s"):
+        assert part in summary
+
+
+async def test_a_pass_that_reclaims_nothing_logs_its_summary_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A daily pass over a cache with no orphan is the common case; it must not
+    # leave an INFO line every time.
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64)
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await _gc(cache, _FakeReferences({"a" * 64}))()
+
+    assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+    assert any("0 reclaimed" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_pass_whose_every_delete_failed_logs_its_summary_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Nothing was reclaimed, but the pass is not empty: the summary is the one
+    # line that counts the failures, so it stays visible.
+    store = _ObjectCache()
+    (failing,) = await store.seed(1)
+    store.fail_deletes_of(failing)
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await _gc(store.cache, _FakeReferences(set()))()
+
+    assert (result.deleted, result.failed) == (0, 1)
+    (summary,) = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert "1 failed" in summary.getMessage()
+
+
+async def test_a_cancelled_delete_ends_the_pass() -> None:
+    # Shutdown cancels the loop's task mid-pass; the cancellation must reach the
+    # loop, not be counted as one failed blob (issue #3871).
+    store = _ObjectCache()
+    first, *_ = keys = await store.seed(2)
+    store.fail_deletes_of(first)
+    store.faults.error = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _gc(store.cache, _FakeReferences(set()))()
+
+    assert await store.keys() == keys
+
+
+async def test_a_store_that_gives_no_answer_ends_the_pass() -> None:
+    # A delete the store never answered says nothing about this blob: every later
+    # delete would wait out the same timeouts. The pass ends instead of skipping
+    # each blob in turn (issue #3871).
+    store = _ObjectCache()
+    first, *_ = keys = await store.seed(2)
+    store.fail_deletes_of(first)
+    store.faults.error = ObjectStoreUnreachableError
+
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await _gc(store.cache, _FakeReferences(set()))()
+
+    assert await store.keys() == keys

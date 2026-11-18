@@ -66,7 +66,7 @@ class _FakeGc:
 
     async def __call__(self) -> JarGcResult:
         self.calls += 1
-        return JarGcResult(scanned=5, deleted=2, freed_bytes=2048)
+        return JarGcResult(scanned=5, deleted=2, freed_bytes=2048, failed=1)
 
 
 _REFUSAL = (
@@ -192,13 +192,20 @@ def test_jar_pool_stats_requires_platform_admin() -> None:
     assert resp.status_code == 403
 
 
-def test_jar_pool_gc_returns_scanned_deleted_freed() -> None:
+def test_jar_pool_gc_returns_scanned_deleted_freed_failed() -> None:
+    # A pass skips a JAR whose delete failed and still answers 200, so the
+    # response must count those, or the caller cannot tell (issue #3871).
     gc = _FakeGc()
     client = _client(gc=gc, recorder=_RecordingRecorder())
     with client:
         resp = client.post("/api/versions/jar-pool/gc")
     assert resp.status_code == 200
-    assert resp.json() == {"scanned": 5, "deleted": 2, "freed_bytes": 2048}
+    assert resp.json() == {
+        "scanned": 5,
+        "deleted": 2,
+        "freed_bytes": 2048,
+        "failed": 1,
+    }
     assert gc.calls == 1
 
 

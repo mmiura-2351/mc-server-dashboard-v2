@@ -234,20 +234,23 @@ async def test_list_entries_names_the_pack_and_key_of_every_stored_blob(
     store: ResourcePackStore, pack: ResourcePackId
 ) -> None:
     # The orphan GC's input (issue #3277): one entry per stored blob, carrying the
-    # pack id the blob is stored under and the key the GC logs a reclaim by.
-    # Filtered to this test's pack, because the live arm's bucket is shared with
-    # whatever else has stored packs in it.
+    # pack id the blob is stored under, and the key and size the GC logs a reclaim
+    # by (issue #3871). Filtered to this test's pack, because the live arm's bucket
+    # is shared with whatever else has stored packs in it.
     await _put(store, pack, "one.zip")
     await _put(store, pack, "two.zip")
 
     listed = {
-        (entry.pack_id, entry.key)
+        (entry.pack_id, entry.key, entry.size_bytes)
         for entry in await store.list_entries()
         if entry.pack_id == pack
     }
 
     prefix = f"resource-packs/{pack.value}/"
-    assert listed == {(pack, prefix + "one.zip"), (pack, prefix + "two.zip")}
+    assert listed == {
+        (pack, prefix + "one.zip", len(_BLOB)),
+        (pack, prefix + "two.zip", len(_BLOB)),
+    }
 
 
 async def test_list_entries_omits_a_deleted_pack(

@@ -10,10 +10,14 @@ The two guards are pinned the same way: an upload in flight has stored its blob
 but not yet committed its row, and is spared by the safety window; a row that
 commits after the GC read the rows is caught by the re-read just before the
 delete.
+
+A failing delete is the stub's outage on that one pack's key, so it raises what
+production raises (issue #3871).
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import json
@@ -29,6 +33,7 @@ from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
 )
 from mc_server_dashboard_api.servers.application.resource_pack_gc import (
     GC_SAFETY_WINDOW,
+    ResourcePackGcResult,
     RunResourcePackGc,
 )
 from mc_server_dashboard_api.servers.application.resource_packs import (
@@ -37,11 +42,13 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackStorageUnavailableError,
+    ResourcePackStorageUnreachableError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackId,
 )
+from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnreachableError
 from tests.servers.fakes import FakeClock, FakeResourcePackRepository, FakeUnitOfWork
 from tests.storage.fake_s3 import FakeS3Store
 from tests.storage.faulty_s3 import Faults, faulty_s3_factory
@@ -87,11 +94,24 @@ class _Bucket:
             uploaded_by=uuid.uuid4(),
         )
 
-    async def gc(self, ownership: FakeStoreOwnership | None = None) -> None:
+    async def orphans(self, count: int) -> list[str]:
+        """Store *count* blobs no row names; their keys, in the order a pass meets
+        them."""
+
+        async def _body() -> AsyncIterator[bytes]:
+            yield _pack_zip()
+
+        for _ in range(count):
+            await self.store.put(ResourcePackId(uuid.uuid4()), _FILENAME, _body())
+        return sorted(self.blob_keys())
+
+    async def gc(
+        self, ownership: FakeStoreOwnership | None = None
+    ) -> ResourcePackGcResult:
         """Run one pass once every blob stored so far is past the safety window."""
 
         self.clock.set(self.clock.now() + GC_SAFETY_WINDOW + dt.timedelta(minutes=1))
-        await RunResourcePackGc(
+        return await RunResourcePackGc(
             uow=FakeUnitOfWork(resource_packs=self.rows),
             store=self.store,
             clock=self.clock,
@@ -169,11 +189,106 @@ async def test_logs_each_reclaimed_blob_and_the_pass_count(
     with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
         await bucket.gc()
 
+    size = len(_pack_zip())
     messages = [record.getMessage() for record in caplog.records]
     (reclaimed,) = [message for message in messages if orphan_key in message]
     assert orphan_key.split("/")[1] in reclaimed
+    assert f"{size} bytes" in reclaimed
     assert "1:01:00" in reclaimed
-    assert "2 blob(s) listed, 1 reclaimed" in messages[-1]
+    summary = messages[-1]
+    for part in ("2 blob(s) listed", f"1 reclaimed ({size} bytes)", "0 failed", "in "):
+        assert part in summary
+    assert caplog.records[-1].levelno == logging.INFO
+
+
+async def test_a_pass_that_reclaims_nothing_logs_its_summary_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A daily pass over packs that all have rows is the common case; it must not
+    # leave an INFO line every time (issue #3871).
+    bucket = _Bucket()
+    await bucket.upload()
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await bucket.gc()
+
+    assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+    assert any("0 reclaimed" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_failing_delete_skips_that_pack_and_the_pass_reclaims_the_rest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # One pack whose delete keeps failing must not starve the ones after it
+    # (issue #3871). It is the first the pass meets, so a pass that stopped at the
+    # failure would reclaim nothing.
+    bucket = _Bucket()
+    failing, *others = await bucket.orphans(3)
+    bucket.faults.when = lambda op, key: op == "delete_object" and key == failing
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        result = await bucket.gc()
+
+    assert bucket.blob_keys() == [failing]
+    assert (result.scanned, result.deleted, result.failed) == (3, 2, 1)
+    assert result.freed_bytes == len(_pack_zip()) * 2
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert failing.split("/")[1] in warning.getMessage()
+    assert "ResourcePackStorageUnavailableError" in warning.getMessage()
+    assert all(key.split("/")[1] not in warning.getMessage() for key in others)
+    summary = caplog.records[-1]
+    assert summary.levelno == logging.INFO
+    assert "1 failed" in summary.getMessage()
+
+
+async def test_a_pass_whose_every_delete_failed_logs_its_summary_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Nothing was reclaimed, but the pass is not empty: the summary is the one
+    # line that counts the failures, so it stays visible (issue #3871).
+    bucket = _Bucket()
+    (failing,) = await bucket.orphans(1)
+    bucket.faults.when = lambda op, key: op == "delete_object"
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await bucket.gc()
+
+    assert bucket.blob_keys() == [failing]
+    assert (result.deleted, result.failed) == (0, 1)
+    (summary,) = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert "1 failed" in summary.getMessage()
+
+
+@pytest.mark.parametrize("operation", ["list_objects", "delete_object"])
+async def test_a_store_that_gives_no_answer_ends_the_pass(operation: str) -> None:
+    # A delete the store never answered says nothing about this pack: every later
+    # delete would wait out the same timeouts. The pass ends instead of skipping
+    # each pack in turn (issue #3871). A pack's delete lists its prefix before it
+    # deletes, so either call can be the one that gets no answer.
+    bucket = _Bucket()
+    keys = await bucket.orphans(2)
+    prefix = keys[0].rpartition("/")[0]
+    bucket.faults.when = lambda op, key: op == operation and key.startswith(prefix)
+    bucket.faults.error = ObjectStoreUnreachableError
+
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+
+    assert sorted(bucket.blob_keys()) == keys
+
+
+async def test_a_cancelled_delete_ends_the_pass() -> None:
+    # Shutdown cancels the loop's task mid-pass; the cancellation must reach the
+    # loop, not be counted as one failed pack (issue #3871).
+    bucket = _Bucket()
+    keys = await bucket.orphans(2)
+    bucket.faults.when = lambda op, key: op == "delete_object" and key == keys[0]
+    bucket.faults.error = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await bucket.gc()
+
+    assert sorted(bucket.blob_keys()) == keys
 
 
 async def test_keeps_the_blob_of_a_pack_with_a_row() -> None:

@@ -20,6 +20,14 @@ database: in a bucket another database also uses, that database's blobs are name
 by no row here. Each pass therefore asks the bucket's owner marker first and is
 refused, with an ERROR, unless it names this installation (STORAGE.md Section 4.3,
 issue #3870).
+
+**Record and failures.** Each reclaimed blob is logged at INFO with its key, size
+and age, and each pass ends with one summary line, at DEBUG when the pass neither
+reclaimed nor failed anything. A blob whose delete fails is logged at WARNING and
+skipped, and the pass goes on: one blob that keeps failing must not starve every
+blob after it (issue #3871). A store that gives no answer at all
+(:class:`PluginCacheStorageUnreachableError`) ends the pass instead, as does a
+cancellation.
 """
 
 from __future__ import annotations
@@ -30,6 +38,9 @@ import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.errors import (
+    PluginCacheStorageUnreachableError,
+)
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     PluginCacheStore,
 )
@@ -46,12 +57,14 @@ class PluginCacheGcResult:
     """What a GC pass scanned and reclaimed.
 
     ``scanned`` is the cache size examined, ``deleted`` the orphans reclaimed,
-    and ``freed_bytes`` their combined on-store size.
+    ``freed_bytes`` their combined on-store size, and ``failed`` the orphans whose
+    delete failed and were skipped (issue #3871).
     """
 
     scanned: int
     deleted: int
     freed_bytes: int
+    failed: int
 
 
 class LivePluginCacheReferences(abc.ABC):
@@ -75,12 +88,15 @@ class RunPluginCacheGc:
         refusal = await self.ownership.refusal()
         if refusal is not None:
             _LOG.error("plugin-cache GC refused: %s", refusal)
-            return PluginCacheGcResult(scanned=0, deleted=0, freed_bytes=0)
+            return PluginCacheGcResult(scanned=0, deleted=0, freed_bytes=0, failed=0)
+        started = self.clock.now()
         entries = await self.cache.list_entries()
         live = await self.references.live()
-        cutoff = self.clock.now() - GC_SAFETY_WINDOW
+        now = self.clock.now()
+        cutoff = now - GC_SAFETY_WINDOW
         deleted = 0
         freed_bytes = 0
+        failed = 0
         for entry in entries:
             if entry.sha256 in live:
                 continue
@@ -96,9 +112,44 @@ class RunPluginCacheGc:
             fresh_live = await self.references.live()
             if entry.sha256 in fresh_live:
                 continue
-            await self.cache.delete(entry.sha256)
+            try:
+                await self.cache.delete(entry.sha256)
+            except PluginCacheStorageUnreachableError:
+                # Not this blob but the store: every later delete would fail the
+                # same way, so the pass ends here.
+                raise
+            except Exception as exc:  # noqa: BLE001 - one blob must not end the pass
+                failed += 1
+                _LOG.warning(
+                    "plugin-cache GC could not delete blob %s, skipped it: %s: %s",
+                    entry.sha256,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                continue
             deleted += 1
             freed_bytes += entry.size_bytes
+            _LOG.info(
+                "plugin-cache GC reclaimed blob %s (%d bytes, stored %s ago): no "
+                "plugin row names it",
+                entry.sha256,
+                entry.size_bytes,
+                now - entry.modified_at,
+            )
+        _LOG.log(
+            logging.INFO if deleted or failed else logging.DEBUG,
+            "plugin-cache GC pass: %d blob(s) listed, %d reclaimed (%d bytes), "
+            "%d failed, in %.1fs",
+            len(entries),
+            deleted,
+            freed_bytes,
+            failed,
+            (self.clock.now() - started).total_seconds(),
+        )
         return PluginCacheGcResult(
-            scanned=len(entries), deleted=deleted, freed_bytes=freed_bytes
+            scanned=len(entries),
+            deleted=deleted,
+            freed_bytes=freed_bytes,
+            failed=failed,
         )

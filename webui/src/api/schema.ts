@@ -2708,7 +2708,8 @@ export interface paths {
          * @description Reclaim pooled JARs no live server row references (platform admin, #293).
          *
          *     A bounded scan diffing the pool against the live reference set, skipping JARs
-         *     inside the safety window; returns what it scanned and freed. Audited like the
+         *     inside the safety window; returns what it scanned and freed, and how many JARs
+         *     it skipped because their delete failed (issue #3871). Audited like the
          *     catalog refresh. Refused with 409 ``store_not_owned`` when the store's owner
          *     marker names another database (STORAGE.md Section 4.3, issue #3870); the
          *     ``detail`` names the marker and both installations, and the refusal is logged.
@@ -3570,10 +3571,15 @@ export interface components {
         /**
          * JarPoolGcResponse
          * @description What a JAR-pool GC pass scanned and reclaimed (issue #293).
+         *
+         *     ``failed`` counts the JARs whose delete failed: the pass skipped them and went
+         *     on, so a 200 alone does not say every orphan went (issue #3871).
          */
         JarPoolGcResponse: {
             /** Deleted */
             deleted: number;
+            /** Failed */
+            failed: number;
             /** Freed Bytes */
             freed_bytes: number;
             /** Scanned */
