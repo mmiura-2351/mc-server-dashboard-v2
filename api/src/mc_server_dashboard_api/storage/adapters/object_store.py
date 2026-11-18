@@ -3113,6 +3113,8 @@ async def _write_backup_targz(
                 buf.write(chunk)
             buf.seek(0)
             await jobs.run(archive.tar.addfile, info, buf)
+        # The end-of-archive marker, only once every member is in (issue #3859).
+        await jobs.run(archive.tar.close)
     finally:
         await jobs.close(archive)
 

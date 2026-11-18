@@ -1499,6 +1499,26 @@ async def test_restore_single_pass_counts_cumulative_bytes() -> None:
         await storage.restore_backup(community, server, backup_key)
 
 
+async def test_a_store_fault_while_packing_a_backup_stays_the_store_fault() -> None:
+    """A store fault while the backup writer packs (issue #3859) is reported as
+    that fault, which is retried, not as ``ArchiveTooLargeError``, which is not:
+    after a failure the end-of-archive marker is left out of the spool, so it
+    cannot take a tar already near the cap past it."""
+
+    faults = Faults()
+    storage = ObjectStorage(
+        faulty_s3_factory(FakeS3Store(), faults), max_restore_bytes=16 * 1024
+    )
+    community, server = new_scope()
+    # 15.5 KiB of tar before the second member: the marker and the record's
+    # padding would take it past 16 KiB.
+    await _publish(storage, community, server, {"a": bytes(15 * 1024), "b": b"b"})
+
+    faults.when = lambda op, key: op == "get_object" and key.endswith("/b")
+    with pytest.raises(ObjectStoreUnavailableError):
+        await storage.create_backup_from_current(community, server)
+
+
 async def test_commit_refuses_when_generation_marker_removed() -> None:
     """Issue #1704: once the generation marker is gone (as a pre-#3434 prune left
     it), _read_generation returns 0. A late commit whose expected_base was the
