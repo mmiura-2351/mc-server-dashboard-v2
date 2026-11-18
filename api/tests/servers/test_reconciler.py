@@ -53,7 +53,10 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
+from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
+    InvalidLifecycleTransitionError,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
@@ -79,6 +82,7 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    PlacementSequenceControlPlane,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -2681,6 +2685,86 @@ async def test_invalid_state_convergence_from_crashed_does_not_back_off(
     assert server.id not in reconciler._attempts
     # No spurious crash-looping warning.
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+@pytest.mark.parametrize("observed", [ObservedState.UNKNOWN, ObservedState.CRASHED])
+async def test_a_placement_whose_hydrate_finds_the_server_live_is_not_re_placed(
+    observed: ObservedState,
+) -> None:
+    # Issue #3865. An unplaced running intent is placed on worker A, which refuses
+    # the hydrate because it already runs an instance of the server. Placement does
+    # not know that, so releasing A would let the next placement put the server on
+    # worker B and start a second instance of the same world there. The tick keeps
+    # A, converges observed=running, and counts no failure: a row read crashed
+    # before it is not a crash loop. The next tick past grace and any backoff then
+    # has nothing to do.
+    worker_a, worker_b = WorkerId(uuid.uuid4()), WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    server = _server(desired=DesiredState.RUNNING, observed=observed, worker=None)
+    uow.servers.seed(server)
+    cp = PlacementSequenceControlPlane(
+        places=[worker_a, worker_b],
+        hydrate_outcomes={
+            worker_a: CommandOutcome(
+                status=worker_status("HydrateTrigger", "instance_running"),
+                message="instancemanager: server already running",
+            )
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    backed_off = server.id in reconciler._attempts
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+    await reconciler.tick()
+
+    assert cp.dispatched == [("hydrate", worker_a, server.id)]
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id == worker_a
+    assert stored.observed_state is ObservedState.RUNNING
+    assert not backed_off
+
+
+async def test_a_failed_stop_of_a_server_kept_on_its_worker_is_sent_again() -> None:
+    # Issue #3865. A user start found the server already live on its Worker and
+    # kept it there. The operator's stop then fails to dispatch, leaving the stop
+    # intent on that Worker. The reconciler sends the stop again. It must not take
+    # the final snapshot and release the row, as it would for the row's earlier
+    # observed=stopped: no start was sent, so no record of one stands in the way,
+    # and the release would leave the instance running under no Worker.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED, observed=ObservedState.STOPPED, worker=None
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "instance_running"),
+                message="instancemanager: server already running",
+            ),
+            "stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom"),
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await reconciler.make_start_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    with pytest.raises(CommandDispatchError):
+        await reconciler.make_stop_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    cp.dispatched.clear()
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+
+    await reconciler.tick()
+
+    assert cp.dispatched == [("stop", _WORKER, server.id)]
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
 # --- concurrent dispatch (#871) --------------------------------------------

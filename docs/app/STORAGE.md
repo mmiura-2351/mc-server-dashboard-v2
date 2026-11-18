@@ -316,7 +316,7 @@ Communities.
 garbage collector: a periodic API-side loop (config `jar_gc.interval_seconds`,
 default daily, gated on the control plane with the other schedulers) plus a
 platform-admin `POST /versions/jar-pool/gc` manual trigger (audited; returns
-`{scanned, deleted, freed_bytes}`). Both run only on a store this database owns;
+`{scanned, deleted, freed_bytes, failed}`). Both run only on a store this database owns;
 otherwise the manual trigger answers `409 store_not_owned`, with the reason as
 `detail` (Section 4.3).
 
@@ -338,6 +338,32 @@ unreferenced — exactly an orphan to the GC — while an in-flight start finish
 committing. The GC therefore never deletes a JAR younger than a fixed safety
 window (one hour, comfortably beyond a normal start's put-to-commit gap), keyed
 off the JAR's store/upload time.
+
+*Record and failures* (issue #3871). The JAR-pool GC, the plugin-cache GC and the
+resource-pack GC (Section 4.3) run a pass the same way:
+
+- Each object a pass reclaims is logged at INFO with its key, its size and its
+  age. A resource pack's line also names its pack id.
+- Each pass ends with one summary line: how many objects it listed, how many it
+  reclaimed and their bytes, how many deletes failed, and how long it took. The
+  line is at INFO when the pass reclaimed or failed anything, and at DEBUG
+  otherwise, so a pass with nothing to do leaves no INFO line.
+- A delete that fails is logged at WARNING with the key and the error. The pass
+  skips that object and goes on, and the next pass tries it again, so one object
+  that keeps failing does not starve the ones after it. The manual trigger counts
+  these in `failed`.
+- A delete the store gave no answer to at all ends the pass instead, since every
+  later delete would wait out the same timeouts. On the object backend that is a
+  transport failure (connection refused, a connect or read timeout, a dropped
+  connection) once botocore's retries are spent. A store that answered, even with
+  a 5xx or a refusal, failed only that key. On fs and remote-fs (the JAR pool
+  only) it is an errno that says the device or the mount's transport is gone:
+  `ENODEV`, `ENXIO`, `ESTALE`, `ETIMEDOUT`, `ENOTCONN`, `EHOSTDOWN`, `EHOSTUNREACH`,
+  `ENETDOWN` or `ENETUNREACH`. `EIO`, `EBUSY`, `EACCES` and the rest can be about
+  one file, and only skip it. A store that answers every request with a 5xx
+  therefore reads as one failure per object, each a WARNING.
+- A cancellation (shutdown) ends the pass too. The owner marker's refusal
+  (Section 4.3) stops a pass before it lists anything, as before.
 
 ### 3.3 Backup archive create / list / restore / delete / transfer
 
@@ -396,11 +422,23 @@ probe and the snapshot ingest do not apply these limits: they have no entry
 cap, and a large working set would reach the character limit (131,072 files
 with 64-character names do). The gate also refuses a chain of extended headers
 too long for `tarfile`, which reads them recursively: a few hundred before one
-member. The gate runs in a worker thread, off the
-event loop (issue #3801). The CPU of the gate, restore and the probe is not
-bounded yet: empty gzip members and zero padding after the gzip stream add no
-decompressed bytes, so only the stored body's size bounds what they cost,
-minutes for one archive near the 512 MiB body cap (issue #3835). Each member is
+member. The gate runs off the event loop thread
+(issue #3801), on a pool of two threads that it shares with the files upload's
+extract and nothing else (issue #3843), so a slow archive cannot hold the
+default executor that the fs backend, the sweep and import run on. The two
+upload routes admit at most four archive uploads at a time between them: two
+validating and two waiting. One past that is `503 upload_busy`, refused before
+its body is read into memory. A validating thread still holds the GIL, so the
+event loop runs late while it decompresses: with one such thread, a 1 ms loop
+tick was measured late by up to 29 ms at the 99th percentile and 100 ms at
+most (several threads were not measured). Once an upload's body is read, a
+client that disconnects does not cancel it: the validation runs to its end,
+keeping its pool thread and its admission slot, and the backup is stored. The
+CPU of the gate, restore and the probe is not bounded yet: empty gzip members
+(about 1 CPU-second a MiB) and zero padding after the gzip stream (about 0.11
+CPU-second a MiB) add no decompressed bytes, so only the stored body's size
+bounds what they cost, minutes for one archive near the 512 MiB body cap
+(issue #3835). Each member is
 first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
@@ -764,6 +802,9 @@ database. It mirrors the plugin-cache GC:
    the re-read and the delete without closing it. Losing that race would take an
    upload whose commit lands more than the safety window after its blob was
    stored.
+
+It logs every pack it reclaims and skips a pack whose delete fails, as the
+JAR-pool GC does (Section 3.2, "Record and failures").
 
 It runs as an API lifespan task on the storage sweep's cadence
 (`storage_sweep.interval_seconds`, CONFIGURATION.md Section 5.15). Its first

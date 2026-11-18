@@ -2086,6 +2086,49 @@ class FakeControlPlane(ControlPlane):
         return await self._record("list_files", worker_id, server_id)
 
 
+class PlacementSequenceControlPlane(FakeControlPlane):
+    """A :class:`FakeControlPlane` that places on each Worker of ``places`` in turn.
+
+    The last Worker keeps taking every later placement. ``hydrate_outcomes``
+    answers a hydrate per Worker, so a test can have one Worker refuse it and see
+    where the next placement lands (issue #3865).
+    """
+
+    def __init__(
+        self,
+        *,
+        places: list[WorkerId],
+        hydrate_outcomes: dict[WorkerId, CommandOutcome],
+    ) -> None:
+        super().__init__(place_to=places[0])
+        self._next_places = places[1:]
+        self._hydrate_outcomes = hydrate_outcomes
+
+    async def place(
+        self,
+        *,
+        server_id: ServerId,
+        memory_limit_mb: int | None = None,
+        committed_by_worker: dict[WorkerId, CommittedResources] | None = None,
+    ) -> WorkerId | None:
+        chosen = await super().place(
+            server_id=server_id,
+            memory_limit_mb=memory_limit_mb,
+            committed_by_worker=committed_by_worker,
+        )
+        if self._next_places:
+            self._place_to = self._next_places.pop(0)
+        return chosen
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        outcome = await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        return self._hydrate_outcomes.get(worker_id, outcome)
+
+
 class FakeBackupArchiveStore(BackupArchiveStore):
     """In-memory backup-archive seam for the backup use-case tests.
 
@@ -2441,9 +2484,10 @@ class FakeResourcePackStore(ResourcePackStore):
                 pack_id=key[0],
                 # The adapter's key for the blob; match it.
                 key=f"resource-packs/{key[0].value}/{key[1]}",
+                size_bytes=len(data),
                 modified_at=self.modified_at.get(key, _UNSTAMPED_STORE_TIME),
             )
-            for key in self.blobs
+            for key, data in self.blobs.items()
         ]
 
     def _blob(self, pack_id: ResourcePackId, filename: str) -> bytes:

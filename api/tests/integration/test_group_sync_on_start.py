@@ -45,12 +45,18 @@ from mc_server_dashboard_api.servers.application.groups import (
     AttachGroup,
     CreateGroup,
     DeleteGroup,
+    DetachGroup,
     RemovePlayer,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
-from mc_server_dashboard_api.servers.domain.groups import GroupId
+from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
+from mc_server_dashboard_api.servers.domain.errors import (
+    InvalidLifecycleTransitionError,
+)
+from mc_server_dashboard_api.servers.domain.groups import GroupId, GroupKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    ObservedState,
     ServerId,
     WorkerId,
 )
@@ -62,6 +68,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import FakeClock, FakeControlPlane, FakeJarProvisioner
 from tests.storage.helpers import drain, read_tar
 
@@ -288,3 +295,64 @@ async def test_start_after_an_at_rest_edit_writes_nothing_more(world: _World) ->
     assert cp.dispatched == [("start", _WORKER, world.server_id)]
     async with world.uow() as uow:
         assert await uow.groups.list_sync_pending(world.server_id) == []
+
+
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
+@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
+async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
+    world: _World, by: str
+) -> None:
+    # Issue #3865. The start regenerates the owed file and clears its mark, then
+    # the Worker refuses the hydrate: it already runs the server, on a working set
+    # with the old file, which its snapshots will publish. The server is kept on
+    # that Worker, and the change is owed again in the same transaction. Once the
+    # only op group is detached or deleted, the cleared mark is all that says so.
+    player = uuid.uuid4()
+    group_id = await _attached_op_group(world, player)
+    await _set_state(world.engine, world.server_id, "running")
+    if by == "remove_player":
+        await RemovePlayer(uow=world.uow(), file_store=world.files)(
+            community_id=world.community_id,
+            group_id=group_id,
+            player_uuid=player,
+        )
+    elif by == "detach_group":
+        await DetachGroup(uow=world.uow(), file_store=world.files)(
+            community_id=world.community_id,
+            group_id=group_id,
+            server_id=world.server_id,
+        )
+    else:
+        await DeleteGroup(uow=world.uow(), file_store=world.files)(
+            community_id=world.community_id,
+            group_id=group_id,
+        )
+    await _set_state(world.engine, world.server_id, "stopped")
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "instance_running"),
+                message="instancemanager: server already running",
+            )
+        },
+    )
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await StartServer(
+            uow=world.uow(),
+            control_plane=cp,
+            clock=FakeClock(_NOW + dt.timedelta(minutes=1)),
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=StorageGenerationReader(storage=world.storage),
+            file_store=world.files,
+        )(community_id=world.community_id, server_id=world.server_id)
+
+    async with world.uow() as uow:
+        owed = await uow.groups.list_sync_pending(world.server_id)
+        server = await uow.servers.get_by_id(world.server_id)
+    assert [mark.kind for mark in owed] == [GroupKind.OP]
+    assert server is not None
+    assert server.assigned_worker_id == _WORKER
+    assert server.observed_state is ObservedState.RUNNING

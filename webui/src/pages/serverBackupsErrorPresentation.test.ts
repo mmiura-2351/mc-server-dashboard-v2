@@ -41,6 +41,14 @@ describe("backupErrorPresentation", () => {
     );
   });
 
+  // Too many archive uploads at once (issue #3843): nothing was stored, and
+  // the remedy is to send it again shortly, not to look at a server host.
+  it("names the busy uploads for a 503 upload_busy", () => {
+    expect(backupErrorPresentation(503, "upload_busy")).toBe(
+      "backups.error.uploadBusy",
+    );
+  });
+
   // An upload refused for want of a credential is a lapsed session, not an
   // archive past the cap.
   it("names the lapsed session for a 413 credential_required_for_body", () => {

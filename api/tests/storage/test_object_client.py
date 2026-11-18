@@ -35,6 +35,8 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
+    ObjectStoreUnreachableError,
+    StorageUnreachableError,
 )
 
 
@@ -576,6 +578,8 @@ async def test_read_translates_backend_5xx(operation: str) -> None:
         await _READ_CALLS[operation](client)
 
     assert excinfo.value.__cause__ is error
+    # The store answered, so it is reachable: not the narrower type (issue #3871).
+    assert not isinstance(excinfo.value, StorageUnreachableError)
 
 
 @pytest.mark.parametrize("operation", sorted(_READ_CALLS))
@@ -591,13 +595,15 @@ async def test_read_translates_transport_errors(
     operation: str, error: BaseException
 ) -> None:
     # The request never got a usable response back — connection refused, or a
-    # connect/read timeout at request initiation (issue #2376). Same verdict.
+    # connect/read timeout at request initiation (issue #2376). Same verdict, in
+    # its narrower form: the store gave no answer at all (issue #3871).
     client = _Aioboto3S3Client(_RaisingReadClient(error), "bucket")
 
-    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+    with pytest.raises(ObjectStoreUnreachableError) as excinfo:
         await _READ_CALLS[operation](client)
 
     assert excinfo.value.__cause__ is error
+    assert isinstance(excinfo.value, StorageUnreachableError)
 
 
 @pytest.mark.parametrize("operation", sorted(_READ_CALLS))
@@ -650,6 +656,8 @@ async def test_put_object_translates_client_error() -> None:
 
 async def test_delete_object_translates_client_error() -> None:
     # A backend service failure on DeleteObject is translated too (issue #2273).
+    # The store answered, so it is reachable: a GC pass skips this one key and
+    # goes on, rather than ending (issue #3871).
     error = ClientError({"Error": {"Code": "InternalError"}}, "DeleteObject")
     client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
 
@@ -657,6 +665,7 @@ async def test_delete_object_translates_client_error() -> None:
         await client.delete_object("communities/k/x")
 
     assert excinfo.value.__cause__ is error
+    assert not isinstance(excinfo.value, StorageUnreachableError)
 
 
 @pytest.mark.parametrize(
@@ -688,13 +697,15 @@ async def test_put_object_translates_transport_errors(error: BaseException) -> N
 )
 async def test_delete_object_translates_transport_errors(error: BaseException) -> None:
     # A connection/timeout transport failure on DeleteObject is likewise translated
-    # (issue #2273), preserving the transport error as the cause.
+    # (issue #2273), preserving the transport error as the cause. The store gave
+    # no answer at all, so it is the narrower type a GC pass ends on (issue #3871).
     client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
 
-    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+    with pytest.raises(ObjectStoreUnreachableError) as excinfo:
         await client.delete_object("communities/k/x")
 
     assert excinfo.value.__cause__ is error
+    assert isinstance(excinfo.value, StorageUnreachableError)
 
 
 # --- put_object_if_absent: the owner-marker claim (issue #3870) -----------

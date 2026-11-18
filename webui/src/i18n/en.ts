@@ -112,6 +112,9 @@ export const en = {
   "common.cancel": "Cancel",
   "common.close": "Close",
   "common.toastRepeated": "Raised {count} times",
+  // A toast about one server, such as a lifecycle action's (#3862): it names
+  // the server, since the dashboard acts on several at once.
+  "common.toastAboutServer": "{server}: {message}",
   "common.showPassword": "Show password",
   "common.hidePassword": "Hide password",
   "common.resizeColumn": "Drag to resize, double-click to reset",
@@ -709,6 +712,8 @@ export const en = {
     "No server host is available to take the backup right now.",
   "backups.error.storageUnavailable":
     "Backup storage is unavailable right now. Please try again shortly.",
+  "backups.error.uploadBusy":
+    "Too many archive uploads are being checked right now. Nothing was stored. Please try again shortly.",
   "backups.error.serverMustBeStopped":
     "The server must be stopped for this operation.",
   "backups.error.serverBusy": "Another operation is in progress. Please wait.",
@@ -944,6 +949,8 @@ export const en = {
     "The server agent is disconnected. Please try again later.",
   "files.error.storageUnavailable":
     "File storage is unavailable right now. Please try again shortly.",
+  "files.error.uploadBusy":
+    "Too many archive uploads are being checked right now. Nothing was extracted. Please try again shortly.",
   // 409 server_busy: refused without being applied, so the remedy is to retry
   // (issue #3361). Every files route that raises it is a change.
   "files.error.serverBusy":

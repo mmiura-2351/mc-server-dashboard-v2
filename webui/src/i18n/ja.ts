@@ -120,6 +120,9 @@ export const ja: Record<TranslationKey, string> = {
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
   "common.toastRepeated": "{count} 回発生",
+  // A toast about one server, such as a lifecycle action's (#3862): it names
+  // the server, since the dashboard acts on several at once.
+  "common.toastAboutServer": "{server}: {message}",
   "common.showPassword": "パスワードを表示",
   "common.hidePassword": "パスワードを非表示",
   "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",
@@ -647,6 +650,8 @@ export const ja: Record<TranslationKey, string> = {
     "現在、バックアップを取得できるサーバーホストがありません。",
   "backups.error.storageUnavailable":
     "現在、バックアップストレージを利用できません。しばらくしてから再度お試しください。",
+  "backups.error.uploadBusy":
+    "現在、確認中のアーカイブのアップロードが多すぎます。バックアップは保存されていません。しばらくしてから再度お試しください。",
   "backups.error.serverMustBeStopped": "この操作にはサーバーの停止が必要です。",
   "backups.error.serverBusy":
     "別の操作が進行中です。完了するまでお待ちください。",
@@ -878,6 +883,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーエージェントが切断されています。しばらくしてから再度お試しください。",
   "files.error.storageUnavailable":
     "現在、ファイルストレージを利用できません。しばらくしてから再度お試しください。",
+  "files.error.uploadBusy":
+    "現在、確認中のアーカイブのアップロードが多すぎます。何も展開されていません。しばらくしてから再度お試しください。",
   "files.error.serverBusy":
     "このサーバーでは別の変更が進行中です。しばらくしてからもう一度お試しください。",
   "files.error.conflict": "競合が発生したため、操作を完了できませんでした。",

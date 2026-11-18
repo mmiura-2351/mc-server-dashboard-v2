@@ -4,11 +4,12 @@ import {
   type QueryFunction,
   useQuery,
 } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
+import { t } from "../i18n/index.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { stampedQueryFn } from "./restReads.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
@@ -529,6 +530,49 @@ describe("useCommunityEvents", () => {
     expect(toast.className).toContain("error");
   });
 
+  // A notice about a server names it, and the same notice about two servers
+  // stays two toasts, as a lifecycle toast does (#3862).
+  it("names the server of a notification, one toast per server", () => {
+    setup([
+      { ...serverRow("s1", "running"), name: "alpha" },
+      { ...serverRow("s2", "running"), name: "bravo" },
+    ]);
+    act(() => {
+      MockWebSocket.last().open();
+      for (const id of ["s1", "s2", "s1"]) {
+        MockWebSocket.last().message(
+          notificationFrame(id, "Scheduled stop failed", "worker_unavailable"),
+        );
+      }
+    });
+
+    const message = "Scheduled stop failed — worker_unavailable";
+    const alpha = screen.getByText(`alpha: ${message}`).closest(".toast");
+    expect(screen.getByText(`bravo: ${message}`)).toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(
+      within(alpha as HTMLElement).getByText(
+        t("common.toastRepeated", { count: 2 }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // The list may not hold the server yet, as one created since it loaded: the
+  // notice shows unnamed, but still apart from the same notice about another.
+  it("keeps the notices of servers not loaded apart, unnamed", () => {
+    setup([]);
+    act(() => {
+      MockWebSocket.last().open();
+      for (const id of ["s8", "s9"]) {
+        MockWebSocket.last().message(
+          notificationFrame(id, "Scheduled stop failed", ""),
+        );
+      }
+    });
+
+    expect(screen.getAllByText("Scheduled stop failed")).toHaveLength(2);
+  });
+
   it("does not patch the servers cache for a notification frame", () => {
     const { queryClient } = setup([serverRow("s1", "running")]);
     act(() => {
@@ -608,6 +652,7 @@ describe("useCommunityEvents", () => {
 });
 
 type Row = ReturnType<typeof serverRow> & {
+  name?: string;
   assigned_worker_id?: string | null;
   crash_reason?: string | null;
   crash_detail?: string | null;

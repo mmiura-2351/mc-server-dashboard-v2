@@ -77,6 +77,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     SnapshotHandleError,
     StaleGenerationError,
     StorageUnavailableError,
+    StorageUnreachableError,
     SymlinkRefusedError,
 )
 from mc_server_dashboard_api.storage.domain.port import (
@@ -202,6 +203,13 @@ _STORE_UNAVAILABLE_ERRNOS = frozenset(
         errno.ENETUNREACH,
     }
 )
+
+# The part of the set above that says the store itself is gone, not one file
+# (issue #3871): the device vanished, the remote-fs mount went stale, or its
+# transport broke. EIO and EBUSY are left out because they can be about one file (a
+# bad block, a file in use), and a GC pass skips such a file and goes on rather than
+# ending.
+_STORE_UNREACHABLE_ERRNOS = _STORE_UNAVAILABLE_ERRNOS - {errno.EIO, errno.EBUSY}
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -2115,7 +2123,13 @@ class FsStorage(Storage):
         return entries
 
     async def delete_jar(self, key: JarKey) -> None:
-        await asyncio.to_thread(self._jar_path(key).unlink, missing_ok=True)
+        try:
+            await asyncio.to_thread(self._jar_path(key).unlink, missing_ok=True)
+        except OSError as exc:
+            # A gone store, not this JAR: the GC ends its pass (issue #3871).
+            if exc.errno in _STORE_UNREACHABLE_ERRNOS:
+                raise StorageUnreachableError(f"fs storage unreachable: {exc}") from exc
+            raise
 
     # --- backup archive create / list / restore / delete (Section 3.3) -----
 

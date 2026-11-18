@@ -31,6 +31,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import type { components } from "../api/schema";
 import { useToast } from "../components/Toast.tsx";
+import { useServerToast } from "../components/useServerToast.ts";
 import {
   CommunityEventsClient,
   type NotificationEvent,
@@ -71,6 +72,7 @@ export function serversKey(communityId: string) {
 export function useCommunityEvents(communityId: string): boolean {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
+  const showServerToast = useServerToast();
   const [degraded, setDegraded] = useState(false);
 
   useEffect(() => {
@@ -259,10 +261,20 @@ export function useCommunityEvents(communityId: string): boolean {
     // An operator notice (today only `schedule_failed`, #1838) is a failure
     // toast: the payload's title/detail are the human-readable message the API
     // already localized to English, surfaced verbatim like an API error string.
+    // A notice about a server names it and collapses only with the same notice
+    // about that server, as a lifecycle toast does (#3862). For a server the
+    // list does not hold yet, it shows unnamed, still kept apart by the id.
     const notify = (event: NotificationEvent) => {
       const message =
         event.detail !== "" ? `${event.title} — ${event.detail}` : event.title;
-      showToast(message, "error");
+      const server = queryClient
+        .getQueryData<ServerResponse[]>(key)
+        ?.find((s) => s.id === event.serverId);
+      if (server !== undefined) {
+        showServerToast(server, message, "error");
+      } else {
+        showToast(message, "error", event.serverId ?? undefined);
+      }
     };
 
     const client = new CommunityEventsClient(communityId, {
@@ -313,7 +325,7 @@ export function useCommunityEvents(communityId: string): boolean {
       stopPolling();
       unobserve();
     };
-  }, [communityId, queryClient, showToast]);
+  }, [communityId, queryClient, showToast, showServerToast]);
 
   return degraded;
 }

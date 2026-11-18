@@ -29,6 +29,7 @@ from contextlib import aclosing
 from mc_server_dashboard_api.servers.domain.errors import (
     PluginCacheBlobNotFoundError,
     PluginCacheStorageUnavailableError,
+    PluginCacheStorageUnreachableError,
 )
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     CacheEntry,
@@ -42,6 +43,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
+    ObjectStoreUnreachableError,
 )
 
 
@@ -114,5 +116,9 @@ class ObjectPluginCacheStore(PluginCacheStore):
         try:
             async with self._client_factory() as client:
                 await client.delete_object(key)
+        except ObjectStoreUnreachableError as exc:
+            # Kept apart from the wider type: the GC ends its pass on this one
+            # (issue #3871).
+            raise PluginCacheStorageUnreachableError(key) from exc
         except ObjectStoreUnavailableError as exc:
             raise PluginCacheStorageUnavailableError(key) from exc

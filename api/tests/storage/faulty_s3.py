@@ -3,8 +3,9 @@
 Wraps :func:`fake_s3_factory` so a test can pick, per call, where the store stops
 answering — by operation name and by the key the call addresses — and so drive
 the production adapters through an outage at an exact step of a multi-call
-operation. The injected failure is the type the real object client raises for a
-backend 5xx or a transport failure.
+operation. The injected failure is, by default, the type the real object client
+raises for a backend 5xx; a test that sets ``Faults.error`` to
+``ObjectStoreUnreachableError`` gets its transport failure instead (issue #3871).
 """
 
 from __future__ import annotations
@@ -30,6 +31,10 @@ class Faults:
 
     def __init__(self) -> None:
         self.when: Fault = lambda op, key: False
+        # What a failed call raises: by default the object client's type for a
+        # store that answered with a fault of its own. A test sets another to
+        # model a store that gave no answer, or a cancelled call (issue #3871).
+        self.error: type[BaseException] = ObjectStoreUnavailableError
         # The calls the store APPLIES and then answers with an outage: a write
         # whose response was lost after it landed (issue #3564).
         self.lose_response: Fault = lambda op, key: False
@@ -49,6 +54,7 @@ class Faults:
     def clear(self) -> None:
         self.when = lambda op, key: False
         self.lose_response = lambda op, key: False
+        self.error = ObjectStoreUnavailableError
 
 
 class _FaultyClient:
@@ -64,7 +70,7 @@ class _FaultyClient:
         async def _call(*args: Any, **kwargs: Any) -> Any:
             key = str(args[0]) if args else ""
             if self._faults.when(name, key):
-                raise ObjectStoreUnavailableError(f"injected outage: {name}")
+                raise self._faults.error(f"injected outage: {name}")
             result = await method(*args, **kwargs)
             if self._faults.lose_response(name, key):
                 raise ObjectStoreUnavailableError(f"injected lost response: {name}")

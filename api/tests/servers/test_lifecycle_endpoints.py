@@ -709,6 +709,49 @@ def test_an_expired_command_is_409_naming_it() -> None:
     _assert_names_the_expiry_only(resp)
 
 
+# --- a start whose hydrate finds the server live (issue #3865) --------------
+
+
+def test_a_start_whose_hydrate_finds_the_server_live_is_409_invalid_transition() -> (
+    None
+):
+    # The placed Worker already runs the server, so it refused the hydrate. The
+    # start keeps the server there and answers the start verb's "already running"
+    # conflict, the reason a second start of a running server gets.
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=WorkerId(uuid.uuid4()),
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "instance_running"),
+                message="instancemanager: server already running",
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_start_server] = lambda: use_case
+
+    resp = _client(app).post(_url(community, server.id.value, "start"))
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "invalid_transition"
+
+
 # --- a Worker whose backend is unavailable (issues #3673, #3678) ------------
 
 

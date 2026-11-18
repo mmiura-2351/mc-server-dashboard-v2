@@ -55,6 +55,9 @@ from mc_server_dashboard_api.archive_member import (
     EndCheckedReader,
     HeaderLimitError,
 )
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
 )
@@ -1100,10 +1103,11 @@ class UploadFile:
                 # in a dry-run pass BEFORE writing anything: a mid-archive rejection
                 # then leaves no partially-written versioned files (issue #269). The
                 # archive bytes are already in memory, so the second pass is cheap.
-                # Offloaded to a thread: decompression is CPU-bound and can process
-                # up to MAX_UPLOAD_BYTES (512 MiB), blocking the event loop
-                # (issue #1620).
-                await asyncio.to_thread(
+                # Both passes run on the archive-validation pool: decompression is
+                # CPU-bound, so on the event loop it would block every other
+                # request (issue #1620), and on the default executor a few such
+                # uploads would starve everything else that runs there (#3843).
+                await run_archive_validation(
                     _validate_archive,
                     filename,
                     content,
@@ -1113,7 +1117,7 @@ class UploadFile:
                 # Guard every extracted entry against the content directory
                 # (issue #1337). Scan all entries before writing so a single
                 # offending member rejects the whole archive cleanly.
-                entries = await asyncio.to_thread(
+                entries = await run_archive_validation(
                     lambda: list(
                         _archive_entries(
                             filename,

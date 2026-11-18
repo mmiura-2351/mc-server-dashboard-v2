@@ -13,8 +13,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.storage.domain.errors import StorageUnreachableError
 from mc_server_dashboard_api.storage.domain.port import JarStore
 from mc_server_dashboard_api.storage.domain.value_objects import JarKey
+from mc_server_dashboard_api.versions.domain.errors import JarPoolUnreachableError
 from mc_server_dashboard_api.versions.domain.jar_pool import (
     JarPool,
     PoolEntry,
@@ -53,4 +55,9 @@ class StorageJarPool(JarPool):
         ]
 
     async def delete(self, sha256: str) -> None:
-        await self.jars.delete_jar(JarKey(sha256))
+        try:
+            await self.jars.delete_jar(JarKey(sha256))
+        except StorageUnreachableError as exc:
+            # The one storage outcome the versions side acts on: the GC ends its
+            # pass on it (issue #3871). Any other failure passes through.
+            raise JarPoolUnreachableError(str(exc)) from exc

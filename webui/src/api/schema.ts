@@ -760,12 +760,12 @@ export interface paths {
          * Upload Backup
          * @description Upload an off-host backup archive as a new restorable backup (backup:create).
          *
-         *     The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
-         *     before the whole body is materialized); the use case then validates the archive
-         *     (opens + traversal-safe entries) before storing it. A non-archive / unsafe
-         *     member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
-         *     member, its name and the reason; a name over 256 characters is cut to its
-         *     first 256 and marked ``…(truncated, N chars)``); an over-cap archive is 413.
+         *     The multipart body is read into memory off the event loop (over-cap -> 413);
+         *     the use case then validates the archive (opens + traversal-safe entries)
+         *     before storing it. A non-archive / unsafe member is 422 ``invalid_archive``,
+         *     whose ``detail`` names the refusal (for a member, its name and the reason; a
+         *     name over 256 characters is cut to its first 256 and marked
+         *     ``…(truncated, N chars)``); an over-cap archive is 413.
          *     The archive is read to its gzip end (issue #3778), so a damaged one is
          *     ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
@@ -790,6 +790,13 @@ export interface paths {
          *     root name starting ``.mcsd_generation`` — the Worker's generation marker — or
          *     under one is 422 ``reserved_name``, refused before the archive is stored. A
          *     same-named member deeper in the tree is ordinary user data.
+         *
+         *     **Only a few archive uploads at a time (issue #3843).** This route and the
+         *     files upload's extract validate on one small pool, and admit at most four
+         *     archive uploads at a time between them: two validating and two waiting. One
+         *     past that is 503 ``upload_busy``, refused before its body is read into memory,
+         *     with nothing stored; sending it again shortly is the remedy. Once its body is
+         *     read, an upload whose client disconnects still runs to its end and is stored.
          */
         post: operations["upload_backup_api_communities__community_id__servers__server_id__backups_upload_post"];
         delete?: never;
@@ -1626,6 +1633,13 @@ export interface paths {
          *     archive member landing at a root name starting ``.mcsd_generation`` — the
          *     Worker's generation marker — or under one is 422 ``reserved_name``, refused in
          *     the same pre-write scan on the resulting path.
+         *
+         *     **Only a few extracts at a time (issue #3843).** With ``extract=true`` this
+         *     route and the backup upload validate on one small pool, and admit at most four
+         *     archive uploads at a time between them: two validating and two waiting. One
+         *     past that is 503 ``upload_busy``, refused before its body is read into memory,
+         *     with nothing written; sending it again shortly is the remedy. An upload without
+         *     ``extract`` is never refused this way.
          */
         post: operations["upload_file_api_communities__community_id__servers__server_id__files_upload_post"];
         delete?: never;
@@ -2708,7 +2722,8 @@ export interface paths {
          * @description Reclaim pooled JARs no live server row references (platform admin, #293).
          *
          *     A bounded scan diffing the pool against the live reference set, skipping JARs
-         *     inside the safety window; returns what it scanned and freed. Audited like the
+         *     inside the safety window; returns what it scanned and freed, and how many JARs
+         *     it skipped because their delete failed (issue #3871). Audited like the
          *     catalog refresh. Refused with 409 ``store_not_owned`` when the store's owner
          *     marker names another database (STORAGE.md Section 4.3, issue #3870); the
          *     ``detail`` names the marker and both installations, and the refusal is logged.
@@ -3570,10 +3585,15 @@ export interface components {
         /**
          * JarPoolGcResponse
          * @description What a JAR-pool GC pass scanned and reclaimed (issue #293).
+         *
+         *     ``failed`` counts the JARs whose delete failed: the pass skipped them and went
+         *     on, so a 200 alone does not say every orphan went (issue #3871).
          */
         JarPoolGcResponse: {
             /** Deleted */
             deleted: number;
+            /** Failed */
+            failed: number;
             /** Freed Bytes */
             freed_bytes: number;
             /** Scanned */

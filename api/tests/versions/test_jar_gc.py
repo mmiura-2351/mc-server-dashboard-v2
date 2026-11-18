@@ -7,22 +7,35 @@ the safety window (a too-young orphan is spared even when unreferenced).
 
 The pool double is the shared :class:`FakeJarPool` every other versions test
 uses, so this file cannot drift away from the adapter's behaviour on its own
-(issue #2528).
+(issue #2528). A failing delete is driven through the real object-backed pool
+over the faulty S3 stub instead, so it raises what production raises
+(issue #3871).
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import logging
 
 import pytest
 
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnreachableError
+from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
 from mc_server_dashboard_api.versions.application.jar_gc import (
     GC_SAFETY_WINDOW,
     RunJarPoolGc,
 )
 from mc_server_dashboard_api.versions.domain.clock import Clock
-from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
+from mc_server_dashboard_api.versions.domain.errors import (
+    JarPoolUnreachableError,
+    StoreNotOwnedError,
+)
+from mc_server_dashboard_api.versions.domain.jar_pool import JarPool
 from mc_server_dashboard_api.versions.domain.jar_references import LiveJarReferences
+from tests.storage.fake_s3 import FakeS3Store
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 from tests.store_ownership import FakeStoreOwnership
 from tests.versions.fakes import FakeJarPool
 
@@ -74,7 +87,7 @@ def _seed(
 
 
 def _gc(
-    pool: FakeJarPool,
+    pool: JarPool,
     refs: _FakeReferences,
     ownership: FakeStoreOwnership | None = None,
 ) -> RunJarPoolGc:
@@ -187,3 +200,130 @@ async def test_refuses_a_pool_whose_store_another_database_owns() -> None:
     assert ownership.refusal_reason is not None
     assert ownership.refusal_reason in str(excinfo.value)
     assert "a" * 64 in pool.stored
+
+
+class _ObjectPool:
+    """The real object-backed pool over a bucket whose calls a test can fail."""
+
+    def __init__(self) -> None:
+        self.faults = Faults()
+        self.pool = StorageJarPool(
+            ObjectStorage(faulty_s3_factory(FakeS3Store(clock=_old), self.faults))
+        )
+
+    async def seed(self, count: int) -> list[str]:
+        """Pool *count* distinct old JARs; their keys, in the order a pass meets
+        them."""
+
+        return sorted([await self.pool.put(b"jar-%d" % i) for i in range(count)])
+
+    def fail_deletes_of(self, sha: str) -> None:
+        self.faults.when = lambda op, key: op == "delete_object" and sha in key
+
+    async def keys(self) -> list[str]:
+        return [entry.sha256 for entry in await self.pool.list_entries()]
+
+
+async def test_a_failing_delete_skips_that_jar_and_the_pass_reclaims_the_rest(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # One JAR whose delete keeps failing must not starve the ones after it
+    # (issue #3871). It is the first the pass meets, so a pass that stopped at the
+    # failure would reclaim nothing.
+    store = _ObjectPool()
+    failing, *others = await store.seed(3)
+    store.fail_deletes_of(failing)
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        result = await _gc(store.pool, _FakeReferences(set()))()
+
+    assert await store.keys() == [failing]
+    assert (result.scanned, result.deleted, result.failed) == (3, 2, 1)
+    assert result.freed_bytes == len(b"jar-0") * 2
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert failing in warning.getMessage()
+    assert "ObjectStoreUnavailableError: injected outage" in warning.getMessage()
+    assert all(sha not in warning.getMessage() for sha in others)
+
+
+async def test_logs_each_reclaimed_jar_and_the_pass_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # What a pass deleted must be traceable afterwards: the key, its size and its
+    # age per JAR, then one summary line (issue #3871).
+    pool = FakeJarPool()
+    _seed(pool, "a" * 64, size=100)
+    _seed(pool, "b" * 64, size=20)  # live
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await _gc(pool, _FakeReferences({"b" * 64}))()
+
+    infos = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+    (reclaimed, summary) = infos
+    assert "a" * 64 in reclaimed
+    assert "100 bytes" in reclaimed
+    assert "2:00:00" in reclaimed  # stored one hour past the one-hour window
+    assert "b" * 64 not in " ".join(infos)
+    for part in ("2 jar(s) listed", "1 reclaimed (100 bytes)", "0 failed", "in 0.0s"):
+        assert part in summary
+
+
+async def test_a_pass_that_reclaims_nothing_logs_its_summary_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A daily pass over a pool with no orphan is the common case; it must not
+    # leave an INFO line every time.
+    pool = FakeJarPool()
+    _seed(pool, "a" * 64)
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await _gc(pool, _FakeReferences({"a" * 64}))()
+
+    assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+    assert any("0 reclaimed" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_pass_whose_every_delete_failed_logs_its_summary_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Nothing was reclaimed, but the pass is not empty: the summary is the one
+    # line that counts the failures, so it stays visible.
+    store = _ObjectPool()
+    (failing,) = await store.seed(1)
+    store.fail_deletes_of(failing)
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await _gc(store.pool, _FakeReferences(set()))()
+
+    assert (result.deleted, result.failed) == (0, 1)
+    (summary,) = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert "1 failed" in summary.getMessage()
+
+
+async def test_a_cancelled_delete_ends_the_pass() -> None:
+    # Shutdown cancels the loop's task mid-pass; the cancellation must reach the
+    # loop, not be counted as one failed JAR (issue #3871).
+    store = _ObjectPool()
+    first, *_ = keys = await store.seed(2)
+    store.fail_deletes_of(first)
+    store.faults.error = asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _gc(store.pool, _FakeReferences(set()))()
+
+    assert await store.keys() == keys
+
+
+async def test_a_store_that_gives_no_answer_ends_the_pass() -> None:
+    # A delete the store never answered says nothing about this JAR: every later
+    # delete would wait out the same timeouts. The pass ends instead of skipping
+    # each JAR in turn (issue #3871).
+    store = _ObjectPool()
+    first, *_ = keys = await store.seed(2)
+    store.fail_deletes_of(first)
+    store.faults.error = ObjectStoreUnreachableError
+
+    with pytest.raises(JarPoolUnreachableError):
+        await _gc(store.pool, _FakeReferences(set()))()
+
+    assert await store.keys() == keys

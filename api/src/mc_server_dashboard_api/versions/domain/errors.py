@@ -66,3 +66,14 @@ class StoreNotOwnedError(VersionError):
     message carries the owner marker's verdict. The edge maps it to 409
     ``store_not_owned``.
     """
+
+
+class JarPoolUnreachableError(VersionError):
+    """The JAR pool's store gave no answer at all (#3871).
+
+    Raised by ``JarPool.delete`` when the storage adapter reports the store itself
+    unreachable rather than a failure of the one JAR: a transport failure on the
+    object backend, a gone device or remote-fs mount on fs. The JAR-pool GC ends
+    its pass on it, since every later delete would fail the same way, each after the
+    full timeout; any other delete failure only skips that JAR.
+    """
