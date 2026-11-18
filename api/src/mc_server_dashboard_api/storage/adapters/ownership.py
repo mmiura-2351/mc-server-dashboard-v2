@@ -8,35 +8,40 @@ bucket, or an fs root) must therefore belong to exactly one database, and this
 module records which one.
 
 At startup the API **claims** its store with its database's installation id
-(DATABASE.md Section 1.1): it writes an owner marker naming that id when none
-exists, and keeps one that does. The write is conditional (``If-None-Match: *``
-on the object store, a hard link on fs), so of two APIs starting together on an
-unmarked store exactly one takes it. A store that rejects conditional writes gets
-a plain write.
+(DATABASE.md Section 1.1): it keeps a marker that exists, and writes one naming
+that id when none does, but only if the store holds no object yet or the database
+has rows that name stored objects. A store that holds objects this database knows
+nothing of may be another database's, so the API leaves it unclaimed and the
+operator claims it with ``store_claim_cli`` (issue #3886). The write is
+conditional (``If-None-Match: *`` on the object store, a hard link on fs), so of
+two APIs starting together on an unmarked store exactly one takes it. A store
+that rejects conditional writes gets a plain write.
 
 Before every destructive pass the marker is read again, and :meth:`refusal` says
 why the pass must not run unless the marker names this installation. A missing,
 unreadable or foreign marker refuses; so does a store this process never claimed.
-A marker removed while the API runs is not claimed again until the next start, so
-an operator handing the store to another database stops this one first. Re-reading
-on every pass also catches the race a plain write leaves open.
+A marker removed or written while the API runs takes effect for it only at the
+next start, so an operator handing the store to another database stops this one
+first. Re-reading on every pass also catches the race a plain write leaves open.
 """
 
 from __future__ import annotations
 
+import abc
 import asyncio
 import datetime as dt
 import json
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from mc_server_dashboard_api.rfc3339 import serialize_utc
 from mc_server_dashboard_api.storage.adapters.fs import _is_stale_spool
 from mc_server_dashboard_api.storage.adapters.object_store import (
     ConditionalPutUnsupportedError,
-    S3Client,
+    KeyNamespace,
     S3ClientFactory,
 )
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
@@ -45,6 +50,13 @@ from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 # every ``KeyNamespace`` prefix and outside ``communities/`` and ``jars/`` on fs,
 # so no sweep or GC lists it.
 OWNER_MARKER = "mcsd-owner.json"
+
+# The directories at the fs root a GC or sweep lists. The marker and a claim's
+# temporary file sit beside them, at the root itself.
+_FS_NAMESPACES = ("communities", "jars")
+
+# What an operator runs to claim a store the API left unclaimed (issue #3886).
+CLAIM_COMMAND = "python -m mc_server_dashboard_api.store_claim_cli"
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,7 +84,11 @@ def _refusal(
     location: str, body: bytes | None, installation_id: uuid.UUID | None
 ) -> str | None:
     if installation_id is None:
-        return f"this API process has not claimed the store ({location})"
+        return (
+            f"this API process has not claimed the store ({location}). If the "
+            f"store belongs to this database, run `{CLAIM_COMMAND}` and restart "
+            "the API (STORAGE.md Section 4.3)"
+        )
     if body is None:
         return (
             f"the store owner marker {location} cannot be read back. If it was "
@@ -101,46 +117,123 @@ def _log_claim(location: str, created: bool, refusal: str | None) -> None:
         _LOG.info("claimed the store for this installation: wrote %s", location)
 
 
-class ObjectStoreOwnership:
-    """The owner marker of an object-store bucket, at key :data:`OWNER_MARKER`."""
+class _StoreOwnership(abc.ABC):
+    """The claim rules and the refusal, over one backend's marker and namespaces."""
 
-    def __init__(self, client_factory: S3ClientFactory, *, bucket: str) -> None:
-        self._client_factory = client_factory
-        self._location = f"{OWNER_MARKER} in bucket {bucket!r}"
+    def __init__(self, location: str) -> None:
+        self._location = location
         self._installation_id: uuid.UUID | None = None
 
-    async def claim(self, installation_id: uuid.UUID) -> None:
-        """Write the marker for ``installation_id`` if none exists (at startup)."""
+    async def claim(
+        self,
+        installation_id: uuid.UUID,
+        *,
+        database_names_objects: Callable[[], Awaitable[bool]],
+    ) -> None:
+        """Claim the store for ``installation_id`` at startup.
+
+        A store without a marker is claimed only if it holds no object or
+        ``database_names_objects`` says this database has rows that name stored
+        objects. Both probes run only then, never on a pass. Otherwise the store
+        stays unclaimed and every pass of this process refuses.
+        """
 
         created = False
-        async with self._client_factory() as client:
-            if await self._read(client) is None:
-                body = _marker_body(installation_id)
-                try:
-                    created = await client.put_object_if_absent(OWNER_MARKER, body)
-                except ConditionalPutUnsupportedError:
-                    await client.put_object(OWNER_MARKER, body)
-                    created = True
+        if await self._read() is None:
+            if await self._holds_objects() and not await database_names_objects():
+                _LOG.error(
+                    "the store has no owner marker (%s) and holds objects, but no "
+                    "row of this database (installation %s) names a stored object, "
+                    "so the store may be another database's. This API did not claim "
+                    "it, and GCs and destructive storage sweeps will not run. If the "
+                    "store belongs to this database, run `%s` and restart the API "
+                    "(STORAGE.md Section 4.3, issue #3886)",
+                    self._location,
+                    installation_id,
+                    CLAIM_COMMAND,
+                )
+                return
+            created = await self._create(installation_id)
         self._installation_id = installation_id
         _log_claim(self._location, created, await self.refusal())
+
+    async def claim_explicitly(self, installation_id: uuid.UUID) -> str | None:
+        """Write the marker for ``installation_id`` whatever the store holds.
+
+        The operator's claim (``store_claim_cli``). It runs no probe and deletes
+        nothing, and it never replaces a marker: it returns why it refused when one
+        exists, naming this installation or another, and ``None`` once it wrote
+        one.
+        """
+
+        if await self._read() is None and await self._create(installation_id):
+            _LOG.info(
+                "claimed the store for installation %s: wrote %s",
+                installation_id,
+                self._location,
+            )
+            return None
+        body = await self._read()
+        owner = None if body is None else _named_installation(body)
+        return (
+            f"the store already has an owner marker ({self._location}), naming "
+            f"installation {owner}; this database is installation "
+            f"{installation_id}. The claim never replaces a marker "
+            "(STORAGE.md Section 4.3)"
+        )
 
     async def refusal(self) -> str | None:
         """Why a destructive pass must not run now, or ``None`` if the store is ours."""
 
+        return _refusal(self._location, await self._read(), self._installation_id)
+
+    @abc.abstractmethod
+    async def _read(self) -> bytes | None:
+        """The marker's bytes, or ``None`` if there is none."""
+
+    @abc.abstractmethod
+    async def _holds_objects(self) -> bool:
+        """Whether any namespace a GC or sweep lists holds an object."""
+
+    @abc.abstractmethod
+    async def _create(self, installation_id: uuid.UUID) -> bool:
+        """Write the marker unless one exists; whether this call wrote it."""
+
+
+class ObjectStoreOwnership(_StoreOwnership):
+    """The owner marker of an object-store bucket, at key :data:`OWNER_MARKER`."""
+
+    def __init__(self, client_factory: S3ClientFactory, *, bucket: str) -> None:
+        super().__init__(f"{OWNER_MARKER} in bucket {bucket!r}")
+        self._client_factory = client_factory
+
+    async def _read(self) -> bytes | None:
         async with self._client_factory() as client:
-            body = await self._read(client)
-        return _refusal(self._location, body, self._installation_id)
+            try:
+                chunks = await client.get_object(OWNER_MARKER)
+            except NotFoundError:
+                return None
+            return b"".join([chunk async for chunk in chunks])
 
-    @staticmethod
-    async def _read(client: S3Client) -> bytes | None:
-        try:
-            chunks = await client.get_object(OWNER_MARKER)
-        except NotFoundError:
-            return None
-        return b"".join([chunk async for chunk in chunks])
+    async def _holds_objects(self) -> bool:
+        # One key per namespace, so the probe of a large bucket stays cheap.
+        async with self._client_factory() as client:
+            for namespace in KeyNamespace:
+                if await client.any_object(namespace):
+                    return True
+        return False
+
+    async def _create(self, installation_id: uuid.UUID) -> bool:
+        body = _marker_body(installation_id)
+        async with self._client_factory() as client:
+            try:
+                return await client.put_object_if_absent(OWNER_MARKER, body)
+            except ConditionalPutUnsupportedError:
+                await client.put_object(OWNER_MARKER, body)
+                return True
 
 
-class FsStoreOwnership:
+class FsStoreOwnership(_StoreOwnership):
     """The owner marker of an fs storage root, at ``<root>/mcsd-owner.json``.
 
     The fs sweep is blocking and runs off the event loop, so it reads the marker
@@ -148,26 +241,28 @@ class FsStoreOwnership:
     """
 
     def __init__(self, root: Path) -> None:
+        super().__init__(str(root / OWNER_MARKER))
         self._root = root
         self._path = root / OWNER_MARKER
-        self._installation_id: uuid.UUID | None = None
 
-    async def claim(self, installation_id: uuid.UUID) -> None:
-        """Write the marker for ``installation_id`` if none exists (at startup)."""
-
-        created = await asyncio.to_thread(self._claim_blocking, installation_id)
-        self._installation_id = installation_id
-        _log_claim(str(self._path), created, await self.refusal())
-
-    async def refusal(self) -> str | None:
-        """Why a destructive pass must not run now, or ``None`` if the store is ours."""
-
-        return await asyncio.to_thread(self.refusal_blocking)
+    async def claim(
+        self,
+        installation_id: uuid.UUID,
+        *,
+        database_names_objects: Callable[[], Awaitable[bool]],
+    ) -> None:
+        await asyncio.to_thread(self._remove_stale_temps)
+        await super().claim(
+            installation_id, database_names_objects=database_names_objects
+        )
 
     def refusal_blocking(self) -> str | None:
         """:meth:`refusal`, for a caller already off the event loop."""
 
-        return _refusal(str(self._path), self._read_marker(), self._installation_id)
+        return _refusal(self._location, self._read_marker(), self._installation_id)
+
+    async def _read(self) -> bytes | None:
+        return await asyncio.to_thread(self._read_marker)
 
     def _read_marker(self) -> bytes | None:
         try:
@@ -175,14 +270,33 @@ class FsStoreOwnership:
         except FileNotFoundError:
             return None
 
-    def _claim_blocking(self, installation_id: uuid.UUID) -> bool:
-        # A crash before the ``finally`` below leaves a temporary file at the
-        # root. Remove one old enough that no claim still running can own it.
+    async def _holds_objects(self) -> bool:
+        return await asyncio.to_thread(self._holds_objects_blocking)
+
+    def _holds_objects_blocking(self) -> bool:
+        # One entry per namespace directory, so the probe of a large root stays
+        # cheap. A missing root or directory holds nothing.
+        for name in _FS_NAMESPACES:
+            try:
+                with os.scandir(self._root / name) as entries:
+                    if next(entries, None) is not None:
+                        return True
+            except FileNotFoundError:
+                continue
+        return False
+
+    def _remove_stale_temps(self) -> None:
+        # A crash before the ``finally`` in ``_create_blocking`` leaves a temporary
+        # file at the root. Remove one old enough that no claim still running can
+        # own it.
         for stale in self._root.glob(f".{OWNER_MARKER}.*.tmp"):
             if _is_stale_spool(stale):
                 stale.unlink(missing_ok=True)
-        if self._read_marker() is not None:
-            return False
+
+    async def _create(self, installation_id: uuid.UUID) -> bool:
+        return await asyncio.to_thread(self._create_blocking, installation_id)
+
+    def _create_blocking(self, installation_id: uuid.UUID) -> bool:
         self._root.mkdir(parents=True, exist_ok=True)
         # Write the whole marker under a temporary name, then hard-link it into
         # place: the link fails if the marker exists, so of two claimants exactly

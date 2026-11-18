@@ -38,6 +38,10 @@ def _marker(installation_id: uuid.UUID) -> bytes:
     ).encode()
 
 
+async def _never_asked() -> bool:
+    raise AssertionError("a marked store is claimed without the database probe")
+
+
 def _refused(caplog: pytest.LogCaptureFixture) -> bool:
     return any(
         rec.levelno == logging.ERROR
@@ -51,7 +55,7 @@ async def _object_storage(owner: uuid.UUID) -> tuple[FakeS3Store, ObjectStorage,
     store = FakeS3Store()
     store.objects[OWNER_MARKER] = _marker(owner)
     ownership = ObjectStoreOwnership(fake_s3_factory(store), bucket="mcsd")
-    await ownership.claim(_OURS)
+    await ownership.claim(_OURS, database_names_objects=_never_asked)
     community, server = new_scope()
     staged = (
         f"communities/{community.value}/servers/{server.value}/incoming/t1/level.dat"
@@ -87,7 +91,7 @@ async def test_object_sweep_runs_on_a_store_this_database_owns() -> None:
 async def _fs_storage(tmp_path: Path, owner: uuid.UUID) -> tuple[FsStorage, Path]:
     (tmp_path / OWNER_MARKER).write_bytes(_marker(owner))
     ownership = FsStoreOwnership(tmp_path)
-    await ownership.claim(_OURS)
+    await ownership.claim(_OURS, database_names_objects=_never_asked)
     community, server = new_scope()
     staged = (
         tmp_path

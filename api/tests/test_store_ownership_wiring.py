@@ -9,8 +9,12 @@ installation id is fixed.
 
 With a marker naming another installation, none of them deletes anything. With
 no marker, the app writes one naming its own installation and the startup sweep
-runs. On the default fs backend, a marker file at the root naming another
-installation blocks the startup and periodic sweeps the same way.
+runs, but only if the store is empty or the database has rows that name stored
+objects (issue #3886). A fresh database on a store that already holds objects
+does not claim it, and every pass refuses. On the default fs backend, a marker
+file at the root naming another installation blocks the startup and periodic
+sweeps the same way, and so does an unmarked root a fresh database does not
+claim.
 """
 
 from __future__ import annotations
@@ -92,6 +96,23 @@ async def _ours(_session_factory: object) -> uuid.UUID:
     return _OURS
 
 
+async def _rows(_session_factory: object) -> bool:
+    """The database probe of a database with rows that name stored objects."""
+
+    return True
+
+
+async def _no_rows(_session_factory: object) -> bool:
+    """The database probe of a fresh database: no row names a stored object."""
+
+    return False
+
+
+_PROBE = "mc_server_dashboard_api.app.database_names_stored_objects"
+_CLAIM_COMMAND = "python -m mc_server_dashboard_api.store_claim_cli"
+_OWNERSHIP_LOGGER = ownership_module.__name__
+
+
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
     backing = FakeS3Store()
@@ -115,6 +136,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
     )
 
     monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
+    monkeypatch.setattr(_PROBE, _rows)
 
     async def _drained(self: SqlAlchemyWorkerDrainStore) -> frozenset[WorkerId]:
         return frozenset()
@@ -177,6 +199,8 @@ async def test_a_bucket_another_database_owns_blocks_every_gc_and_sweep(
 async def test_an_unmarked_bucket_is_claimed_and_swept(
     store: FakeS3Store, captured: _Captured
 ) -> None:
+    # The upgrade of an existing deployment: the store holds objects, and so does
+    # the database rows naming them (the fixture's database probe).
     _seed(store)
     app = create_app()
 
@@ -186,6 +210,61 @@ async def test_an_unmarked_bucket_is_claimed_and_swept(
         # The startup sweep reclaimed the orphan staging and the old upload.
         assert _STAGED not in store.objects
         assert "upload-old" not in store.multipart_uploads
+
+
+async def test_an_empty_bucket_is_claimed_by_a_fresh_database(
+    store: FakeS3Store, captured: _Captured, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_PROBE, _no_rows)
+    app = create_app()
+
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        assert json.loads(store.objects[OWNER_MARKER])["installation_id"] == str(_OURS)
+
+
+def _claim_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.ERROR and rec.name == _OWNERSHIP_LOGGER
+    ]
+
+
+async def test_a_fresh_database_leaves_a_bucket_holding_objects_unclaimed(
+    store: FakeS3Store,
+    captured: _Captured,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A probe or dev stack with its own empty database, pointed at the live bucket
+    # (issue #3886): claiming it would make every live object an orphan.
+    monkeypatch.setattr(_PROBE, _no_rows)
+    _seed(store)
+    app = create_app()
+
+    with caplog.at_level(logging.ERROR):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            assert OWNER_MARKER not in store.objects
+            # The startup sweep ran and was refused.
+            assert _survivors(store) == _EVERYTHING
+            # The claim logged one ERROR naming the store and the operator step.
+            (startup_error,) = _claim_errors(caplog)
+            assert "'mcsd'" in startup_error
+            assert _CLAIM_COMMAND in startup_error
+            # Each periodic pass refuses too.
+            await captured.loops["run_storage_sweep_loop"]()
+            with pytest.raises(StoreNotOwnedError):
+                await captured.loops["run_jar_gc_loop"]()
+            await captured.loops["run_plugin_cache_gc_loop"]()
+            await captured.loops["run_resource_pack_gc_loop"]()
+            # And the manual JAR-pool GC.
+            with pytest.raises(StoreNotOwnedError):
+                await dependencies.get_jar_pool_gc(_request(app))()
+
+    assert _survivors(store) == _EVERYTHING
+    assert OWNER_MARKER not in store.objects
 
 
 async def test_an_fs_root_another_database_owns_blocks_both_sweeps(
@@ -224,3 +303,36 @@ async def test_an_fs_root_another_database_owns_blocks_both_sweeps(
         and str(_THEIRS) in rec.getMessage()
         for rec in caplog.records
     )
+
+
+async def test_a_fresh_database_leaves_an_fs_root_holding_objects_unclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured: _Captured,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership",
+        ownership_module.FsStoreOwnership,
+    )
+    monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
+    monkeypatch.setattr(_PROBE, _no_rows)
+    staged = tmp_path / "communities" / "c" / "servers" / "s" / "incoming" / "t1"
+    staged.mkdir(parents=True)
+    (staged / "level.dat").write_bytes(b"in flight")
+    app = create_app()
+
+    with caplog.at_level(logging.ERROR):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            assert not (tmp_path / OWNER_MARKER).exists()
+            assert staged.exists()
+            (startup_error,) = _claim_errors(caplog)
+            assert str(tmp_path) in startup_error
+            assert _CLAIM_COMMAND in startup_error
+            await asyncio.to_thread(captured.loops["run_storage_sweep_loop"])
+
+    assert staged.exists()
+    assert not (tmp_path / OWNER_MARKER).exists()

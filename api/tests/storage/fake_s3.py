@@ -173,6 +173,9 @@ class FakeS3Client:
             if key.startswith(prefix)
         ]
 
+    async def any_object(self, prefix: str) -> bool:
+        return any(key.startswith(prefix) for key in self._store.objects)
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         if self._store.list_multipart_uploads_unsupported:
             raise MultipartUploadsUnsupportedError("stub: operation unsupported")

@@ -395,13 +395,16 @@ class _RaisingObjectClient:
 
 
 class _RaisingListClient:
-    """A client double whose paginators raise a set code on iteration."""
+    """A client double whose listings raise a set code (paginators on iteration)."""
 
     def __init__(self, code: str) -> None:
         self._code = code
 
     def get_paginator(self, _name: str) -> _RaisingPaginator:
         return _RaisingPaginator(self._code)
+
+    async def list_objects_v2(self, **_kwargs: object) -> dict[str, object]:
+        raise _client_error(self._code)
 
 
 # --- Bucketless store reads as empty/not-found (issue #946) ------------------
@@ -445,6 +448,46 @@ async def test_list_objects_other_error_reraises() -> None:
 
     with pytest.raises(ClientError):
         await client.list_objects("communities/")
+
+
+async def test_any_object_no_such_bucket_is_false() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("NoSuchBucket"), "bucket")
+
+    assert await client.any_object("communities/") is False
+
+
+async def test_any_object_other_error_reraises() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("AccessDenied"), "bucket")
+
+    with pytest.raises(ClientError):
+        await client.any_object("communities/")
+
+
+class _OnePageClient:
+    """A client double answering ``list_objects_v2`` with one page; records calls."""
+
+    def __init__(self, contents: list[dict[str, object]]) -> None:
+        self._contents = contents
+        self.calls: list[dict[str, object]] = []
+
+    async def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return {"Contents": self._contents} if self._contents else {"KeyCount": 0}
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"), [([{"Key": "jars/a.jar"}], True), ([], False)]
+)
+async def test_any_object_asks_the_store_for_one_key(
+    contents: list[dict[str, object]], expected: bool
+) -> None:
+    # A probe of a namespace with millions of keys must not list them all
+    # (issue #3886).
+    double = _OnePageClient(contents)
+    client = _Aioboto3S3Client(double, "bucket")
+
+    assert await client.any_object("jars/") is expected
+    assert double.calls == [{"Bucket": "bucket", "Prefix": "jars/", "MaxKeys": 1}]
 
 
 async def test_list_multipart_uploads_no_such_bucket_returns_empty() -> None:
@@ -554,14 +597,18 @@ class _RaisingReadClient:
     def get_paginator(self, _name: str) -> _RaisingErrorPaginator:
         return _RaisingErrorPaginator(self._error)
 
+    async def list_objects_v2(self, **_kwargs: object) -> dict[str, object]:
+        raise self._error
 
-# The four read operations that reach the store before a response body starts, each
+
+# The read operations that reach the store before a response body starts, each
 # with the call shape its test needs.
 _READ_CALLS: dict[str, Callable[[_Aioboto3S3Client], Awaitable[object]]] = {
     "get_object": lambda c: c.get_object("communities/k"),
     "head_object": lambda c: c.head_object("communities/k"),
     "copy_object": lambda c: c.copy_object("src/k", "dst/k"),
     "list_objects": lambda c: c.list_objects("communities/"),
+    "any_object": lambda c: c.any_object("communities/"),
 }
 
 
