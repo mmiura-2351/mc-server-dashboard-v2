@@ -7,13 +7,19 @@ directory tree so a snapshot/backup can be staged from in-memory content.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import io
+import os
+import shutil
+import subprocess
 import tarfile
 import threading
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any, Literal, cast
+
+import pytest
 
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
@@ -435,6 +441,200 @@ def gnu_tar_sparse_archive_cut_in_its_extension_block() -> bytes:
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
         header = tar.getmember("world/many.dat").offset
     return archive[: header + tarfile.BLOCKSIZE + 100]
+
+
+def _flipped(data: bytes, at: int) -> bytes:
+    damaged = bytearray(data)
+    damaged[at] ^= 0x01
+    return bytes(damaged)
+
+
+# The members of the end-of-archive shapes below (issue #3798): a good member,
+# the one the damage follows, and one after the damage.
+END_CHECK_FILES = {
+    "server.properties": b"k=v",
+    "world/level.dat": b"w" * 3000,
+    "world/after.dat": b"after",
+}
+_PROPERTIES, _LEVEL, _AFTER = (
+    _member(name, data) for name, data in END_CHECK_FILES.items()
+)
+
+
+def _bad_sparse_0_0(field: str) -> bytes:
+    """A GNU sparse format 0.0 member whose ``field`` record is not a number.
+
+    ``tarfile`` raises ``InvalidHeaderError`` for it, which ``TarFile.next``
+    takes, past the first header, for the end of the archive.
+    """
+
+    numbers = {"GNU.sparse.offset": "0", "GNU.sparse.numbytes": "1"}
+    numbers[field] = "x"
+    headers = {"GNU.sparse.size": "4", "GNU.sparse.numblocks": "1", **numbers}
+    return _member(_SPARSE_NAME, b"A", headers)
+
+
+# A plain tar that does not end at its end-of-archive marker, or holds more than
+# zeros past it (issue #3798). ``tarfile`` stops at the damage and takes it for
+# the end, so a reader that did not check where it stopped kept the members
+# before it and lost the rest.
+TARS_NOT_ENDING_AT_THEIR_MARKER: dict[str, bytes] = {
+    "bad-checksum-later-header": _tar_of(_PROPERTIES, _flipped(_LEVEL, 0), _AFTER),
+    "non-numeric-sparse-offset": _tar_of(
+        _PROPERTIES, _bad_sparse_0_0("GNU.sparse.offset"), _AFTER
+    ),
+    "non-numeric-sparse-numbytes": _tar_of(
+        _PROPERTIES, _bad_sparse_0_0("GNU.sparse.numbytes"), _AFTER
+    ),
+    "no-end-marker": _PROPERTIES + _LEVEL,
+    "cut-end-marker": _PROPERTIES + _LEVEL + bytes(100),
+    "a-second-tar-past-the-marker": _tar_of(_PROPERTIES, _LEVEL) + _tar_of(_AFTER),
+    "a-byte-past-the-marker": _tar_of(_PROPERTIES, _LEVEL) + b"\x01",
+}
+
+# A sound plain tar of :data:`END_CHECK_FILES`.
+END_CHECK_TAR = _tar_of(_PROPERTIES, _LEVEL, _AFTER)
+
+
+def _stored_byte_flipped() -> bytes:
+    """:data:`END_CHECK_TAR` gzipped uncompressed, one stored data byte flipped:
+    only the CRC32 tells."""
+
+    archive = gzip.compress(END_CHECK_TAR, compresslevel=0, mtime=0)
+    return _flipped(archive, archive.index(b"k=v"))
+
+
+_END_CHECK_TAR_GZ = gzip.compress(END_CHECK_TAR, mtime=0)
+
+# A ``tar.gz`` of :data:`END_CHECK_TAR` whose gzip stream does not read to a
+# sound end (issue #3798): restore stopped at the end-of-archive marker and
+# never read the trailer.
+DAMAGED_GZIP_STREAMS: dict[str, bytes] = {
+    "bad-crc": _flipped(_END_CHECK_TAR_GZ, len(_END_CHECK_TAR_GZ) - 8),
+    "bad-isize": _flipped(_END_CHECK_TAR_GZ, len(_END_CHECK_TAR_GZ) - 4),
+    "flipped-stored-byte": _stored_byte_flipped(),
+    "cut-trailer": _END_CHECK_TAR_GZ[:-1],
+    "garbage-after-the-stream": _END_CHECK_TAR_GZ + b"not a gzip member",
+}
+
+# Where :data:`END_CHECK_TAR` splits into two gzip members: after the first tar
+# member's data record, and 1000 bytes into the second member's data.
+GZIP_MEMBER_SPLITS = {"at-a-tar-member": 1024, "inside-a-tar-member": 2048}
+
+
+def two_gzip_members(split: str) -> bytes:
+    """:data:`END_CHECK_TAR` as two gzip members split at ``split``."""
+
+    at = GZIP_MEMBER_SPLITS[split]
+    return gzip.compress(END_CHECK_TAR[:at]) + gzip.compress(END_CHECK_TAR[at:])
+
+
+def reserved_member_with_unreadable_data() -> bytes:
+    """A tar whose reserved root member's data does not read (issue #3798).
+
+    Its old GNU sparse map takes 2001 bytes of data where the member stores one
+    block, so a read of its data runs past the end of the archive. A walk that
+    skips the data reads the archive whole.
+    """
+
+    reserved = _old_gnu_sparse_member(
+        ".mcsd_generation", [(0, 1), (100, 2000)], 4096, b"X"
+    )
+    return _tar_of(_PROPERTIES, reserved)
+
+
+def _gnu_tar_on_path() -> bool:
+    if shutil.which("tar") is None:
+        return False
+    version = subprocess.run(
+        ["tar", "--version"], capture_output=True, text=True, timeout=60
+    )
+    return "GNU tar" in version.stdout
+
+
+needs_gnu_tar = pytest.mark.skipif(not _gnu_tar_on_path(), reason="no GNU tar")
+needs_pigz = pytest.mark.skipif(shutil.which("pigz") is None, reason="no pigz")
+needs_go = pytest.mark.skipif(shutil.which("go") is None, reason="no Go toolchain")
+
+
+def _end_check_tree(root: Path) -> Path:
+    for name, data in END_CHECK_FILES.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(data)
+    return root
+
+
+def gnu_tar(tmp_path: Path, *options: str) -> bytes:
+    """GNU tar's archive of :data:`END_CHECK_FILES`, ``world/`` as a directory."""
+
+    tree = _end_check_tree(tmp_path / "tree")
+    return subprocess.run(
+        ["tar", "-c", *options, "-f", "-", "-C", str(tree), "server.properties"]
+        + ["world"],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
+
+
+def pigz(data: bytes) -> bytes:
+    return subprocess.run(
+        ["pigz", "-c"], input=data, capture_output=True, check=True, timeout=60
+    ).stdout
+
+
+# The Worker's pack (``worker/internal/adapters/datatransfer``): ``archive/tar``
+# with a directory header, regular files, and a name too long for ustar, which
+# Go writes as PAX. ``Close`` writes the two zero blocks and no record padding.
+_GO_PACK = """package main
+
+import (
+	"archive/tar"
+	"os"
+	"strings"
+	"time"
+)
+
+func main() {
+	tw := tar.NewWriter(os.Stdout)
+	put := func(name string, typ byte, data string) {
+		hdr := &tar.Header{Name: name, Mode: 0o644, Size: int64(len(data)),
+			ModTime: time.Unix(1700000000, 0), Typeflag: typ}
+		if err := tw.WriteHeader(hdr); err != nil {
+			panic(err)
+		}
+		if _, err := tw.Write([]byte(data)); err != nil {
+			panic(err)
+		}
+	}
+	put("world/", tar.TypeDir, "")
+	put("server.properties", tar.TypeReg, "k=v")
+	put("world/level.dat", tar.TypeReg, strings.Repeat("w", 3000))
+	put("world/after.dat", tar.TypeReg, "after")
+	put("world/"+strings.Repeat("n", 120), tar.TypeReg, "long")
+	if err := tw.Close(); err != nil {
+		panic(err)
+	}
+}
+"""
+
+# The files :func:`go_archive_tar` writes.
+GO_PACK_FILES = {**END_CHECK_FILES, "world/" + "n" * 120: b"long"}
+
+
+def go_archive_tar(tmp_path: Path) -> bytes:
+    """A plain tar as Go's ``archive/tar`` writes the Worker's snapshot."""
+
+    (tmp_path / "pack.go").write_text(_GO_PACK)
+    env = {**os.environ, "GOWORK": "off", "GOFLAGS": "", "GOTOOLCHAIN": "local"}
+    return subprocess.run(
+        ["go", "run", "pack.go"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        check=True,
+        timeout=300,
+    ).stdout
 
 
 def bomb_targz(*, decompressed: int = 4096) -> bytes:

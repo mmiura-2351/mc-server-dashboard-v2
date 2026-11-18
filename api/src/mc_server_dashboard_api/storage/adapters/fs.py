@@ -34,6 +34,7 @@ import datetime as dt
 import enum
 import errno
 import functools
+import gzip
 import hashlib
 import io
 import logging
@@ -51,6 +52,7 @@ from pathlib import Path
 from typing import Any, ParamSpec, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
+    EndCheckedReader,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -3909,19 +3911,34 @@ def _plain_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo:
 
 
 def _extract_tar_into(spool: Path, dest: Path) -> None:
-    """Stream-extract the plain tar at ``spool`` into ``dest``, sandboxed.
+    """Extract the plain tar at ``spool`` into ``dest``, sandboxed.
 
-    Stream mode (``r|``) reads the spool incrementally so the whole archive is
+    The spool is read forward, one member at a time, so the whole archive is
     never held in memory at once. A snapshot is a plain tar, so a compressed one
     does not read as a tar at all (issue #3786). :func:`_plain_member_filter`
-    refuses unsafe and link members.
+    refuses unsafe and link members before any is extracted, so no link is
+    looked up by name.
+
+    The walk must end at the end-of-archive marker, with only zeros after it, or
+    the extraction raises ``ReadError`` (issue #3798): ``tarfile`` takes a header
+    it cannot read, past the first, for the end of the archive, which would
+    publish the members before it alone. :class:`EndCheckedReader` tells where
+    the walk stopped only in ``r:``, since in ``r|`` ``tarfile`` reads whole
+    records. The spool is a file, so ``r:`` can read it, and extracting every
+    member in order never seeks back.
     """
 
     with (
         open(spool, "rb") as fileobj,
-        tarfile.open(fileobj=fileobj, mode="r|", tarinfo=HeaderCheckedTarInfo) as tar,
+        tarfile.open(
+            fileobj=(stream := EndCheckedReader(fileobj)),
+            mode="r:",
+            tarinfo=HeaderCheckedTarInfo,
+        ) as tar,
     ):
-        tar.extractall(dest, filter=_ingest_member_filter)
+        tar.extractall(dest, members=stream.members(tar), filter=_ingest_member_filter)
+        for _zeros in stream.read_past_end_marker():
+            pass
 
 
 def _ingest_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
@@ -3990,10 +4007,19 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     holding a member the filter refuses (issue #3371): it reads, but nothing can
     be restored from it, override or not, which is the verdict that error models.
 
+    The archive is read to its end (issue #3798), as the upload gate reads it: the
+    tar is decompressed by our own ``gzip.GzipFile`` and walked through
+    :class:`EndCheckedReader`. The walk must stop at the end-of-archive marker,
+    only zeros may follow it, the gzip CRC32 and ISIZE must match, and only
+    another gzip member or zero padding may follow a gzip member; anything else
+    is :class:`ArchiveUnreadableError`. The zeros past the marker count toward
+    ``max_bytes`` too.
+
     A member at, or under, the reserved generation-marker root name is left out
     and counted (issue #3433): a backup stored before the name was reserved can
-    carry one, and refusing it would leave that backup unrestorable. Returns how
-    many members were left out.
+    carry one, and refusing it would leave that backup unrestorable. Its data is
+    still read, and counted, so data that does not read is refused as any
+    member's is (issue #3798). Returns how many members were left out.
     """
 
     total = 0
@@ -4001,9 +4027,14 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     try:
         with (
             archive_read_errors_as_unreadable(),
-            tarfile.open(archive, mode="r:gz", tarinfo=HeaderCheckedTarInfo) as tar,
+            gzip.GzipFile(archive) as gz,
+            tarfile.open(
+                fileobj=(stream := EndCheckedReader(gz)),
+                mode="r:",
+                tarinfo=HeaderCheckedTarInfo,
+            ) as tar,
         ):
-            for read in tar:
+            for read in stream.members(tar):
                 # Read without the tar root prefix, judged and filtered, then
                 # renamed to where it lands: both the reserved decision and the
                 # extraction use that normalised name (issues #3433, #3574).
@@ -4015,8 +4046,11 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
                 safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
                 if is_reserved_root_member(safe.name):
                     dropped += 1
+                    total = _drain_member_capped(tar, safe, total, max_bytes)
                     continue
                 total = _extract_member_capped(tar, safe, dest, total, max_bytes)
+            for zeros in stream.read_past_end_marker():
+                total = _counted(total, zeros, max_bytes)
     except tarfile.FilterError as exc:
         raise ArchiveUnreadableError(
             f"archive holds a member that cannot be restored: {exc}"
@@ -4055,16 +4089,40 @@ def _extract_member_capped(
             chunk = handle.read(_CHUNK)
             if not chunk:
                 break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ArchiveTooLargeError(
-                    f"restore archive exceeds {max_bytes} decompressed bytes"
-                )
+            total = _counted(total, chunk, max_bytes)
             out.write(chunk)
     # Streaming the body by hand drops the member metadata that ``extractall``
     # would have applied, so restore the sanitized mode/mtime ourselves.
     os.chmod(target, safe.mode)
     os.utime(target, (safe.mtime, safe.mtime))
+    return total
+
+
+def _drain_member_capped(
+    tar: tarfile.TarFile, safe: tarfile.TarInfo, total: int, max_bytes: int
+) -> int:
+    """Read a left-out member's data and drop it, counting the bytes (#3798).
+
+    A directory member carries no data. Returns the updated running total.
+    """
+
+    handle = tar.extractfile(safe) if safe.isfile() else None
+    if handle is None:
+        return total
+    with handle:
+        while chunk := handle.read(_CHUNK):
+            total = _counted(total, chunk, max_bytes)
+    return total
+
+
+def _counted(total: int, chunk: bytes, max_bytes: int) -> int:
+    """``total`` plus ``chunk``'s length, refused past ``max_bytes`` (#287)."""
+
+    total += len(chunk)
+    if total > max_bytes:
+        raise ArchiveTooLargeError(
+            f"restore archive exceeds {max_bytes} decompressed bytes"
+        )
     return total
 
 

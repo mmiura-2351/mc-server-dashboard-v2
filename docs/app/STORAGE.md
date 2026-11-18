@@ -350,18 +350,22 @@ code (`archive_member.unrestorable_reason`) before it is stored, so an archive
 restore would refuse is a `422 invalid_archive` at upload, not a backup that
 fails later (issue #3579). The gate also refuses a `..` between backslashes
 (`world\..\level.dat`), a separator only on Windows; restore reads `\` as an
-ordinary name character. The gate reads the archive whole, which restore and the
-probe do not (issue #3778, `archive_member.EndCheckedReader`): the member walk
-must stop at the end-of-archive marker, only zeros may follow it, the gzip
-CRC32 and ISIZE must match, and only another gzip member or zero padding may
-follow the gzip stream. So the gate refuses a header past the first that does
-not read, which restore takes for the end and so cuts the member list short, a
-missing or cut marker, a second tar after the first and bytes after the gzip
-stream, all of which restore and the probe accept today (issue #3798). The gate
-runs in a worker thread, off the event loop (issue #3801). Its CPU is not bounded
-there yet: empty gzip members and zero padding after the gzip stream add no
-decompressed bytes, so only the 512 MiB body cap bounds what they cost, minutes
-for one upload (issue #3835). Each
+ordinary name character. The gate, restore and the probe all read the archive
+whole (issues #3778, #3798, `archive_member.EndCheckedReader`): the tar is
+decompressed by our own `gzip.GzipFile`, the member walk must stop at the
+end-of-archive marker, only zeros may follow it, the gzip CRC32 and ISIZE of
+every gzip member must match, and only another gzip member or zero padding may
+follow a gzip member. So all three refuse a header past the first that does not
+read, which `tarfile` takes for the end and so would cut the member list short,
+a missing or cut marker, a second tar after the first and bytes after the gzip
+stream, and all three read every member of a `tar.gz` of several gzip members.
+Restore and the probe read every member's data, a left-out reserved member's
+(below) included, and count the zeros past the marker toward the
+decompressed-size cap. The gate runs in a worker thread, off the event loop
+(issue #3801). The CPU of the gate, restore and the probe is not bounded yet:
+empty gzip members and zero padding after the gzip stream add no decompressed
+bytes, so only the stored body's size bounds what they cost, minutes for one
+archive near the 512 MiB body cap (issue #3835). Each
 member is first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
@@ -1425,7 +1429,9 @@ and not only truncation. Decompressed output is discarded as it is produced
 spooled to a local temp file, which a sound read then walks member by member the
 way restore does, discarding the bytes: bytes the store can produce can still hold
 nothing restore can stage. A member the archive member rule (Section 3.3)
-refuses raises `ArchiveUnreadableError`, and members inflating past the restore decompressed-size
+refuses raises `ArchiveUnreadableError`, and so does an archive that does not
+read to its end the way restore reads it (One archive member rule, Section 3.3);
+members inflating past the restore decompressed-size
 cap raise `ArchiveTooLargeError`, as in restore. It does not stage members or
 region-fsck — that stays fs-only, above.
 
@@ -1464,7 +1470,9 @@ restore for it. The sweep audits the two under separate operations
 
 A restore can also be the **first** read to find an archive unreadable: on either
 backend its extraction raises `ArchiveUnreadableError` when the bytes do not read
-back as a `tar.gz` (truncated, damaged gzip/tar framing, or a member header
+back as a `tar.gz` (truncated, damaged gzip/tar framing, a gzip stream that does
+not end soundly or a tar that does not end at its end-of-archive marker, issue
+#3798, or a member header
 whose `GNU.sparse.size`, `GNU.sparse.realsize` or `GNU.sparse.map` field, or
 sparse format 1.0 map, is not a number, issue #3790, or whose numbers cannot
 describe a file: a negative size, or a sparse map entry with a negative offset
@@ -1490,23 +1498,17 @@ quarantined before `UNREADABLE` existed: migration `0038` leaves them as they ar
 so until a sweep completes a `quarantined` row may mean either finding.
 
 A false *unhealthy* is as harmful as a false *healthy* — it
-condemns a restorable backup and emits a spurious audit entry — so the probe's
-leniency is pinned to what restore accepts. Restore reads the archive with
-`tarfile.open(mode="r:gz")`, which stops at the tar end-of-archive marker inside
-the first gzip member. Anything after a **complete** member therefore cannot make
-the archive unreadable: a concatenated second member (legal gzip, and what the
-shell tools produce) is walked as well, and anything that does not carry the gzip
-magic is trailing padding that ends the walk. The one place the probe is
-deliberately **stricter** than restore is the trailer: because tarfile stops early
-it never verifies the CRC32/ISIZE at all and will open an archive whose trailer has
-rotted, but a stored object whose bytes have changed is damaged regardless — the
-next flipped bit lands in the payload, which restore *does* reject. The upload
-gate is stricter than both (One archive member rule, above): it refuses what
-the probe reads as padding, a second tar after the end-of-archive marker or
-bytes after the gzip stream. Like gzip, it accepts a `tar.gz` of several gzip
-members, which the object backend's restore and health walk (`r|gz`) read only
-the first of: such an archive restores in part there, or not at all when the
-split falls inside a tar member (issue #3798).
+condemns a restorable backup and emits a spurious audit entry — so the gzip
+probe refuses nothing after a **complete** member that restore accepts. Restore
+reads the archive with our own `gzip.GzipFile` to its end (One archive member
+rule, Section 3.3), checking every member's CRC32 and ISIZE as the probe does. A
+concatenated second member (legal gzip, and what the shell tools produce) is
+walked by both. Anything else after a complete member ends the probe's walk
+without a verdict: the member walk that follows it on the spool reads the
+archive as restore does, so it accepts zero padding there and refuses any other
+byte, a second tar after the end-of-archive marker, or a first gzip member that
+holds only part of the tar (issue #3236). The health check and restore
+therefore reach one verdict for the same bytes.
 
 Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
@@ -1602,7 +1604,11 @@ credential as their `transfer_token` and the full endpoint URL as
 working-set root (the same format `open_hydrate_source` / `write_snapshot`
 produce/consume, Section 7.1). No compression: the snapshot read takes the body
 as a plain tar only, so a gzip, bzip2 or xz body, sound or not, is refused as
-`422 invalid_archive` (issue #3786). The Worker's pack writes plain tar.
+`422 invalid_archive` (issue #3786). The Worker's pack writes plain tar. The
+member walk must end at the tar end-of-archive marker with only zeros after it,
+or the body is `422 invalid_archive` too (issue #3798): a header past the first
+that does not read would otherwise end the walk and publish the members before
+it alone.
 
 **Endpoints** (scoped by `(community_id, server_id)`). Like the rest of the HTTP
 API these are namespaced under `/api`; the API builds the full
@@ -1612,7 +1618,7 @@ whatever path the API emits:
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
 | `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <uuid>` (the publishing Worker, canonicalised so any spelling of its UUID compares equal to the assigned worker id), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `422` `invalid_archive` (the byte-complete body does not read as a plain, uncompressed tar — a compressed body included — or carries a member ingest refuses: an absolute, `..` or non-canonical name on both backends, or a link on fs (the object backend leaves a link member out)); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune ran under the per-server lock during the upload window, so the commit's re-check found the generation advanced and no live snapshot, or the prune had removed the spool or staging itself, before the commit or under one of its lock-free steps — the delete wins and the staging is discarded); `409` `publisher_not_assigned` (the `X-Worker-Id` publisher is not the server's assigned Worker while another one is, checked after the upload stream and again under the per-server lock immediately before the publish; the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <uuid>` (the publishing Worker, canonicalised so any spelling of its UUID compares equal to the assigned worker id), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `422` `invalid_archive` (the byte-complete body does not read as a plain, uncompressed tar — a compressed body included — does not end at its end-of-archive marker with only zeros after it, or carries a member ingest refuses: an absolute, `..` or non-canonical name on both backends, or a link on fs (the object backend leaves a link member out)); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune ran under the per-server lock during the upload window, so the commit's re-check found the generation advanced and no live snapshot, or the prune had removed the spool or staging itself, before the commit or under one of its lock-free steps — the delete wins and the staging is discarded); `409` `publisher_not_assigned` (the `X-Worker-Id` publisher is not the server's assigned Worker while another one is, checked after the upload stream and again under the per-server lock immediately before the publish; the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
 
 **`X-Worker-Id` trust.** The `X-Worker-Id` the guard reads is **not**
 authenticated within the shared-credential data plane: any Worker holding the
