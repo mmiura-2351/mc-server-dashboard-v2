@@ -5,7 +5,10 @@ supplied current password is verified against the stored hash, mirroring
 :class:`ChangePassword` (same hasher Port, same uniform failure). A mismatch
 raises :class:`InvalidCredentialsError` — the same error login raises — so the
 edge maps it to the same uniform 401 and the endpoint is not a password-
-confirmation oracle (SECURITY.md Section 2).
+confirmation oracle (SECURITY.md Section 2). The verify runs outside any
+transaction (#3861), so the delete transaction checks that the account, as it
+locks it, still has the hash that was verified; a password changed in between
+is refused the same way.
 
 Refuses (FR-COMM-4 / FR-AUTH-6) when the user still owns a community — deleting
 would orphan it — or is the last platform administrator; both are domain errors
@@ -51,13 +54,15 @@ class DeleteAccount:
         # Re-authenticate before this destructive action: a wrong password is the
         # same InvalidCredentialsError login raises, mapped to the same uniform
         # 401 at the edge, so the check gates before any refusal reason leaks. The
-        # read is a short transaction of its own; the delete reopens the uow.
+        # read is a short transaction of its own, and the verify runs after it
+        # ends: the KDF is slow and memory-hard, and no pooled connection or lock
+        # may wait on it (#3861). The delete reopens the uow.
         async with self.uow:
             actor = await self.uow.users.get_by_id(user_id)
-            if actor is None:
-                raise UserNotFoundError(str(user_id.value))
-            if not await self.hasher.verify(password, actor.password_hash):
-                raise InvalidCredentialsError
+        if actor is None:
+            raise UserNotFoundError(str(user_id.value))
+        if not await self.hasher.verify(password, actor.password_hash):
+            raise InvalidCredentialsError
 
         async with self.uow:
             # The invariant counts ACTIVE admins only (issue #278): a deactivated
@@ -69,6 +74,11 @@ class DeleteAccount:
             user, active_admins = await self.uow.users.lock_with_active_admins(user_id)
             if user is None:
                 raise UserNotFoundError(str(user_id.value))
+            # The password was verified against the hash read before this lock: a
+            # change committed since makes that verify stale, so it is refused
+            # like a wrong password, before any refusal reason (#3861).
+            if user.password_hash != actor.password_hash:
+                raise InvalidCredentialsError
             # Under the account's ownership lock, held until this delete commits:
             # a conferral of ownership on the account either committed first and
             # is seen here, or waits and then finds no such user (#3217).
