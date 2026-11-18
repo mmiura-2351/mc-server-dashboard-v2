@@ -57,17 +57,12 @@ class _FakeUserDirectory(UserDirectory):
     def __init__(
         self,
         *,
-        known: bool = True,
         usernames: dict[UserId, str] | None = None,
         by_username: dict[str, UserId] | None = None,
     ) -> None:
-        self._known = known
         self._usernames = usernames or {}
         self._by_username = by_username or {}
         self.usernames_for_calls: list[list[UserId]] = []
-
-    async def exists(self, user_id: UserId) -> bool:
-        return self._known
 
     async def resolve_username(self, username: str) -> UserId | None:
         # Case-insensitive exact match, mirroring the identity uniqueness key.
@@ -115,7 +110,7 @@ async def test_add_member_stages_membership_and_commits() -> None:
     user = UserId(uuid.uuid4())
 
     membership = await AddMember(
-        uow=uow, users=_FakeUserDirectory(known=True), clock=_FakeClock()
+        uow=uow, users=_FakeUserDirectory(), clock=_FakeClock()
     )(community_id=community.id, user_id=user)
 
     assert membership.user_id == user
