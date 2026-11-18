@@ -9,6 +9,7 @@ so it takes the claim and the blocking read the storage adapters make.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Awaitable, Callable
 
 _FOREIGN = (
     "the store owner marker mcsd-owner.json names installation "
@@ -29,7 +30,12 @@ class FakeStoreOwnership:
 
         return cls(_FOREIGN)
 
-    async def claim(self, installation_id: uuid.UUID) -> None:
+    async def claim(
+        self,
+        installation_id: uuid.UUID,
+        *,
+        database_names_objects: Callable[[], Awaitable[bool]],
+    ) -> None:
         pass
 
     async def refusal(self) -> str | None:

@@ -305,6 +305,13 @@ class S3Client(Protocol):
         """List every object whose key starts with ``prefix`` (a prefix scan)."""
         ...
 
+    async def any_object(self, prefix: str) -> bool:
+        """Whether some object's key starts with ``prefix``, from a one-key listing.
+
+        A bucket that does not exist yet holds none (issue #3886).
+        """
+        ...
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         """List in-progress multipart uploads whose key starts with ``prefix``.
 

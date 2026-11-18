@@ -135,6 +135,20 @@ async def test_missing_and_deleted_objects_are_absent(
     assert await client.list_objects(prefix) == []
 
 
+async def test_any_object_sees_only_keys_under_its_prefix(
+    s3: tuple[S3Client, str, StoreClock, bool],
+) -> None:
+    client, prefix, _clock, _controlled = s3
+    assert await client.any_object(prefix) is False
+
+    await client.put_object(prefix + "jars/one.jar", b"jar")
+    await client.put_object(prefix + "jars/two.jar", b"jar")
+
+    assert await client.any_object(prefix + "jars/") is True
+    assert await client.any_object(prefix) is True
+    assert await client.any_object(prefix + "communities/") is False
+
+
 async def test_put_if_absent_never_replaces_an_existing_object(
     s3: tuple[S3Client, str, StoreClock, bool],
 ) -> None:

@@ -16,6 +16,7 @@ import os
 import random
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from functools import partial
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
@@ -166,6 +167,9 @@ from mc_server_dashboard_api.servers.adapters.session_sink import ServersSession
 from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
+)
+from mc_server_dashboard_api.servers.adapters.store_references import (
+    database_names_stored_objects,
 )
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
@@ -785,13 +789,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await storage.check_reachable(endpoint=obj.endpoint, bucket=obj.bucket)
         # Claim the store for this database before anything destructive runs
         # (STORAGE.md Section 4.3, issue #3870): write the owner marker naming
-        # this database's installation id if the store has none. Every GC and
-        # sweep below re-reads it and refuses to run unless it names this
-        # installation, so a store shared with another database is never diffed
-        # against this one. A marker naming another database does not stop the
-        # app: serving and uploads go on, only the destructive passes refuse.
+        # this database's installation id if the store has none, but only if the
+        # store is empty or this database has rows naming stored objects (issue
+        # #3886); a fresh database never claims a store that already holds
+        # objects. Every GC and sweep below re-reads it and refuses to run unless
+        # it names this installation, so a store shared with another database is
+        # never diffed against this one. A store this API did not claim does not
+        # stop the app: serving and uploads go on, only the destructive passes
+        # refuse.
+        session_factory = create_session_factory(engine)
         await store_ownership.claim(
-            await read_installation_id(create_session_factory(engine))
+            await read_installation_id(session_factory),
+            database_names_objects=partial(
+                database_names_stored_objects, session_factory
+            ),
         )
         app.state.store_ownership = store_ownership
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8

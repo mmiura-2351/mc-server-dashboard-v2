@@ -342,6 +342,21 @@ class _Aioboto3S3Client:
                 raise
         return out
 
+    async def any_object(self, prefix: str) -> bool:
+        # One key answers it, so the store owner claim's probe of a large bucket
+        # costs one request per namespace (issue #3886). A bucketless store holds
+        # nothing (issue #946); an outage is typed, as for ``list_objects``.
+        with _translating_backend_faults("list", prefix):
+            try:
+                page = await self._client.list_objects_v2(
+                    Bucket=self._bucket, Prefix=prefix, MaxKeys=1
+                )
+            except ClientError as exc:
+                if _is_no_such_bucket(exc):
+                    return False
+                raise
+        return bool(page.get("Contents"))
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         # Paginate ListMultipartUploads so a crash-leftover orphan upload is found
         # regardless of count (issue #903). A backend without the operation (e.g. a
