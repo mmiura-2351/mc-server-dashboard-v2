@@ -18,7 +18,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request, status
+from fastapi.responses import JSONResponse
 
 from mc_server_dashboard_api.audit.adapters.clock import (
     SystemClock as AuditSystemClock,
@@ -84,6 +85,7 @@ from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitMiddleware
 from mc_server_dashboard_api.http_problem import (
     install_problem_handlers,
+    problem_response,
     unhandled_exception_middleware,
 )
 from mc_server_dashboard_api.identity.adapters.clock import (
@@ -234,6 +236,7 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
 from mc_server_dashboard_api.servers.application.warn_missing_ports import (
     WarnLegacyMissingPorts,
 )
+from mc_server_dashboard_api.servers.domain.errors import LifecycleLockLostError
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_client import (
@@ -639,6 +642,17 @@ def _warn_data_plane_base_url_fallback(settings: Settings) -> None:
         "value to confirm the fallback is intended and silence this.",
         settings.server.public_base_url,
     )
+
+
+async def _lifecycle_lock_lost(_request: Request, _exc: Exception) -> JSONResponse:
+    """Answer an operation that lost its per-server lifecycle lock (issue #3927).
+
+    It stopped before its next write that relied on the lock, so retrying it is
+    the remedy: a transient 503. Every route that runs a lock holder can meet it,
+    so it is answered here once rather than by each route.
+    """
+
+    return problem_response(status.HTTP_503_SERVICE_UNAVAILABLE, "lifecycle_lock_lost")
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -1509,6 +1523,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Render every error response as RFC 9457 problem+json (issue #371): one body
     # shape for application errors, framework HTTPExceptions, and 422 validation.
     install_problem_handlers(app)
+    app.add_exception_handler(LifecycleLockLostError, _lifecycle_lock_lost)
     # Bound how much request body a route reads (issue #3363), and how much a
     # request without a valid credential can make it read (issue #3561).
     # Registered before everything below so it sits inside all of it, next to

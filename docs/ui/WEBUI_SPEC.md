@@ -280,6 +280,13 @@ fails while it reads `server.properties`. These statuses describe the object
 storage backend, which reports an outage as such; the filesystem backend
 reports a device fault on these routes as a 500.
 
+**A lost lifecycle lock.** A route that runs under the server's lifecycle lock
+(DATABASE.md Section 7) answers **503 `lifecycle_lock_lost`** when the lock's
+database session ended while the operation ran: it stopped before its next
+write that relied on the lock. Retrying takes the lock afresh. What it wrote
+before stopping stands, as after any other failure at that point; a restore
+that had already published is live and is audited as that restore.
+
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `mc_version`, `server_type`, `config` (full blob),
 `memory_limit_mb` (derived from `config['memory_limit_mb']`, null when unset),
