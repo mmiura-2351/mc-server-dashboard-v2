@@ -146,6 +146,22 @@ def global_pax_held_by_many_members() -> bytes:
 
 
 @functools.cache
+def global_records_before_a_sparse_member() -> bytes:
+    """A global PAX header of 60,000 records, then an old-GNU sparse member.
+
+    ``tarfile`` copies the global records into a member's own for most member
+    types, but not into an old-GNU sparse one: only ``TarFile.pax_headers``
+    holds them.
+    """
+
+    header = tarfile.TarInfo.create_pax_global_header(
+        {f"k{i:05}": "v" for i in range(60_000)}
+    )
+    member = old_gnu_sparse_header("s.bin", stored=0, regions=(), realsize=0)
+    return gzip.compress(header + member + bytes(1024), compresslevel=1)
+
+
+@functools.cache
 def gnu_long_links_held_by_many_members() -> bytes:
     """11 regular members, each with a GNU long link of 768 KiB.
 
@@ -253,6 +269,11 @@ OVER_WHAT_MEMBERS_HOLD = [
     ),
     pytest.param(
         gnu_long_links_held_by_many_members, _HELD_TOO_MUCH, id="gnu-long-links"
+    ),
+    pytest.param(
+        global_records_before_a_sparse_member,
+        "a member with more than 32 PAX records",
+        id="global-records-before-a-sparse-member",
     ),
 ]
 

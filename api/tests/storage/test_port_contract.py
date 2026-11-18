@@ -56,7 +56,6 @@ from tests.storage.helpers import (
     GZIP_MEMBER_SPLITS,
     INVALID_SPARSE_LAYOUTS,
     OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
-    OVER_THE_UPLOAD_HEADER_LIMITS_TAR,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
@@ -72,6 +71,7 @@ from tests.storage.helpers import (
     needs_gnu_tar,
     needs_pigz,
     new_scope,
+    over_the_upload_header_limits_tar,
     pigz,
     read_tar,
     region_targz,
@@ -1877,7 +1877,7 @@ async def test_backup_over_the_upload_header_limits_is_healthy_and_restores(
 
     await _restore_and_health_accept(
         harness,
-        gzip.compress(OVER_THE_UPLOAD_HEADER_LIMITS_TAR),
+        gzip.compress(over_the_upload_header_limits_tar()),
         OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
     )
 

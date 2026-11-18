@@ -41,9 +41,10 @@ _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 # a time. Real extended headers are long names, xattrs and ACLs: kilobytes.
 _BETWEEN_MEMBERS_BYTES = 1024 * 1024
 
-# What the members a walk hands out may hold. tarfile keeps every
-# member, each with a copy of the global PAX records dict, so a member may hold
-# at most this many PAX records, global and its own...
+# What the members a walk hands out may hold. tarfile keeps every member, most
+# of them with a copy of the global PAX records dict, and the TarFile keeps the
+# global records too, so a member may hold at most this many PAX records, global
+# and its own...
 _PAX_RECORDS_PER_MEMBER = 32
 # ...and the members' names, link names, PAX keys and PAX values together at most
 # this many characters. The count over-states some of it, which errs safe: a
@@ -176,9 +177,12 @@ class EndCheckedReader(io.RawIOBase):
       most one byte past that. The caller's reads of member data are not held to
       it.
     - ``tarfile`` also keeps every member it hands out, with its name, its link
-      name and a copy of the global PAX records, so :meth:`members` bounds what
-      they hold: at most 32 PAX records in a member, global and its own, and at
-      most 8 Mi characters of names, link names, PAX keys and PAX values in all.
+      name and its PAX records, and the ``TarFile`` keeps the global ones
+      (``TarFile.pax_headers``). It copies them into a member's own records for
+      most member types, but not into an old-GNU sparse one, so each member
+      counts as holding all of them. :meth:`members` bounds what the members
+      hold: at most 32 PAX records in a member, global and its own, and at most
+      8 Mi characters of names, link names, PAX keys and PAX values in all.
       Neither bound sees a sparse member's map (issue #3869).
 
     Going past any of them is :class:`HeaderLimitError`.
@@ -253,17 +257,15 @@ class EndCheckedReader(io.RawIOBase):
         held = 0
         for member in tar:
             if self._header_limits:
-                if len(member.pax_headers) > _PAX_RECORDS_PER_MEMBER:
+                records = {**tar.pax_headers, **member.pax_headers}
+                if len(records) > _PAX_RECORDS_PER_MEMBER:
                     raise HeaderLimitError(
                         f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
                     )
                 held += (
                     len(member.name)
                     + len(member.linkname)
-                    + sum(
-                        len(key) + len(value)
-                        for key, value in member.pax_headers.items()
-                    )
+                    + sum(len(key) + len(value) for key, value in records.items())
                 )
                 if held > _HELD_CHARACTERS:
                     raise HeaderLimitError(

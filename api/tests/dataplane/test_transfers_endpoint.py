@@ -72,7 +72,6 @@ from tests.storage.helpers import (
     GO_PACK_FILES,
     INVALID_SPARSE_LAYOUTS,
     OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
-    OVER_THE_UPLOAD_HEADER_LIMITS_TAR,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
@@ -82,6 +81,7 @@ from tests.storage.helpers import (
     go_archive_tar,
     needs_gnu_tar,
     needs_go,
+    over_the_upload_header_limits_tar,
     tar_cut_in_a_sparse_extension_block,
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
@@ -3117,7 +3117,7 @@ def test_snapshot_over_the_upload_header_limits_is_published(
     # Worker credential keeps the route's own body limit, as above.
     monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: _CREDENTIAL)
     status, _, hydrated, staging = _post_snapshot_over_a_prior(
-        tmp_path, make_storage, OVER_THE_UPLOAD_HEADER_LIMITS_TAR
+        tmp_path, make_storage, over_the_upload_header_limits_tar()
     )
 
     assert (status, hydrated, staging) == (204, OVER_THE_UPLOAD_HEADER_LIMITS_FILES, [])

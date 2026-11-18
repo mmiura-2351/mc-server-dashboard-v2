@@ -810,6 +810,56 @@ def test_the_members_hold_at_most_8_mi_characters_of_names_and_pax_records(
     assert len(_walk(archive, gzipped=gzipped)[0]) >= 16
 
 
+def _sparse_after_global_records(windows: list[dict[str, str]]) -> bytes:
+    """Each window: a global PAX header of its records, then an old-GNU sparse
+    member that stores and maps nothing.
+
+    ``tarfile`` copies the global records into a member's own for most member
+    types, but not into an old-GNU sparse (``S``) one: its own stay empty, while
+    ``TarFile.pax_headers`` keeps every global record.
+    """
+
+    parts = []
+    for i, records in enumerate(windows):
+        data = b"".join(_record(key, value) for key, value in records.items())
+        parts += [
+            _header("GlobalHead", typ=b"g", size=len(data)),
+            data + bytes(-len(data) % 512),
+            _header(f"s{i}.bin", typ=b"S"),
+        ]
+    return b"".join(parts) + _ZEROS
+
+
+@_both
+@pytest.mark.parametrize(
+    ("windows", "match"),
+    [
+        # 60,000 records a window, each window under the budget.
+        pytest.param(
+            [{f"k{w}_{i:05}": "v" for i in range(60_000)} for w in range(2)],
+            "PAX records",
+            id="records",
+        ),
+        # One record of about 1 Mi characters a window, a new key each time, so
+        # the record count stays low.
+        pytest.param(
+            [{f"k{w}": "\U0001f600" + "a" * (1000 * 1024)} for w in range(4)],
+            "characters of names",
+            id="characters",
+        ),
+    ],
+)
+def test_each_member_holds_the_global_records_whatever_its_type(
+    windows: list[dict[str, str]], match: str, gzipped: bool
+) -> None:
+    archive = _sparse_after_global_records(windows)
+
+    with pytest.raises(HeaderLimitError, match=match):
+        _walk(archive, gzipped=gzipped, header_limits=True)
+    # Without the header limits, as the storage walks read it, it is taken.
+    assert len(_walk(archive, gzipped=gzipped)[0]) == len(windows)
+
+
 @pytest.mark.parametrize(
     ("build", "handed_out"),
     [
