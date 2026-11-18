@@ -72,3 +72,38 @@ func TestASnapshotWhoseSessionEndsIsReportedAsCancelled(t *testing.T) {
 		})
 	}
 }
+
+// The other side of that split: a snapshot whose deadline passes while its
+// session is alive is still a failed snapshot (issue #3511). It answers
+// "abandoned at its deadline" and WARNs, because the API receives that answer
+// and the world was not captured.
+func TestASnapshotPastItsDeadlineIsStillReportedAsAbandoned(t *testing.T) {
+	st := newStall(t)
+	h := &syncSlogHandler{}
+	m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{stallSnapshot: st.wait}).WithLogger(slog.New(h))
+	seedScratch(t, m, s1)
+	exited := awaitSnapshotReleased(m)
+	expire := snapshotExpiry(t, m)
+
+	done := goHandle(m, snapshotCmd())
+	awaitEnter(t, st.entered)
+	expire()
+	res := awaitAnswer(t, done)
+	st.unblock()
+	// The released transfer still lists the working dir (hasWorkingSet).
+	awaitFinished(t, exited, 120*time.Second)
+
+	assertFailed(t, res)
+	if !strings.Contains(res.ErrorMessage, "abandoned at its deadline") {
+		t.Fatalf("SnapshotTrigger past its deadline = %+v, want it abandoned at its deadline", res)
+	}
+	warned := false
+	for _, r := range h.snapshot() {
+		if r.Level == slog.LevelWarn && strings.Contains(r.Message, "abandoned at its deadline") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Fatal("a snapshot abandoned at its deadline logged no WARN")
+	}
+}
