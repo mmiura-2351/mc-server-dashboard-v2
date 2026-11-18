@@ -113,7 +113,8 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     });
 
     // The last Tab's direction and the page's scroll before it, kept until
-    // the browser has moved focus for it.
+    // the browser has moved focus for it: until its keyup, or a timer when
+    // that keyup is lost, as when Tab leaves the page.
     let lastTab: { shiftKey: boolean; x: number; y: number } | null = null;
 
     // Focus that lands outside the dialog and the toast stack, from a Tab the
@@ -198,11 +199,18 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
       }
     };
     document.addEventListener("keydown", onKeyDown);
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === "Tab") {
+        lastTab = null;
+      }
+    };
+    document.addEventListener("keyup", onKeyUp);
 
     return () => {
       observer.disconnect();
       document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keyup", onKeyUp);
       const slot = dialogStack.indexOf(dialog);
       if (slot !== -1) {
         dialogStack.splice(slot, 1);
