@@ -13,7 +13,7 @@ import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
 import { Popover } from "../components/Popover.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
-import { useToast } from "../components/Toast.tsx";
+import { useServerToast } from "../components/useServerToast.ts";
 import { shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
@@ -621,8 +621,9 @@ function SortableHeader({
 // the card and table rows so neither duplicates the start/stop/restart business
 // logic (#541). The optimistic list-cache patch, its #1727-safe rollback and the
 // settle refetch live in useLifecycleMutation, shared with the detail page.
+// Several rows can fail at once, so each toast names its server (#3862).
 function useLifecycle(server: ServerResponse, communityId: string) {
-  const { showToast } = useToast();
+  const showServerToast = useServerToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const [eulaOpen, setEulaOpen] = useState(false);
@@ -641,14 +642,14 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       // it on both the 409 and the 503 path: for a few reasons what the failure
       // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
       // #2441).
-      if (onForbidden(error)) {
+      if (onForbidden(error, server)) {
         return;
       }
       if (isEulaNotAccepted(error)) {
         setEulaOpen(true);
         return;
       }
-      showToast(t(lifecycleErrorMessage(error, action)), "error");
+      showServerToast(server, t(lifecycleErrorMessage(error, action)), "error");
     },
   });
 
@@ -662,12 +663,16 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       await api.post(`${path}?accept_eula=true` as never);
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     } catch (error: unknown) {
-      if (onForbidden(error)) {
+      if (onForbidden(error, server)) {
         return;
       }
-      showToast(t(lifecycleErrorMessage(error, "start")), "error");
+      showServerToast(
+        server,
+        t(lifecycleErrorMessage(error, "start")),
+        "error",
+      );
     }
-  }, [communityId, server.id, queryClient, onForbidden, showToast]);
+  }, [communityId, server, queryClient, onForbidden, showServerToast]);
 
   const state = normalizeState(server.observed_state);
   // While a request is in flight, show the transition it requests so the pill

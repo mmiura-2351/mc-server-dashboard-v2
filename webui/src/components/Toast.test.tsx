@@ -21,7 +21,7 @@ function Harness() {
 }
 
 // Captures showToast so a test can raise toasts of any message and variant.
-let raise: (message: string, variant: ToastVariant) => void;
+let raise: (message: string, variant: ToastVariant, scope?: string) => void;
 function Capture() {
   raise = useToast().showToast;
   return null;
@@ -51,9 +51,9 @@ function dismissButton(message: string): HTMLElement {
   ).getByRole("button");
 }
 
-function show(message: string, variant: ToastVariant) {
+function show(message: string, variant: ToastVariant, scope?: string) {
   act(() => {
-    raise(message, variant);
+    raise(message, variant, scope);
   });
 }
 
@@ -591,6 +591,43 @@ describe("Toast", () => {
 
     expect(screen.getAllByRole("status")).toHaveLength(2);
     expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  // A scope names what an error is about, such as a server, so the same
+  // message about two of them stays two toasts (#3862).
+  it("keeps the same error in different scopes apart", () => {
+    renderToasts();
+    show("Failed", "error", "s1");
+    show("Failed", "error", "s2");
+
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(
+      screen.queryByText(t("common.toastRepeated", { count: 2 })),
+    ).not.toBeInTheDocument();
+  });
+
+  it("collapses a repeated error within its scope, with a count", () => {
+    renderToasts();
+    show("Failed", "error", "s1");
+    show("Failed", "error", "s2");
+    show("Failed", "error", "s1");
+
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(2);
+    expect(
+      within(alerts[0]).getByText(t("common.toastRepeated", { count: 2 })),
+    ).toBeInTheDocument();
+    expect(
+      within(alerts[1]).queryByText(t("common.toastRepeated", { count: 2 })),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps a scoped and an unscoped error apart", () => {
+    renderToasts();
+    show("Failed", "error");
+    show("Failed", "error", "s1");
+
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
   });
 
   it("does not collapse a repeated timed toast", () => {

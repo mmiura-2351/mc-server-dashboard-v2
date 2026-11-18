@@ -664,7 +664,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Live updates over `WS /communities/{cid}/events` (status stream); on WS
   loss fall back to 10s polling of `GET …/servers` with a "live degraded"
   indicator.
-- Quick actions on card: start / stop / restart (permission-scoped).
+- Quick actions on card: start / stop / restart (permission-scoped). Several
+  rows can fail at once, so each action's toast names its server (7.4).
 - Empty state → CTA to the create wizard.
 
 ### 6.3 Server create wizard
@@ -1149,12 +1150,19 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while
-  its toast still shows does not stack a copy: that toast shows a count badge
-  and counts as the newest for the drop order. A toast is at most 32rem wide,
-  never wider than the screen less 2rem, and its message wraps anywhere; the
-  stack is at most the screen's height less 2rem and scrolls beyond that, so
-  every toast stays reachable on a phone. A toast raised, or raised again,
-  scrolls into view, unless keyboard focus is in the stack.
+  its toast still shows, about the same server when it is about one, does not
+  stack a copy: that toast shows a count badge and counts as the newest for
+  the drop order. A toast is at most 32rem wide, never wider than the screen
+  less 2rem, and its message wraps anywhere; the stack is at most the
+  screen's height less 2rem and scrolls beyond that, so every toast stays
+  reachable on a phone. A toast raised, or raised again, scrolls into view,
+  unless keyboard focus is in the stack.
+- **Lifecycle toasts.** A toast from a start, stop or restart names the
+  server it is about, as "alpha: <message>", with the 403 denial among them:
+  the dashboard rows can act on several servers at once, and the detail
+  page's controls and the restore dialog's stop read the same. Such a toast
+  collapses only into one about the same server, told apart by the server's
+  id, since two servers may share a name.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.

@@ -32,6 +32,7 @@ import { Modal } from "../components/Modal.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { UploadProgress } from "../components/UploadProgress.tsx";
+import { useServerToast } from "../components/useServerToast.ts";
 import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
@@ -820,6 +821,7 @@ function RestoreDialog({
   onClose: () => void;
 }) {
   const { showToast } = useToast();
+  const showServerToast = useServerToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const [typed, setTyped] = useState("");
@@ -871,6 +873,7 @@ function RestoreDialog({
     },
   });
 
+  // A lifecycle stop: its toasts name the server, as the header's do (#3862).
   const stop = useMutation({
     mutationFn: () =>
       api.post(
@@ -880,14 +883,14 @@ function RestoreDialog({
         }),
       ),
     onSuccess: () => {
-      showToast(t("backups.restoreDialog.stopping"), "success");
+      showServerToast(server, t("backups.restoreDialog.stopping"), "success");
       invalidateServer();
     },
     onError: (error) => {
-      if (onForbidden(error)) {
+      if (onForbidden(error, server)) {
         return;
       }
-      showToast(t(backupErrorKey(error)), "error");
+      showServerToast(server, t(backupErrorKey(error)), "error");
     },
   });
 

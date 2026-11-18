@@ -120,6 +120,9 @@ export const ja: Record<TranslationKey, string> = {
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
   "common.toastRepeated": "{count} 回発生",
+  // A toast about one server, such as a lifecycle action's (#3862): it names
+  // the server, since the dashboard acts on several at once.
+  "common.toastAboutServer": "{server}: {message}",
   "common.showPassword": "パスワードを表示",
   "common.hidePassword": "パスワードを非表示",
   "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",

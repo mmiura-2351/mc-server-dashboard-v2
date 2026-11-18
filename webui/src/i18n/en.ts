@@ -112,6 +112,9 @@ export const en = {
   "common.cancel": "Cancel",
   "common.close": "Close",
   "common.toastRepeated": "Raised {count} times",
+  // A toast about one server, such as a lifecycle action's (#3862): it names
+  // the server, since the dashboard acts on several at once.
+  "common.toastAboutServer": "{server}: {message}",
   "common.showPassword": "Show password",
   "common.hidePassword": "Hide password",
   "common.resizeColumn": "Drag to resize, double-click to reset",

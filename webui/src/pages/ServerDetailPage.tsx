@@ -18,6 +18,7 @@ import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
+import { useServerToast } from "../components/useServerToast.ts";
 import { shortId } from "../format.ts";
 import { type TranslationKey, t } from "../i18n/index.ts";
 import { type Can, useCan } from "../permissions/useCan.ts";
@@ -485,6 +486,7 @@ function Controls({
   can: Can;
 }) {
   const { showToast } = useToast();
+  const showServerToast = useServerToast();
   const onForbidden = useOnForbidden();
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
@@ -503,7 +505,8 @@ function Controls({
   };
 
   // The optimistic pill, its #1727-safe rollback and the settle refetch live
-  // in useLifecycleMutation, shared with the dashboard rows (issue #3146).
+  // in useLifecycleMutation, shared with the dashboard rows (issue #3146). Its
+  // toasts name the server, as the dashboard's do (#3862).
   const lifecycle = useLifecycleMutation({
     communityId,
     serverId: server.id,
@@ -513,14 +516,14 @@ function Controls({
       serversKey(communityId),
     ],
     onError: (error, action) => {
-      if (onForbidden(error)) {
+      if (onForbidden(error, server)) {
         return;
       }
       if (isEulaNotAccepted(error)) {
         setEulaOpen(true);
         return;
       }
-      showToast(t(lifecycleErrorMessage(error, action)), "error");
+      showServerToast(server, t(lifecycleErrorMessage(error, action)), "error");
     },
   });
 
