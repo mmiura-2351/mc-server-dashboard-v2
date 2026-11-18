@@ -24,10 +24,16 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -62,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId
@@ -188,16 +195,19 @@ async def _publish(
     await storage.commit_snapshot(handle, expected_base=base)
 
 
-# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(20 * 10 + 30)
-@pytest.mark.parametrize(
-    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
-)
-async def test_server_delete_between_a_restore_copy_and_its_flip_is_refused(
-    engine: AsyncEngine,
-    tmp_path: Path,
-    make_storage: Callable[[Path, _Hold], Storage],
-) -> None:
+@dataclass
+class _Case:
+    """A server with a backup of ``BACKED_UP`` and ``LIVE`` published over it."""
+
+    server: Server
+    storage: Storage
+    scope: tuple[StorageCommunityId, StorageServerId]
+    backup_id: BackupId
+    backup_store: StorageBackupStoreAdapter
+    factory: async_sessionmaker[AsyncSession]
+
+
+async def _arrange(engine: AsyncEngine, storage: Storage) -> _Case:
     factory = create_session_factory(engine)
     community = Community(
         id=CommunityCommunityId(uuid.uuid4()),
@@ -222,8 +232,6 @@ async def test_server_delete_between_a_restore_copy_and_its_flip_is_refused(
         server_type="vanilla",
         config={},
     )
-    hold = _Hold()
-    storage = make_storage(tmp_path, hold)
     scope = (StorageCommunityId(community.id.value), StorageServerId(server.id.value))
     await _publish(storage, *scope, BACKED_UP)
     key = await storage.create_backup_from_current(*scope)
@@ -243,29 +251,65 @@ async def test_server_delete_between_a_restore_copy_and_its_flip_is_refused(
             )
         )
         await uow.commit()
-    backup_store = StorageBackupStoreAdapter(storage=storage)
+    return _Case(
+        server=server,
+        storage=storage,
+        scope=scope,
+        backup_id=backup_id,
+        backup_store=StorageBackupStoreAdapter(storage=storage),
+        factory=factory,
+    )
+
+
+def _restore(case: _Case, lock: PgLifecycleLock) -> RestoreBackup:
+    return RestoreBackup(
+        uow=ServersUnitOfWork(case.factory),
+        backup_store=case.backup_store,
+        lifecycle_lock=lock,
+    )
+
+
+def _delete(case: _Case, lock: PgLifecycleLock) -> DeleteServer:
+    return DeleteServer(
+        uow=ServersUnitOfWork(case.factory),
+        backup_store=case.backup_store,
+        lifecycle_lock=lock,
+    )
+
+
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+async def test_server_delete_between_a_restore_copy_and_its_flip_is_refused(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    make_storage: Callable[[Path, _Hold], Storage],
+) -> None:
+    hold = _Hold()
+    case = await _arrange(engine, make_storage(tmp_path, hold))
+    server = case.server
     lock = PgLifecycleLock(engine=engine)
 
     hold.armed = True
     restore = asyncio.create_task(
-        RestoreBackup(
-            uow=ServersUnitOfWork(factory),
-            backup_store=backup_store,
-            lifecycle_lock=lock,
-        )(community_id=server.community_id, server_id=server.id, backup_id=backup_id)
+        _restore(case, lock)(
+            community_id=server.community_id,
+            server_id=server.id,
+            backup_id=case.backup_id,
+        )
     )
     await hold.reached.wait()
     try:
         with pytest.raises(ServerBusyError):
-            await DeleteServer(
-                uow=ServersUnitOfWork(factory),
-                backup_store=backup_store,
-                lifecycle_lock=lock,
-            )(community_id=server.community_id, server_id=server.id)
+            await _delete(case, lock)(
+                community_id=server.community_id, server_id=server.id
+            )
     finally:
         hold.resume.set()
         await asyncio.wait({restore})
 
     assert restore.result() == RestoreResult(forced_corrupt=False, corrupt_count=0)
-    hydrated = read_tar(await drain(storage.open_hydrate_source(*scope)))
+    hydrated = read_tar(await drain(case.storage.open_hydrate_source(*case.scope)))
     assert hydrated == BACKED_UP
