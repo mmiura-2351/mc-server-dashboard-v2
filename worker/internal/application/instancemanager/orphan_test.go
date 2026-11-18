@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +19,9 @@ import (
 // orphanInstance is a fakeInstance whose Stop fails until stopAfter calls have
 // been made, modelling the #211 case where a driver Stop cannot confirm
 // termination (process/container survives Kill) until a later retry succeeds.
+// With neverConfirms every Stop fails, however many are made: a finite
+// stopAfter is not "always", since a test that polls StopServer can spend it
+// (issue #3714).
 //
 // It faithfully models the real drivers' stopping-latch contract (issue #253):
 // Stop latches `stopping` on entry and, if already latched (terminal or a
@@ -30,9 +32,10 @@ import (
 // model the manager suite could not have caught the bug.
 type orphanInstance struct {
 	*fakeInstance
-	stopAfter int // number of leading Stop calls that fail
-	stopCalls int
-	stopping  bool
+	stopAfter     int  // number of leading Stop calls that fail
+	neverConfirms bool // every Stop call fails
+	stopCalls     int
+	stopping      bool
 }
 
 func (i *orphanInstance) Stop(ctx context.Context, graceful bool, preFallback ...func(context.Context) bool) error {
@@ -44,7 +47,7 @@ func (i *orphanInstance) Stop(ctx context.Context, graceful bool, preFallback ..
 	}
 	i.stopping = true
 	i.stopCalls++
-	fail := i.stopCalls <= i.stopAfter
+	fail := i.neverConfirms || i.stopCalls <= i.stopAfter
 	i.mu.Unlock()
 	if fail {
 		// Survived-kill failure path: reset the latch so a retry re-attempts.
@@ -66,12 +69,13 @@ func (i *orphanInstance) stopCount() int {
 // orphanDriver hands out a single orphanInstance with a configurable failing
 // Stop, so tests can drive the failed-stop -> retry path.
 type orphanDriver struct {
-	inst      *orphanInstance
-	stopAfter int
+	inst          *orphanInstance
+	stopAfter     int
+	neverConfirms bool
 }
 
 func (d *orphanDriver) Start(_ context.Context, spec execution.InstanceSpec) (execution.Instance, error) {
-	d.inst = &orphanInstance{fakeInstance: newFakeInstance(spec.ServerID), stopAfter: d.stopAfter}
+	d.inst = &orphanInstance{fakeInstance: newFakeInstance(spec.ServerID), stopAfter: d.stopAfter, neverConfirms: d.neverConfirms}
 	return d.inst, nil
 }
 
@@ -202,7 +206,7 @@ func TestTakeOrphanReserveRefusesAnInstanceThatIsNoLongerTheOrphan(t *testing.T)
 // trying to terminate. Before this the tunnel was closed only on a CONFIRMED
 // stop, so a failed stop left it open indefinitely (issue #2468 item 2).
 func TestFailedStopClosesBedrockTunnel(t *testing.T) {
-	d := &orphanDriver{stopAfter: 1000} // never confirms: only the failure path runs
+	d := &orphanDriver{neverConfirms: true} // only the failure path runs
 	bt := &fakeBedrockTunneler{}
 	m := newManager(t, d, nil).WithBedrockTunneler(bt)
 	shrinkOrphanConverger(m)
@@ -250,7 +254,7 @@ func retireOrphan(t *testing.T, m *Manager, inst *fakeInstance) {
 // (issue #2475). The report is level-triggered — one event per transition into
 // the state, not one per probe.
 func TestUnknownEmittedWhileDaemonUnreachable(t *testing.T) {
-	d := &orphanDriver{stopAfter: 1000}
+	d := &orphanDriver{neverConfirms: true}
 	m := newManager(t, d, nil)
 	shrinkOrphanConverger(m)
 	seedScratch(t, m, s1)
@@ -630,53 +634,47 @@ func TestFailedStopLogsOrphanRecord(t *testing.T) {
 func TestOrphanClearedWhenInstanceExitsOnItsOwn(t *testing.T) {
 	// Every retry stop keeps failing (the driver cannot confirm termination); only
 	// the instance exiting on its own clears the orphan, via the pump.
-	d := &orphanDriver{stopAfter: 1000}
+	d := &orphanDriver{neverConfirms: true}
 	m := newManager(t, d, nil)
 	seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
 	_ = m.Handle(context.Background(), session.Command{CommandID: "stop1", ServerID: s1, Kind: "StopServer"})
 
-	// The lingering process finally dies: the instance emits a terminal event and
-	// closes its channel, which the pump observes.
-	d.inst.events <- execution.StatusEvent{ServerID: s1, State: execution.StateStopped}
-	close(d.inst.events)
+	// The lingering process finally dies: the instance records and emits its
+	// terminal and closes its channel, which the pump observes.
+	exitOnItsOwn(d.inst.fakeInstance, true)
 
-	// Anchor on the pump's own progress rather than a fixed sleep: the pump
-	// forwards the terminal stopped status onto the merged stream as the last
-	// action of its event loop, then the loop exits and the deferred
-	// forgetOrphanIf clears the orphan (issue #253). Draining that terminal event
-	// off m.Events() deterministically advances the pump past its final send, so
-	// the remaining window before the orphan is cleared is only the deferred call
-	// scheduling — collapsing the old dependency on a fixed deadline that an
-	// overloaded -race runner could exceed (issue #330).
-	overall := time.After(2 * time.Second)
-drain:
-	for {
-		select {
-		case ev := <-m.Events():
-			if ev.ServerID == s1 && ev.State == execution.StateStopped.String() {
-				break drain
-			}
-		case <-overall:
-			t.Fatal("pump did not forward the terminal stopped status")
-		}
+	// Watch the record instead of polling StopServer for it: a poll is itself a
+	// retry stop. One in flight when the pump retires the record fails and records
+	// it again, and nothing here retires it after that, the converger keeping its
+	// production cadence (issue #2468 item 4). The polls then spent a finite
+	// stopAfter, and the first stop past it ended the instance a second time, on
+	// its closed stream (issue #3714).
+	waitFor(t, func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		_, ok := m.orphans[s1]
+		return !ok
+	})
+	res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
+	if res.ErrorCode != session.CommandErrorServerNotFound {
+		t.Fatalf("stop after the orphan exited = %+v, want SERVER_NOT_FOUND", res)
 	}
+}
 
-	// Event-driven fast path with a generous overall deadline: poll the observable
-	// (the orphan is cleared once a stop for the id is SERVER_NOT_FOUND), which
-	// converges within microseconds of the drain above once the deferred
-	// forgetOrphanIf runs.
-	for {
-		res := m.Handle(context.Background(), session.Command{CommandID: "stop2", ServerID: s1, Kind: "StopServer"})
-		if res.ErrorCode == session.CommandErrorServerNotFound {
-			break
-		}
-		select {
-		case <-overall:
-			t.Fatalf("orphan not cleared after instance exit; last = %+v", res)
-		default:
-		}
-		runtime.Gosched()
+// An orphan that exits on its own records its terminal before it closes its
+// stream, as a driver's instance does (exitOnItsOwn). A retry Stop that confirms
+// after that is then the documented no-op, not a send on the closed stream
+// (issue #3714).
+func TestOrphanInstanceTakesALateStopAfterItsExitAsANoOp(t *testing.T) {
+	inst := &orphanInstance{fakeInstance: newFakeInstance(s1), stopAfter: 1}
+	if err := inst.Stop(context.Background(), true); err == nil {
+		t.Fatal("stop #1 = nil, want the survived-kill failure")
+	}
+	exitOnItsOwn(inst.fakeInstance, true)
+
+	if err := inst.Stop(context.Background(), true); err != nil {
+		t.Fatalf("late Stop = %v, want nil: the instance already ended", err)
 	}
 }
 

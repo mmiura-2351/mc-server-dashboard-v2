@@ -705,8 +705,16 @@ async def upload_file(
     are ``invalid_archive`` too: a header past the first that does not read, no
     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
     that does not match, and bytes after the gzip stream that are neither
-    another gzip member nor zero padding. The zeros past the marker count toward
-    the extracted-size cap.
+    another gzip member nor zero padding. So are a sparse member whose map
+    reaches past its stored data, which would make the reader seek back, and a
+    chain of extended headers too long for the reader (issue #3810). So is a
+    walk over the header limits, whose ``detail`` names the limit: more than
+    1 MiB of headers before a member, extended headers included, or members that
+    hold more than 32 PAX records each, global ones included, or more than 8 Mi
+    characters of names, link names and PAX records in all (issue #3810).
+    Every byte a tar.gz decompresses counts toward the extracted-size cap,
+    headers, extended-header data and skipped member data included (issue
+    #3810).
 
     **Platform-managed keys (issue #2809).** An upload landing on the root
     ``server.properties`` — directly, or as an archive member — may not change
@@ -751,7 +759,12 @@ async def upload_file(
     except UnreadableArchiveError as exc:
         # The archive reader failed on the body's own bytes (issue #3769): the
         # reason a backup upload gives a body that does not read as its archive.
-        raise _unprocessable("invalid_archive") from exc
+        # A named refusal rides as the ``detail``, as there (issue #3810).
+        raise problem(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "invalid_archive",
+            extensions=None if exc.refusal is None else {"detail": exc.refusal},
+        ) from exc
     except PlatformManagedKeyError as exc:
         raise _platform_managed_key(exc) from exc
     except FileTooLargeError as exc:

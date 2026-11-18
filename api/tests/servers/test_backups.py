@@ -24,6 +24,7 @@ import io
 import tarfile
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import pytest
@@ -74,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.servers import archive_cap_shapes
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
@@ -1250,6 +1252,102 @@ def test_validate_accepts_safe_archive_within_caps() -> None:
     # cap covers the zeros past the end-of-archive marker too (issue #3778), and
     # ``tarfile`` pads its archive to a 10 KiB record.
     _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=10 * 1024)
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_CAP)
+def test_validate_counts_what_tarfile_reads_outside_member_data(
+    build: Callable[[], bytes],
+) -> None:
+    # Skipped sparse data, PAX data and a GNU long name are decompressed as much
+    # as member data is, so they count toward the same cap (issue #3810).
+    with pytest.raises(InvalidBackupArchiveError, match="exceeds cap"):
+        _validate_backup_archive(
+            build(), max_entries=10, max_decompressed_bytes=archive_cap_shapes.CAP
+        )
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_THE_BUDGET)
+def test_validate_refuses_extended_headers_over_the_budget(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile holds an extended header's data whole, so what the walk reads
+    # between two members is bounded (issue #3810). The cap is the production
+    # one: only that bound can refuse this archive.
+    with pytest.raises(InvalidBackupArchiveError) as refused:
+        _validate_backup_archive(build(), max_entries=10)
+    assert str(refused.value) == archive_cap_shapes.OVER_THE_BUDGET_DETAIL
+
+
+@pytest.mark.parametrize(("build", "detail"), archive_cap_shapes.OVER_WHAT_MEMBERS_HOLD)
+def test_validate_refuses_members_that_hold_too_much(
+    build: Callable[[], bytes], detail: str
+) -> None:
+    # tarfile keeps every member, with its names and a copy of the global PAX
+    # records, so what they hold is bounded (issue #3810). The cap is the
+    # production one: only that bound can refuse this archive.
+    with pytest.raises(InvalidBackupArchiveError) as refused:
+        _validate_backup_archive(build(), max_entries=10_000)
+    assert str(refused.value) == detail
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.EXTENDED_HEADER_CHAINS)
+def test_validate_refuses_a_chain_of_extended_headers(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile recurses once per extended header, so a long chain of them raised
+    # RecursionError, a 500 (issue #3810).
+    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar"):
+        _validate_backup_archive(build(), max_entries=10)
+
+
+@pytest.mark.parametrize("slack", [0, -1], ids=["at-the-cap", "one-byte-under"])
+def test_validate_holds_an_archive_to_its_cap_to_the_byte(slack: int) -> None:
+    # The cap is the stream's own length: header, data and padding.
+    content = _targz({"a.txt": b"A"})
+    cap = len(gzip.decompress(content)) + slack
+
+    if slack:
+        with pytest.raises(InvalidBackupArchiveError, match="exceeds cap"):
+            _validate_backup_archive(
+                content, max_entries=10, max_decompressed_bytes=cap
+            )
+    else:
+        _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=cap)
+
+
+def test_validate_counts_a_sparse_members_holes_toward_the_cap() -> None:
+    # An old-GNU sparse member stores 512 bytes and declares a real size of 8 MiB.
+    # Restore writes the holes too, so they count though nothing decompresses them.
+    header = archive_cap_shapes.old_gnu_sparse_header(
+        "sparse.bin",
+        stored=512,
+        regions=((0, 512),),
+        realsize=8 * archive_cap_shapes.MIB,
+    )
+
+    with pytest.raises(InvalidBackupArchiveError, match="exceeds cap"):
+        _validate_backup_archive(
+            gzip.compress(header + bytes(512) + bytes(1024)),
+            max_entries=10,
+            max_decompressed_bytes=archive_cap_shapes.MIB,
+        )
+
+
+def test_validate_refuses_an_archive_that_seeks_back() -> None:
+    # A seek back would decompress the stream again from its start, once per
+    # sparse member here, so it is refused (issues #3798, #3810). The cap is the
+    # production one. The refusal is EndCheckedReader's: a walk that read on
+    # from where it did not seek back would be refused too, later.
+    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar") as refused:
+        _validate_backup_archive(
+            archive_cap_shapes.sparse_maps_past_stored_data(), max_entries=10_000
+        )
+    assert str(refused.value.__cause__) == "a member's data runs past the member"
+
+
+def test_validate_counts_directory_members_toward_the_entry_cap() -> None:
+    with pytest.raises(InvalidBackupArchiveError, match="too many entries"):
+        _validate_backup_archive(archive_cap_shapes.directories(5), max_entries=5)
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------
