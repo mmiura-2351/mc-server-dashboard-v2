@@ -585,6 +585,55 @@ describe("Toast focus when the focused toast goes", () => {
     act(() => main.blur());
     expect(main).not.toHaveAttribute("tabindex");
   });
+
+  it("keeps where it came from across a blur to nothing", () => {
+    renderToasts(<button type="button">Page</button>);
+    show("Failed", "error");
+    const page = screen.getByRole("button", { name: "Page" });
+    const close = dismissButton("Failed");
+
+    act(() => page.focus());
+    act(() => close.focus());
+    // As when the window loses focus and gets it back.
+    act(() => close.blur());
+    act(() => close.focus());
+    fireEvent.click(close);
+
+    expect(document.activeElement).toBe(page);
+  });
+
+  it("forgets where it came from once it has left the stack for another element", () => {
+    renderToasts(
+      <main>
+        <button type="button">Page 1</button>
+        <button type="button">Page 2</button>
+      </main>,
+    );
+    show("Failed", "error");
+    const close = dismissButton("Failed");
+
+    act(() => screen.getByRole("button", { name: "Page 1" }).focus());
+    act(() => close.focus());
+    act(() => screen.getByRole("button", { name: "Page 2" }).focus());
+    // Back from nothing, as after a click on the page.
+    act(() => (document.activeElement as HTMLElement).blur());
+    act(() => close.focus());
+    fireEvent.click(close);
+
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
+
+  it("is left alone when the toast that goes does not hold it", () => {
+    renderToasts(<button type="button">Page</button>);
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+    const page = screen.getByRole("button", { name: "Page" });
+
+    act(() => page.focus());
+    fireEvent.click(dismissButton("Failed 1"));
+
+    expect(document.activeElement).toBe(page);
+  });
 });
 
 describe("Toasts over an open modal", () => {
