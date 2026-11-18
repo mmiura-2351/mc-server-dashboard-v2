@@ -19,6 +19,7 @@ from mc_server_dashboard_api.identity.domain.entities import RefreshToken
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     PasswordPolicyError,
+    PasswordVerificationUnavailableError,
 )
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
 from mc_server_dashboard_api.identity.domain.value_objects import (
@@ -162,4 +163,33 @@ async def test_change_password_refuses_when_the_hash_changed_after_the_verify() 
         await use_case(user_id=user.id, current_password=_CURRENT, new_password=_NEW)
 
     assert uow.users.by_id[user.id].password_hash == "concurrent"
+    assert uow.commits == 0
+
+
+class _HashingFails(StubHasher):
+    """Verifies as usual, then fails to hash the new password (#3762)."""
+
+    async def hash(self, plaintext: str) -> str:
+        raise PasswordVerificationUnavailableError
+
+
+async def test_change_password_hasher_failure_changes_nothing() -> None:
+    # The new password could not be hashed (the hasher itself failed): the error
+    # reaches the route for its 503, and neither the password nor the sessions
+    # change.
+    user = make_user(password=_CURRENT, now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    uow.refresh_tokens.seed(_active_token(user.id, suffix="a"))
+    use_case = ChangePassword(
+        uow=uow, hasher=_HashingFails(), clock=FakeClock(_NOW), policy=_policy()
+    )
+
+    with pytest.raises(PasswordVerificationUnavailableError):
+        await use_case(user_id=user.id, current_password=_CURRENT, new_password=_NEW)
+
+    assert uow.users.by_id[user.id].password_hash == f"hashed::{_CURRENT}"
+    assert all(
+        token.revoked_at is None for token in uow.refresh_tokens.by_hash.values()
+    )
     assert uow.commits == 0

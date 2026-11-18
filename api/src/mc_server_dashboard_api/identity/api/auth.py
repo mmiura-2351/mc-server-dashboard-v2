@@ -49,6 +49,7 @@ from mc_server_dashboard_api.dependencies import (
 )
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.api.problems import password_hasher_unavailable
 from mc_server_dashboard_api.identity.application.login import Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
@@ -161,9 +162,7 @@ async def login(
     except PasswordVerificationUnavailableError as exc:
         # The password was never judged (the hasher itself failed, #3749): a
         # transient server failure, not a denied login.
-        raise problem(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "password_verification_unavailable"
-        ) from exc
+        raise password_hasher_unavailable() from exc
     await recorder.record(
         AuditEvent(
             operation=ops.AUTH_LOGIN,
