@@ -571,10 +571,10 @@ class StorageSweepSettings(_Section):
     plus orphan in-progress multipart aborts (STORAGE.md Section 4.3). It ran
     only once at startup; on an interval it bounds accumulation without a
     restart. ``interval_seconds`` is how often the loop wakes to sweep; a daily
-    default matches the sibling GC loops and keeps the loop cold, so overlap
-    with a live publish stays rare. Runs for both backends unconditionally. The
-    resource-pack GC (issue #3277) runs on the same interval, on the object
-    backend only.
+    default matches the sibling GC loops. A pass that overlaps a live publish
+    keeps the snapshot it is still filling (issue #3893). Runs for both backends
+    unconditionally. The resource-pack GC (issue #3277) runs on the same
+    interval, on the object backend only.
     """
 
     interval_seconds: int = Field(default=86400, gt=0)

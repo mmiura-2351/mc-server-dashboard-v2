@@ -1545,10 +1545,9 @@ async def test_commit_pruned_store_error_identifies_concurrent_delete(
     # re-check, as a concurrent delete can.
     real_copy = storage._copy_into_snapshot
 
-    async def _copy_then_prune(*args: Any, **kwargs: Any) -> str:
-        new_prefix = await real_copy(*args, **kwargs)
+    async def _copy_then_prune(*args: Any, **kwargs: Any) -> None:
+        await real_copy(*args, **kwargs)
         await storage.prune_to_final_snapshot(community, server)
-        return new_prefix
 
     monkeypatch.setattr(storage, "_copy_into_snapshot", _copy_then_prune)
 

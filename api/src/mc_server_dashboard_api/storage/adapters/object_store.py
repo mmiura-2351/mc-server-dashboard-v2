@@ -75,6 +75,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.fs import (
+    _INFLIGHT_MARKER_TTL_S,
     _acquire_off_loop,
     _close_abandoned,
     _close_off_loop,
@@ -180,6 +181,12 @@ _REPROBE_BACKOFF_S = 1.0
 # pointer write failed (issue #3564), and the first pause between them (doubled).
 _FLIP_CONFIRM_ATTEMPTS = 3
 _FLIP_CONFIRM_BACKOFF_S = 0.05
+# The key prefix, under a server's, of the marker a publish writes before it
+# copies into a fresh ``snapshots/<id>/`` (issue #3893), and how often the copy
+# renews it: well within ``_INFLIGHT_MARKER_TTL_S``, the age at which the sweep of
+# another process stops honouring it.
+_INFLIGHT = "inflight/"
+_INFLIGHT_MARKER_RENEW_S = 600
 
 if TYPE_CHECKING:
     from mc_server_dashboard_api.storage.adapters.ownership import (
@@ -430,6 +437,12 @@ class ObjectStorage(Storage):
         # fresh process's sweep still reclaims it. Guarded by ``_lease_lock``
         # alongside the reader leases.
         self._active_staging: set[str] = set()
+        # In-flight publishes (issue #3893): the ``snapshots/<id>/`` prefix a
+        # publish copies into is held here from before its first copy until its
+        # pointer flip, so this process's sweep keeps it however long the copy
+        # runs. Another process reads the prefix's in-flight marker instead.
+        # Guarded by ``_lease_lock``.
+        self._publishing: set[str] = set()
         self._lease_lock = threading.Lock()
         # Per-server publish/edit serialization (issue #899). Every authoritative
         # mutation of ``current/`` and its generation marker — a snapshot commit, a
@@ -544,6 +557,20 @@ class ObjectStorage(Storage):
     def _is_staging_active(self, incoming_prefix: str) -> bool:
         with self._lease_lock:
             return incoming_prefix in self._active_staging
+
+    # --- in-flight publishes (issue #3893) ---------------------------------
+
+    def _register_publish(self, snapshot_prefix: str) -> None:
+        with self._lease_lock:
+            self._publishing.add(snapshot_prefix)
+
+    def _release_publish(self, snapshot_prefix: str) -> None:
+        with self._lease_lock:
+            self._publishing.discard(snapshot_prefix)
+
+    def _is_publishing(self, snapshot_prefix: str) -> bool:
+        with self._lease_lock:
+            return snapshot_prefix in self._publishing
 
     # --- pointer object (the publish pointer, Section 4.2) -----------------
 
@@ -682,17 +709,24 @@ class ObjectStorage(Storage):
         prefix an active hydrate reader still leases is skipped and reclaimed by a
         later sweep once the reader releases (Section 4.2 reader safety).
 
-        Sweep-vs-flip race (issue #113): a concurrent publish whose new-prefix
-        objects were already in the listing but whose pointer flip lands after the
-        per-server pointer read would otherwise see the just-made-live prefix as an
-        orphan and delete it. The guard below re-reads the pointer immediately
-        before deleting each candidate snapshot prefix and skips it if the pointer
-        now names it. This narrows the window to the gap between that re-read and
-        the delete; it does not eliminate it, so the sweep remains safest run when
-        no publisher is concurrent. It runs at API startup and then on a periodic
-        loop (``storage_sweep.interval_seconds``, daily by default — issue #2252);
-        the daily cadence keeps the loop cold so overlap with a live publish stays
-        rare, which is the accepted concurrency posture (Section 9.5).
+        In-flight publish (issues #113, #3893): a snapshot commit, a backup restore
+        and a first file write copy into a fresh ``snapshots/<id>/`` prefix before
+        they flip the pointer onto it, and the copy can take minutes. Until the
+        flip no pointer names that prefix. The publish registers it before the
+        first copy and releases it only after the flip: in memory for this process,
+        and as an ``inflight/<id>`` marker object for any other. The sweep
+        decides once per candidate prefix, at that moment rather than from the
+        listing. It reads the registration first, then the pointer, so a prefix it
+        finds unregistered was either flipped already, which the pointer read then
+        shows, or abandoned. A candidate that is registered, live or reader-leased
+        is kept. The sweep runs at API startup and then on a periodic loop
+        (``storage_sweep.interval_seconds``, daily by default — issue #2252); a
+        pass that overlaps a publish keeps the prefix that publish is filling.
+
+        Abandoned markers (issue #3893): the copy renews its marker every
+        ``_INFLIGHT_MARKER_RENEW_S``. A marker older than
+        ``_INFLIGHT_MARKER_TTL_S`` is one whose process died; it no longer pins its
+        prefix, which is reclaimed, and is deleted after it.
 
         In-flight staging (issue #160): a transfer staged but not yet committed has
         no live pointer to re-read against, so it is pinned instead by an in-process
@@ -771,6 +805,7 @@ class ObjectStorage(Storage):
         # first object encountered under a prefix re-reads the pointer and caches
         # whether to delete that whole prefix.
         delete_prefix: dict[str, bool] = {}
+        markers: list[str] = []
         for key in keys:
             rest = key[len(server_prefix) :]
             if rest.startswith("incoming/"):
@@ -780,20 +815,35 @@ class ObjectStorage(Storage):
                 incoming_prefix = server_prefix + "/".join(rest.split("/")[:2]) + "/"
                 if not self._is_staging_active(incoming_prefix):
                     await client.delete_object(key)
+            elif rest.startswith(_INFLIGHT):
+                markers.append(key)
             elif rest.startswith("snapshots/"):
                 snap_prefix = server_prefix + "/".join(rest.split("/")[:2]) + "/"
                 if snap_prefix not in delete_prefix:
-                    # Re-read the pointer immediately before the first delete under
-                    # this prefix: a concurrent publish may have flipped it onto the
-                    # candidate after the listing was taken (issue #113), in which
-                    # case the prefix is live now and must be kept. A leased
-                    # superseded prefix is likewise kept (Section 4.2).
-                    live = await self._read_pointer(client, server_prefix)
-                    delete_prefix[snap_prefix] = (
-                        snap_prefix != live and not self._is_leased(snap_prefix)
+                    # Decide immediately before the first delete under this prefix.
+                    # A prefix a hydrate reader leases (Section 4.2) or a publish
+                    # still fills (issue #3893) is kept. Then re-read the pointer: a
+                    # concurrent publish may have flipped it onto the candidate
+                    # after the listing was taken (issue #113). The publish is
+                    # checked first because it is released only after its flip.
+                    kept = (
+                        self._is_leased(snap_prefix)
+                        or self._is_publishing(snap_prefix)
+                        or await _is_fresh_marker(client, _inflight_marker(snap_prefix))
+                    )
+                    delete_prefix[snap_prefix] = not kept and (
+                        snap_prefix != await self._read_pointer(client, server_prefix)
                     )
                 if delete_prefix[snap_prefix]:
                     await client.delete_object(key)
+        # The markers of publishes whose process died (issue #3893), each after the
+        # prefix it no longer pins.
+        for marker in markers:
+            snap_prefix = server_prefix + "snapshots/" + marker.rsplit("/", 1)[1] + "/"
+            if not self._is_publishing(snap_prefix) and not await _is_fresh_marker(
+                client, marker
+            ):
+                await client.delete_object(marker)
 
     # --- working-set hydrate / snapshot (Section 3.1) ----------------------
 
@@ -939,7 +989,12 @@ class ObjectStorage(Storage):
             raise SnapshotHandleError("snapshot handle already committed or aborted")
         incoming = self._incoming_prefix(h.community_id, h.server_id, h.transfer_id)
         server_prefix = self._server_prefix(h.community_id, h.server_id)
-        async with self._client_factory() as client:
+        async with (
+            self._client_factory() as client,
+            self._publishing_snapshot(
+                client, h.community_id, h.server_id
+            ) as new_prefix,
+        ):
             staged = await client.list_objects(incoming)
             if not staged:
                 # A concurrent delete's prune deletes ``incoming/`` with the rest of
@@ -978,9 +1033,7 @@ class ObjectStorage(Storage):
             async with self._refusing_pruned_staging(
                 client, h, incoming, expected_base
             ):
-                new_prefix = await self._copy_into_snapshot(
-                    client, h.community_id, h.server_id, incoming, staged
-                )
+                await self._copy_into_snapshot(client, new_prefix, incoming, staged)
             # Take the server lock (issue #899) for the stale re-check, the
             # missing-region prior read, the pointer flip, and the generation bump —
             # the same lock an in-place edit takes for its mutate+bump. Holding it
@@ -1304,20 +1357,52 @@ class ObjectStorage(Storage):
                 corrupt.append(finding)
         return WorkingSetReport(scanned=scanned, corrupt=corrupt)
 
+    @asynccontextmanager
+    async def _publishing_snapshot(
+        self, client: S3Client, community_id: CommunityId, server_id: ServerId
+    ) -> AsyncIterator[str]:
+        """Mint a fresh snapshot prefix and keep it registered until exit.
+
+        The sweep keeps a registered prefix (issue #3893), so a publish holds this
+        across its copy and its pointer flip. This process's registration is in
+        memory and holds however long the publish runs; :meth:`_copy_into_snapshot`
+        writes the marker any other process reads. Exit releases both. A marker
+        that cannot be deleted is logged rather than raised over the publish's
+        outcome, and expires.
+        """
+
+        new_prefix = self._snapshot_prefix(
+            community_id, server_id, SnapshotId.new().value
+        )
+        self._register_publish(new_prefix)
+        try:
+            yield new_prefix
+        finally:
+            self._release_publish(new_prefix)
+            try:
+                await client.delete_object(_inflight_marker(new_prefix))
+            except Exception:
+                _LOG.warning(
+                    "removing the in-flight marker of %s failed; it expires",
+                    new_prefix,
+                    exc_info=True,
+                )
+
     async def _copy_into_snapshot(
         self,
         client: S3Client,
-        community_id: CommunityId,
-        server_id: ServerId,
+        new_prefix: str,
         staged_prefix: str,
         staged: list[S3Object],
-    ) -> str:
-        """Materialize the staged objects under a fresh ``snapshots/<id>/`` prefix.
+    ) -> None:
+        """Materialize the staged objects under ``new_prefix``.
 
         The bulk copy (minutes for a big world) touches NOTHING live -- it only
         writes a new, not-yet-pointed-at prefix -- so it runs BEFORE the per-server
-        lock (issue #920) to keep the lock's critical section short. Returns the new
-        snapshot prefix for :meth:`_flip_pointer`.
+        lock (issue #920) to keep the lock's critical section short. ``new_prefix``
+        comes from :meth:`_publishing_snapshot`. The copy writes the prefix's
+        in-flight marker before its first object and renews it every
+        ``_INFLIGHT_MARKER_RENEW_S`` (issue #3893).
 
         A failed copy removes what it already copied before the error propagates:
         a concurrent prune can delete ``snapshots/`` before an in-flight copy lands
@@ -1328,10 +1413,14 @@ class ObjectStorage(Storage):
 
         self._seam.reach(PublishPhase.AFTER_STAGE)
 
-        snapshot_id = SnapshotId.new()
-        new_prefix = self._snapshot_prefix(community_id, server_id, snapshot_id.value)
+        marker = _inflight_marker(new_prefix)
         try:
+            await client.put_object(marker, b"")
+            renewed = time.monotonic()
             for obj in staged:
+                if time.monotonic() - renewed >= _INFLIGHT_MARKER_RENEW_S:
+                    await client.put_object(marker, b"")
+                    renewed = time.monotonic()
                 rest = obj.key[len(staged_prefix) :]
                 await client.copy_object(obj.key, new_prefix + rest)
         except Exception:
@@ -1347,7 +1436,6 @@ class ObjectStorage(Storage):
             raise
 
         self._seam.reach(PublishPhase.AFTER_MOVE)
-        return new_prefix
 
     async def _flip_pointer(
         self,
@@ -1592,7 +1680,12 @@ class ObjectStorage(Storage):
         # the same active-staging lease for the life of the operation (issue #160).
         self._register_staging(incoming)
         try:
-            async with self._client_factory() as client:
+            async with (
+                self._client_factory() as client,
+                self._publishing_snapshot(
+                    client, community_id, server_id
+                ) as new_prefix,
+            ):
                 declared = await client.head_object(backup_key)
                 if declared is None:
                     raise NotFoundError(f"backup not found: {key.value}")
@@ -1656,9 +1749,7 @@ class ObjectStorage(Storage):
                     # BEFORE the lock (issue #920): the copy touches nothing live, so
                     # it must not hold the per-server lock and block edits for its
                     # duration.
-                    new_prefix = await self._copy_into_snapshot(
-                        client, community_id, server_id, incoming, staged
-                    )
+                    await self._copy_into_snapshot(client, new_prefix, incoming, staged)
                     # Bump + flip under the server lock (issue #899), serializing with
                     # a concurrent snapshot commit's generation re-check so the restore
                     # cannot interleave with the commit's pointer flip.
@@ -2173,23 +2264,24 @@ class ObjectStorage(Storage):
         incoming = self._incoming_prefix(community_id, server_id, uuid.uuid4().hex)
         self._register_staging(incoming)
         try:
-            await client.put_object(incoming + sub, data)
-            staged = await client.list_objects(incoming)
-            new_prefix = await self._copy_into_snapshot(
-                client, community_id, server_id, incoming, staged
-            )
-            old_prefix = await self._flip_pointer(
-                client, community_id, server_id, new_prefix
-            )
-            # The first published version of a never-snapshotted server is still an
-            # authoritative edit (issue #889): bump past generation 0 and stamp the
-            # API_EDIT_PUBLISHER sentinel so the same staleness reasoning applies.
-            await self._bump_generation(
-                client,
-                self._server_prefix(community_id, server_id),
-                API_EDIT_PUBLISHER,
-            )
-            await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
+            async with self._publishing_snapshot(
+                client, community_id, server_id
+            ) as new_prefix:
+                await client.put_object(incoming + sub, data)
+                staged = await client.list_objects(incoming)
+                await self._copy_into_snapshot(client, new_prefix, incoming, staged)
+                old_prefix = await self._flip_pointer(
+                    client, community_id, server_id, new_prefix
+                )
+                # The first published version of a never-snapshotted server is still an
+                # authoritative edit (issue #889): bump past generation 0 and stamp the
+                # API_EDIT_PUBLISHER sentinel so the same staleness reasoning applies.
+                await self._bump_generation(
+                    client,
+                    self._server_prefix(community_id, server_id),
+                    API_EDIT_PUBLISHER,
+                )
+                await self._gc_after_flip(client, incoming, old_prefix, new_prefix)
         except BaseException:
             await _delete_prefix(client, incoming)
             raise
@@ -2521,6 +2613,28 @@ def _group_by_server(objs: list[S3Object]) -> dict[str, list[str]]:
         server_prefix = "/".join(parts[:4]) + "/"
         groups.setdefault(server_prefix, []).append(obj.key)
     return groups
+
+
+def _inflight_marker(snapshot_prefix: str) -> str:
+    """The in-flight marker key of a ``snapshots/<id>/`` prefix (issue #3893)."""
+
+    server_prefix, _, snapshot = snapshot_prefix.rpartition("snapshots/")
+    return server_prefix + _INFLIGHT + snapshot.rstrip("/")
+
+
+async def _is_fresh_marker(client: S3Client, marker: str) -> bool:
+    """True if ``marker`` exists and was renewed within its TTL (issue #3893).
+
+    The age is the store's own write time, read fresh, against this clock, as the
+    multipart sweep reads ``Initiated``.
+    """
+
+    now = dt.datetime.now(dt.UTC)
+    return any(
+        obj.key == marker
+        and (now - obj.last_modified).total_seconds() < _INFLIGHT_MARKER_TTL_S
+        for obj in await client.list_objects(marker)
+    )
 
 
 def _region_names_by_dir(prefix: str, objs: list[S3Object]) -> dict[Path, set[str]]:

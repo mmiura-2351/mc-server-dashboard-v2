@@ -131,6 +131,12 @@ _DEFAULT_VERSION_RETENTION = 10
 # local source without pausing (the leased ``current/``, an upload body already in
 # memory, a local file), so a live spool is never this stale.
 _SPOOL_SWEEP_MIN_AGE_S = 3600
+# How long an in-flight marker (``inflight/<snapshot-id>``, issue #3893) pins its
+# snapshot against another process's sweep without being renewed. The publishing
+# process pins the snapshot in memory for as long as it runs, so only a marker
+# whose process died ever reaches this age; the first sweep after that reclaims
+# it and its snapshot. The object adapter renews its marker during the copy.
+_INFLIGHT_MARKER_TTL_S = 3600
 
 # Decompressed-size cap for restore extraction. The compressed archive body is
 # bounded on the way in, but a gzip member can expand ~1000x; the cumulative
@@ -811,6 +817,11 @@ class FsStorage(Storage):
         # The removals of each staging dir under way (issue #3664), each owning the
         # removal owed when it ends. Guarded by ``_lease_lock``.
         self._staging_removers: dict[Path, int] = {}
+        # In-flight publishes (issue #3893): the ``snapshots/<id>/`` dir a publish
+        # moves its staging into is held here from before the move until its flip,
+        # so this process's sweep keeps it. Another process reads the snapshot's
+        # in-flight marker instead. Guarded by ``_lease_lock``.
+        self._publishing: set[Path] = set()
         self._lease_lock = threading.Lock()
         # Per-server publish/edit serialization (issue #899). Every authoritative
         # mutation of ``current/`` and its generation marker — a snapshot commit, a
@@ -1041,6 +1052,20 @@ class FsStorage(Storage):
     def _is_staging_active(self, staging: Path) -> bool:
         with self._lease_lock:
             return staging in self._active_staging
+
+    # --- in-flight publishes (issue #3893) ----------------------------------
+
+    def _register_publish(self, snapshot: Path) -> None:
+        with self._lease_lock:
+            self._publishing.add(snapshot)
+
+    def _release_publish(self, snapshot: Path) -> None:
+        with self._lease_lock:
+            self._publishing.discard(snapshot)
+
+    def _is_publishing(self, snapshot: Path) -> bool:
+        with self._lease_lock:
+            return snapshot in self._publishing
 
     async def _run_on_staging(
         self,
@@ -1342,6 +1367,16 @@ class FsStorage(Storage):
         pointer now names it. This mirrors the object adapter's per-candidate
         pointer re-read (issue #113).
 
+        In-flight publish (issue #3893): between its move into ``snapshots/`` and
+        its flip, a publish's new snapshot is named by no pointer. The publish
+        registers it before the move and releases it only after the flip: in
+        memory for this process, and as an ``inflight/<snapshot-id>`` marker for
+        any other. A candidate either holds is skipped. The registration is
+        read before the pointer, so a candidate found unregistered was either
+        flipped already, which the pointer read then shows, or abandoned. A marker
+        older than ``_INFLIGHT_MARKER_TTL_S`` is one whose process died; it no
+        longer pins its snapshot, and is removed.
+
         In-flight staging (issue #183): a transfer staged but not yet committed is
         pinned by an in-process active-staging lease taken at ``begin_snapshot`` (and
         at ``restore_backup``) and released at commit/abort, so a sweep scheduled
@@ -1372,14 +1407,29 @@ class FsStorage(Storage):
 
     def _sweep_server(self, server_root: Path) -> None:
         snapshots = server_root / "snapshots"
+        inflight = server_root / "inflight"
         if snapshots.is_dir():
             for snap in sorted(snapshots.iterdir(), key=lambda p: p.name):
+                # A candidate a hydrate reader leases or a publish is still moving
+                # in (issue #3893) is kept. Checked before the pointer: a publish
+                # is released only after its flip.
+                if (
+                    self._is_leased(snap)
+                    or self._is_publishing(snap)
+                    or _is_fresh_marker(inflight / snap.name)
+                ):
+                    continue
                 # Re-read the live name per candidate: a concurrent publish may
                 # have flipped ``current`` onto this candidate after the iteration
                 # started (issue #1606, mirroring the object adapter's #113 guard).
-                live = self._live_snapshot_name(server_root)
-                if snap.name != live and not self._is_leased(snap):
+                if snap.name != self._live_snapshot_name(server_root):
                     _rmtree(snap)
+        if inflight.is_dir():
+            # The markers of publishes whose process died (issue #3893).
+            for marker in inflight.iterdir():
+                publishing = self._is_publishing(snapshots / marker.name)
+                if not publishing and not _is_fresh_marker(marker):
+                    marker.unlink(missing_ok=True)
         incoming = server_root / "incoming"
         if incoming.is_dir():
             for staging in incoming.iterdir():
@@ -1886,27 +1936,39 @@ class FsStorage(Storage):
 
         snapshot_id = SnapshotId.new()
         snapshot_dir = snapshots / snapshot_id.value
-        # Same-filesystem rename: staging (incoming/) and snapshots/ share <root>
-        # (Section 7.1 caveat), so this is an atomic move, never a copy.
-        os.replace(staging, snapshot_dir)
-        # Make the rename entry durable so a crash after the flip cannot lose the
-        # directory the new symlink points at (issue #1943).
-        _fsync_dir(snapshots)
+        # Register the new snapshot before it appears under ``snapshots/`` and
+        # release it once ``current`` names it, so a concurrent sweep never takes it
+        # for an orphan (issue #3893): in memory for this process, the marker for
+        # any other. The sweep does not take the server lock this runs under.
+        marker = server_root / "inflight" / snapshot_id.value
+        self._register_publish(snapshot_dir)
+        try:
+            marker.parent.mkdir(exist_ok=True)
+            marker.touch()
+            # Same-filesystem rename: staging (incoming/) and snapshots/ share
+            # <root> (Section 7.1 caveat), so this is an atomic move, never a copy.
+            os.replace(staging, snapshot_dir)
+            # Make the rename entry durable so a crash after the flip cannot lose
+            # the directory the new symlink points at (issue #1943).
+            _fsync_dir(snapshots)
 
-        self._seam.reach(PublishPhase.AFTER_MOVE)
+            self._seam.reach(PublishPhase.AFTER_MOVE)
 
-        link = server_root / "current"
-        old_snapshot_name = self._live_snapshot_name(server_root)
-        # New symlink at a temp name in the *same* directory, then atomic rename
-        # over ``current`` (Section 4.2). The target is relative so the tree is
-        # relocatable.
-        tmp_link = server_root / f".current.{uuid.uuid4().hex}"
-        os.symlink(os.path.join("snapshots", snapshot_id.value), tmp_link)
-        if on_attempt is not None:
-            on_attempt(snapshot_id.value)
-        os.replace(tmp_link, link)
-        if on_flip is not None:
-            on_flip()
+            link = server_root / "current"
+            old_snapshot_name = self._live_snapshot_name(server_root)
+            # New symlink at a temp name in the *same* directory, then atomic rename
+            # over ``current`` (Section 4.2). The target is relative so the tree is
+            # relocatable.
+            tmp_link = server_root / f".current.{uuid.uuid4().hex}"
+            os.symlink(os.path.join("snapshots", snapshot_id.value), tmp_link)
+            if on_attempt is not None:
+                on_attempt(snapshot_id.value)
+            os.replace(tmp_link, link)
+            if on_flip is not None:
+                on_flip()
+        finally:
+            self._release_publish(snapshot_dir)
+            _remove_marker(marker)
 
         self._seam.reach(PublishPhase.AFTER_FLIP)
 
@@ -3199,6 +3261,31 @@ def _is_stale_spool(path: Path) -> bool:
     except FileNotFoundError:
         return False
     return age >= _SPOOL_SWEEP_MIN_AGE_S
+
+
+def _is_fresh_marker(marker: Path) -> bool:
+    """True if an in-flight marker exists and is younger than its TTL (#3893)."""
+
+    try:
+        age = time.time() - marker.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    return age < _INFLIGHT_MARKER_TTL_S
+
+
+def _remove_marker(marker: Path) -> None:
+    """Remove a publish's in-flight marker, logging rather than raising (#3893).
+
+    It runs once the publish has flipped or failed, so a fault here must not
+    replace that outcome. A marker left behind expires after its TTL.
+    """
+
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        _LOG.warning(
+            "removing the in-flight marker %s failed; it expires", marker, exc_info=True
+        )
 
 
 def _new_version_id() -> str:

@@ -704,9 +704,10 @@ The API runs the backend-agnostic crash-recovery sweep — GC of orphan
 staging/snapshot prefixes plus orphan in-progress multipart aborts
 (STORAGE.md Section 4.3) — on an interval, not just once at startup. Started
 **unconditionally** for both storage backends (not gated on the control plane),
-mirroring the one-shot startup sweep. A daily default keeps the loop cold so
-overlap with a live publish stays rare. The resource-pack GC (STORAGE.md
-Section 4.3) runs on the same cadence, on the object backend only.
+mirroring the one-shot startup sweep. A pass that overlaps a live publish keeps
+the snapshot that publish is still filling (STORAGE.md Section 4.3). The
+resource-pack GC (STORAGE.md Section 4.3) runs on the same cadence, on the object
+backend only.
 
 The sweep loop's first pass comes one full interval after startup, because the
 one-shot startup sweep has just run. The resource-pack GC's first pass follows
