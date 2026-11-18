@@ -247,6 +247,17 @@ describe("Modal focus outside the dialog", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it("leaves focus that a script drops to the page body there", async () => {
+    renderOverPage();
+    const last = screen.getByRole("button", { name: "Last" });
+
+    last.focus();
+    last.blur();
+    await settle();
+
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it("pulls focus that lands on the page behind back to the dialog's first control", async () => {
     const behind = renderOverPage();
 
