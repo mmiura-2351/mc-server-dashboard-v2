@@ -11,6 +11,12 @@ import (
 // logs.
 const ForgeInstallLogRelpath = "logs/forge-install.log"
 
+// ForgeInstallLogMaxBytes bounds the install log at ForgeInstallLogRelpath
+// (issue #3282). The files API refuses a file past its read cap
+// (instancemanager.MaxFileBytes, which pins the relation), so a log any larger
+// could not be read at all.
+const ForgeInstallLogMaxBytes = 3 * 1024 * 1024
+
 // forgeArgsfileGlob matches the Forge launcher's generated unix args file under
 // the working set. Forge writes it to a version-stamped directory, so the
 // version segment is globbed and the single match is expected at launch time.

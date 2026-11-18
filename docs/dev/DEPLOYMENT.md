@@ -631,7 +631,14 @@ file. Subsequent starts skip the install (the args file is already present).
 The first start therefore takes noticeably longer than a vanilla/Paper start while
 the installer downloads Forge's libraries. The installer's combined output is
 written to `logs/forge-install.log` in the server's working set, readable through
-the file API — check it if a Forge first start fails or stalls. The log is
+the file API — check it if a Forge first start fails or stalls. The log holds
+the latest start's install only: each start empties it as its install begins,
+and it keeps every attempt of that install, retries included. It is at most
+3 MiB, inside the file API's 4 MiB read cap: once an install prints more, the
+log keeps the first 64 KiB of the install's output and its latest output — the
+latest attempt whole when that fits, and always the end, where the installer
+reports what failed — with a line
+`[mcsd] omitted N bytes of install output here …` between them. The log is
 best-effort: when the worker cannot write it safely it logs
 `forge install log not written` at `WARN` with the reason and the install goes
 on without it. Besides something planted at `logs/`, that happens when the
@@ -644,9 +651,9 @@ filesystem without `O_TMPFILE` (NFS, some FUSE filesystems) a worker without
 re-owns or removes it ([`../app/SECURITY.md`](../app/SECURITY.md), "Container
 hardening"). A write to the log that fails part way through (a full or failing
 filesystem) logs `forge install log write failed` at `WARN` with the error, and
-the install goes on: that attempt's log stops at the failure point, and the
-worker still reads the rest of the installer's output to explain a failed
-install.
+the install goes on: the log stops at the failure point for the rest of that
+install, and the worker still reads the rest of the installer's output to
+explain a failed install.
 
 If the install fails, the server goes `crashed` with a reason. An installer that
 exits non-zero is retried twice (the usual cause is a failed download) before the

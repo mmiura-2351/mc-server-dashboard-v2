@@ -335,7 +335,7 @@ func TestForgeInstallRetryAndLaunchContainersAreHardened(t *testing.T) {
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
 	docker.waitGates[installID] = make(chan waitResult, 2)
-	docker.waitGates[installID] <- waitResult{code: 1, err: statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}}
+	docker.waitGates[installID] <- waitResult{code: 1}
 	docker.waitGates[installID] <- waitResult{code: 0}
 	creates := 0
 	docker.onCreateHook = func(CreateSpec) {
