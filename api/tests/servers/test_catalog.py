@@ -30,6 +30,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogProjectNotFoundError,
     CatalogUpstreamFailedError,
     InvalidFilePathError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
     PortRangeExhaustedError,
@@ -56,6 +57,7 @@ from tests.servers.fakes import (
     FakeCatalogProvider,
     FakeClock,
     FakeFileStore,
+    FakeLifecycleLock,
     FakePluginCacheStore,
     FakeUnitOfWork,
 )
@@ -2474,3 +2476,81 @@ async def test_update_plugin_failed_commit_leaves_files_unchanged() -> None:
     # The old jar must still exist and the new jar must NOT have been written.
     assert "mods/fabric-api-0.92.0.jar" in fs.files
     assert "mods/fabric-api-0.93.0.jar" not in fs.files
+
+
+# -- A lost lifecycle lock (issue #3927) --
+
+
+def _lost_lock() -> FakeLifecycleLock:
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    return lock
+
+
+async def test_install_from_catalog_that_lost_the_lock_commits_and_writes_nothing() -> (
+    None
+):
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    project = _project()
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    with pytest.raises(LifecycleLockLostError):
+        await InstallFromCatalog(
+            uow=uow,
+            catalog=catalog,
+            file_store=fs,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=_lost_lock(),
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+
+    assert uow.commits == 0
+    assert fs.files == {}
+
+
+async def test_update_plugin_that_lost_the_lock_commits_and_writes_nothing() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    plugin = _plugin(server_id=server.id, source_version_id="ver-1")
+    uow.plugins.seed(plugin)
+    new_content = b"new-jar-bytes"
+    ver_new, _ = _version(
+        version_id="ver-2",
+        version_number="0.93.0",
+        filename="fabric-api-0.92.0.jar",
+        file_content=new_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(), [ver_new])
+    catalog.seed_file(ver_new.files[0].url, new_content)
+
+    with pytest.raises(LifecycleLockLostError):
+        await UpdatePlugin(
+            uow=uow,
+            catalog=catalog,
+            file_store=fs,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=_lost_lock(),
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            version_id="ver-2",
+        )
+
+    assert uow.commits == 0
+    assert fs.files == {}

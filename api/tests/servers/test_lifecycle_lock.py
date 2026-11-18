@@ -21,6 +21,8 @@ import datetime as dt
 import io
 import tarfile
 import uuid
+import zipfile
+from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
 
 import pytest
@@ -401,6 +403,7 @@ async def test_write_file_takes_lock_around_its_work() -> None:
     )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt", content=b"x")
 
     _assert_around(lock.events, server.id, "write-file")
+    _assert_checked_right_before(lock.events, server.id, "write-file")
 
 
 async def test_rollback_file_takes_lock_around_its_work() -> None:
@@ -414,6 +417,7 @@ async def test_rollback_file_takes_lock_around_its_work() -> None:
     )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt", version_id="v1")
 
     _assert_around(lock.events, server.id, "rollback")
+    _assert_checked_right_before(lock.events, server.id, "rollback")
 
 
 async def test_upload_file_takes_lock_around_its_work() -> None:
@@ -434,6 +438,7 @@ async def test_upload_file_takes_lock_around_its_work() -> None:
     )
 
     _assert_around(lock.events, server.id, "write-file")
+    _assert_checked_right_before(lock.events, server.id, "write-file")
 
 
 async def test_delete_file_takes_lock_around_its_work() -> None:
@@ -452,6 +457,7 @@ async def test_delete_file_takes_lock_around_its_work() -> None:
     )(community_id=_COMMUNITY, server_id=server.id, rel_path="d")
 
     _assert_around(lock.events, server.id, "delete-dir")
+    _assert_checked_right_before(lock.events, server.id, "delete-dir")
 
 
 async def test_make_dir_takes_lock_around_its_work() -> None:
@@ -465,6 +471,7 @@ async def test_make_dir_takes_lock_around_its_work() -> None:
     )(community_id=_COMMUNITY, server_id=server.id, rel_path="d")
 
     _assert_around(lock.events, server.id, "make-dir")
+    _assert_checked_right_before(lock.events, server.id, "make-dir")
 
 
 async def test_rename_file_takes_lock_around_its_work() -> None:
@@ -507,6 +514,7 @@ async def test_update_server_takes_lock_around_its_work() -> None:
     )
 
     _assert_around(lock.events, server.id, "update-row")
+    _assert_checked_right_before(lock.events, server.id, "update-row")
 
 
 async def test_create_backup_takes_lock_around_its_work() -> None:
@@ -617,6 +625,7 @@ async def test_attach_group_takes_lock_around_its_work() -> None:
     )
 
     _assert_around(lock.events, server.id, "write-file")
+    _assert_checked_right_before(lock.events, server.id, "write-file")
 
 
 async def test_detach_group_takes_lock_around_its_work() -> None:
@@ -684,6 +693,7 @@ async def test_delete_group_takes_lock_around_its_work() -> None:
     )
 
     _assert_around(lock.events, server.id, "write-file")
+    _assert_checked_right_before(lock.events, server.id, "write-file")
 
 
 # --- A lost lock stops its holder before the guarded write (issue #3927) -----
@@ -1046,3 +1056,149 @@ async def test_place_and_start_that_loses_the_lock_does_not_assign(
     assert (server.id, "flip") not in lock.events
     assert repo.by_id[server.id].assigned_worker_id is None
     assert cp.released == cp.reserved
+
+
+async def test_file_writes_that_lost_the_lock_change_nothing() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.files["a.txt"] = b"old"
+    store.files["d/b.txt"] = b"old"
+    store.events = lock.events
+    uow = FakeUnitOfWork(servers=repo)
+    lock.checks_before_loss = 0
+    before = dict(store.files)
+
+    writes: list[Callable[[], Awaitable[None]]] = [
+        lambda: WriteFile(
+            uow=uow,
+            control_plane=FakeControlPlane(),
+            file_store=store,
+            lifecycle_lock=lock,
+        )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt", content=b"x"),
+        lambda: RollbackFile(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            rel_path="a.txt",
+            version_id="v1",
+        ),
+        lambda: UploadFile(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            dir_path="",
+            filename="c.txt",
+            content=b"x",
+            extract=False,
+        ),
+        lambda: DeleteFile(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt"
+        ),
+        lambda: DeleteFile(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY, server_id=server.id, rel_path="d"
+        ),
+        lambda: MakeDir(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY, server_id=server.id, rel_path="e"
+        ),
+        lambda: RenameFile(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            from_path="a.txt",
+            to_path="f.txt",
+        ),
+        lambda: RenameFile(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY, server_id=server.id, from_path="d", to_path="g"
+        ),
+    ]
+    for write in writes:
+        with pytest.raises(LifecycleLockLostError):
+            await write()
+
+    assert store.files == before
+    assert not {
+        "write-file",
+        "rollback",
+        "delete-file",
+        "delete-dir",
+        "make-dir",
+        "rename-file",
+        "rename-dir",
+    } & {label for _, label in lock.events}
+
+
+async def test_rename_checks_the_lock_right_before_it_moves() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.files["a.txt"] = b"x"
+    store.files["d/b.txt"] = b"x"
+    store.events = lock.events
+    rename = RenameFile(
+        uow=FakeUnitOfWork(servers=repo), file_store=store, lifecycle_lock=lock
+    )
+
+    await rename(
+        community_id=_COMMUNITY, server_id=server.id, from_path="a.txt", to_path="f.txt"
+    )
+    await rename(
+        community_id=_COMMUNITY, server_id=server.id, from_path="d", to_path="g"
+    )
+
+    _assert_checked_right_before(lock.events, server.id, "rename-file", "rename-dir")
+
+
+async def test_delete_file_checks_the_lock_right_before_it_deletes() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.files["a.txt"] = b"x"
+    store.events = lock.events
+
+    await DeleteFile(
+        uow=FakeUnitOfWork(servers=repo), file_store=store, lifecycle_lock=lock
+    )(community_id=_COMMUNITY, server_id=server.id, rel_path="a.txt")
+
+    _assert_checked_right_before(lock.events, server.id, "delete-file")
+
+
+def _zip(entries: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+async def test_extracting_upload_checks_the_lock_before_each_member() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.events = lock.events
+    upload = UploadFile(
+        uow=FakeUnitOfWork(servers=repo), file_store=store, lifecycle_lock=lock
+    )
+    lock.checks_before_loss = 1
+
+    with pytest.raises(LifecycleLockLostError):
+        await upload(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            dir_path="",
+            filename="a.zip",
+            content=_zip({"a.txt": b"a", "b.txt": b"b"}),
+            extract=True,
+        )
+
+    assert store.files == {"a.txt": b"a"}
+    _assert_checked_right_before(lock.events, server.id, "write-file")
+
+
+async def test_group_sync_that_lost_the_lock_writes_nothing() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.events = lock.events
+    uow = FakeUnitOfWork(servers=repo)
+    group = _seed_group(uow)
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await AttachGroup(uow=uow, file_store=store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY, group_id=group.id, server_id=server.id
+        )
+
+    assert (server.id, "write-file") not in lock.events

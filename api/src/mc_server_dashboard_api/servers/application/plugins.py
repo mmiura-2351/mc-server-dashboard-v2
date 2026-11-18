@@ -304,7 +304,7 @@ class InstallPlugin:
             parse_manifest_at_ingest, content, loader=loader
         )
 
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
@@ -369,6 +369,9 @@ class InstallPlugin:
                     port_range=self.bedrock_port_range,
                     now=now,
                 )
+                # The row and the working-set write right behind it rely on the
+                # lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.uow.commit()
                 # Side-aware deploy (issue #1308): only a server-relevant,
                 # enabled jar goes into the working set; a client-only jar is
@@ -406,7 +409,7 @@ class RemovePlugin:
         server_id: ServerId,
         plugin_id: PluginId,
     ) -> None:
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
@@ -427,6 +430,8 @@ class RemovePlugin:
                         server.bedrock_port = None
                         server.updated_at = self.clock.now()
                         await self.uow.servers.update(server)
+                # As in InstallPlugin (issue #3927).
+                await lock.ensure_held()
                 await self.uow.commit()
                 # Delete the working-set file after the DB commit so a commit
                 # failure does not leave a live row whose jar is gone (#1706).
@@ -467,7 +472,7 @@ class TogglePlugin:
         plugin_id: PluginId,
         enable: bool,
     ) -> ServerPlugin:
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
@@ -502,6 +507,8 @@ class TogglePlugin:
                 plugin.rel_path = new_path if new_path is not None else clean_path
                 plugin.updated_at = self.clock.now()
                 await self.uow.plugins.update(plugin)
+                # As in InstallPlugin (issue #3927).
+                await lock.ensure_held()
                 await self.uow.commit()
                 # Reconcile the working-set file after the DB commit so a
                 # commit failure does not leave rel_path diverged (#1706).
@@ -551,7 +558,7 @@ class SetPluginSide:
             raise InvalidPluginSideError(side)
         new_side: PluginSide = side  # type: ignore[assignment]
 
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 # Paper plugins are always server-side only (issue #1342).
@@ -592,6 +599,8 @@ class SetPluginSide:
                 )
                 plugin.updated_at = self.clock.now()
                 await self.uow.plugins.update(plugin)
+                # As in InstallPlugin (issue #3927).
+                await lock.ensure_held()
                 await self.uow.commit()
                 # Reconcile the working-set file after the DB commit so a
                 # commit failure does not leave the file diverged (#1706).

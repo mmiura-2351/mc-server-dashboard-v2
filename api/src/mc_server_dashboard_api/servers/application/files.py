@@ -604,7 +604,7 @@ class WriteFile:
         # Storage write (issue #827): a start that flips desired=running must
         # serialize with an at-rest edit, not race the authoritative write. The
         # running/crashed branches take it harmlessly (no Storage mutation races).
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
 
@@ -618,6 +618,8 @@ class WriteFile:
                     rel_path=rel_path,
                     content=content,
                 )
+                # The at-rest write relies on the lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -835,7 +837,7 @@ class RollbackFile:
         _refuse_reserved_root_name(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # republish so a concurrent start cannot race the rollback (issue #827).
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
@@ -856,6 +858,8 @@ class RollbackFile:
                     await _current_properties(self.file_store, community_id, server_id),
                     version_content,
                 )
+            # The republish relies on the lifecycle lock (issue #3927).
+            await lock.ensure_held()
             await self.file_store.rollback(
                 community_id=community_id,
                 server_id=server_id,
@@ -1093,7 +1097,7 @@ class UploadFile:
         # Hold the per-server lifecycle lock across the at-rest check and the
         # (multi-file) republish so a concurrent start cannot race the upload
         # writing into the authoritative copy (issue #827).
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
@@ -1160,6 +1164,9 @@ class UploadFile:
                 # de-dup / reject) for M2; an archive with colliding names is
                 # malformed and the resulting authoritative copy is well-defined.
                 for entry_path, data in entries:
+                    # Each member's write relies on the lifecycle lock (issue
+                    # #3927); a loss stops the rest.
+                    await lock.ensure_held()
                     await self.file_store.write_file(
                         community_id=community_id,
                         server_id=server_id,
@@ -1178,6 +1185,8 @@ class UploadFile:
                 rel_path=_join(dir_path, filename),
                 incoming=content,
             )
+            # The write relies on the lifecycle lock (issue #3927).
+            await lock.ensure_held()
             await self.file_store.write_file(
                 community_id=community_id,
                 server_id=server_id,
@@ -1431,7 +1440,7 @@ class DeleteFile:
             raise InvalidFilePathError(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # delete so a concurrent start cannot race the mutation (issue #827).
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
@@ -1454,6 +1463,8 @@ class DeleteFile:
                 # A DIRECTORY named server.properties (possible only while the real
                 # file is absent) carries no keys, and a baseline read of it would
                 # raise — so the guard is the file branch's alone (issue #2809).
+                # The delete relies on the lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.file_store.delete_dir(
                     community_id=community_id, server_id=server_id, rel_path=rel_path
                 )
@@ -1471,6 +1482,8 @@ class DeleteFile:
                     rel_path=rel_path,
                     incoming=b"",
                 )
+                # The delete relies on the lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.file_store.delete_file(
                     community_id=community_id, server_id=server_id, rel_path=rel_path
                 )
@@ -1505,11 +1518,13 @@ class MakeDir:
         _refuse_reserved_root_name(rel_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # make-dir so a concurrent start cannot race the mutation (issue #827).
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
                 raise ServerFilesUnsettledError(str(server_id.value))
+            # The write relies on the lifecycle lock (issue #3927).
+            await lock.ensure_held()
             await self.file_store.make_dir(
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
@@ -1557,7 +1572,7 @@ class RenameFile:
         _refuse_reserved_root_name(to_path)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # write+delete republish so a concurrent start cannot race it (issue #827).
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
             if not server.is_at_rest():
@@ -1580,6 +1595,8 @@ class RenameFile:
 
             if is_dir:
                 _refuse_dir_at_root_properties(to_path)
+                # The move relies on the lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.file_store.rename_dir(
                     community_id=community_id,
                     server_id=server_id,
@@ -1620,6 +1637,8 @@ class RenameFile:
                         rel_path=to_path,
                         incoming=source,
                     )
+                # The move relies on the lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.file_store.rename_file(
                     community_id=community_id,
                     server_id=server_id,
