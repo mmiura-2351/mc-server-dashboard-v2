@@ -113,7 +113,7 @@ dependencies = [
 # Automated resolutions apply the 7-day cooldown, except for security updates.
 dev = [
     # Keep the reviewed ruff 0.17 line; later 0.x lines need explicit review.
-    "ruff>=0.15.14,<0.18",
+    "ruff>=0.17.4,<0.18",
     "mypy>=2.1.0,<3",
     "pytest>=9.0.3,<10",
     "import-linter>=2.11,<3",
