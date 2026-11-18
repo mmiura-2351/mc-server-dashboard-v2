@@ -1,17 +1,24 @@
 """Shared execution semantics for periodic API lifespan tasks.
 
 Callers keep ownership of their callback and error policy. This runner owns only
-the recurring delay, exception survival, and cancellation behavior that those
-tasks share.
+the startup delay, the recurring delay, exception survival, and cancellation
+behavior that those tasks share.
 """
 
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Awaitable, Callable
 
 PeriodicCallback = Callable[[], Awaitable[object]]
 ErrorHandler = Callable[[], None]
+
+# Cap on the random delay before the first pass (issue #3868).
+_FIRST_PASS_MAX_DELAY_SECONDS = 600.0
+
+# Draws the first-pass delay. Module-level so tests can pin the draw.
+_RNG = random.Random()
 
 
 async def run_periodic(
@@ -23,13 +30,21 @@ async def run_periodic(
 ) -> None:
     """Run ``callback`` on a fixed cadence until cancelled.
 
-    The default first delay keeps ordinary lifespan tasks quiet during startup.
+    By default the first pass runs soon after startup, after a delay drawn
+    uniformly from ``[0, min(tick_seconds, 600))`` seconds; later passes follow
+    ``tick_seconds``. Waiting a full interval first meant an API restarted more
+    often than the interval (on every deploy, say) never ran the pass at all
+    (issue #3868). The random draw spreads API processes restarted together, so
+    they do not all hit the store at once. The delay runs inside the task, so it
+    never holds up startup or readiness.
+
     ``run_immediately`` exists for the reconciler, whose startup reset must run
     before its first cadence wait.
     """
 
     if not run_immediately:
-        await asyncio.sleep(tick_seconds)
+        window = min(tick_seconds, _FIRST_PASS_MAX_DELAY_SECONDS)
+        await asyncio.sleep(_RNG.random() * window)
 
     while True:
         try:
