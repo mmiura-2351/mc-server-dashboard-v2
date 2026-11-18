@@ -34,6 +34,7 @@ from starlette.types import Message
 
 from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.dependencies import (
+    WorkerAssignment,
     get_assigned_worker_lookup,
     get_resolved_jar_lookup,
     get_storage,
@@ -126,6 +127,7 @@ def _setup(
     *,
     resolved_jar: str | None = None,
     assigned_worker_id: str | None = None,
+    awaiting_hydrate: bool = False,
     transfer_semaphore: asyncio.Semaphore | None = None,
 ) -> tuple[TestClient, FsStorage]:
     # Reuse the per-worker shared app; clear overrides on entry so a helper called
@@ -140,8 +142,12 @@ def _setup(
 
     app.dependency_overrides[get_resolved_jar_lookup] = lambda: _lookup
 
-    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
-        return assigned_worker_id
+    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> WorkerAssignment | None:
+        if assigned_worker_id is None:
+            return None
+        return WorkerAssignment(
+            worker_id=assigned_worker_id, awaiting_hydrate=awaiting_hydrate
+        )
 
     app.dependency_overrides[get_assigned_worker_lookup] = lambda: _assigned
     # The Worker credential the data plane authenticates against is injected via
@@ -2310,6 +2316,56 @@ def test_snapshot_stale_base_from_assigned_worker_is_allowed(tmp_path: Path) -> 
     assert _read_tar(asyncio.run(_read())) == {"world/level.dat": b"from-b"}
 
 
+# 19 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(19 * 10 + 30)
+def test_snapshot_stale_base_from_an_assigned_worker_not_yet_hydrated_is_refused(
+    tmp_path: Path,
+) -> None:
+    # Issue #3890: a start kept worker B after B refused its hydrate, so B holds
+    # a leftover scratch older than the store, which worker A advanced since. The
+    # #1703 exemption assumed an assigned worker had hydrated. Until B has, its
+    # stale publish is refused like any other worker's, and the store stands.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
+
+    client, storage = _setup(
+        tmp_path, assigned_worker_id=worker_b, awaiting_hydrate=True
+    )
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"world/level.dat": b"leftover-on-b"}),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current - 1),
+                "X-Worker-Id": worker_b,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+
+    async def _read() -> bytes:
+        return b"".join(
+            [
+                chunk
+                async for chunk in storage.open_hydrate_source(
+                    CommunityId(community), ServerId(server)
+                )
+            ]
+        )
+
+    assert _read_tar(asyncio.run(_read())) == {"k": b"g2"}
+
+
 def test_snapshot_commit_fenced_when_assignment_moved_during_upload(
     tmp_path: Path,
 ) -> None:
@@ -2570,8 +2626,8 @@ def _post_snapshot_reassigned_mid_commit(
     _shared_app.dependency_overrides[get_storage] = lambda: storage
     assigned = publisher
 
-    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> str | None:
-        return assigned
+    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> WorkerAssignment | None:
+        return WorkerAssignment(worker_id=assigned, awaiting_hydrate=False)
 
     _shared_app.dependency_overrides[get_assigned_worker_lookup] = lambda: _assigned
     community, server = _scope()
