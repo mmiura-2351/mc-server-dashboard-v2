@@ -3,6 +3,7 @@ package datatransfer
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -57,7 +58,7 @@ func walkRoot(t *testing.T, tw *tar.Writer, root string, log *slog.Logger) error
 	if err != nil {
 		t.Fatalf("open %s: %v", root, err)
 	}
-	return walkInto(tw, fd, "", unix.PathMax, 0, log)
+	return walkInto(context.Background(), tw, fd, "", unix.PathMax, 0, log)
 }
 
 // packMembers packs srcDir and returns each member's body by name (a directory
@@ -65,7 +66,7 @@ func walkRoot(t *testing.T, tw *tar.Writer, root string, log *slog.Logger) error
 func packMembers(t *testing.T, srcDir string, log *slog.Logger) map[string]string {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := packTar(srcDir, &buf, log); err != nil {
+	if err := packTar(context.Background(), srcDir, &buf, log); err != nil {
 		t.Fatalf("packTar: %v", err)
 	}
 	members := map[string]string{}
@@ -206,7 +207,7 @@ func TestPackDoesNotBlockOnAFileSwappedForAFIFO(t *testing.T) {
 	done := make(chan *result, 1)
 	go func() {
 		r := &result{}
-		r.err = packTar(work, &r.buf, slog.Default())
+		r.err = packTar(context.Background(), work, &r.buf, slog.Default())
 		done <- r
 	}()
 
@@ -318,7 +319,7 @@ func TestPackBoundsItsDepth(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := packTar(nested(maxPackDepth+1), &buf, slog.Default())
+	err := packTar(context.Background(), nested(maxPackDepth+1), &buf, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "nested deeper") {
 		t.Fatalf("a tree %d levels deep must fail the pack on its depth, got: %v", maxPackDepth+1, err)
 	}
@@ -335,7 +336,7 @@ func TestPackRefusesAMemberPathOverTheLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return walkInto(tar.NewWriter(io.Discard), fd, "", maxRel, 0, slog.Default())
+		return walkInto(context.Background(), tar.NewWriter(io.Discard), fd, "", maxRel, 0, slog.Default())
 	}
 	if err := run(len("dir/12345.txt")); err != nil {
 		t.Fatalf("a member path exactly at the limit must pack, got: %v", err)
@@ -356,7 +357,7 @@ func TestPackRefusesASymlinkedRoot(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := packTar(link, &buf, slog.Default())
+	err := packTar(context.Background(), link, &buf, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "is not a directory") {
 		t.Fatalf("a symlinked snapshot source must be refused, got: %v", err)
 	}
@@ -390,13 +391,13 @@ func TestPackLeavesNoDescriptorOpen(t *testing.T) {
 	quiescent := representativeWorkingSet(t)
 
 	before := openFds()
-	if err := packTar(quiescent, io.Discard, slog.Default()); err != nil {
+	if err := packTar(context.Background(), quiescent, io.Discard, slog.Default()); err != nil {
 		t.Fatalf("packTar: %v", err)
 	}
-	if err := packTar(deep, io.Discard, slog.Default()); err == nil {
+	if err := packTar(context.Background(), deep, io.Discard, slog.Default()); err == nil {
 		t.Fatal("the over-deep tree must fail the pack")
 	}
-	if err := packTar(swapped, io.Discard, slog.Default()); err != nil {
+	if err := packTar(context.Background(), swapped, io.Discard, slog.Default()); err != nil {
 		t.Fatalf("packTar: %v", err)
 	}
 	if after := openFds(); after != before {

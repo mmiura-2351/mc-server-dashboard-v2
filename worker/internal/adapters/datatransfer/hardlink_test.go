@@ -69,7 +69,7 @@ func TestSnapshotRoundTripCarriesNoHardLink(t *testing.T) {
 	}
 
 	var archive bytes.Buffer
-	if err := packTar(src, &archive, slog.Default()); err != nil {
+	if err := packTar(context.Background(), src, &archive, slog.Default()); err != nil {
 		t.Fatalf("pack: %v", err)
 	}
 	dest := filepath.Join(base, "dest")

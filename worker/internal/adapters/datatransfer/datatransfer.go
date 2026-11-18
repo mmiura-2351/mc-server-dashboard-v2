@@ -195,10 +195,11 @@ func SweepSnapshotSpools(scratchRoot string) {
 // cleanup leaks the spool; SweepSnapshotSpools reclaims such leftovers at startup
 // (issue #787).
 //
-// The pack stops early once ctx is done (issue #3511): every write into the spool
-// checks ctx, so a pack past the snapshot command's deadline fails at its next
-// write and removes the spool instead of reading the rest of the working set. A
-// system call that does not return is not bounded here; the snapshot command
+// The pack stops early once ctx is done (issues #3511, #3340): the walk checks ctx
+// before each entry and every write into the spool checks it, so a pack whose
+// command ended — at its deadline or with its session — stops within one entry or
+// one copy buffer and removes the spool instead of reading the rest of the working
+// set. A system call that does not return is not bounded here; the snapshot command
 // answers at its deadline whatever the pack is blocked on
 // (instancemanager.handleSnapshot).
 func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(), error) {
@@ -210,7 +211,7 @@ func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(
 		return "", func() {}, fmt.Errorf("datatransfer: create snapshot spool: %w", err)
 	}
 	spoolPath := spool.Name()
-	if err := packTar(srcDir, ctxWriter{ctx: ctx, w: spool}, c.logger); err != nil {
+	if err := packTar(ctx, srcDir, spool, c.logger); err != nil {
 		_ = spool.Close()
 		_ = os.Remove(spoolPath)
 		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
@@ -220,7 +221,8 @@ func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(
 	return spoolPath, cleanup, nil
 }
 
-// ctxWriter refuses every write once ctx is done, so a pack stops at its deadline.
+// ctxWriter refuses every write once ctx is done, so a pack stops at its next
+// header or copy buffer.
 type ctxWriter struct {
 	ctx context.Context
 	w   io.Writer
@@ -879,8 +881,11 @@ var (
 // packTar writes a tar of srcDir's contents (entries relative to srcDir) into w,
 // in a deterministic (lexicographic) order. The Worker-private generation marker
 // at the scratch root is excluded (issue #763); nothing else is. log is used to
-// emit observability lines for vanished-file skips and cap/pad adjustments.
-func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
+// emit observability lines for vanished-file skips and cap/pad adjustments. Once
+// ctx is done the walk stops before its next entry and every write fails with
+// ctx's error.
+func packTar(ctx context.Context, srcDir string, w io.Writer, log *slog.Logger) error {
+	w = ctxWriter{ctx: ctx, w: w}
 	root, err := filepath.Abs(srcDir)
 	if err != nil {
 		return err
@@ -904,7 +909,7 @@ func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
 	// A member's path may be as long as the path-based walk could resolve below
 	// root, and no longer: a hydrate unpacks by path, so an archive holding a
 	// longer name could be published but never restored.
-	if err := walkInto(tw, rootFd, "", unix.PathMax-1-len(root)-1, 0, log); err != nil {
+	if err := walkInto(ctx, tw, rootFd, "", unix.PathMax-1-len(root)-1, 0, log); err != nil {
 		_ = tw.Close()
 		return err
 	}
@@ -916,7 +921,9 @@ func packTar(srcDir string, w io.Writer, log *slog.Logger) error {
 // dirFd. rel is the directory's slash-separated path below the root ("" for the
 // root itself); it names members and labels errors and is never resolved. maxRel
 // is the longest member path allowed, depth the directory's level below the root.
-func walkInto(tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slog.Logger) error {
+// It returns ctx's error before the next entry once ctx is done, so an entry that
+// writes nothing to the archive (one left out) is not walked past it either.
+func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slog.Logger) error {
 	dir := os.NewFile(uintptr(dirFd), rel)
 	defer func() { _ = dir.Close() }()
 	names, err := dir.Readdirnames(-1)
@@ -926,6 +933,9 @@ func walkInto(tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slo
 	// Byte order, as os.ReadDir sorted the path-based walk's entries.
 	sort.Strings(names)
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Exclude the Worker-private generation marker at the scratch root so it
 		// never lands in the authoritative stored working set (issue #763). The match
 		// is by PREFIX, not exact name (issue #834): writeGeneration writes the marker
@@ -963,7 +973,7 @@ func walkInto(tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slo
 		}
 		switch hint.Mode & unix.S_IFMT {
 		case unix.S_IFDIR:
-			err = packDir(tw, dirFd, name, entryRel, maxRel, depth+1, log)
+			err = packDir(ctx, tw, dirFd, name, entryRel, maxRel, depth+1, log)
 		case unix.S_IFREG:
 			err = packRegular(tw, dirFd, name, entryRel, log)
 		default:
@@ -979,7 +989,7 @@ func walkInto(tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slo
 
 // packDir archives the directory name of the directory behind parentFd, then
 // everything beneath it. depth is the level of the directory being archived.
-func packDir(tw *tar.Writer, parentFd int, name, rel string, maxRel, depth int, log *slog.Logger) error {
+func packDir(ctx context.Context, tw *tar.Writer, parentFd int, name, rel string, maxRel, depth int, log *slog.Logger) error {
 	if depth > maxPackDepth {
 		return fmt.Errorf("datatransfer: snapshot source is nested deeper than %d directories at %q", maxPackDepth, rel)
 	}
@@ -1021,7 +1031,7 @@ func packDir(tw *tar.Writer, parentFd int, name, rel string, maxRel, depth int, 
 		_ = unix.Close(fd)
 		return err
 	}
-	return walkInto(tw, fd, rel, maxRel, depth, log)
+	return walkInto(ctx, tw, fd, rel, maxRel, depth, log)
 }
 
 // packRegular archives the regular file name of the directory behind dirFd.
