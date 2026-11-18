@@ -77,7 +77,9 @@ export function converging(
  * The crash reasons the reconciler does not restart, as the next attempt fails
  * the same way (CONFIGURATION.md Section 5.6, issue #3281). The API reports
  * its rule as `crash_not_restarted`; a crashed status frame carries only the
- * reason, so the live hooks derive the flag from this set.
+ * reason, so the live hooks derive the flag from this set. It mirrors the
+ * API's `NOT_RESTARTED_CRASH_REASONS` (`value_objects.py`), which is not in the
+ * OpenAPI document; `api/tests/servers/test_entities.py` pins the two together.
  */
 export const NOT_RESTARTED_CRASH_REASONS: ReadonlySet<string> = new Set([
   "forge_install_out_of_memory",

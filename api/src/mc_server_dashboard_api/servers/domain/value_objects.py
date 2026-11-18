@@ -151,7 +151,9 @@ class CrashReason(enum.Enum):
 # exhausts the installer again, and the same Java runtime refuses the same
 # classes. ``FORGE_INSTALL_FAILED`` is not among them: the Worker retries that
 # failure itself (a failed download is the usual cause) and gives the reason to
-# every install crash it cannot attribute, so a restart may still succeed.
+# every install crash it cannot attribute, so a restart may still succeed. The
+# Web UI keeps a copy (``webui/src/pages/serverState.ts``), which
+# ``tests/servers/test_entities.py`` pins to this one.
 NOT_RESTARTED_CRASH_REASONS = frozenset(
     {
         CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import pathlib
+import re
 import uuid
 
 import pytest
 
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    NOT_RESTARTED_CRASH_REASONS,
     CommunityId,
     CrashReason,
     DesiredState,
@@ -127,6 +130,26 @@ def test_crash_not_restarted_only_under_a_running_intent() -> None:
     server.crash_reason = CrashReason.FORGE_INSTALL_OUT_OF_MEMORY
 
     assert server.crash_not_restarted() is False
+
+
+def test_the_web_ui_holds_the_same_not_restarted_reasons() -> None:
+    # Issue #3281: no status frame carries ``crash_not_restarted``, so the Web UI
+    # derives it from a crashed frame's reason with its own copy of the set. A
+    # reason added here only would leave its live flag false, and "applying..."
+    # shown on a server nothing converges. The set is not in the OpenAPI
+    # document, so the client mirrors it.
+    state = (
+        pathlib.Path(__file__).resolve().parents[3] / "webui/src/pages/serverState.ts"
+    )
+    declared = re.search(
+        r"export const NOT_RESTARTED_CRASH_REASONS: ReadonlySet<string> = new Set\(\["
+        r"(?P<body>[^\]]*)\]\);",
+        state.read_text(),
+    )
+
+    assert declared is not None
+    mirrored = re.findall(r'"([^"]*)"', declared["body"])
+    assert sorted(mirrored) == sorted(r.value for r in NOT_RESTARTED_CRASH_REASONS)
 
 
 @pytest.mark.parametrize(
