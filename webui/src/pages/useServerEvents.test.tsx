@@ -1014,6 +1014,58 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
       ).toBe(stored);
     },
   );
+
+  // The same supersede for the crash a crashed frame carries and the flag it
+  // sets (#3281). Both change without a frame: a Worker disconnect records
+  // `unknown`, which clears the stored crash, and an edit bumps the row's
+  // `updated_at`, which re-arms one restart.
+  it.each([
+    [
+      "crash",
+      "unknown",
+      { crash_reason: null, crash_detail: null, crash_not_restarted: false },
+    ],
+    [
+      "crash_not_restarted",
+      "crashed",
+      {
+        crash_reason: "forge_install_out_of_memory",
+        crash_detail: "java.lang.OutOfMemoryError",
+        crash_not_restarted: false,
+      },
+    ],
+  ] as const)(
+    "lets a REST read started after a crashed frame supersede its %s",
+    async (_name, observed, stored) => {
+      const { queryClient, respond } = setupDeferred();
+      act(() => {
+        MockWebSocket.last().open();
+      });
+      await respond("running", {
+        crash_reason: null,
+        crash_detail: null,
+        crash_not_restarted: false,
+      });
+      act(() => {
+        MockWebSocket.last().message(
+          frame("status", {
+            state: "crashed",
+            detail: "java.lang.OutOfMemoryError",
+            reason: "forge_install_out_of_memory",
+          }),
+        );
+      });
+      act(() => {
+        queryClient.invalidateQueries({ queryKey: serverKey(CID, SID) });
+      });
+      await respond(observed, stored);
+      expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+        id: SID,
+        observed_state: observed,
+        ...stored,
+      });
+    },
+  );
 });
 
 describe("useServerEvents with REST retries (#3213)", () => {
