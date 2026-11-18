@@ -59,6 +59,20 @@ rebuild ships.
   - a unique `MCSD_SCRATCH_DIR`: it is bind-mounted at the same absolute path
     on the host and in the container, so sharing the live one drops a probe
     worker into the live servers' working directories.
+  - its own store and database, never the live ones. The `seaweedfs-data`,
+    `api-storage` and `db-data` volumes are scoped to the project, so a
+    separate project gets its own. An env-file or override that points
+    `MCD_API_STORAGE__OBJECT__ENDPOINT` / `MCD_API_STORAGE__OBJECT__BUCKET` (or
+    `MCD_API_STORAGE__FS__ROOT`) at the live store undoes that. A store belongs
+    to exactly one database, and the probe's GCs would see every live object as
+    an orphan. On a store the live API has claimed, the store owner marker makes
+    them refuse to run, with an ERROR
+    ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). It does not stop the
+    probe's writes, which the live API then reclaims as orphans. Nor does it
+    help on an unmarked store (the first start after the upgrade, or a deleted
+    marker): a probe that starts first claims it, becomes the owner and GCs the
+    live objects (issue #3886). A probe whose database is a dump of the live
+    one carries the live installation id and is not refused at all.
   - alternate host ports. `API_HTTP_PORT` (live: 8000) is a variable; the
     `relay` profile's `25565`, `25665`, `25675/udp` and `19132-19231/udp` are
     literals in `compose.yaml` and need an override file. MC server game ports

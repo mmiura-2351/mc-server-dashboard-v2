@@ -47,7 +47,7 @@ var (
 	// installLogOpenUnnamed creates a file with no name in the directory behind
 	// dirFd; replaced to stand in for a filesystem that has no such files.
 	installLogOpenUnnamed = func(dirFd int) (int, error) {
-		return unix.Openat(dirFd, ".", unix.O_TMPFILE|unix.O_WRONLY|unix.O_APPEND|unix.O_CLOEXEC, 0o640)
+		return unix.Openat(dirFd, ".", unix.O_TMPFILE|unix.O_WRONLY|unix.O_CLOEXEC, 0o640)
 	}
 	// installLogAfterMkdir runs between the creation of logs/ and its open, so a
 	// test can replace the directory at that exact point; production never
@@ -58,12 +58,13 @@ var (
 const installLogDirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
 // openInstallLog opens execution.ForgeInstallLogRelpath beneath workingDir for
-// appending, creating the log and its directory when absent.
+// writing, creating the log and its directory when absent. It is not opened for
+// appending: the install log writes at offsets of its own (installLog.compact).
 //
 // It refuses — with nothing created or written outside the working set — a
 // symlink at any component (dangling or not), a logs/ that is not a directory,
 // and a log that is not a regular file with exactly one name: a FIFO or device
-// would hand the output to whoever planted it, and a hard link would append to a
+// would hand the output to whoever planted it, and a hard link would write to a
 // file kept under another name.
 //
 // What it creates takes the owner of the directory it is created in, which is the
@@ -183,7 +184,7 @@ func createInstallLogDir(dirFd int, name string) (int, error) {
 var errInstallLogEntryLeft = errors.New("the entry was created and is left in place, owned by the worker")
 
 // createInstallLog creates the log leaf in the directory behind dirFd and
-// returns it open for appending, owned like that directory. An entry already at
+// returns it open for writing, owned like that directory. An entry already at
 // leaf fails it with EEXIST.
 //
 // The file is created without a name, given its owner, and only then linked in
@@ -228,7 +229,7 @@ func createNamedInstallLog(dirFd int, leaf string) (int, error) {
 	// O_EXCL never follows a link at the leaf, so a successful create is a new
 	// regular file in the directory just opened.
 	fd, err := unix.Openat(dirFd, leaf,
-		unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o640)
 	if err != nil {
 		return -1, &os.PathError{Op: "open", Path: leaf, Err: err}
 	}
@@ -240,11 +241,11 @@ func createNamedInstallLog(dirFd int, leaf string) (int, error) {
 }
 
 // openExistingInstallLog opens the log leaf of the directory behind dirFd for
-// appending, refusing anything but a regular file with a single name.
+// writing, refusing anything but a regular file with a single name.
 func openExistingInstallLog(dirFd int, leaf string) (int, error) {
 	// O_NONBLOCK keeps a planted FIFO from blocking the open; what was opened is
 	// then judged on the descriptor itself.
-	fd, err := unix.Openat(dirFd, leaf, unix.O_WRONLY|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(dirFd, leaf, unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return -1, &os.PathError{Op: "open", Path: leaf, Err: err}
 	}

@@ -64,4 +64,5 @@ def test_app_factory_builds_object_storage(monkeypatch: pytest.MonkeyPatch) -> N
     settings = load_settings(config_file=None)
     # Building the adapter does not open a connection (aioboto3 is lazy), so the
     # wiring is exercised without any real cloud.
-    assert isinstance(_build_storage(settings), ObjectStorage)
+    storage, _ownership = _build_storage(settings)
+    assert isinstance(storage, ObjectStorage)

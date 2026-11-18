@@ -9,6 +9,7 @@ audit record.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 
 import pytest
@@ -31,7 +32,10 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.domain.port import JarPoolStats
 from mc_server_dashboard_api.versions.application.jar_gc import JarGcResult
-from mc_server_dashboard_api.versions.domain.errors import UnknownServerTypeError
+from mc_server_dashboard_api.versions.domain.errors import (
+    StoreNotOwnedError,
+    UnknownServerTypeError,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
 
@@ -63,6 +67,17 @@ class _FakeGc:
     async def __call__(self) -> JarGcResult:
         self.calls += 1
         return JarGcResult(scanned=5, deleted=2, freed_bytes=2048)
+
+
+_REFUSAL = (
+    "jar-pool GC refused: the store owner marker mcsd-owner.json names "
+    "installation x, but this database is installation y"
+)
+
+
+class _RefusedGc:
+    async def __call__(self) -> JarGcResult:
+        raise StoreNotOwnedError(_REFUSAL)
 
 
 class _RecordingRecorder:
@@ -203,3 +218,24 @@ def test_jar_pool_gc_is_audited() -> None:
     assert len(recorder.events) == 1
     event = recorder.events[0]
     assert event.operation == ops.VERSION_JAR_GC  # type: ignore[attr-defined]
+
+
+def test_jar_pool_gc_refused_on_a_store_another_database_owns_is_409(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A refused pass deleted nothing, so the admin must not read a result as if
+    # the pool had been collected, and nothing is audited as done (issue #3870).
+    # The reason, naming the marker and both installations, reaches the admin and
+    # the log alike.
+    recorder = _RecordingRecorder()
+    client = _client(gc=_RefusedGc(), recorder=recorder)
+    with caplog.at_level(logging.ERROR), client:
+        resp = client.post("/api/versions/jar-pool/gc")
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "store_not_owned"
+    assert resp.json()["detail"] == _REFUSAL
+    assert recorder.events == []
+    assert any(
+        rec.levelno == logging.ERROR and _REFUSAL in rec.getMessage()
+        for rec in caplog.records
+    )

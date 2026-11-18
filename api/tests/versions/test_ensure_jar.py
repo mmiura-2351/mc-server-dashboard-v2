@@ -27,6 +27,7 @@ from mc_server_dashboard_api.versions.domain.errors import (
     JarHashMismatchError,
 )
 from mc_server_dashboard_api.versions.domain.value_objects import JarSource, ServerType
+from tests.store_ownership import FakeStoreOwnership
 from tests.versions.fakes import FakeJarFetcher, FakeJarPool, FakeJsonFetcher
 
 _JAR = b"PK\x03\x04 fake jar bytes"
@@ -225,7 +226,12 @@ async def test_ensure_after_gc_re_downloads_cleanly() -> None:
         def now(self) -> dt.datetime:
             return dt.datetime.now(dt.UTC) + GC_SAFETY_WINDOW + dt.timedelta(hours=1)
 
-    gc = RunJarPoolGc(pool=pool, references=_NoReferences(), clock=_PastClock())
+    gc = RunJarPoolGc(
+        pool=pool,
+        references=_NoReferences(),
+        clock=_PastClock(),
+        ownership=FakeStoreOwnership(),
+    )
     gc_result = await gc()
     assert gc_result.deleted == 1
     assert key not in pool.stored

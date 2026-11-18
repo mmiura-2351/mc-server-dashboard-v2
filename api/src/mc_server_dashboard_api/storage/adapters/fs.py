@@ -49,7 +49,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
 from pathlib import Path
-from typing import Any, ParamSpec, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
     EndCheckedReader,
@@ -113,6 +113,9 @@ from mc_server_dashboard_api.storage.integrity.region import (
     check_missing_regions,
     check_working_set,
 )
+
+if TYPE_CHECKING:
+    from mc_server_dashboard_api.storage.adapters.ownership import FsStoreOwnership
 
 # Read/stream chunk size for hydrate / JAR egress.
 _LOG = logging.getLogger(__name__)
@@ -765,7 +768,9 @@ class FsStorage(Storage):
     ``tar_member_hook`` is a test-only seam invoked just before each working-set
     member is added to the hydrate tar, so a test can inject a deterministic
     producer-thread failure and prove it surfaces to the consumer; production
-    leaves it ``None``.
+    leaves it ``None``. ``ownership`` is the root's owner marker: with one, the
+    sweep runs only while the marker names this installation (Section 4.3, issue
+    #3870). The app always passes it.
     """
 
     def __init__(
@@ -776,8 +781,10 @@ class FsStorage(Storage):
         max_restore_bytes: int = _DEFAULT_MAX_RESTORE_BYTES,
         failure_seam: FailureSeam | None = None,
         tar_member_hook: Callable[[Path], None] | None = None,
+        ownership: FsStoreOwnership | None = None,
     ) -> None:
         self._root = root
+        self._ownership = ownership
         self._version_retention = version_retention
         self._max_restore_bytes = max_restore_bytes
         self._seam = failure_seam or FailureSeam()
@@ -1341,8 +1348,18 @@ class FsStorage(Storage):
         concurrently with an in-flight stage leaves its staging dir intact. A crash
         leftover has no in-process handle by definition, so a fresh process's sweep
         still reclaims it.
+
+        Ownership (issue #3870): a lease pins only this process's transfers, so on
+        a root another database's API also uses, the sweep would delete that API's
+        staging. The pass therefore re-reads the owner marker first and is refused,
+        with an ERROR, unless the marker names this installation.
         """
 
+        if self._ownership is not None:
+            refusal = self._ownership.refusal_blocking()
+            if refusal is not None:
+                _LOG.error("storage sweep refused: %s", refusal)
+                return
         communities = self._root / "communities"
         if not communities.is_dir():
             return

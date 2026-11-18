@@ -69,7 +69,9 @@ async def run(*, server_id: ServerId | None) -> SweepSummary:
     lock_engine = create_engine(settings.database.url, pool_size=1, max_overflow=0)
     try:
         session_factory = create_session_factory(engine)
-        storage = _build_storage(settings)
+        # The integrity sweep only reads the store, so it needs no owner marker
+        # (issue #3870).
+        storage, _ownership = _build_storage(settings)
         sweep = IntegritySweep(
             uow=SqlAlchemyUnitOfWork(session_factory),
             backup_store=StorageBackupStoreAdapter(storage=storage),

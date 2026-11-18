@@ -31,6 +31,12 @@ in-flight start. We therefore never delete a JAR younger than
 :data:`GC_SAFETY_WINDOW` (its store/upload time vs now); the window only has to
 exceed the put-to-commit gap of a normal start, and one hour is comfortably
 beyond it while keeping reclaim timely.
+
+**Ownership.** The reference model holds only if the pool's store belongs to this
+database: on a store another database also uses, that database's JARs are
+referenced by no row here. Each pass therefore asks the store's owner marker first
+and raises :class:`StoreNotOwnedError` unless it names this installation (STORAGE.md
+Section 4.3, issue #3870).
 """
 
 from __future__ import annotations
@@ -39,8 +45,10 @@ import datetime as dt
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.versions.domain.clock import Clock
+from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
 from mc_server_dashboard_api.versions.domain.jar_pool import JarPool
 from mc_server_dashboard_api.versions.domain.jar_references import LiveJarReferences
+from mc_server_dashboard_api.versions.domain.store_ownership import StoreOwnership
 
 # Never delete a JAR younger than this. It must exceed the window in which
 # StartServer has put a JAR into the pool but not yet committed the server row
@@ -70,8 +78,12 @@ class RunJarPoolGc:
     pool: JarPool
     references: LiveJarReferences
     clock: Clock
+    ownership: StoreOwnership
 
     async def __call__(self) -> JarGcResult:
+        refusal = await self.ownership.refusal()
+        if refusal is not None:
+            raise StoreNotOwnedError(f"jar-pool GC refused: {refusal}")
         entries = await self.pool.list_entries()
         live = await self.references.live()
         cutoff = self.clock.now() - GC_SAFETY_WINDOW

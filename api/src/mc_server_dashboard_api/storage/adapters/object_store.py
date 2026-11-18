@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Any, NoReturn, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 import anyio
 
@@ -181,6 +181,11 @@ _REPROBE_BACKOFF_S = 1.0
 _FLIP_CONFIRM_ATTEMPTS = 3
 _FLIP_CONFIRM_BACKOFF_S = 0.05
 
+if TYPE_CHECKING:
+    from mc_server_dashboard_api.storage.adapters.ownership import (
+        ObjectStoreOwnership,
+    )
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -237,6 +242,15 @@ class MultipartUploadsUnsupportedError(Exception):
     """
 
 
+class ConditionalPutUnsupportedError(Exception):
+    """The store rejects a conditional (If-None-Match) PutObject (issue #3870).
+
+    Raised by :meth:`S3Client.put_object_if_absent` when the backend refuses the
+    condition as unsupported. The owner-marker claim falls back to a plain put and
+    reads the marker back.
+    """
+
+
 class S3Client(Protocol):
     """The handful of S3 operations the object adapter uses (Section 7.3).
 
@@ -260,6 +274,15 @@ class S3Client(Protocol):
 
     async def put_object(self, key: str, body: bytes) -> None:
         """Write a whole object atomically (single PUT, last-writer-wins)."""
+        ...
+
+    async def put_object_if_absent(self, key: str, body: bytes) -> bool:
+        """Write a whole object only if none exists at ``key`` (If-None-Match: *).
+
+        Returns ``False``, writing nothing, when an object is already there. Raises
+        :class:`ConditionalPutUnsupportedError` if the backend rejects the
+        condition (issue #3870).
+        """
         ...
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
@@ -374,7 +397,9 @@ class ObjectStorage(Storage):
     ``client_factory`` yields a bucket-scoped :class:`S3Client` per operation.
     ``version_retention`` bounds per-file retained versions (Section 5).
     ``failure_seam`` is the crash-injection hook for the publish-phase tests
-    (Section 4.3); production uses the no-op default.
+    (Section 4.3); production uses the no-op default. ``ownership`` is the
+    bucket's owner marker: with one, the sweep runs only while the marker names
+    this installation (Section 4.3, issue #3870). The app always passes it.
 
     Active-reader leases (Section 4.2) are adapter-local, like the fs adapter: an
     open hydrate stream pins the snapshot prefix it is reading so a concurrent
@@ -388,8 +413,10 @@ class ObjectStorage(Storage):
         version_retention: int = _DEFAULT_VERSION_RETENTION,
         max_restore_bytes: int = _DEFAULT_MAX_RESTORE_BYTES,
         failure_seam: FailureSeam | None = None,
+        ownership: ObjectStoreOwnership | None = None,
     ) -> None:
         self._client_factory = client_factory
+        self._ownership = ownership
         self._version_retention = version_retention
         self._max_restore_bytes = max_restore_bytes
         self._seam = failure_seam or FailureSeam()
@@ -683,8 +710,19 @@ class ObjectStorage(Storage):
         upload is never aborted. If the backend does not support ListMultipartUploads
         the sweep degrades to a WARN advising the ``AbortIncompleteMultipartUpload``
         bucket lifecycle rule and continues the rest of the sweep.
+
+        Ownership (issue #3870): leases pin only this process's transfers, so in a
+        bucket another database's API also uses, the sweep would delete that API's
+        staging and abort its uploads. The pass therefore re-reads the owner marker
+        first and is refused, with an ERROR, unless the marker names this
+        installation.
         """
 
+        if self._ownership is not None:
+            refusal = await self._ownership.refusal()
+            if refusal is not None:
+                _LOG.error("storage sweep refused: %s", refusal)
+                return
         async with self._client_factory() as client:
             objs = await client.list_objects(KeyNamespace.COMMUNITIES)
             for server_prefix, keys in _group_by_server(objs).items():

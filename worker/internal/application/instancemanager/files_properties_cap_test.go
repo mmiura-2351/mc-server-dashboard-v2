@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/serverproperties"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
 
 // A server.properties the file-edit path accepted must never be refused for its
@@ -18,6 +19,17 @@ import (
 func TestServerPropertiesReaderAcceptsAnythingAnEditCanWrite(t *testing.T) {
 	if serverproperties.MaxSize < MaxFileBytes {
 		t.Fatalf("serverproperties.MaxSize = %d is below MaxFileBytes = %d", serverproperties.MaxSize, MaxFileBytes)
+	}
+}
+
+// The Forge install log is how an operator diagnoses a failed install, read
+// through the files API like any other file: the bound the driver keeps it under
+// must stay below the read cap, or the log is refused exactly when it is needed
+// (issue #3282).
+func TestForgeInstallLogFitsTheFileReadCap(t *testing.T) {
+	if execution.ForgeInstallLogMaxBytes >= MaxFileBytes {
+		t.Fatalf("execution.ForgeInstallLogMaxBytes = %d is not below MaxFileBytes = %d",
+			execution.ForgeInstallLogMaxBytes, MaxFileBytes)
 	}
 }
 
