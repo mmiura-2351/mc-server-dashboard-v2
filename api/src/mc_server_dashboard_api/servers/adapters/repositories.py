@@ -458,11 +458,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                     "detail": detail,
                     "reason": reason,
                 }
-            assigned = (values or {}).get("assigned_worker_id", row.assigned_worker_id)
-            if assigned != row.assigned_worker_id:
-                payload["assigned_worker_id"] = (
-                    None if assigned is None else str(assigned)
-                )
+            # The only assignment a caller sets here is a release (``unassign``),
+            # which changes the row only if a Worker was assigned.
+            released = "assigned_worker_id" in (values or {})
+            if released and row.assigned_worker_id is not None:
+                payload["assigned_worker_id"] = None
             if not payload:
                 continue
             self._staged_status_events.append(
