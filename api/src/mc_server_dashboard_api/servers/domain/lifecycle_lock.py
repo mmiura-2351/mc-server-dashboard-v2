@@ -23,12 +23,12 @@ A held lock can be lost before its holder releases it (issue #3927): the real
 lock lives on a database session, and when that session ends the database
 releases the lock without telling the holder. So ``hold`` yields a
 :class:`HeldLifecycleLock`, and a holder calls its ``ensure_held`` immediately
-before each write that relies on the exclusion -- a storage flip or prune, an
-in-place working-set write, an archive write or delete, a row commit that assumed
-the server at rest. A lost lock raises
+before each write, or run of writes, that relies on the exclusion -- a storage
+flip or prune, an in-place working-set write, an archive write or delete, a row
+commit that assumed the server at rest. A lost lock raises
 :class:`~mc_server_dashboard_api.servers.domain.errors.LifecycleLockLostError`
-there, so the operation stops before that write. A loss between the check and the
-write it guards goes unnoticed (``docs/app/DATABASE.md`` Section 7).
+there, so the operation stops before those writes. A loss from the check until
+they are done goes unnoticed (``docs/app/DATABASE.md`` Section 7).
 """
 
 from __future__ import annotations
