@@ -77,8 +77,9 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // action runs, keeps focus on nothing usable until the browser drops it
     // to the page body (Chromium, a frame later). The dialog takes it first,
     // unscrolled. Only that loss moves focus, never a control disabled
-    // elsewhere or enabled again, so a screen reader hears the dialog at most
-    // once per confirm rather than on every busy toggle.
+    // elsewhere or enabled again, so focus moves at most once per confirm
+    // rather than on every busy toggle, and the dialog is not meant to be
+    // announced anew each time.
     const observer = new MutationObserver(() => {
       if (
         dialogStack.at(-1) === dialog &&

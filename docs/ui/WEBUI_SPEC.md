@@ -1162,8 +1162,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   has none, so focus never walks the page behind. A control disabled while it
   holds focus, as a confirm button is while its action runs, hands focus to
   the dialog itself without scrolling, and focus does not go back when the
-  control is enabled again. Only that loss moves focus, so a screen reader
-  announces the dialog at most once per confirm, not on every busy toggle.
+  control is enabled again. Only that loss moves focus, so focus moves at
+  most once per confirm, not on every busy toggle, and a screen reader is not
+  given the dialog to announce anew each time.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast

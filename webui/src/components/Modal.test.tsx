@@ -262,8 +262,8 @@ describe("Modal focus from outside the dialog", () => {
 
 // A dialog that disables the control holding focus, as a confirm does while
 // its action runs, keeps focus: it goes to the dialog, never to the page body
-// (WEBUI_SPEC.md 7.4). The test DOM, like Firefox, leaves focus on the disabled
-// control; Chromium drops it to the body a frame later.
+// (WEBUI_SPEC.md 7.4). The test DOM leaves focus on the disabled control;
+// Chromium drops it to the body a frame later.
 function BusyFooter() {
   const [busy, setBusy] = useState(false);
   return (
