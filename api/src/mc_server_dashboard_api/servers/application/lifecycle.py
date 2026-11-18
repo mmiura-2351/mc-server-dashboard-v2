@@ -945,8 +945,9 @@ class StartServer:
         and a Worker is assigned, but the launch was never sent (crash between
         commit and dispatch) or the Worker is not actually running it. The intent
         and assignment stand; only the dispatch is replayed, so this changes no DB
-        row — and on failure it reverts nothing (a later reconcile tick retries
-        under backoff). The placement load was already counted on the original
+        row but the ``awaiting_hydrate`` mark ``_launch`` clears (issue #3890) —
+        and on failure it reverts nothing (a later reconcile tick retries under
+        backoff). The placement load was already counted on the original
         assignment, so it is not incremented again.
 
         An ``INVALID_STATE`` outcome means the Worker is already running the server
@@ -1084,8 +1085,9 @@ class StartServer:
         starts fresh), so this is not an error. The failing step's outcome is
         returned (a failed hydrate short-circuits the launch); a
         :class:`WorkerUnavailableError` propagates. Compensation/cleanup policy is
-        the caller's — this helper makes no DB write — so the normal start and the
-        reconciler's re-dispatch paths can each react differently to a failure.
+        the caller's — this helper writes no DB row but the ``awaiting_hydrate``
+        mark (issue #3890, below) — so the normal start and the reconciler's
+        re-dispatch paths can each react differently to a failure.
 
         Just before the start is sent, the server row is re-read in its own unit of
         work (issue #3737), and ``stop_intent_count`` is compared with the server's
