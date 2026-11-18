@@ -673,7 +673,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("applying…" while the
-  reconciler converges), worker id, port. A stopped intent is reached at rest
+  reconciler converges; not shown for a crash it does not restart, see the
+  crash banner), worker id, port. A stopped intent is reached at rest
   (observed stopped, crashed or unknown) once no Worker is assigned: while one
   still is, the stop is still finishing (its final snapshot and the release,
   or for `unknown` the stop itself) and the hint shows. Every release

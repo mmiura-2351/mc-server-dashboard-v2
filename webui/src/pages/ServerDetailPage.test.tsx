@@ -2975,6 +2975,10 @@ describe("ServerDetailPage Overview live streams", () => {
       expect(
         screen.queryByText(t("serverDetail.crashBanner.autoRestart")),
       ).not.toBeInTheDocument();
+      // Nothing converges it until the operator acts, so no "applying" hint.
+      expect(
+        screen.queryByText(t("serverDetail.converging")),
+      ).not.toBeInTheDocument();
     },
   );
 
@@ -2989,6 +2993,9 @@ describe("ServerDetailPage Overview live streams", () => {
 
       expect(
         screen.getByText(t("serverDetail.crashBanner.autoRestart")),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(t("serverDetail.converging")),
       ).toBeInTheDocument();
     },
   );

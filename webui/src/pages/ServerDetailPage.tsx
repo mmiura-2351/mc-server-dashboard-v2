@@ -363,15 +363,19 @@ function Header({
   // it into the server (issue #3281), so a reload explains it too.
   const crashDetail = server.crash_detail ?? "";
   const crashReason = server.crash_reason ?? "";
+  // A crash under a running intent that the reconciler leaves crashed, as the
+  // next attempt fails the same way (issue #3281).
+  const notRestarted =
+    state === "crashed" &&
+    server.desired_state === "running" &&
+    NOT_RESTARTED_CRASH_REASONS.has(crashReason);
   const pill = statePill(state);
   // Show an applying hint until the server converges on the intent, which a
   // stopped intent does at rest once its Worker is released (WEBUI_SPEC.md
-  // 6.4).
-  const drifting = converging(
-    state,
-    server.desired_state,
-    server.assigned_worker_id !== null,
-  );
+  // 6.4). A crash the reconciler does not restart is not converging.
+  const drifting =
+    !notRestarted &&
+    converging(state, server.desired_state, server.assigned_worker_id !== null);
 
   return (
     <div className="page-head">
@@ -422,7 +426,7 @@ function Header({
               {t(
                 server.desired_state !== "running"
                   ? "serverDetail.crashBanner.guidance"
-                  : NOT_RESTARTED_CRASH_REASONS.has(crashReason)
+                  : notRestarted
                     ? "serverDetail.crashBanner.noAutoRestart"
                     : "serverDetail.crashBanner.autoRestart",
               )}{" "}
