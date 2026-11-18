@@ -240,8 +240,11 @@ of a running server then fail with `409` `command_expired` instead of
 `command_failed`: nothing was applied, so retrying is safe. The lifecycle toast
 and the Console line say the host was busy and ask the user to try again; the
 Console line does not say the console connection failed, since it was never
-opened. A failed start is set back to stopped as for any refused start, and a
-stop keeps its intent, so the system replays it on its own as well. The Files
+opened. A start whose start command expired is set back to stopped as for any
+refused start. One whose hydrate expired stays pending on its host, since the
+answer does not rule out an instance of the server there, and the system
+retries it (`CONTROL_PLANE.md` Section 5). A stop keeps its intent, so the
+system replays it on its own as well. The Files
 tab keeps its generic failure message, and a backup keeps the Backups tab's
 generic one. A stop's final snapshot never fails this way: it runs however long
 it waits.

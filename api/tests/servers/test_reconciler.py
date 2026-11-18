@@ -2834,20 +2834,25 @@ def _hydrate_refused(precondition: str) -> CommandOutcome:
     )
 
 
+@pytest.mark.parametrize("entry", ["placement", "user-start"])
 @pytest.mark.parametrize("precondition", _HYDRATE_REFUSALS_KEEPING_THE_WORKER)
 async def test_a_placement_whose_hydrate_may_meet_an_instance_retries_that_worker(
-    precondition: str,
+    precondition: str, entry: str
 ) -> None:
-    # Issue #3890. An unplaced running intent is placed on worker A, which refuses
-    # the hydrate with an answer that leaves an instance of the server there
-    # possible. The tick keeps A, so each tick past the grace and any backoff
-    # retries A, never worker B, which the next placement would pick. Once A's
-    # reservation, orphan, leftover or queue clears, the retry hydrates and
-    # starts the server on A.
+    # Issue #3890. The reconciler's placement of an unplaced running intent, or a
+    # user start, places the server on worker A, which refuses the hydrate with
+    # an answer that leaves an instance of the server there possible. A is kept,
+    # so each tick past the grace and any backoff retries A, never worker B,
+    # which the next placement would pick. Once A's reservation, orphan,
+    # leftover or queue clears, the retry hydrates and starts the server on A.
     worker_a, worker_b = WorkerId(uuid.uuid4()), WorkerId(uuid.uuid4())
     uow = FakeUnitOfWork()
     server = _server(
-        desired=DesiredState.RUNNING, observed=ObservedState.UNKNOWN, worker=None
+        desired=(
+            DesiredState.RUNNING if entry == "placement" else DesiredState.STOPPED
+        ),
+        observed=ObservedState.UNKNOWN,
+        worker=None,
     )
     uow.servers.seed(server)
     hydrate_outcomes = {worker_a: _hydrate_refused(precondition)}
@@ -2857,7 +2862,13 @@ async def test_a_placement_whose_hydrate_may_meet_an_instance_retries_that_worke
     clock = FakeClock(_NOW)
     reconciler = _reconciler(uow, cp, clock)
 
-    await reconciler.tick()  # placed on A and refused
+    if entry == "placement":
+        await reconciler.tick()  # placed on A and refused
+    else:
+        with pytest.raises(CommandDispatchError):
+            await reconciler.make_start_server()(
+                community_id=server.community_id, server_id=server.id
+            )
     clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
     await reconciler.tick()  # A again, refused again
     del hydrate_outcomes[worker_a]
