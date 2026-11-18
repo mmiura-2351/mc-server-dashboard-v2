@@ -57,6 +57,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    LifecycleLockLostError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
 )
@@ -393,6 +394,23 @@ def test_start_server_unavailable_worker_backend_records_error() -> None:
     resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
 
     assert resp.status_code == 503
+    assert [e.outcome for e in recorder.events] == [Outcome.ERROR]
+
+
+def test_start_server_that_lost_its_lifecycle_lock_records_error() -> None:
+    # The start's lifecycle lock was lost before its flip (issue #3927): rendered
+    # 503, so it is the transient ERROR outcome, as a store outage is.
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
+        error=LifecycleLockLostError("x")
+    )
+    client = _client(app)
+
+    resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
     assert [e.outcome for e in recorder.events] == [Outcome.ERROR]
 
 
