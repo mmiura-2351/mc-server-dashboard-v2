@@ -29,10 +29,11 @@ Outcome taxonomy (owner-confirmed):
   answer. Neither proves the command left the API, since one dropped unsent from
   the outbound queue looks the same, so both err toward unknown. A start whose
   intent still stands after the error: an unreachable Worker, a lost answer or a
-  ``BUSY`` refusal at the start command, after which the reconciler re-sends the
-  start once the assigned Worker is connected (it skips the row while that
-  Worker is gone). A stop the Worker refused ``BUSY``, whose intent stands too,
-  which the reconciler converges (issue #3799). Audited and notified like a
+  ``BUSY`` refusal at the start command, or a hydrate refused ``BUSY``,
+  ``UNAVAILABLE`` or ``EXPIRED`` (issue #3890), after which the reconciler
+  re-sends the start once the assigned Worker is connected (it skips the row
+  while that Worker is gone). A stop the Worker refused ``BUSY``, whose intent
+  stands too, which the reconciler converges (issue #3799). Audited and notified like a
   failure, under its own title, and never retried. It shares the failing edge,
   but a failure after an unknown notifies once more as an escalation; an unknown
   after a failure stays silent.
@@ -464,9 +465,10 @@ class ExecuteScheduleAction:
         intent is reverted and the start will not happen. Once the start command
         is reached, an unreachable Worker, a lost answer (a timeout or a
         disconnect) or a ``BUSY`` refusal leaves the intent and assignment
-        standing, and the reconciler re-sends the start once the assigned Worker
-        is connected (it skips the row while that Worker is gone). The row tells
-        these apart.
+        standing, and so does a hydrate refused ``BUSY``, ``UNAVAILABLE`` or
+        ``EXPIRED`` (issue #3890). The reconciler re-sends the start once the
+        assigned Worker is connected (it skips the row while that Worker is gone).
+        The row tells these apart.
 
         A stop the Worker refused ``BUSY`` can: :class:`StopServer` never reverts
         its intent, so ``desired=stopped`` stands, which the reconciler
