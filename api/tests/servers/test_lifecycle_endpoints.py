@@ -13,6 +13,7 @@ import dataclasses
 import datetime as dt
 import json
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx2
@@ -48,6 +49,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -746,6 +748,87 @@ def test_an_unavailable_restart_is_503_worker_unavailable() -> None:
     resp = _client(app).post(_url(uuid.uuid4(), uuid.uuid4(), "restart"))
     assert resp.status_code == 503
     assert resp.json()["reason"] == "worker_unavailable"
+
+
+# --- the Worker state a lifecycle 503 names (issue #3820) -------------------
+
+_LIFECYCLE_USE_CASE: dict[str, Callable[..., object]] = {
+    "start": get_start_server,
+    "stop": get_stop_server,
+    "restart": get_restart_server,
+}
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+@pytest.mark.parametrize(
+    ("worker_state", "member"),
+    [
+        (UnavailableWorkerState.NOT_CONNECTED, "not_connected"),
+        (UnavailableWorkerState.NO_ANSWER, "no_answer"),
+    ],
+)
+def test_a_lifecycle_503_names_the_worker_state(
+    action: str, worker_state: UnavailableWorkerState, member: str
+) -> None:
+    # A Worker that is not connected gets no automatic recovery, while one that
+    # did not answer in time may still finish the command, so the WebUI words
+    # the two apart from this member. The reason stays worker_unavailable.
+    use_case = _FakeUseCase(
+        error=WorkerUnavailableError("x", worker_state=worker_state)
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[_LIFECYCLE_USE_CASE[action]] = lambda: use_case
+
+    resp = _client(app).post(_url(uuid.uuid4(), uuid.uuid4(), action))
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "worker_unavailable"
+    assert resp.json()["worker_state"] == member
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        # The Worker answered UNAVAILABLE: its container backend did not.
+        CommandDispatchError("x", reason="worker_unavailable"),
+        # A cause that says nothing about the Worker (missing data-plane config).
+        WorkerUnavailableError("x"),
+    ],
+)
+def test_a_lifecycle_503_without_a_worker_state_names_none(
+    action: str, error: Exception
+) -> None:
+    use_case = _FakeUseCase(error=error)
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[_LIFECYCLE_USE_CASE[action]] = lambda: use_case
+
+    resp = _client(app).post(_url(uuid.uuid4(), uuid.uuid4(), action))
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "worker_unavailable"
+    assert "worker_state" not in resp.json()
+
+
+def test_the_console_503_names_no_worker_state() -> None:
+    # Only the lifecycle routes name it; the console keeps its plain 503.
+    app = _app(
+        member=True,
+        allow=True,
+        command=_FakeUseCase(
+            error=WorkerUnavailableError(
+                "x", worker_state=UnavailableWorkerState.NOT_CONNECTED
+            )
+        ),
+    )
+
+    resp = _client(app).post(
+        _url(uuid.uuid4(), uuid.uuid4(), "command"), json={"line": "list"}
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "worker_unavailable"
+    assert "worker_state" not in resp.json()
 
 
 # --- console line bound (issue #3363) ---------------------------------------

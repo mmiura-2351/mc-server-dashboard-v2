@@ -53,6 +53,7 @@ from mc_server_dashboard_api.servers.domain.committed_resources import (
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -399,6 +400,56 @@ async def test_session_ended_in_flight_is_flagged_and_releases_the_upload() -> N
         )
     assert excinfo.value.session_ended_in_flight is True
     assert excinfo.value.upload_may_be_live is False
+
+
+@pytest.mark.parametrize(
+    ("fleet_error", "worker_state"),
+    [
+        (WorkerNotConnectedError("worker gone"), UnavailableWorkerState.NOT_CONNECTED),
+        (SessionEndedError("worker gone"), UnavailableWorkerState.NOT_CONNECTED),
+        (
+            CommandTimedOutError("dispatch timed out"),
+            UnavailableWorkerState.NO_ANSWER,
+        ),
+    ],
+)
+async def test_unavailable_names_the_worker_state(
+    fleet_error: Exception, worker_state: UnavailableWorkerState
+) -> None:
+    # Issue #3820: the lifecycle routes tell the client whether the Worker is not
+    # connected or did not answer in time. The cause is named here, where it is
+    # still known; the transfer flags above are not that answer.
+    adapter = _adapter(_RaisingFleetControlPlane(fleet_error))
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await adapter.stop(
+            worker_id=WorkerId(uuid.uuid4()), server_id=ServerId(uuid.uuid4())
+        )
+    assert excinfo.value.worker_state is worker_state
+
+
+@pytest.mark.parametrize(
+    ("base_url", "credential"), [(None, "shhh"), ("https://api.example", None)]
+)
+async def test_missing_data_plane_config_names_no_worker_state(
+    base_url: str | None, credential: str | None
+) -> None:
+    # Issue #3820: a data-plane setting the API lacks says nothing about the
+    # Worker, so no Worker state is named.
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]
+        control_plane=_CapturingFleetControlPlane(),
+        data_plane_base_url=base_url,
+        worker_credential=credential,
+    )
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await adapter.hydrate(
+            worker_id=WorkerId(uuid.uuid4()),
+            community_id=CommunityId(uuid.uuid4()),
+            server_id=ServerId(uuid.uuid4()),
+        )
+    assert excinfo.value.worker_state is None
 
 
 async def test_read_file_dispatches_and_carries_bytes() -> None:

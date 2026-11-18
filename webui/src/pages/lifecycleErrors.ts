@@ -25,12 +25,13 @@
  *
  * 503 responses with a recognized `reason` (`no_eligible_worker`,
  * `worker_unavailable`, `jar_unavailable`) get their own message (issue #1092).
- * `worker_unavailable` — the API's rendering of a dispatch that timed out or lost
- * the Worker session, and of a Worker that answered that its container backend
- * did not cooperate (issue #3673) — is verb-specific on stop and restart for the
- * same reason some 409s are: the intent was already committed, so "try again" is
- * wrong (issue #2440). All other errors fall back to the generic action-failed
- * toast.
+ * `worker_unavailable` — the API's rendering of a dispatch to a Worker that is
+ * not connected or did not answer in time, and of a Worker that answered that
+ * its container backend did not cooperate (issue #3673) — is verb-specific on
+ * stop and restart for the same reason some 409s are: the intent was already
+ * committed, so "try again" is wrong (issue #2440). On those two verbs a Worker
+ * the API names `not_connected` gets a message of its own (issue #3820). All
+ * other errors fall back to the generic action-failed toast.
  *
  * 403 is intentionally NOT handled here: it carries a side effect (refetching
  * capabilities) that lives in `useOnForbidden`. Callers run that glue first and
@@ -266,12 +267,12 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 
 // The 503 counterpart of VERB_SPECIFIC_409_MESSAGE, consulted the same way and
 // falling through to SPECIFIC_503_MESSAGE (issue #2440). `worker_unavailable` is
-// the API's rendering of a dispatch that TIMED OUT or lost the Worker session,
-// and of a Worker that answered UNAVAILABLE because its container backend did
-// not cooperate (issue #3673; servers/api/servers.py
-// `_SERVICE_UNAVAILABLE_REASONS`, command_dispatch.py `_SANITIZED_REASONS`); the
-// generic message asks for a retry, which is wrong wherever the verb already
-// committed its intent:
+// the API's rendering of a dispatch to a Worker that is NOT CONNECTED or lost
+// its session, of one that TIMED OUT, and of a Worker that answered UNAVAILABLE
+// because its container backend did not cooperate (issue #3673;
+// servers/api/servers.py `_SERVICE_UNAVAILABLE_REASONS`, command_dispatch.py
+// `_SANITIZED_REASONS`); the generic message asks for a retry, which is wrong
+// wherever the verb already committed its intent:
 //
 // - stop    — StopServer raises it from one of two dispatches, both AFTER
 //             desired=stopped is committed and the placement load decremented,
@@ -283,8 +284,10 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 // - restart — desired stays running (restart commits no state change), so a
 //             Worker that stopped the server and failed to relaunch it (its
 //             relaunch answered UNAVAILABLE among the rest) leaves the server
-//             down with the reconciler about to start it again — the same
-//             reasoning as the 409 entry above.
+//             down with the reconciler about to start it again while that
+//             Worker stays connected — the same reasoning as the 409 entry
+//             above. A Worker that is not connected gets no such restart; see
+//             WORKER_NOT_CONNECTED_503_MESSAGE below.
 // - start   — absent DELIBERATELY. A PRE-dispatch unavailable (a failed hydrate,
 //             a hydrate the Worker answered UNAVAILABLE, or a connect that never
 //             reached the Worker) IS compensated back to stopped, and so is a
@@ -293,8 +296,10 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 //             session keeps desired=running plus the assignment for
 //             redispatch_start, so a start IS pending. All arrive as a bare
 //             `worker_unavailable` and the client cannot tell them apart — the
-//             same ambiguity #2445 tracks for the BUSY start, so start stays on
-//             the verb-agnostic message here too.
+//             `worker_state` member does not split them either, since each state
+//             arises both before and after the dispatch. It is the same
+//             ambiguity #2445 tracks for the BUSY start, so start stays on the
+//             verb-agnostic message here too.
 //
 // The wording is NOT the *Pending pair the 409 entries use. Those failures were
 // reported by a Worker that answered, so the toast can say what the server did;
@@ -307,8 +312,9 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 // the strings differ with it: the stop INTENT is re-driven (redispatch_stop
 // keeps retrying it), so that string states the retry; restart keeps only
 // desired=running — an undelivered restart is never re-sent, and the reconciler
-// starts the server only if it does end up down — so that string is conditional
-// ("if it stays down") rather than a promise to bring it back.
+// starts the server only if it does end up down, and only while its Worker is
+// connected — so that string is conditional ("if it stays down", "as long as
+// the host stays connected") rather than a promise to bring it back.
 //
 // `no_eligible_worker` and `jar_unavailable` are absent: both are raised by
 // StartServer before any intent is committed, so nothing is ever pending.
@@ -319,6 +325,42 @@ const VERB_SPECIFIC_503_MESSAGE: Record<
   worker_unavailable: {
     stop: "dashboard.lifecycle.stopUnconfirmed",
     restart: "dashboard.lifecycle.restartUnconfirmed",
+  },
+};
+
+// Consulted before VERB_SPECIFIC_503_MESSAGE when the API names the Worker
+// `not_connected` (the `worker_state` member of a lifecycle 503, issue #3820):
+// not connected at dispatch, or its session ended while the command waited (a
+// fast reconnect retires the old session's commands the same way, so the Worker
+// may in fact be back; the recovery below still holds). The unconfirmed
+// messages fit a Worker that is connected and may still finish the command. A
+// Worker that is not connected gets no automatic recovery: the reconciler skips
+// its servers until it returns, and nothing moves them on its own
+// (CONFIGURATION.md 5.6, "A Worker that never reconnects").
+//
+// - stop    — the intent stands, as above, but nothing is re-sent while the
+//             Worker is gone. The reconciler releases the server from it once
+//             its grace lapses, or a second stop does at once, and a start then
+//             places it on another Worker. A Worker back before the release
+//             gets the stop; one back after it keeps its instance, and nothing
+//             stops it.
+// - restart — desired stays running, but an undelivered restart is never
+//             re-sent, so the operator restarts it once the Worker is back, or
+//             moves it (stop, stop again, start).
+//
+// Both say moving is safe only once the old host is known to be down: the
+// release stops nothing there, so an instance still alive on it would run
+// beside the new one, and nothing fences it. The copy carries the steps and
+// that precondition itself rather than pointing to the docs, which not every
+// member can read. Start is absent for the reason given above. `no_answer`, and no member at all (the Worker's own UNAVAILABLE
+// answer, or a cause the API cannot name), keep the unconfirmed messages.
+const WORKER_NOT_CONNECTED_503_MESSAGE: Record<
+  string,
+  Partial<Record<LifecycleAction, TranslationKey>>
+> = {
+  worker_unavailable: {
+    stop: "dashboard.lifecycle.stopWorkerOffline",
+    restart: "dashboard.lifecycle.restartWorkerOffline",
   },
 };
 
@@ -364,11 +406,17 @@ export function lifecycleErrorMessage(
   }
   if (error instanceof ApiError && error.status === 503) {
     if (error.reason !== undefined) {
-      const byVerb = verbSpecificMessage(
-        VERB_SPECIFIC_503_MESSAGE,
-        error.reason,
-        action,
-      );
+      const offline =
+        error.workerState === "not_connected"
+          ? verbSpecificMessage(
+              WORKER_NOT_CONNECTED_503_MESSAGE,
+              error.reason,
+              action,
+            )
+          : undefined;
+      const byVerb =
+        offline ??
+        verbSpecificMessage(VERB_SPECIFIC_503_MESSAGE, error.reason, action);
       if (byVerb !== undefined) {
         return byVerb;
       }
