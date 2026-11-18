@@ -462,6 +462,60 @@ async def test_a_failed_re_read_ends_the_pass_and_is_not_a_failed_delete() -> No
     assert sorted(bucket.blob_keys()) == keys
 
 
+def _row(pack_id: ResourcePackId) -> ResourcePack:
+    """The row of a pack stored under *pack_id*; the GC reads only its id."""
+
+    return ResourcePack(
+        id=pack_id,
+        filename=_FILENAME,
+        display_name="Pack",
+        description=None,
+        sha1_hash="",
+        sha256_hash="",
+        size_bytes=0,
+        uploaded_by=uuid.uuid4(),
+        created_at=_T0,
+        updated_at=_T0,
+    )
+
+
+async def test_a_skipped_pack_leaves_the_count_of_failed_deletes_alone() -> None:
+    # A real bucket mixes live and young packs among the orphans. A pack the pass
+    # skips says nothing about the store, so it neither adds to the count nor
+    # restarts it: five failures with a live, a young and a re-read-spared pack
+    # between them still end the pass, and the pack after them is not tried
+    # (issue #3906).
+    bucket = _Bucket()
+    ids = sorted(
+        (ResourcePackId(uuid.uuid4()) for _ in range(9)), key=lambda p: str(p.value)
+    )
+    live, young, spared, last = ids[2], ids[4], ids[6], ids[8]
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield _pack_zip()
+
+    for pack_id in ids:
+        # Stored two minutes after the rest, the young pack is still inside the
+        # safety window when the pass meets it.
+        bucket.clock.set(_T0 + dt.timedelta(minutes=2) if pack_id == young else _T0)
+        await bucket.store.put(pack_id, _FILENAME, _body())
+    bucket.clock.set(_T0)
+    keys = [f"resource-packs/{pack_id.value}/{_FILENAME}" for pack_id in ids]
+    failing = [
+        key
+        for pack_id, key in zip(ids, keys, strict=True)
+        if pack_id not in (live, young, spared, last)
+    ]
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in failing
+    bucket.rows = _RowCommitsAfterTheRead(late=_row(spared))
+    await bucket.rows.add(_row(live))
+
+    result = await bucket.gc()
+
+    assert sorted(bucket.blob_keys()) == keys
+    assert (result.scanned, result.deleted, result.failed) == (9, 0, 5)
+
+
 async def test_refuses_a_bucket_another_database_owns(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

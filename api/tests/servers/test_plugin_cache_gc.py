@@ -255,24 +255,31 @@ class _ObjectCache:
 
     def __init__(self) -> None:
         self.faults = Faults()
+        # The store time each put records; a test moves it to cache a young blob.
+        self.stamp = _old()
         self.cache = ObjectPluginCacheStore(
-            faulty_s3_factory(FakeS3Store(clock=_old), self.faults)
+            faulty_s3_factory(FakeS3Store(clock=lambda: self.stamp), self.faults)
         )
 
-    async def seed(self, count: int) -> list[str]:
-        """Cache *count* distinct old blobs; their keys, in the order a pass meets
-        them."""
+    async def seed(self, count: int, *, young: int | None = None) -> list[str]:
+        """Cache *count* distinct blobs; their keys, in the order a pass meets
+        them. All are old, except the one at index *young* of that order, which is
+        stored now."""
 
         async def _body(data: bytes) -> AsyncIterator[bytes]:
             yield data
 
+        contents = sorted(
+            (b"blob-%d" % i for i in range(count)),
+            key=lambda d: hashlib.sha256(d).hexdigest(),
+        )
         keys = []
-        for i in range(count):
-            data = b"blob-%d" % i
+        for index, data in enumerate(contents):
             sha = hashlib.sha256(data).hexdigest()
+            self.stamp = _NOW if index == young else _old()
             await self.cache.put(sha, _body(data))
             keys.append(sha)
-        return sorted(keys)
+        return keys
 
     def fail_deletes_of(self, *shas: str) -> None:
         self.faults.when = lambda op, key: (
@@ -428,3 +435,22 @@ async def test_a_reclaimed_blob_restarts_the_count_of_failed_deletes(
     summary = caplog.records[-1]
     assert summary.levelno == logging.INFO
     assert "reason" not in vars(summary)
+
+
+async def test_a_skipped_blob_leaves_the_count_of_failed_deletes_alone() -> None:
+    # A real cache mixes live and young blobs among the orphans. A blob the pass
+    # skips says nothing about the store, so it neither adds to the count nor
+    # restarts it: five failures with a live, a young and a re-check-spared blob
+    # between them still end the pass, and the blob after them is not tried
+    # (issue #3906).
+    store = _ObjectCache()
+    keys = await store.seed(9, young=4)
+    live, young, spared, last = keys[2], keys[4], keys[6], keys[8]
+    store.fail_deletes_of(*(k for k in keys if k not in (live, young, spared, last)))
+    refs = _FakeReferences({live})
+    refs.add_after_first_call(spared)
+
+    result = await _gc(store.cache, refs)()
+
+    assert await store.keys() == keys
+    assert (result.scanned, result.deleted, result.failed) == (9, 0, 5)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import logging
 
 import pytest
@@ -235,15 +236,28 @@ class _ObjectPool:
 
     def __init__(self) -> None:
         self.faults = Faults()
+        # The store time each put records; a test moves it to pool a young JAR.
+        self.stamp = _old()
         self.pool = StorageJarPool(
-            ObjectStorage(faulty_s3_factory(FakeS3Store(clock=_old), self.faults))
+            ObjectStorage(
+                faulty_s3_factory(FakeS3Store(clock=lambda: self.stamp), self.faults)
+            )
         )
 
-    async def seed(self, count: int) -> list[str]:
-        """Pool *count* distinct old JARs; their keys, in the order a pass meets
-        them."""
+    async def seed(self, count: int, *, young: int | None = None) -> list[str]:
+        """Pool *count* distinct JARs; their keys, in the order a pass meets them.
+        All are old, except the one at index *young* of that order, which is
+        pooled now."""
 
-        return sorted([await self.pool.put(b"jar-%d" % i) for i in range(count)])
+        contents = sorted(
+            (b"jar-%d" % i for i in range(count)),
+            key=lambda d: hashlib.sha256(d).hexdigest(),
+        )
+        keys = []
+        for index, data in enumerate(contents):
+            self.stamp = _NOW if index == young else _old()
+            keys.append(await self.pool.put(data))
+        return keys
 
     def fail_deletes_of(self, *shas: str) -> None:
         self.faults.when = lambda op, key: (
@@ -399,3 +413,22 @@ async def test_a_reclaimed_jar_restarts_the_count_of_failed_deletes(
     summary = caplog.records[-1]
     assert summary.levelno == logging.INFO
     assert "reason" not in vars(summary)
+
+
+async def test_a_skipped_jar_leaves_the_count_of_failed_deletes_alone() -> None:
+    # A real pool mixes live and young JARs among the orphans. A JAR the pass
+    # skips says nothing about the store, so it neither adds to the count nor
+    # restarts it: five failures with a live, a young and a re-check-spared JAR
+    # between them still end the pass, and the JAR after them is not tried
+    # (issue #3906).
+    store = _ObjectPool()
+    keys = await store.seed(9, young=4)
+    live, young, spared, last = keys[2], keys[4], keys[6], keys[8]
+    store.fail_deletes_of(*(k for k in keys if k not in (live, young, spared, last)))
+    refs = _FakeReferences({live})
+    refs.add_after_first_call(spared)
+
+    result = await _gc(store.pool, refs)()
+
+    assert await store.keys() == keys
+    assert (result.scanned, result.deleted, result.failed) == (9, 0, 5)
