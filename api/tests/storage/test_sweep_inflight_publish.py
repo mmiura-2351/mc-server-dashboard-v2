@@ -67,9 +67,11 @@ async def _publish(
     community: CommunityId,
     server: ServerId,
     files: dict[str, bytes],
+    *,
+    chunk: int = 7,
 ) -> None:
     handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream(files))
+    await storage.write_snapshot(handle, tar_stream(files, chunk=chunk))
     await storage.commit_snapshot(handle)
 
 
@@ -361,6 +363,59 @@ async def test_object_stale_marker_expires_and_its_orphan_is_reclaimed() -> None
     assert await _hydrate(storage, community, server) == OLD
 
 
+async def test_object_sweep_reads_a_reader_lease_after_the_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hydrate leases the live snapshot, and its lease outlives the next flip.
+
+    So the sweep reads a reader lease after the pointer, the reverse of a
+    publish's registration. Here a hydrate starts and a publish flips while the
+    sweep checks the live snapshot's marker. Had the lease been read before that
+    check, it would have been absent, and the sweep would then read the new
+    pointer and delete the snapshot under the reader.
+    """
+
+    store = FakeS3Store()
+    storage = ObjectStorage(fake_s3_factory(store))
+    community, server = new_scope()
+    await _publish(storage, community, server, OLD)
+    live = json.loads(store.objects[_server_prefix(community, server) + "current.json"])
+    marker = _marker_of({live["snapshot"]}, community, server)
+    reader = storage.open_hydrate_source(community, server)
+    chunks: list[bytes] = []
+    real = object_store_mod._is_fresh_marker
+
+    async def _read_and_publish_meanwhile(client: S3Client, key: str) -> bool:
+        if key == marker and not chunks:
+            chunks.append(await reader.__anext__())
+            await _publish(storage, community, server, NEW)
+        return await real(client, key)
+
+    monkeypatch.setattr(
+        object_store_mod, "_is_fresh_marker", _read_and_publish_meanwhile
+    )
+
+    await storage.sweep()
+
+    assert chunks
+    assert read_tar(b"".join(chunks) + await drain(reader)) == OLD
+
+
+async def test_object_prune_removes_the_inflight_markers() -> None:
+    """Post-delete retention keeps no ``inflight/`` marker (Section 2.1)."""
+
+    store = FakeS3Store()
+    storage = ObjectStorage(fake_s3_factory(store))
+    community, server = new_scope()
+    await _publish(storage, community, server, OLD)
+    inflight = _server_prefix(community, server) + "inflight/"
+    await FakeS3Client(store).put_object(inflight + "deadbeef", b"")
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    assert not [key for key in store.objects if key.startswith(inflight)]
+
+
 # --- fs backend ------------------------------------------------------------
 
 
@@ -418,8 +473,8 @@ def _names(directory: Path) -> set[str]:
     return {p.name for p in directory.iterdir()} if directory.is_dir() else set()
 
 
-# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(12 * 10 + 30)
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_fs_sweep_during_a_commit_move_keeps_the_new_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -436,8 +491,8 @@ async def test_fs_sweep_during_a_commit_move_keeps_the_new_snapshot(
     assert await _hydrate(storage, community, server) == NEW
 
 
-# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(18 * 10 + 30)
+# 23 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(23 * 10 + 30)
 async def test_fs_sweep_during_a_restore_move_keeps_the_new_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -462,8 +517,8 @@ async def test_fs_sweep_during_a_restore_move_keeps_the_new_snapshot(
     assert await _hydrate(storage, community, server) == BACKED_UP
 
 
-# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(12 * 10 + 30)
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_fs_sweep_keeps_its_own_publish_past_the_marker_ttl(
     tmp_path: Path,
 ) -> None:
@@ -481,8 +536,8 @@ async def test_fs_sweep_keeps_its_own_publish_past_the_marker_ttl(
     assert await _hydrate(storage, community, server) == NEW
 
 
-# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(12 * 10 + 30)
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_fs_sweep_of_another_process_honours_the_marker(tmp_path: Path) -> None:
     storage, seam, community, server, commit, moved = await _fs_commit_held_after_move(
         tmp_path
@@ -501,8 +556,8 @@ async def test_fs_sweep_of_another_process_honours_the_marker(tmp_path: Path) ->
     assert not marker.exists()
 
 
-# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(12 * 10 + 30)
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
 async def test_fs_sweep_reads_the_marker_before_the_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -531,8 +586,8 @@ async def test_fs_sweep_reads_the_marker_before_the_pointer(
     assert await _hydrate(storage, community, server) == NEW
 
 
-# 6 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(6 * 10 + 30)
+# 7 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(7 * 10 + 30)
 async def test_fs_stale_marker_expires_and_its_orphan_is_reclaimed(
     tmp_path: Path,
 ) -> None:
@@ -563,3 +618,59 @@ async def test_fs_stale_marker_expires_and_its_orphan_is_reclaimed(
     assert not marker.exists()
     assert not lone_marker.exists()
     assert await _hydrate(storage, community, server) == OLD
+
+
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
+async def test_fs_sweep_reads_a_reader_lease_after_the_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fs twin of the object test: the reader lease is read after the pointer.
+
+    The files are larger than the hydrate's first chunk plus a pipe buffer, so
+    the tar writer is still in ``a`` when the sweep runs and has yet to open ``b``.
+    """
+
+    big = {"a": b"A" * (2 << 20), "b": b"B" * (2 << 20)}
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, big, chunk=1 << 20)
+    live = snapshot_dir(tmp_path, community, server)
+    marker = live.parent.parent / "inflight" / live.name
+    reader = storage.open_hydrate_source(community, server)
+    chunks: list[bytes] = []
+    loop = asyncio.get_running_loop()
+    real = fs_mod._is_fresh_marker
+
+    async def _read_and_publish() -> None:
+        chunks.append(await reader.__anext__())
+        await _publish(storage, community, server, NEW)
+
+    def _read_and_publish_meanwhile(path: Path) -> bool:
+        if path == marker and not chunks:
+            asyncio.run_coroutine_threadsafe(_read_and_publish(), loop).result(_WAIT_S)
+        return real(path)
+
+    monkeypatch.setattr(fs_mod, "_is_fresh_marker", _read_and_publish_meanwhile)
+
+    await asyncio.to_thread(storage.sweep)
+
+    assert chunks
+    assert read_tar(b"".join(chunks) + await drain(reader)) == big
+
+
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
+async def test_fs_prune_removes_the_inflight_markers(tmp_path: Path) -> None:
+    """Post-delete retention keeps no ``inflight/`` directory (Section 2.1)."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await _publish(storage, community, server, OLD)
+    server_root = snapshot_dir(tmp_path, community, server).parent.parent
+    (server_root / "inflight").mkdir(exist_ok=True)
+    (server_root / "inflight" / "deadbeef").touch()
+
+    await storage.prune_to_final_snapshot(community, server)
+
+    assert not (server_root / "inflight").exists()

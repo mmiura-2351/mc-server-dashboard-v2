@@ -233,7 +233,7 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 2. **The current working set, packed as `final.tar.gz`** — mandatory. The live
    `current/` snapshot is packed into a single self-contained `tar.gz` at the server
    root, then the unpacked working-set tree (`snapshots/`, `incoming/`, `versions/`,
-   and the `current` pointer) is removed and the generation marker is advanced
+   `inflight/`, and the `current` pointer) is removed and the generation marker is advanced
    (Section 2, generation marker). Packing is
    **fail-closed**: if it fails, the working set is left intact and the delete fails,
    so a deletion never silently loses the latest state. A server that never published
@@ -246,7 +246,7 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 Everything else for the server is removed; after the prune the server directory
 holds only `backups/<newest-id>.tar.gz` (if any), `final.tar.gz` (if published)
 and the `generation` marker — no `snapshots/`, `incoming/`,
-`versions/`, or `current` pointer remain. Nothing removes the server directory
+`versions/`, `inflight/`, or `current` pointer remain. Nothing removes the server directory
 after a successful delete, so the few-byte marker is retained with the archives
 until an operator reclaims the directory. The retained archives are unreferenced orphans by design (not the bug the
 `delete_backup` ordering guards against).
@@ -678,7 +678,9 @@ from its listing, and it reads the registration before the pointer. A publish
 releases its registration only after its flip, so a candidate found unregistered
 has either been flipped already, which the pointer read then shows, or been
 abandoned. A pass that overlaps a publish therefore never reclaims the snapshot
-being filled, whatever the sweep cadence.
+being filled, whatever the sweep cadence. A hydrate reader's lease is read the
+other way round, after the pointer: it is taken on the live snapshot and outlives
+the flip that supersedes it.
 
 A marker left unrenewed for **1 h** belongs to a publish whose process died. It no
 longer pins its snapshot: the first sweep after that reclaims the snapshot, then

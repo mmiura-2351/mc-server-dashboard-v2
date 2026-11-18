@@ -1373,9 +1373,11 @@ class FsStorage(Storage):
         memory for this process, and as an ``inflight/<snapshot-id>`` marker for
         any other. A candidate either holds is skipped. The registration is
         read before the pointer, so a candidate found unregistered was either
-        flipped already, which the pointer read then shows, or abandoned. A marker
-        older than ``_INFLIGHT_MARKER_TTL_S`` is one whose process died; it no
-        longer pins its snapshot, and is removed.
+        flipped already, which the pointer read then shows, or abandoned. A hydrate
+        reader's lease is read after the pointer, as before: it is taken on the
+        live snapshot and outlives the flip. A marker older than
+        ``_INFLIGHT_MARKER_TTL_S`` is one whose process died; it no longer pins its
+        snapshot, and is removed.
 
         In-flight staging (issue #183): a transfer staged but not yet committed is
         pinned by an in-process active-staging lease taken at ``begin_snapshot`` (and
@@ -1410,19 +1412,16 @@ class FsStorage(Storage):
         inflight = server_root / "inflight"
         if snapshots.is_dir():
             for snap in sorted(snapshots.iterdir(), key=lambda p: p.name):
-                # A candidate a hydrate reader leases or a publish is still moving
-                # in (issue #3893) is kept. Checked before the pointer: a publish
-                # is released only after its flip.
-                if (
-                    self._is_leased(snap)
-                    or self._is_publishing(snap)
-                    or _is_fresh_marker(inflight / snap.name)
-                ):
+                # A snapshot a publish is still moving in is kept (issue #3893).
+                # Checked before the pointer: a publish is released only after its
+                # flip.
+                if self._is_publishing(snap) or _is_fresh_marker(inflight / snap.name):
                     continue
                 # Re-read the live name per candidate: a concurrent publish may
                 # have flipped ``current`` onto this candidate after the iteration
                 # started (issue #1606, mirroring the object adapter's #113 guard).
-                if snap.name != self._live_snapshot_name(server_root):
+                live = self._live_snapshot_name(server_root)
+                if snap.name != live and not self._is_leased(snap):
                     _rmtree(snap)
         if inflight.is_dir():
             # The markers of publishes whose process died (issue #3893).
@@ -2410,7 +2409,7 @@ class FsStorage(Storage):
             # on its first delete, and an upload whose guard read its generation must
             # still fail the commit re-check, or that first publish lands on a server
             # being deleted. A retry advances it again, which never lowers it.
-            for sub in ("snapshots", "incoming", "versions"):
+            for sub in ("snapshots", "incoming", "versions", "inflight"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
             server_root.mkdir(parents=True, exist_ok=True)
@@ -2473,7 +2472,7 @@ class FsStorage(Storage):
         _rmtree(server_root / "current")
         # The final archive is durable and ``current`` is gone; reclaim the unpacked
         # working-set tree. The generation marker stays (see the bump above).
-        for sub in ("snapshots", "incoming", "versions"):
+        for sub in ("snapshots", "incoming", "versions", "inflight"):
             _rmtree(server_root / sub)
         self._drop_publisher(server_root)
 

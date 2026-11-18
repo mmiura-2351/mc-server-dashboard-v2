@@ -718,10 +718,12 @@ class ObjectStorage(Storage):
         decides once per candidate prefix, at that moment rather than from the
         listing. It reads the registration first, then the pointer, so a prefix it
         finds unregistered was either flipped already, which the pointer read then
-        shows, or abandoned. A candidate that is registered, live or reader-leased
-        is kept. The sweep runs at API startup and then on a periodic loop
-        (``storage_sweep.interval_seconds``, daily by default — issue #2252); a
-        pass that overlaps a publish keeps the prefix that publish is filling.
+        shows, or abandoned. A hydrate reader's lease is read last, as before: it is
+        taken on a live prefix and outlives the flip. A candidate that is
+        registered, live or reader-leased is kept. The sweep runs at API startup
+        and then on a periodic loop (``storage_sweep.interval_seconds``, daily by
+        default — issue #2252); a pass that overlaps a publish keeps the prefix
+        that publish is filling.
 
         Abandoned markers (issue #3893): the copy renews its marker every
         ``_INFLIGHT_MARKER_RENEW_S``. A marker older than
@@ -821,18 +823,21 @@ class ObjectStorage(Storage):
                 snap_prefix = server_prefix + "/".join(rest.split("/")[:2]) + "/"
                 if snap_prefix not in delete_prefix:
                     # Decide immediately before the first delete under this prefix.
-                    # A prefix a hydrate reader leases (Section 4.2) or a publish
-                    # still fills (issue #3893) is kept. Then re-read the pointer: a
-                    # concurrent publish may have flipped it onto the candidate
-                    # after the listing was taken (issue #113). The publish is
-                    # checked first because it is released only after its flip.
-                    kept = (
-                        self._is_leased(snap_prefix)
-                        or self._is_publishing(snap_prefix)
-                        or await _is_fresh_marker(client, _inflight_marker(snap_prefix))
+                    # A prefix a publish still fills is kept (issue #3893), checked
+                    # before the pointer because a publish is released only after
+                    # its flip. Then re-read the pointer: a concurrent publish may
+                    # have flipped it onto the candidate after the listing was taken
+                    # (issue #113). A superseded prefix a hydrate reader leases is
+                    # kept too (Section 4.2), checked after the pointer because the
+                    # lease outlives the flip.
+                    filling = self._is_publishing(snap_prefix) or (
+                        await _is_fresh_marker(client, _inflight_marker(snap_prefix))
                     )
-                    delete_prefix[snap_prefix] = not kept and (
-                        snap_prefix != await self._read_pointer(client, server_prefix)
+                    live = await self._read_pointer(client, server_prefix)
+                    delete_prefix[snap_prefix] = (
+                        not filling
+                        and snap_prefix != live
+                        and not self._is_leased(snap_prefix)
                     )
                 if delete_prefix[snap_prefix]:
                     await client.delete_object(key)
@@ -1306,6 +1311,7 @@ class ObjectStorage(Storage):
                 await _delete_prefix(client, server_prefix + "snapshots/")
                 await _delete_prefix(client, server_prefix + "incoming/")
                 await _delete_prefix(client, server_prefix + "versions/")
+                await _delete_prefix(client, server_prefix + _INFLIGHT)
                 if snapshot_prefix is None:
                     # The GC-only branch ADVANCES the generation too (issue #3439),
                     # with no publisher now that the pointer is gone: a server that
