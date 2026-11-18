@@ -42,6 +42,10 @@ paths:
   applying the change there means forcing a hydrate from the last published
   snapshot over a scratch that may be newer. The change stays owed until the
   next clean stop and start (decision tracked in issue #3271).
+- a start or placement whose hydrate the Worker refuses because it already runs
+  the server keeps it there and launches nothing (issue #3865). The instance's
+  snapshots publish its own files over the regenerated ones, so the start owes
+  them again: the marks it cleared, and every file a group manages.
 
 The mark is what tells a file a group change made stale from one no group ever
 managed. A server with no mark keeps its ``ops.json`` / ``whitelist.json``

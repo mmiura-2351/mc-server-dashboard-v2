@@ -19,9 +19,12 @@ from mc_server_dashboard_api.servers.application.groups import RemovePlayer
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     StartServer,
+    StopServer,
 )
+from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     WorkingSetSeedFailedError,
 )
@@ -48,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
     FakeClock,
     FakeControlPlane,
@@ -142,11 +146,12 @@ def _start(
     store: _VersionedFileStore,
     cp: FakeControlPlane,
     jar_provisioner: JarProvisioner | None = None,
+    clock: FakeClock | None = None,
 ) -> StartServer:
     return StartServer(
         uow=uow,
         control_plane=cp,
-        clock=FakeClock(_NOW),
+        clock=clock or FakeClock(_NOW),
         jar_provisioner=jar_provisioner or FakeJarProvisioner(),
         store_generation=store,
         file_store=store,
@@ -357,3 +362,145 @@ async def test_restart_stays_in_place_and_leaves_the_change_owed() -> None:
     assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == [
         GroupKind.OP
     ]
+
+
+# --- a start whose hydrate finds the server already live (issue #3865) -------
+
+
+class _WorkerAlreadyRunningIt(FakeControlPlane):
+    """Worker A already runs an instance of the server, on its own working set.
+
+    It refuses a hydrate while that instance lives, as the Worker does. Every
+    snapshot it takes publishes the instance's own ``ops.json``, the stale one: the
+    assigned Worker's snapshot is the one a stale-base publish is accepted from.
+    """
+
+    def __init__(self, store: _VersionedFileStore) -> None:
+        super().__init__(place_to=_WORKER)
+        self._store = store
+        self._live = True
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        outcome = await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        if not self._live:
+            return outcome
+        return CommandOutcome(
+            status=worker_status("HydrateTrigger", "instance_running"),
+            message="instancemanager: server already running",
+        )
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        outcome = await super().stop(
+            worker_id=worker_id, server_id=server_id, force=force
+        )
+        self._live = False
+        return outcome
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        outcome = await super().snapshot(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            final=final,
+        )
+        await self._store.write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path="ops.json",
+            content=_STALE_OPS.encode(),
+        )
+        return outcome
+
+
+async def _adopt(entry: str, use_case: StartServer, server_id: ServerId) -> None:
+    """Run the start ``entry`` names; the Worker turns out to run the server."""
+
+    if entry == "start":
+        with pytest.raises(InvalidLifecycleTransitionError):
+            await use_case(community_id=_COMMUNITY, server_id=server_id)
+    else:
+        await use_case.place_and_start(community_id=_COMMUNITY, server_id=server_id)
+
+
+@pytest.mark.parametrize("entry", ["start", "place_and_start"])
+async def test_an_adopted_instance_leaves_the_owed_player_files_owed(
+    entry: str,
+) -> None:
+    # The start regenerated the owed ops.json into the store and cleared its mark
+    # with the intent. Then the Worker refused the hydrate: it already runs the
+    # server, on a working set holding the stale file, and keeps it. Its snapshots
+    # put that file back in the store, so the regeneration must stay owed: the next
+    # start, after a stop, makes it again.
+    uow = FakeUnitOfWork()
+    server = _server()
+    await _operator_removed_while_running(uow, server)
+    if entry == "place_and_start":
+        server.desired_state = DesiredState.RUNNING
+        uow.servers.seed(server)
+    store = _VersionedFileStore()
+    cp = _WorkerAlreadyRunningIt(store)
+    later = FakeClock(_NOW + dt.timedelta(minutes=1))
+
+    await _adopt(entry, _start(uow, store, cp, clock=later), server.id)
+    owed_once_adopted = [p.kind for p in await uow.groups.list_sync_pending(server.id)]
+    await StopServer(uow=uow, control_plane=cp, clock=later)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+    assert json.loads(store.files["ops.json"]) != []
+    await _start(uow, store, cp, clock=later)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert owed_once_adopted == [GroupKind.OP]
+    assert json.loads(store.files["ops.json"]) == []
+    assert await uow.groups.list_sync_pending(server.id) == []
+
+
+async def _with_op_group_attached(uow: FakeUnitOfWork, server: Server) -> None:
+    group = PlayerGroup(
+        id=GroupId.new(),
+        community_id=_COMMUNITY,
+        name=GroupName("admins"),
+        kind=GroupKind.OP,
+        players=[Player(uuid.uuid4(), "admin")],
+    )
+    uow.groups.seed(group)
+    await uow.groups.attach(group.id, server.id)
+
+
+@pytest.mark.parametrize("entry", ["start", "place_and_start"])
+@pytest.mark.parametrize(
+    ("attached", "owed"), [(True, [GroupKind.OP]), (False, [])], ids=["op", "none"]
+)
+async def test_an_adopted_instance_owes_every_group_managed_file(
+    entry: str, attached: bool, owed: list[GroupKind]
+) -> None:
+    # Nothing is owed when this start runs: an earlier start that never launched on
+    # this Worker cleared the mark of a change the store holds and the instance
+    # does not. So a file a group manages is owed again on adoption whether or not
+    # this start cleared it. A file no group manages stays as the game left it.
+    uow = FakeUnitOfWork()
+    server = _server()
+    if entry == "place_and_start":
+        server.desired_state = DesiredState.RUNNING
+    uow.servers.seed(server)
+    if attached:
+        await _with_op_group_attached(uow, server)
+    store = _VersionedFileStore()
+
+    await _adopt(entry, _start(uow, store, _WorkerAlreadyRunningIt(store)), server.id)
+
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == owed

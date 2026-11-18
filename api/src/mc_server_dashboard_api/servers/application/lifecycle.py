@@ -77,7 +77,10 @@ A hydrate the placed Worker refuses ``INVALID_STATE`` is therefore not a failure
 before dispatch in the sense above, though no start was sent: it proves an instance
 already live on that Worker, one the row did not name, which placement cannot see
 (issue #3865). Both ``__call__`` and ``place_and_start`` keep the assignment and
-record observed=running. ``place_and_start`` then returns, as nothing failed;
+record observed=running. In the same transaction they owe the group-managed player
+files again: the start regenerated them into the store and cleared their marks,
+but the instance runs its own working set, and its snapshots publish that set's
+files over the store. ``place_and_start`` then returns, as nothing failed;
 ``__call__`` answers ``InvalidLifecycleTransitionError``, since its start launched
 nothing and the instance may run an older working set than the store's.
 
@@ -157,6 +160,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.groups import GroupKind, PendingGroupSync
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     ProvisionedJar,
@@ -625,14 +629,16 @@ class StartServer:
             # Worker (issue #773/#774, and #3865 for the refused hydrate). So converge
             # exactly as redispatch_start does (#213): record observed=running and
             # KEEP desired=running + the assignment.
-            await self._record_running(server, worker_id)
             if dispatch.attempted:
                 # The user's start IS satisfied.
+                await self._record_running(server, worker_id)
                 return server
             # A refused hydrate means this start launched nothing: the instance was
             # there before it, on whatever working set it had, which may be older
-            # than the store's. So the start did not happen as asked, and the user
+            # than the store's. So the player files are owed again (see
+            # ``_record_running``), the start did not happen as asked, and the user
             # gets the start verb's "already running" conflict instead of a success.
+            await self._record_running(server, worker_id, owe_again=owed_group_files)
             _LOG.warning(
                 "worker %s refused the hydrate for server %s because it already "
                 "runs an instance of it; keeping the server on that Worker",
@@ -820,9 +826,13 @@ class StartServer:
                 # a hydrate, as ``__call__``'s arm explains. Placement cannot know
                 # that, so unassigning would let a later tick place the server on
                 # another Worker while this instance runs. Keep this Worker and
-                # converge as redispatch_start does. Nothing failed, so this
-                # returns, and the reconciler counts no failure.
-                await self._record_running(server, worker_id)
+                # converge as redispatch_start does, owing again the player files
+                # this placement regenerated for a launch that did not happen.
+                # Nothing failed, so this returns, and the reconciler counts no
+                # failure.
+                await self._record_running(
+                    server, worker_id, owe_again=owed_group_files
+                )
                 _LOG.warning(
                     "worker %s refused the hydrate for server %s because it "
                     "already runs an instance of it; keeping the server on that "
@@ -1200,12 +1210,27 @@ class StartServer:
             )
         return outcome
 
-    async def _record_running(self, server: Server, worker_id: WorkerId) -> None:
+    async def _record_running(
+        self,
+        server: Server,
+        worker_id: WorkerId,
+        *,
+        owe_again: list[PendingGroupSync] | None = None,
+    ) -> None:
         """Record observed=running for an instance found live on ``worker_id``.
 
         The convergence an ``INVALID_STATE`` start or hydrate outcome is owed
         (#213): the Worker performed no transition, so no ``StatusChange`` will
         come to record it. The write asserts the row is still on ``worker_id``.
+
+        ``owe_again`` is passed when the refused step was the hydrate (issue
+        #3865): the marks the start cleared with its intent, for a launch that did
+        not happen. The instance keeps its own working set, and its snapshots
+        publish that set's player files over the store, so the files are owed
+        again in this same transaction: the marks the start cleared, and every
+        file a group manages, since an earlier start that never launched on this
+        Worker may have cleared a mark the instance never applied. A file no group
+        manages is left as the game left it.
         """
 
         observed_at = self.clock.now()
@@ -1216,6 +1241,13 @@ class StartServer:
                 observed_at=observed_at,
                 expected_worker=worker_id,
             )
+            if owe_again is not None:
+                attached = await self.uow.groups.list_groups_for_server(server.id)
+                owed = {mark.kind for mark in owe_again}
+                owed |= {group.kind for group in attached}
+                for kind in GroupKind:
+                    if kind in owed:
+                        await self.uow.groups.mark_sync_pending([server.id], kind)
             await self.uow.commit()
         # Keep the return honest (issue #292): reflect the observed state on the
         # entity only when the guarded write landed; if a same-instant/fresher
