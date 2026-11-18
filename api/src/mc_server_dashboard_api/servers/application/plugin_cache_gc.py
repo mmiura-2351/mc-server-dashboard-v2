@@ -25,9 +25,10 @@ issue #3870).
 and age, and each pass ends with one summary line, at DEBUG when the pass neither
 reclaimed nor failed anything. A blob whose delete fails is logged at WARNING and
 skipped, and the pass goes on: one blob that keeps failing must not starve every
-blob after it (issue #3871). A store that gives no answer at all
-(:class:`PluginCacheStorageUnreachableError`) ends the pass instead, as does a
-cancellation.
+blob after it (issue #3871). Five failed deletes in a row end the pass, and its
+summary is then at WARNING with the reason (``gc_pass``, issue #3906). A store that
+gives no answer at all (:class:`PluginCacheStorageUnreachableError`) ends the pass
+at once, as does a cancellation; neither logs a summary.
 """
 
 from __future__ import annotations
@@ -37,6 +38,10 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.gc_pass import (
+    MAX_CONSECUTIVE_FAILED_DELETES,
+    STOPPED_AFTER_CONSECUTIVE_FAILURES,
+)
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
     PluginCacheStorageUnreachableError,
@@ -56,7 +61,7 @@ GC_SAFETY_WINDOW = dt.timedelta(hours=1)
 class PluginCacheGcResult:
     """What a GC pass scanned and reclaimed.
 
-    ``scanned`` is the cache size examined, ``deleted`` the orphans reclaimed,
+    ``scanned`` is the number of blobs listed, ``deleted`` the orphans reclaimed,
     ``freed_bytes`` their combined on-store size, and ``failed`` the orphans whose
     delete failed and were skipped (issue #3871).
     """
@@ -97,6 +102,8 @@ class RunPluginCacheGc:
         deleted = 0
         freed_bytes = 0
         failed = 0
+        failed_in_a_row = 0
+        stopped = False
         for entry in entries:
             if entry.sha256 in live:
                 continue
@@ -108,7 +115,9 @@ class RunPluginCacheGc:
             # a dedup install reuses an existing blob without refreshing its
             # modified_at, so the safety window alone cannot protect it.
             # Between the snapshot above and this point, a new plugin row may
-            # have committed — re-checking avoids reclaiming a live blob.
+            # have committed — re-checking avoids reclaiming a live blob. It stays
+            # outside the ``try`` below: a re-read that fails is not a failed
+            # delete, and it ends the pass (issue #3906).
             fresh_live = await self.references.live()
             if entry.sha256 in fresh_live:
                 continue
@@ -120,6 +129,7 @@ class RunPluginCacheGc:
                 raise
             except Exception as exc:  # noqa: BLE001 - one blob must not end the pass
                 failed += 1
+                failed_in_a_row += 1
                 _LOG.warning(
                     "plugin-cache GC could not delete blob %s, skipped it: %s: %s",
                     entry.sha256,
@@ -127,7 +137,13 @@ class RunPluginCacheGc:
                     exc,
                     exc_info=True,
                 )
+                if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_DELETES:
+                    # Likely the store rather than these blobs: stop paying each
+                    # later one its retries and a WARNING (issue #3906).
+                    stopped = True
+                    break
                 continue
+            failed_in_a_row = 0
             deleted += 1
             freed_bytes += entry.size_bytes
             _LOG.info(
@@ -137,8 +153,9 @@ class RunPluginCacheGc:
                 entry.size_bytes,
                 now - entry.modified_at,
             )
+        level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(
-            logging.INFO if deleted or failed else logging.DEBUG,
+            logging.WARNING if stopped else level,
             "plugin-cache GC pass: %d blob(s) listed, %d reclaimed (%d bytes), "
             "%d failed, in %.1fs",
             len(entries),
@@ -146,6 +163,7 @@ class RunPluginCacheGc:
             freed_bytes,
             failed,
             (self.clock.now() - started).total_seconds(),
+            extra={"reason": STOPPED_AFTER_CONSECUTIVE_FAILURES} if stopped else None,
         )
         return PluginCacheGcResult(
             scanned=len(entries),

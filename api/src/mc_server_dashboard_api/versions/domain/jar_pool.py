@@ -66,5 +66,6 @@ class JarPool(abc.ABC):
         """Remove a pooled JAR by content key. Idempotent (no error if absent).
 
         Raises ``JarPoolUnreachableError`` when the store gave no answer at all
-        (issue #3871); any other failure is about this JAR.
+        (issue #3871). Any other failure fails only this delete: the GC skips the
+        JAR, and ends its pass after five such failures in a row (issue #3906).
         """

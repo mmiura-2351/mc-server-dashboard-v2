@@ -1914,7 +1914,7 @@
         "type": "object"
       },
       "JarPoolGcResponse": {
-        "description": "What a JAR-pool GC pass scanned and reclaimed (issue #293).\n\n``failed`` counts the JARs whose delete failed: the pass skipped them and went\non, so a 200 alone does not say every orphan went (issue #3871).",
+        "description": "What a JAR-pool GC pass scanned and reclaimed (issue #293).\n\n``scanned`` is the number of JARs the pass listed. ``failed`` counts the JARs\nwhose delete failed: the pass skipped each one and went on, so a 200 alone does\nnot say every orphan went (issue #3871). After five failed deletes in a row the\npass ends early, and the orphans it never reached count in neither ``deleted``\nnor ``failed`` (issue #3906).",
         "properties": {
           "deleted": {
             "title": "Deleted",
@@ -11835,7 +11835,7 @@
     },
     "/api/versions/jar-pool/gc": {
       "post": {
-        "description": "Reclaim pooled JARs no live server row references (platform admin, #293).\n\nA bounded scan diffing the pool against the live reference set, skipping JARs\ninside the safety window; returns what it scanned and freed, and how many JARs\nit skipped because their delete failed (issue #3871). Audited like the\ncatalog refresh. Refused with 409 ``store_not_owned`` when the store's owner\nmarker names another database (STORAGE.md Section 4.3, issue #3870); the\n``detail`` names the marker and both installations, and the refusal is logged.",
+        "description": "Reclaim pooled JARs no live server row references (platform admin, #293).\n\nA bounded scan diffing the pool against the live reference set, skipping JARs\ninside the safety window; returns how many JARs it listed, what it freed, and\nhow many JARs it skipped because their delete failed (issue #3871). Five failed\ndeletes in a row end the pass early, and the orphans it never reached count in\nneither total (issue #3906). Audited like the catalog refresh. Refused with 409\n``store_not_owned`` when the store's owner marker names another database\n(STORAGE.md Section 4.3, issue #3870); the ``detail`` names the marker and both\ninstallations, and the refusal is logged.",
         "operationId": "jar_pool_gc_api_versions_jar_pool_gc_post",
         "responses": {
           "200": {

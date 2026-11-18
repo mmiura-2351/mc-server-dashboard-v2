@@ -45,6 +45,7 @@ def _fail_unlink(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
 @pytest.mark.parametrize(
     "code",
     [
+        errno.EIO,
         errno.ENODEV,
         errno.ENXIO,
         errno.ESTALE,
@@ -61,6 +62,8 @@ async def test_a_delete_on_a_gone_store_is_unreachable(
 ) -> None:
     # The device vanished, or the remote-fs mount went stale or lost its
     # transport: the store itself is gone, so the GC ends its pass (issue #3871).
+    # EIO is one of them: a soft NFS mount reports a server that stopped answering
+    # that way (issue #3906).
     pool = StorageJarPool(FsStorage(tmp_path))
     key = await pool.put(_JAR)
     _fail_unlink(monkeypatch, code)
@@ -74,12 +77,14 @@ async def test_a_delete_on_a_gone_store_is_unreachable(
     assert cause.__cause__.errno == code
 
 
-@pytest.mark.parametrize("code", [errno.EIO, errno.EBUSY, errno.EACCES, errno.EROFS])
-async def test_a_delete_that_can_fail_for_one_file_is_not_unreachable(
+@pytest.mark.parametrize("code", [errno.EBUSY, errno.EACCES, errno.EROFS])
+async def test_a_delete_that_fails_at_once_is_not_unreachable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
 ) -> None:
-    # A bad block, a file in use, a permission or a read-only mount: the store
-    # answered, about this file. The GC skips it and goes on (issue #3871).
+    # A file in use or a permission is about this file. A read-only filesystem is
+    # about the whole store, but it fails at once rather than after a timeout.
+    # The GC skips the JAR and goes on (issue #3871), and five failures in a row
+    # end its pass (issue #3906).
     pool = StorageJarPool(FsStorage(tmp_path))
     key = await pool.put(_JAR)
     _fail_unlink(monkeypatch, code)

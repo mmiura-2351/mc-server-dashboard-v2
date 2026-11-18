@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { components } from "../api/schema";
 import { clearAccessToken } from "../auth/tokenStore.ts";
 import { t } from "../i18n/index.ts";
 import { renderApp } from "../test/render.tsx";
@@ -43,7 +44,12 @@ const TYPES = { server_types: ["vanilla", "paper"] };
 const VANILLA = { versions: ["1.21.4", "1.21.3", "1.20.6"] };
 const PAPER = { versions: ["1.21.4", "1.21.1"] };
 const JAR_POOL = { count: 14, total_bytes: 2_040_109_466 };
-const GC_RESULT = { scanned: 14, deleted: 3, freed_bytes: 432_013_312 };
+const GC_RESULT: components["schemas"]["JarPoolGcResponse"] = {
+  scanned: 14,
+  deleted: 3,
+  freed_bytes: 432_013_312,
+  failed: 0,
+};
 
 // Capture the requests the page issues so the tests can assert refresh/GC shapes.
 let calls: { url: string; method: string }[] = [];
