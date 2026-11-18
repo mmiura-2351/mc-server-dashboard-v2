@@ -253,17 +253,22 @@ function ToastItem({
   const remainingRef = useRef(autoDismissMs(toast.message));
   const ref = useRef<HTMLDivElement>(null);
   const messageId = useId();
+  // Read at removal, so a new callback never re-runs the cleanup below on a
+  // toast that is still showing.
+  const onRemoveFocusedRef = useRef(onRemoveFocused);
+  onRemoveFocusedRef.current = onRemoveFocused;
 
   // A layout effect's cleanup runs while the node is still in the document,
-  // so focus is handed on before the browser would drop it to the body.
+  // so focus is handed on before the browser would drop it to the body. It
+  // runs once, at removal.
   useLayoutEffect(() => {
     const node = ref.current;
     return () => {
       if (node?.contains(document.activeElement)) {
-        onRemoveFocused(node);
+        onRemoveFocusedRef.current(node);
       }
     };
-  }, [onRemoveFocused]);
+  }, []);
 
   // A toast raised, or raised again, comes into view in case the stack
   // overflows and scrolls; not while keyboard focus is in the stack, so a
