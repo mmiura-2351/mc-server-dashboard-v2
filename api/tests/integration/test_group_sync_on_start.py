@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.application.groups import (
     AttachGroup,
     CreateGroup,
     DeleteGroup,
+    DetachGroup,
     RemovePlayer,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
@@ -298,21 +299,35 @@ async def test_start_after_an_at_rest_edit_writes_nothing_more(world: _World) ->
 
 # 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(16 * 10 + 30)
+@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
 async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
-    world: _World,
+    world: _World, by: str
 ) -> None:
     # Issue #3865. The start regenerates the owed file and clears its mark, then
     # the Worker refuses the hydrate: it already runs the server, on a working set
     # with the old file, which its snapshots will publish. The server is kept on
-    # that Worker, and the change is owed again in the same transaction.
+    # that Worker, and the change is owed again in the same transaction. Once the
+    # only op group is detached or deleted, the cleared mark is all that says so.
     player = uuid.uuid4()
     group_id = await _attached_op_group(world, player)
     await _set_state(world.engine, world.server_id, "running")
-    await RemovePlayer(uow=world.uow(), file_store=world.files)(
-        community_id=world.community_id,
-        group_id=group_id,
-        player_uuid=player,
-    )
+    if by == "remove_player":
+        await RemovePlayer(uow=world.uow(), file_store=world.files)(
+            community_id=world.community_id,
+            group_id=group_id,
+            player_uuid=player,
+        )
+    elif by == "detach_group":
+        await DetachGroup(uow=world.uow(), file_store=world.files)(
+            community_id=world.community_id,
+            group_id=group_id,
+            server_id=world.server_id,
+        )
+    else:
+        await DeleteGroup(uow=world.uow(), file_store=world.files)(
+            community_id=world.community_id,
+            group_id=group_id,
+        )
     await _set_state(world.engine, world.server_id, "stopped")
     cp = FakeControlPlane(
         place_to=_WORKER,

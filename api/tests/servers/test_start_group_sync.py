@@ -15,7 +15,11 @@ import uuid
 
 import pytest
 
-from mc_server_dashboard_api.servers.application.groups import RemovePlayer
+from mc_server_dashboard_api.servers.application.groups import (
+    DeleteGroup,
+    DetachGroup,
+    RemovePlayer,
+)
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
     StartServer,
@@ -118,8 +122,14 @@ def _server(*, worker: WorkerId | None = None) -> Server:
     )
 
 
-async def _operator_removed_while_running(uow: FakeUnitOfWork, server: Server) -> None:
-    """Remove the only operator while ``server`` runs, then stop it again."""
+async def _operator_removed_while_running(
+    uow: FakeUnitOfWork, server: Server, *, by: str = "remove_player"
+) -> None:
+    """Remove the only operator while ``server`` runs, then stop it again.
+
+    ``by`` says how: the player leaves the op group, or the group itself, the
+    server's only op group, is detached or deleted (issue #3865).
+    """
 
     group = PlayerGroup(
         id=GroupId.new(),
@@ -134,9 +144,18 @@ async def _operator_removed_while_running(uow: FakeUnitOfWork, server: Server) -
     server.desired_state = DesiredState.RUNNING
     server.observed_state = ObservedState.RUNNING
     uow.servers.seed(server)
-    await RemovePlayer(uow=uow, file_store=FakeFileStore())(
-        community_id=_COMMUNITY, group_id=group.id, player_uuid=_REMOVED
-    )
+    if by == "remove_player":
+        await RemovePlayer(uow=uow, file_store=FakeFileStore())(
+            community_id=_COMMUNITY, group_id=group.id, player_uuid=_REMOVED
+        )
+    elif by == "detach_group":
+        await DetachGroup(uow=uow, file_store=FakeFileStore())(
+            community_id=_COMMUNITY, group_id=group.id, server_id=server.id
+        )
+    else:
+        await DeleteGroup(uow=uow, file_store=FakeFileStore())(
+            community_id=_COMMUNITY, group_id=group.id
+        )
     server.desired_state, server.observed_state = stopped
     uow.servers.seed(server)
 
@@ -435,18 +454,21 @@ async def _adopt(entry: str, use_case: StartServer, server_id: ServerId) -> None
         await use_case.place_and_start(community_id=_COMMUNITY, server_id=server_id)
 
 
+@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
 @pytest.mark.parametrize("entry", ["start", "place_and_start"])
 async def test_an_adopted_instance_leaves_the_owed_player_files_owed(
-    entry: str,
+    entry: str, by: str
 ) -> None:
     # The start regenerated the owed ops.json into the store and cleared its mark
     # with the intent. Then the Worker refused the hydrate: it already runs the
     # server, on a working set holding the stale file, and keeps it. Its snapshots
     # put that file back in the store, so the regeneration must stay owed: the next
-    # start, after a stop, makes it again.
+    # start, after a stop, makes it again. Once the last op group is detached or
+    # deleted, no group is attached, and the mark the start cleared is the only
+    # thing that says the file is owed.
     uow = FakeUnitOfWork()
     server = _server()
-    await _operator_removed_while_running(uow, server)
+    await _operator_removed_while_running(uow, server, by=by)
     if entry == "place_and_start":
         server.desired_state = DesiredState.RUNNING
         uow.servers.seed(server)
