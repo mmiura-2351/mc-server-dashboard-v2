@@ -619,30 +619,7 @@ class StartServer:
             # Worker (issue #773/#774). So converge exactly as redispatch_start does
             # (#213): record observed=running and KEEP desired=running + the
             # assignment — the user's start IS satisfied.
-            observed_at = self.clock.now()
-            async with self.uow:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.RUNNING,
-                    observed_at=observed_at,
-                    expected_worker=worker_id,
-                )
-                await self.uow.commit()
-            # Keep the return honest (issue #292): reflect the observed state on the
-            # entity only when the guarded write landed; if a same-instant/fresher
-            # write won the #216 guard, leave the as-read fields rather than claim a
-            # write that did not happen.
-            if applied:
-                server.observe(ObservedState.RUNNING, observed_at)
-                # Sync the Bedrock tunnel to match the convergence write (issue
-                # #1602): the repository write above bypasses the sink's hook, so
-                # without this the tunnel is never opened on the INVALID_STATE path.
-                await self.bedrock_tunnel_sync.sync_observed(
-                    server_id=server_id,
-                    worker_id=worker_id,
-                    bedrock_port=server.bedrock_port,
-                    running=True,
-                )
+            await self._record_running(server, worker_id)
             return server
         failure = _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
@@ -938,28 +915,7 @@ class StartServer:
         if outcome.success:
             return server
         if outcome.status is CommandStatus.INVALID_STATE:
-            observed_at = self.clock.now()
-            async with self.uow:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.RUNNING,
-                    observed_at=observed_at,
-                    expected_worker=worker_id,
-                )
-                await self.uow.commit()
-            # Keep the return honest (issue #292): mutate the entity only when the
-            # write landed. If the #216 guard dropped it, a same-instant/fresher
-            # observed write already won, so leave the entity's observed fields
-            # as-read rather than claim a write that did not happen.
-            if applied:
-                server.observe(ObservedState.RUNNING, observed_at)
-                # Sync the Bedrock tunnel (issue #1602), same as __call__'s arm.
-                await self.bedrock_tunnel_sync.sync_observed(
-                    server_id=server_id,
-                    worker_id=worker_id,
-                    bedrock_port=server.bedrock_port,
-                    running=True,
-                )
+            await self._record_running(server, worker_id)
             return server
         if outcome.status is CommandStatus.BUSY:
             # A BUSY start (or hydrate) means the Worker is in one of two UNSETTLED
@@ -1203,6 +1159,39 @@ class StartServer:
                 stop_intent_count=stop_intent_count,
             )
         return outcome
+
+    async def _record_running(self, server: Server, worker_id: WorkerId) -> None:
+        """Record observed=running for an instance found live on ``worker_id``.
+
+        The convergence an ``INVALID_STATE`` start outcome is owed (#213): the
+        Worker performed no transition, so no ``StatusChange`` will come to record
+        it. The write asserts the row is still on ``worker_id``.
+        """
+
+        observed_at = self.clock.now()
+        async with self.uow:
+            applied = await self.uow.servers.record_observed_state(
+                server.id,
+                observed_state=ObservedState.RUNNING,
+                observed_at=observed_at,
+                expected_worker=worker_id,
+            )
+            await self.uow.commit()
+        # Keep the return honest (issue #292): reflect the observed state on the
+        # entity only when the guarded write landed; if a same-instant/fresher
+        # write won the #216 guard, leave the as-read fields rather than claim a
+        # write that did not happen.
+        if applied:
+            server.observe(ObservedState.RUNNING, observed_at)
+            # Sync the Bedrock tunnel to match the convergence write (issue
+            # #1602): the repository write above bypasses the sink's hook, so
+            # without this the tunnel is never opened on the INVALID_STATE path.
+            await self.bedrock_tunnel_sync.sync_observed(
+                server_id=server.id,
+                worker_id=worker_id,
+                bedrock_port=server.bedrock_port,
+                running=True,
+            )
 
     async def _generation_before_hydrate(
         self, community_id: CommunityId, server_id: ServerId
