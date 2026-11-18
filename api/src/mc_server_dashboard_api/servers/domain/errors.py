@@ -894,10 +894,11 @@ class ResourcePackStorageUnavailableError(ServerError):
     pack is gone and asking again is pointless.
 
     The store's writes raise it too (issue #2458). An upload that hits it inserted
-    no row -- at most it left a blob no row names (issue #3277) -- and a retry
-    uploads under a fresh id, so the upload route answers the same 503. A blob
-    delete that hits it is logged by the delete use case instead of answered: the
-    row is already gone by then, so there is nothing left for a retry to do.
+    no row -- at most it left a blob no row names, for the resource-pack GC to
+    reclaim (issue #3277) -- and a retry uploads under a fresh id, so the upload
+    route answers the same 503. A blob delete that hits it is logged by the delete
+    use case instead of answered: the row is already gone by then, so there is
+    nothing left for a retry to do, and the GC reclaims the blob.
     """
 
 

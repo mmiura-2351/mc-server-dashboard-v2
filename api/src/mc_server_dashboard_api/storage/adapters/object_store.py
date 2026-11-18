@@ -57,6 +57,7 @@ import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
 from typing import Any, Literal, NoReturn, Protocol
@@ -179,6 +180,21 @@ _FLIP_CONFIRM_ATTEMPTS = 3
 _FLIP_CONFIRM_BACKOFF_S = 0.05
 
 _LOG = logging.getLogger(__name__)
+
+
+class KeyNamespace(StrEnum):
+    """The top-level key prefixes the API writes objects under (issue #3277).
+
+    The one place a namespace is named: every key builder -- this adapter's, the
+    resource-pack store's, the plugin-cache store's -- takes its prefix from here,
+    and the multipart sweep walks every member. A namespace added here is swept with
+    no further change, so an upload cannot land where the sweep does not look.
+    """
+
+    COMMUNITIES = "communities/"
+    JARS = "jars/"
+    PLUGIN_CACHE = "plugin-cache/"
+    RESOURCE_PACKS = "resource-packs/"
 
 
 @dataclass(frozen=True)
@@ -434,7 +450,8 @@ class ObjectStorage(Storage):
     # --- key-prefix layout helpers (Section 2 as a key scheme) -------------
 
     def _server_prefix(self, community_id: CommunityId, server_id: ServerId) -> str:
-        return f"communities/{community_id.value}/servers/{server_id.value}/"
+        namespace = KeyNamespace.COMMUNITIES
+        return f"{namespace}{community_id.value}/servers/{server_id.value}/"
 
     def _pointer_key(self, community_id: CommunityId, server_id: ServerId) -> str:
         return self._server_prefix(community_id, server_id) + _POINTER
@@ -465,7 +482,7 @@ class ObjectStorage(Storage):
         )
 
     def _jar_key(self, key: JarKey) -> str:
-        return f"jars/{key.sha256}.jar"
+        return f"{KeyNamespace.JARS}{key.sha256}.jar"
 
     # --- active-reader leases (Section 4.2 reader safety) ------------------
 
@@ -667,7 +684,7 @@ class ObjectStorage(Storage):
         """
 
         async with self._client_factory() as client:
-            objs = await client.list_objects("communities/")
+            objs = await client.list_objects(KeyNamespace.COMMUNITIES)
             for server_prefix, keys in _group_by_server(objs).items():
                 await self._sweep_server(client, server_prefix, keys)
             await self._sweep_multipart(client)
@@ -677,19 +694,20 @@ class ObjectStorage(Storage):
 
         A crash mid-``put_backup`` (or mid-snapshot-member upload) leaves multipart
         parts that the object-listing sweep cannot see (issue #903). List the
-        in-progress uploads under this adapter's key prefixes — ``communities/``
-        (snapshot members, backups) AND ``jars/`` (``put_jar`` uploads via multipart
-        too, issue #916) — and abort only those initiated more than
-        ``_MULTIPART_SWEEP_MIN_AGE_S`` ago, so a live upload is never aborted. A
-        backend that does not support ListMultipartUploads degrades to a WARN
-        advising the ``AbortIncompleteMultipartUpload`` bucket lifecycle rule,
-        leaving the rest of the sweep intact.
+        in-progress uploads under every :class:`KeyNamespace` -- ``communities/``
+        (snapshot members, backups), ``jars/`` (``put_jar``, issue #916), and the
+        resource-pack and plugin-cache stores' namespaces, which share the bucket
+        and upload via multipart too (issue #3277) -- and abort only those
+        initiated more than ``_MULTIPART_SWEEP_MIN_AGE_S`` ago, so a live upload is
+        never aborted. A backend that does not support ListMultipartUploads degrades
+        to a WARN advising the ``AbortIncompleteMultipartUpload`` bucket lifecycle
+        rule, leaving the rest of the sweep intact.
         """
 
         try:
             uploads = [
                 upload
-                for prefix in ("communities/", "jars/")
+                for prefix in KeyNamespace
                 for upload in await client.list_multipart_uploads(prefix)
             ]
         except MultipartUploadsUnsupportedError:
@@ -1439,7 +1457,7 @@ class ObjectStorage(Storage):
         # One prefix scan over the content-addressed ``jars/`` namespace (Section
         # 2 as a key scheme); each object's size comes back with the listing.
         async with self._client_factory() as client:
-            objs = await client.list_objects("jars/")
+            objs = await client.list_objects(KeyNamespace.JARS)
         return JarPoolStats(count=len(objs), total_bytes=sum(obj.size for obj in objs))
 
     async def list_jars(self) -> list[JarPoolEntry]:
@@ -1447,10 +1465,12 @@ class ObjectStorage(Storage):
         # come back with the listing, the GC's reference-diff + safety-window input
         # (#293). The content key is the basename with the ``.jar`` suffix stripped.
         async with self._client_factory() as client:
-            objs = await client.list_objects("jars/")
+            objs = await client.list_objects(KeyNamespace.JARS)
         return [
             JarPoolEntry(
-                key=JarKey(obj.key.removeprefix("jars/").removesuffix(".jar")),
+                key=JarKey(
+                    obj.key.removeprefix(KeyNamespace.JARS).removesuffix(".jar")
+                ),
                 size_bytes=obj.size,
                 modified_at=obj.last_modified,
             )

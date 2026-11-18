@@ -117,6 +117,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack_repository import (
 )
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
+    StoredBlob,
 )
 from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
@@ -2367,11 +2368,17 @@ class FakeResourcePackStore(ResourcePackStore):
     ``resource-packs/<pack-id>/<filename>``: reading a stored pack under a
     different filename must miss here exactly as it does in production
     (issue #2335).
+
+    ``modified_at`` is each blob's store time as ``list_entries`` reports it:
+    ``put`` stamps it from ``clock``, and a blob seeded straight into ``blobs`` has
+    none -- see :data:`_UNSTAMPED_STORE_TIME` (issue #3277).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], dt.datetime] | None = None) -> None:
         self.blobs: dict[tuple[ResourcePackId, str], bytes] = {}
+        self.modified_at: dict[tuple[ResourcePackId, str], dt.datetime] = {}
         self.calls: list[str] = []
+        self._clock = clock or (lambda: dt.datetime.now(dt.UTC))
 
     async def put(
         self,
@@ -2382,6 +2389,7 @@ class FakeResourcePackStore(ResourcePackStore):
         self.calls.append("put")
         data = b"".join([chunk async for chunk in stream])
         self.blobs[(pack_id, filename)] = data
+        self.modified_at[(pack_id, filename)] = self._clock()
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
         self.calls.append("open")
@@ -2397,10 +2405,23 @@ class FakeResourcePackStore(ResourcePackStore):
         # Like the adapter, delete sweeps the whole ``<pack-id>/`` prefix.
         for key in [key for key in self.blobs if key[0] == pack_id]:
             del self.blobs[key]
+            self.modified_at.pop(key, None)
 
     async def size(self, pack_id: ResourcePackId, filename: str) -> int:
         self.calls.append("size")
         return len(self._blob(pack_id, filename))
+
+    async def list_entries(self) -> list[StoredBlob]:
+        self.calls.append("list_entries")
+        return [
+            StoredBlob(
+                pack_id=key[0],
+                # The adapter's key for the blob; match it.
+                key=f"resource-packs/{key[0].value}/{key[1]}",
+                modified_at=self.modified_at.get(key, _UNSTAMPED_STORE_TIME),
+            )
+            for key in self.blobs
+        ]
 
     def _blob(self, pack_id: ResourcePackId, filename: str) -> bytes:
         data = self.blobs.get((pack_id, filename))

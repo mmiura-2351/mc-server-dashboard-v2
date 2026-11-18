@@ -183,7 +183,8 @@ async def upload_resource_pack(
         # The store failed the blob, which is written before the row: no pack was
         # created, and a retry uploads under a fresh id, so sending the upload
         # again is safe and 503 says so, where a generic 500 would not (issue
-        # #2458). The failed attempt may leave an unreferenced blob (issue #3277).
+        # #2458). The failed attempt may leave an unreferenced blob, which the
+        # resource-pack GC reclaims (issue #3277).
         raise _service_unavailable("storage_unavailable") from exc
 
     await recorder.record(
