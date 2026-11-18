@@ -12,6 +12,9 @@ from __future__ import annotations
 import abc
 from types import TracebackType
 
+from mc_server_dashboard_api.identity.domain.community_ownership import (
+    CommunityOwnership,
+)
 from mc_server_dashboard_api.identity.domain.repositories import (
     RefreshTokenRepository,
     UserRepository,
@@ -23,6 +26,9 @@ class UnitOfWork(abc.ABC):
 
     users: UserRepository
     refresh_tokens: RefreshTokenRepository
+    # Bound on the same transaction, so an account deletion decides ownership
+    # under the lock it holds until its delete commits (#3217).
+    ownership: CommunityOwnership
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

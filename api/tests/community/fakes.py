@@ -40,6 +40,7 @@ from mc_server_dashboard_api.community.domain.repositories import (
     ResourceExistenceChecker,
     ResourceGrantRepository,
     RoleRepository,
+    UserExistenceChecker,
 )
 from mc_server_dashboard_api.community.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -418,6 +419,16 @@ class FakeResourceExistenceChecker(ResourceExistenceChecker):
         return (community_id, resource_type, resource_id) in self.existing
 
 
+class FakeUserExistenceChecker(UserExistenceChecker):
+    """In-memory user-existence check: every user exists unless marked absent."""
+
+    def __init__(self) -> None:
+        self.absent: set[UserId] = set()
+
+    async def exists(self, user_id: UserId) -> bool:
+        return user_id not in self.absent
+
+
 class FakeAuthzUnitOfWork(UnitOfWork):
     """In-memory :class:`UnitOfWork` sharing its repositories across blocks."""
 
@@ -426,6 +437,7 @@ class FakeAuthzUnitOfWork(UnitOfWork):
     roles: FakeRoleRepository
     resource_grants: FakeResourceGrantRepository
     resources: FakeResourceExistenceChecker
+    users: FakeUserExistenceChecker
 
     def __init__(self) -> None:
         self.communities = FakeCommunityRepository()
@@ -433,6 +445,7 @@ class FakeAuthzUnitOfWork(UnitOfWork):
         self.roles = FakeRoleRepository()
         self.resource_grants = FakeResourceGrantRepository()
         self.resources = FakeResourceExistenceChecker()
+        self.users = FakeUserExistenceChecker()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeAuthzUnitOfWork":

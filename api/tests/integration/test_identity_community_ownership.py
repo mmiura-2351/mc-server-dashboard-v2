@@ -34,9 +34,6 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId as CommunityUserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
-from mc_server_dashboard_api.identity.adapters.community_ownership import (
-    CommunityBackedOwnership,
-)
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as IdentityUnitOfWork,
 )
@@ -80,7 +77,6 @@ def _provision(engine: AsyncEngine) -> ProvisionCommunity:
     factory = create_session_factory(engine)
     return ProvisionCommunity(
         uow=CommunityUnitOfWork(factory),
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )
 
@@ -94,9 +90,10 @@ def _add_member(engine: AsyncEngine) -> AddMember:
     )
 
 
-def _ownership(engine: AsyncEngine) -> CommunityBackedOwnership:
-    factory = create_session_factory(engine)
-    return CommunityBackedOwnership(CommunityUnitOfWork(factory))
+async def _owns_any_community(engine: AsyncEngine, user_id: uuid.UUID) -> bool:
+    # Bound on the identity unit of work's session, as a deletion uses it.
+    async with IdentityUnitOfWork(create_session_factory(engine)) as uow:
+        return await uow.ownership.owns_any_community(UserId(user_id))
 
 
 async def test_owns_any_community_true_for_owner(engine: AsyncEngine) -> None:
@@ -104,7 +101,7 @@ async def test_owns_any_community_true_for_owner(engine: AsyncEngine) -> None:
     await _insert_user(engine, owner_id, "alice")
     await _provision(engine)(name="guild", owner_user_id=CommunityUserId(owner_id))
 
-    assert await _ownership(engine).owns_any_community(UserId(owner_id)) is True
+    assert await _owns_any_community(engine, owner_id) is True
 
 
 async def test_owns_any_community_false_for_plain_member(engine: AsyncEngine) -> None:
@@ -120,7 +117,7 @@ async def test_owns_any_community_false_for_plain_member(engine: AsyncEngine) ->
         community_id=community.id, user_id=CommunityUserId(member_id)
     )
 
-    assert await _ownership(engine).owns_any_community(UserId(member_id)) is False
+    assert await _owns_any_community(engine, member_id) is False
 
 
 async def test_owns_any_community_false_for_non_member(engine: AsyncEngine) -> None:
@@ -130,4 +127,4 @@ async def test_owns_any_community_false_for_non_member(engine: AsyncEngine) -> N
     await _insert_user(engine, stranger_id, "carol")
     await _provision(engine)(name="guild", owner_user_id=CommunityUserId(owner_id))
 
-    assert await _ownership(engine).owns_any_community(UserId(stranger_id)) is False
+    assert await _owns_any_community(engine, stranger_id) is False

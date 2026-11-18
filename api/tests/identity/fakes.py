@@ -372,14 +372,17 @@ class FakeUnitOfWork(UnitOfWork):
     # reach their inspection helpers (``seed`` / ``by_hash``) without casts.
     users: FakeUserRepository
     refresh_tokens: FakeRefreshTokenRepository
+    ownership: FakeCommunityOwnership
 
     def __init__(
         self,
         users: FakeUserRepository | None = None,
         refresh_tokens: FakeRefreshTokenRepository | None = None,
+        ownership: FakeCommunityOwnership | None = None,
     ) -> None:
         self.users = users or FakeUserRepository()
         self.refresh_tokens = refresh_tokens or FakeRefreshTokenRepository()
+        self.ownership = ownership or FakeCommunityOwnership()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":

@@ -38,9 +38,9 @@ _PASSWORD = "Wm7!qz#Lp2vT"
 
 
 def _use_case(uow: FakeUnitOfWork, ownership: FakeCommunityOwnership) -> DeleteAccount:
-    return DeleteAccount(
-        uow=uow, ownership=ownership, hasher=StubHasher(), clock=FakeClock(_NOW)
-    )
+    # The ownership seam is bound on the unit of work's transaction (#3217).
+    uow.ownership = ownership
+    return DeleteAccount(uow=uow, hasher=StubHasher(), clock=FakeClock(_NOW))
 
 
 def _active_token(user_id: UserId) -> RefreshToken:

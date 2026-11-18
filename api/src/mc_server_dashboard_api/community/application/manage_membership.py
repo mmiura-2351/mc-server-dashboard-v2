@@ -16,7 +16,8 @@ assume an authorized member and only do the data work.
 - :class:`AssignRole` / :class:`UnassignRole` attach/detach a community role to a
   member. They validate the role belongs to *this* community (the
   ``membership_role`` FK accepts any role id, so cross-community assignment must be
-  rejected in the use case — FR-AUTHZ-4, security-critical).
+  rejected in the use case — FR-AUTHZ-4, security-critical). An assignment holds
+  its recipient against account deletion until it commits (issue #3217).
 """
 
 from __future__ import annotations
@@ -232,6 +233,12 @@ class AssignRole:
     from another community could be assigned, leaking permissions across the
     isolation boundary (FR-AUTHZ-4). A role absent from this community is reported
     as not-found, giving no signal about other communities' roles.
+
+    The recipient is held against account deletion first (issue #3217): assigning
+    the preset Owner role confers ownership, which a deletion committed after it
+    would cascade away. Every assignment takes the hold, not only one of the
+    Owner role: the role is read only later, under the ceiling's locks, and the
+    hold makes an assignment wait only while its recipient is being deleted.
     """
 
     uow: UnitOfWork
@@ -245,6 +252,11 @@ class AssignRole:
         actor_id: UserId,
     ) -> None:
         async with self.uow:
+            # Before any lock of this context (the ceiling's lock order, step 0):
+            # a deletion of the recipient committed first leaves no member to
+            # assign to, or waits for this commit and then refuses an Owner.
+            if not await self.uow.users.exists(user_id):
+                raise MembershipNotFoundError(str(user_id.value))
             # The recipient's membership (the assignment's parent) and the
             # actor's (the ceiling's) are held first, and the assigned role is
             # share-locked in the ceiling's role pass, so the set checked is the

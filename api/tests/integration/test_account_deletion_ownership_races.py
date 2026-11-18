@@ -69,9 +69,6 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId as CommunityUserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
-from mc_server_dashboard_api.identity.adapters.community_ownership import (
-    CommunityBackedOwnership,
-)
 from mc_server_dashboard_api.identity.adapters.repositories import (
     SqlAlchemyUserRepository,
 )
@@ -206,16 +203,10 @@ class _World:
     previous_owner: uuid.UUID | None = None
 
 
-async def _provision_community(
-    factory: async_sessionmaker[AsyncSession],
-    uow: CommunityUnitOfWork,
-    owner: uuid.UUID,
-) -> Community:
-    return await ProvisionCommunity(
-        uow=uow,
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
-        clock=SystemClock(),
-    )(name=_COMMUNITY, owner_user_id=CommunityUserId(owner))
+async def _provision_community(uow: CommunityUnitOfWork, owner: uuid.UUID) -> Community:
+    return await ProvisionCommunity(uow=uow, clock=SystemClock())(
+        name=_COMMUNITY, owner_user_id=CommunityUserId(owner)
+    )
 
 
 _Deletion = Callable[[_World, IdentityUnitOfWork], Coroutine[Any, Any, None]]
@@ -224,24 +215,19 @@ _Conferral = Callable[[_World, CommunityUnitOfWork], Coroutine[Any, Any, None]]
 
 async def _admin_delete(world: _World, uow: IdentityUnitOfWork) -> None:
     # The acting admin is irrelevant to the guards; only "not the target" is.
-    await AdminDeleteUser(
-        uow=uow,
-        ownership=CommunityBackedOwnership(CommunityUnitOfWork(world.factory)),
-        clock=FakeClock(_NOW),
-    )(actor_id=UserId.new(), target_id=UserId(world.target))
+    await AdminDeleteUser(uow=uow, clock=FakeClock(_NOW))(
+        actor_id=UserId.new(), target_id=UserId(world.target)
+    )
 
 
 async def _delete_account(world: _World, uow: IdentityUnitOfWork) -> None:
-    await DeleteAccount(
-        uow=uow,
-        ownership=CommunityBackedOwnership(CommunityUnitOfWork(world.factory)),
-        hasher=StubHasher(),
-        clock=FakeClock(_NOW),
-    )(user_id=UserId(world.target), password=_PASSWORD)
+    await DeleteAccount(uow=uow, hasher=StubHasher(), clock=FakeClock(_NOW))(
+        user_id=UserId(world.target), password=_PASSWORD
+    )
 
 
 async def _provision(world: _World, uow: CommunityUnitOfWork) -> None:
-    await _provision_community(world.factory, uow, world.target)
+    await _provision_community(uow, world.target)
 
 
 async def _assign_owner(world: _World, uow: CommunityUnitOfWork) -> None:
@@ -287,9 +273,7 @@ async def _transfer_world(engine: AsyncEngine) -> _World:
     factory = create_session_factory(engine)
     target = await _seed_user(factory, "target")
     previous = await _seed_user(factory, "previous")
-    community = await _provision_community(
-        factory, CommunityUnitOfWork(factory), previous.value
-    )
+    community = await _provision_community(CommunityUnitOfWork(factory), previous.value)
     await AddMember(
         uow=CommunityUnitOfWork(factory),
         users=IdentityUserDirectory(IdentityUnitOfWork(factory)),

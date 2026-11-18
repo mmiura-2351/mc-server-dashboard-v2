@@ -30,9 +30,6 @@ from mc_server_dashboard_api.community.adapters.repositories import (
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
-from mc_server_dashboard_api.community.adapters.user_directory import (
-    IdentityUserDirectory,
-)
 from mc_server_dashboard_api.community.application.manage_community import (
     DeleteCommunity,
     RenameCommunity,
@@ -57,9 +54,6 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
-from mc_server_dashboard_api.identity.adapters.unit_of_work import (
-    SqlAlchemyUnitOfWork as IdentityUnitOfWork,
-)
 from tests.integration.migrate import downgrade_base, upgrade_head
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -99,7 +93,6 @@ def _provision(engine: AsyncEngine) -> ProvisionCommunity:
     factory = create_session_factory(engine)
     return ProvisionCommunity(
         uow=SqlAlchemyUnitOfWork(factory),
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )
 
