@@ -807,6 +807,28 @@ describe("Toasts over an open modal", () => {
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 
+  it("falls back to the topmost of stacked modals", () => {
+    renderToasts(
+      <main>
+        <Modal open={true} title="Outer" onClose={() => {}}>
+          <button type="button">Outer body</button>
+        </Modal>
+        <Modal open={true} title="Inner" onClose={() => {}}>
+          <RemovableButton name="Inside" />
+        </Modal>
+      </main>,
+    );
+    show("Failed", "error");
+
+    tabToToasts();
+    act(() => removeButton());
+    fireEvent.click(dismissButton("Failed"));
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("dialog", { name: "Inner" }),
+    );
+  });
+
   it("falls back to the modal when the element focus came from is gone", () => {
     renderModal(() => {}, <RemovableButton name="Inside" />);
     show("Failed", "error");

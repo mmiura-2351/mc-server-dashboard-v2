@@ -100,7 +100,8 @@ describe("Modal", () => {
     const last = screen.getByRole("button", { name: "Last" });
 
     last.focus();
-    fireEvent.keyDown(document, { key: "Tab" });
+    // Cancelled, or the browser would move focus one step further.
+    expect(fireEvent.keyDown(document, { key: "Tab" })).toBe(false);
     expect(document.activeElement).toBe(first);
   });
 
@@ -115,7 +116,9 @@ describe("Modal", () => {
     const last = screen.getByRole("button", { name: "Last" });
 
     first.focus();
-    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(fireEvent.keyDown(document, { key: "Tab", shiftKey: true })).toBe(
+      false,
+    );
     expect(document.activeElement).toBe(last);
   });
 
@@ -171,11 +174,15 @@ describe("Modal focus trap with toasts showing", () => {
       .map((toast) => within(toast).getByRole("button"));
   }
 
+  // Presses Tab where focus is, and expects the trap to cancel it: at an
+  // edge the browser would otherwise move focus one step further.
   function pressTab(shiftKey = false) {
-    fireEvent.keyDown(document.activeElement ?? document, {
-      key: "Tab",
-      shiftKey,
-    });
+    expect(
+      fireEvent.keyDown(document.activeElement ?? document, {
+        key: "Tab",
+        shiftKey,
+      }),
+    ).toBe(false);
   }
 
   const controls = (
