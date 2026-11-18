@@ -152,7 +152,7 @@ class UserRepository(abc.ABC):
         1. ``user`` rows: the active platform admins and the target, in one
            statement, in ascending id order, ``FOR NO KEY UPDATE``, before any
            other lock in the transaction; then, for a delete, the target's
-           community-ownership lock, exclusive, which
+           account write lock, exclusive, which
            :meth:`CommunityOwnership.owns_any_community` takes to decide whether
            the target owns a community (#3217);
         2. the target's dependent rows: its session lock and refresh tokens (in
@@ -197,7 +197,7 @@ class RefreshTokenRepository(abc.ABC):
     1. ``user`` rows: the last-admin guards' ``FOR NO KEY UPDATE``
        (:meth:`UserRepository.lock_with_active_admins`), or the ``UPDATE`` of the
        user row itself (password change, deactivation); a deletion then takes
-       its target's community-ownership lock
+       its target's account write lock
        (:meth:`CommunityOwnership.owns_any_community`, #3217);
     2. session locks, in ascending lock-key order when there are several
        (:meth:`lock_sessions_by_token_hashes`, :meth:`lock_sessions`;

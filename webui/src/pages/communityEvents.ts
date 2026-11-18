@@ -32,24 +32,29 @@ export { backoffDelayMs };
  * It sets the server state fields it carries: an observed transition carries
  * `state`, a change of the server's intent carries `desiredState` (#3428), and
  * a placement or release carries `assignedWorkerId`, `null` once released
- * (#3818).
+ * (#3818). A `crashed` transition also carries the crash reason the Worker
+ * classified, `""` when none, which decides whether the reconciler leaves the
+ * crash alone (#3281).
  */
 export interface StatusEvent {
   serverId: string;
   state?: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
+  crashReason?: string;
 }
 
 /**
  * One server of the status snapshot: its observed state and, when the API
- * reports them, its desired state (#3428) and assigned Worker (#3818).
+ * reports them, its desired state (#3428), assigned Worker (#3818) and whether
+ * the reconciler leaves its crash alone (#3281).
  */
 export interface SnapshotEntry {
   serverId: string;
   state: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
+  crashNotRestarted?: boolean;
 }
 
 /**
@@ -136,9 +141,10 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
   }
-  const { state, desired_state } = payload as {
+  const { state, desired_state, reason } = payload as {
     state?: unknown;
     desired_state?: unknown;
+    reason?: unknown;
   };
   const assignedWorkerId = assignmentOf(payload);
   if (
@@ -154,6 +160,9 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     ...(typeof state === "string" && { state }),
     ...(typeof desired_state === "string" && { desiredState: desired_state }),
     ...(assignedWorkerId !== undefined && { assignedWorkerId }),
+    ...(state === "crashed" && {
+      crashReason: typeof reason === "string" ? reason : "",
+    }),
   };
 }
 
@@ -191,8 +200,9 @@ function parseNotification(
 
 /**
  * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state,
- * assigned_worker_id}]}` payload. A malformed entry rejects the whole frame: a
- * partial snapshot would misreport the community's server set.
+ * assigned_worker_id, crash_not_restarted}]}` payload. A malformed entry
+ * rejects the whole frame: a partial snapshot would misreport the community's
+ * server set.
  */
 function parseSnapshot(payload: unknown): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
@@ -204,10 +214,12 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
   }
   const parsed: SnapshotEntry[] = [];
   for (const entry of servers) {
-    const { server_id, state, desired_state } = (entry ?? {}) as {
+    const { server_id, state, desired_state, crash_not_restarted } = (entry ??
+      {}) as {
       server_id?: unknown;
       state?: unknown;
       desired_state?: unknown;
+      crash_not_restarted?: unknown;
     };
     if (typeof server_id !== "string" || typeof state !== "string") {
       return null;
@@ -218,6 +230,9 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
       state,
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
       ...(assignedWorkerId !== undefined && { assignedWorkerId }),
+      ...(typeof crash_not_restarted === "boolean" && {
+        crashNotRestarted: crash_not_restarted,
+      }),
     });
   }
   return { kind: "snapshot", servers: parsed };

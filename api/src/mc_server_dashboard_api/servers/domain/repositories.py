@@ -14,6 +14,7 @@ from typing import Any
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -193,6 +194,8 @@ class ServerRepository(abc.ABC):
         *,
         unassign: bool = False,
         expected_worker: WorkerId | None = None,
+        detail: str = "",
+        reason: CrashReason | None = None,
     ) -> bool:
         """Cache the worker-reported observed state for ``server_id`` (FR-SRV-4).
 
@@ -216,6 +219,13 @@ class ServerRepository(abc.ABC):
         let the stale worker's (freshest-stamped) report overwrite the new
         owner's state. API-driven convergence writers do not assert a worker:
         they converge their own dispatch outcome, not a worker's report.
+
+        ``detail`` and ``reason`` are the report's free text and crash reason.
+        A write of ``crashed`` stores them as the server's last crash
+        (``crash_detail`` bounded, an empty one stored as ``None``), and a write
+        of any other state clears both, as do the two bulk writes below (issue
+        #3281). They are stored, kept or cleared together with the state,
+        under the same guards.
 
         Returns ``True`` when the write landed, ``False`` when the #216 monotonic
         guard dropped it (a same-instant or fresher write already stamped the

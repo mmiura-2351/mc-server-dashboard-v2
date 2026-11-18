@@ -336,6 +336,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーがクラッシュしました。再起動をクリックして再試行するか、コンソールで詳細を確認してください。",
   "serverDetail.crashBanner.autoRestart":
     "サーバーがクラッシュしました。システムが自動的に再起動します。代わりに停止することもできます。詳細はコンソールで確認してください。",
+  "serverDetail.crashBanner.noAutoRestart":
+    "サーバーがクラッシュしました。次に試しても同じ理由で失敗するため、自動では再起動されません。サーバーを停止し、原因を解消してから、もう一度起動してください。詳細はコンソールで確認してください。",
   "serverDetail.crashBanner.viewConsole": "コンソールを表示",
   "serverDetail.crashReason.forgeInstallOutOfMemory":
     "Forge インストーラーがメモリ不足で終了しました。サーバーを停止し、設定でメモリ上限を引き上げてから、もう一度起動してください。",

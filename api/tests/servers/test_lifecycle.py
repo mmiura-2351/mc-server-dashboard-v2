@@ -13,7 +13,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
     JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -5291,6 +5292,240 @@ async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
     assert stored.assigned_worker_id == WorkerId(worker)
     assert result.observed_state is ObservedState.RUNNING
     assert result.observed_at == _NOW
+
+
+_CRASH = (CrashReason.FORGE_INSTALL_OUT_OF_MEMORY, "java.lang.OutOfMemoryError")
+
+# One way a lifecycle use case converges ``observed`` off a crashed entity:
+# given (community, server, worker) ids, seed the row and return the unit of
+# work and the entity the use case returned.
+_Converge = Callable[
+    [uuid.UUID, uuid.UUID, uuid.UUID], Awaitable[tuple[FakeUnitOfWork, Server]]
+]
+
+
+def _seed_crashed(uow: FakeUnitOfWork, server: Server) -> None:
+    server.crash_reason, server.crash_detail = _CRASH
+    uow.servers.seed(server)
+
+
+async def _start_answered_invalid_state(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # An operator's start of a crashed server the Worker still runs.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=ObservedState.CRASHED,
+        ),
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="already running"
+            )
+        },
+    )
+    result = await _start_server(uow, cp)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _redispatch_start_answered_invalid_state(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # The reconciler's restart of a crashed server the Worker still runs.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        ),
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="running")
+    )
+    result = await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _stop_confirmed(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # A stop the Worker confirms.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        ),
+    )
+    cp = FakeControlPlane()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _stop_released_after_a_reconnect(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # A stop answered SERVER_NOT_FOUND once the row has left crashed: the
+    # Worker reconnected after the stop loaded the server, and its disconnect
+    # recorded ``unknown``, which cleared the stored crash.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        ),
+    )
+
+    class _Reconnected(FakeControlPlane):
+        async def stop(
+            self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+        ) -> CommandOutcome:
+            row = uow.servers.by_id[server_id]
+            row.observed_state = ObservedState.UNKNOWN
+            row.observed_at = _NOW - dt.timedelta(minutes=1)
+            row.crash_reason = row.crash_detail = None
+            return await super().stop(
+                worker_id=worker_id, server_id=server_id, force=force
+            )
+
+    cp = _Reconnected(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _stale_stopping_released(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # The reconciler's release of a stop wedged at ``stopping`` (#2452). A
+    # stored ``stopping`` row never holds a crash, as every write of another
+    # state clears it, so this seed is one the repository cannot produce: it
+    # pins that this site reflects its write like the others.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=ObservedState.STOPPING,
+            worker_id=worker,
+        ),
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+@pytest.mark.parametrize(
+    ("converge", "observed"),
+    [
+        (_start_answered_invalid_state, ObservedState.RUNNING),
+        (_redispatch_start_answered_invalid_state, ObservedState.RUNNING),
+        (_stop_confirmed, ObservedState.STOPPED),
+        (_stop_released_after_a_reconnect, ObservedState.STOPPED),
+        (_stale_stopping_released, ObservedState.UNKNOWN),
+    ],
+    ids=[
+        "start",
+        "redispatch-start",
+        "stop",
+        "stop-release",
+        "stale-stopping-release",
+    ],
+)
+async def test_convergence_off_crashed_returns_an_entity_without_the_crash(
+    converge: _Converge, observed: ObservedState
+) -> None:
+    # Issue #3281: the convergence write clears the stored crash, and the
+    # returned entity reads like the row it wrote, so a lifecycle response never
+    # pairs a state other than crashed with the crash's reason and detail.
+    community, server_id, worker = _ids()
+
+    uow, result = await converge(community, server_id, worker)
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    for entity in (stored, result):
+        assert (entity.observed_state, entity.crash_reason, entity.crash_detail) == (
+            observed,
+            None,
+            None,
+        )
+
+
+async def test_stop_of_a_crash_landed_in_flight_returns_the_crash() -> None:
+    # Issue #3281: a crash that lands after the stop loaded a running server is
+    # left standing by the SERVER_NOT_FOUND release (#2448), and the response
+    # carries it as the row holds it, reason and detail included.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    crashed_at = _NOW - dt.timedelta(minutes=1)
+
+    class _CrashesInFlight(FakeControlPlane):
+        async def stop(
+            self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+        ) -> CommandOutcome:
+            row = uow.servers.by_id[server_id]
+            row.observed_state = ObservedState.CRASHED
+            row.observed_at = crashed_at
+            row.crash_reason, row.crash_detail = _CRASH
+            return await super().stop(
+                worker_id=worker_id, server_id=server_id, force=force
+            )
+
+    cp = _CrashesInFlight(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert (
+        result.observed_state,
+        result.observed_at,
+        result.crash_reason,
+        result.crash_detail,
+    ) == (ObservedState.CRASHED, crashed_at, *_CRASH)
 
 
 async def test_redispatch_start_invalid_state_returned_entity_honest_when_dropped() -> (

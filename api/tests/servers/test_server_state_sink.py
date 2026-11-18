@@ -1,5 +1,7 @@
 """Unit tests for the parse-failure paths of :class:`ServersServerStateSink`.
 
+The last test pins the crash-reason vocabulary the sink translates (#3281).
+
 A worker id is enforced to be a UUID at registration (issue #99), and server
 ids are DB-issued UUIDs. A non-UUID reaching the sink is therefore an invariant
 violation; the sink must surface it loudly (an error log) instead of silently
@@ -16,9 +18,13 @@ from typing import NoReturn, cast
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.fleet.adapters.grpc_server import _CRASH_REASON_BY_PROTO
+from mc_server_dashboard_api.servers.adapters.models import _CRASH_REASONS
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
+from mc_server_dashboard_api.servers.domain.value_objects import CrashReason
+from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.servers.fakes import FakeClock
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -59,3 +65,19 @@ async def test_running_assignment_ids_logs_on_non_uuid_worker_id(
         ids = await _sink().running_assignment_ids(worker_id="worker-1")
     assert ids == {}
     assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+
+def test_every_relayed_crash_reason_is_one_the_row_stores() -> None:
+    # Issue #3281: the sink stores the reason the servicer relays. A name in
+    # one vocabulary and not the other would fail the write, and the crashed
+    # state with it, so the wire enum, the relayed names, the domain enum and
+    # the column's CHECK must name the same reasons.
+    relayed = set(_CRASH_REASON_BY_PROTO.values())
+
+    assert set(_CRASH_REASON_BY_PROTO) == {
+        value
+        for value in pb.CrashReason.values()
+        if value != pb.CRASH_REASON_UNSPECIFIED
+    }
+    assert relayed == {reason.value for reason in CrashReason}
+    assert relayed == set(_CRASH_REASONS)

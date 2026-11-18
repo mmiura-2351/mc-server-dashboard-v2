@@ -1,14 +1,19 @@
 import {
   createContext,
+  type FocusEvent,
   type ReactNode,
   useCallback,
   useContext,
   useEffect,
+  useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { t } from "../i18n/index.ts";
+import { isFocusVisible } from "./focusVisible.ts";
+import { setToastZone, topmostDialog } from "./Modal.tsx";
 
 // Self-built toast primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
 // API errors and success notices surface here; variants tint the left edge.
@@ -44,6 +49,21 @@ const AUTO_DISMISS_MAX_MS = 12000;
 const MAX_ERROR_TOASTS = 3;
 const MAX_TIMED_TOASTS = 2;
 
+// `main` takes no focus on its own: it is made focusable just to take this
+// focus, and stops being so once focus leaves it, so a later click in the page
+// does not land on it.
+function focusMain(options: FocusOptions) {
+  const main = document.querySelector("main");
+  if (main === null) {
+    return;
+  }
+  main.tabIndex = -1;
+  main.addEventListener("blur", () => main.removeAttribute("tabindex"), {
+    once: true,
+  });
+  main.focus(options);
+}
+
 function autoDismissMs(message: string): number {
   const scaled =
     AUTO_DISMISS_BASE_MS + AUTO_DISMISS_PER_CHAR_MS * message.length;
@@ -68,16 +88,61 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const raisesRef = useRef(0);
   const zoneRef = useRef<HTMLDivElement>(null);
-  // The pointer or focus anywhere in the zone pauses every countdown, so no
-  // toast closes, or slides, out from under the one being read.
+  // The pointer or keyboard focus anywhere in the zone pauses every countdown,
+  // so no toast closes, or slides, out from under the one being read.
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  // The element focus came into the stack from, to hand it back to.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  // An open modal's focus trap runs on through the stack (WEBUI_SPEC.md 7.4).
+  useLayoutEffect(() => {
+    setToastZone(zoneRef.current);
+    return () => setToastZone(null);
+  }, []);
+
+  // WEBUI_SPEC.md 7.4: a toast removed while it holds focus, dismissed, timed
+  // out or dropped by the cap, hands focus on to the next toast, else the one
+  // before, else back where focus came from, else to the open modal or `main`.
+  // Never to the page body.
+  //
+  // Only keyboard focus moves on through the stack. Focus a click or a tap
+  // left goes straight back, so a key pressed next cannot dismiss another
+  // toast unread, and without scrolling to where it goes: that user was not
+  // looking there.
+  const handOffFocus = useCallback((node: HTMLElement) => {
+    const active = document.activeElement;
+    const keyboard = active !== null && isFocusVisible(active);
+    const neighbour = (
+      node.nextElementSibling ?? node.previousElementSibling
+    )?.querySelector("button");
+    if (keyboard && neighbour) {
+      neighbour.focus();
+      return;
+    }
+    const options = { preventScroll: !keyboard };
+    // Focus leaves the stack here, so where it came from is used up. It is
+    // never taken back behind an open modal.
+    const returnTo = returnFocusRef.current;
+    returnFocusRef.current = null;
+    const dialog = topmostDialog();
+    const back = dialog === null || dialog.contains(returnTo) ? returnTo : null;
+    for (const target of [back, dialog]) {
+      if (target) {
+        target.focus(options);
+        if (document.activeElement === target) {
+          return;
+        }
+      }
+    }
+    focusMain(options);
+  }, []);
 
   // A toast removed while it holds focus or sits under the pointer takes them
   // out of the zone without a blur or mouseleave reaching it. Re-read focus
   // whenever the stack changes, and drop hover once the zone is empty.
   useEffect(() => {
-    setFocused(zoneRef.current?.contains(document.activeElement) === true);
+    setFocused(keyboardFocusIn(zoneRef.current));
     if (toasts.length === 0) {
       setHovered(false);
     }
@@ -127,8 +192,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         // the finger lifts.
         onPointerEnter={() => setHovered(true)}
         onPointerLeave={() => setHovered(false)}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onFocus={(event) => {
+          setFocused(keyboardFocusIn(event.currentTarget));
+          if (relatedIsOutside(event)) {
+            returnFocusRef.current = event.relatedTarget;
+          }
+        }}
+        // Focus gone to another element has left the stack, so a later visit
+        // that comes from nothing, as after a click on the page, returns to
+        // the fallback. Gone to nothing, as the window loses focus, it has not.
+        onBlur={(event) => {
+          setFocused(false);
+          if (relatedIsOutside(event)) {
+            returnFocusRef.current = null;
+          }
+        }}
       >
         {toasts.map((toast) => (
           <ToastItem
@@ -136,10 +214,32 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             toast={toast}
             paused={hovered || focused}
             onDismiss={dismiss}
+            onRemoveFocused={handOffFocus}
           />
         ))}
       </div>
     </ToastContext.Provider>
+  );
+}
+
+// Whether keyboard focus is in `zone`. The focus a click or a tap leaves on a
+// button shows no ring, and holds neither the countdowns nor the scroll
+// (WEBUI_SPEC.md 7.4).
+function keyboardFocusIn(zone: Element | null): boolean {
+  const active = document.activeElement;
+  return (
+    active !== null && zone?.contains(active) === true && isFocusVisible(active)
+  );
+}
+
+// Whether the other end of a focus move within the zone is an element outside
+// it: where focus came from on focus, where it went on blur.
+function relatedIsOutside(
+  event: FocusEvent<HTMLElement>,
+): event is FocusEvent<HTMLElement> & { relatedTarget: HTMLElement } {
+  return (
+    event.relatedTarget instanceof HTMLElement &&
+    !event.currentTarget.contains(event.relatedTarget)
   );
 }
 
@@ -150,25 +250,41 @@ function ToastItem({
   toast,
   paused,
   onDismiss,
+  onRemoveFocused,
 }: {
   toast: Toast;
   paused: boolean;
   onDismiss: (id: number) => void;
+  onRemoveFocused: (node: HTMLElement) => void;
 }) {
   const isError = toast.variant === "error";
   const remainingRef = useRef(autoDismissMs(toast.message));
   const ref = useRef<HTMLDivElement>(null);
+  const messageId = useId();
+  // Read at removal, so a new callback never re-runs the cleanup below on a
+  // toast that is still showing.
+  const onRemoveFocusedRef = useRef(onRemoveFocused);
+  onRemoveFocusedRef.current = onRemoveFocused;
+
+  // A layout effect's cleanup runs while the node is still in the document,
+  // so focus is handed on before the browser would drop it to the body. It
+  // runs once, at removal.
+  useLayoutEffect(() => {
+    const node = ref.current;
+    return () => {
+      if (node?.contains(document.activeElement)) {
+        onRemoveFocusedRef.current(node);
+      }
+    };
+  }, []);
 
   // A toast raised, or raised again, comes into view in case the stack
-  // overflows and scrolls; not while focus is in the stack, so a focused
-  // toast is not scrolled away.
+  // overflows and scrolls; not while keyboard focus is in the stack, so a
+  // focused toast is not scrolled away.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `toast.raisedAt` marks a raise; re-run on each one, and only then.
   useEffect(() => {
     const node = ref.current;
-    if (
-      node !== null &&
-      !node.parentElement?.contains(document.activeElement)
-    ) {
+    if (node !== null && !keyboardFocusIn(node.parentElement)) {
       node.scrollIntoView({ block: "nearest" });
     }
   }, [toast.raisedAt]);
@@ -191,7 +307,9 @@ function ToastItem({
       role={isError ? "alert" : "status"}
       className={`toast ${toast.variant}`}
     >
-      <span className="toast-message">{toast.message}</span>
+      <span id={messageId} className="toast-message">
+        {toast.message}
+      </span>
       {toast.count > 1 && (
         <span className="toast-count">
           <span aria-hidden="true">{toast.count}</span>
@@ -204,6 +322,7 @@ function ToastItem({
         type="button"
         className="toast-dismiss"
         aria-label={t("common.close")}
+        aria-describedby={messageId}
         onClick={() => onDismiss(toast.id)}
         onKeyDown={(event) => {
           // Stop here: Modal and Popover close on an Escape at the document.

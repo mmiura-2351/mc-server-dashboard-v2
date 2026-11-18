@@ -63,6 +63,9 @@ function server(overrides: Record<string, unknown> = {}) {
     observed_state: "running",
     observed_at: null,
     assigned_worker_id: "worker-a",
+    crash_reason: null,
+    crash_detail: null,
+    crash_not_restarted: false,
     config: {},
     join_hostname: null,
     bedrock_address: null,
@@ -1404,6 +1407,72 @@ describe("DashboardPage desired/observed drift (issue #2443)", () => {
 
     await screen.findByText("survival");
     expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+
+  // A crash the reconciler leaves alone is not converging: nothing acts on it
+  // until the operator stops and starts it (#3281). The detail header uses the
+  // same rule.
+  it.each([
+    [true, false],
+    [false, true],
+  ])(
+    "with crash_not_restarted %s, marks a crashed row under a running intent: %s",
+    async (notRestarted, marked) => {
+      mockApi.get.mockResolvedValue([
+        server({
+          observed_state: "crashed",
+          crash_reason: "forge_install_out_of_memory",
+          crash_not_restarted: notRestarted,
+        }),
+      ]);
+      renderPage();
+
+      await screen.findByText("survival");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(screen.queryByText(t("serverDetail.converging")) !== null).toBe(
+        marked,
+      );
+    },
+  );
+
+  it("follows a live crash the reconciler leaves alone until an intent comes after it", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message({
+        stream: "status",
+        ts: "t",
+        payload: {
+          state: "crashed",
+          detail: "installer ran out of memory",
+          reason: "forge_install_out_of_memory",
+        },
+        server_id: "s1",
+      });
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+
+    act(() => {
+      MockWebSocket.last().message({
+        stream: "status",
+        ts: "t",
+        payload: { desired_state: "running" },
+        server_id: "s1",
+      });
+    });
+    expect(
+      await screen.findByText(t("serverDetail.converging")),
+    ).toBeInTheDocument();
   });
 
   it("marks a drifting row in the table view too", async () => {

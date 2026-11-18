@@ -1016,8 +1016,15 @@ supervised Forge install, whose output is in `logs/forge-install.log`:
 
 The two specific reasons are reported only for a **failed** install, and only on
 those signals: a failure the Worker cannot attribute stays
-`FORGE_INSTALL_FAILED`. The reason, like `detail`, rides only the live event —
-the API relays it to subscribers and does not persist it.
+`FORGE_INSTALL_FAILED`. The API relays the reason and `detail` to subscribers
+on the live event, and stores a crash's pair with the server's observed state
+until the server next reports another state ([`DATABASE.md`](DATABASE.md)
+Section 7), so the server read and the status snapshot carry them too. Its
+reconciler does not restart a crash the Worker does not retry
+(`FORGE_INSTALL_OUT_OF_MEMORY`, `FORGE_INSTALL_JAVA_INCOMPATIBLE`): the next
+attempt would fail the same way, so the server stays crashed until an operator
+stops it and starts it again. An unclassified crash and `FORGE_INSTALL_FAILED`
+are restarted as before ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6).
 
 `ServerState` enumerates the observed states. REQUIREMENTS.md FR-SRV-4 names
 running / stopped / starting / crashed; the contract adds the transient

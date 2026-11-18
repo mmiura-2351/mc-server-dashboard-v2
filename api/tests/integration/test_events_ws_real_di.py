@@ -554,6 +554,9 @@ async def test_server_stream_carries_the_desired_state_snapshot_and_change(
                 "state": "stopped",
                 "desired_state": "stopped",
                 "assigned_worker_id": str(worker),
+                "crash_reason": None,
+                "crash_detail": None,
+                "crash_not_restarted": False,
             },
         ),
         ("status", {"desired_state": "stopped"}),
@@ -594,6 +597,9 @@ async def test_community_stream_carries_the_desired_state_snapshot_and_change(
                         "state": "stopped",
                         "desired_state": "stopped",
                         "assigned_worker_id": str(worker),
+                        "crash_reason": None,
+                        "crash_detail": None,
+                        "crash_not_restarted": False,
                     }
                 ]
             },

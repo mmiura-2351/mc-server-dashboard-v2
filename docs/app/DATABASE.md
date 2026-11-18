@@ -360,15 +360,16 @@ An account that holds a Community's preset Owner role cannot be deleted
 memberships and role assignments and leave the Community without an Owner. The
 refusal holds against every write that makes the account an Owner --
 provisioning a Community with it as the initial owner, assigning it a role --
-through one lock, the account's **community-ownership lock**: a
-transaction-scoped advisory lock keyed by `user_id`. A deletion takes it
-exclusively, right after its `user` row locks, then decides whether the account
-owns a Community, and holds it until the delete commits. A conferral takes it
-shared as the first statement of the transaction that writes the assignment,
-then checks that the account exists. Whichever comes second waits for the first
-to commit and decides from what it committed: the deletion is refused as a
-Community owner (`409 owns_community`), or the conferral finds no such account
-(provisioning `422 owner_not_found`, role assignment `404`).
+through one lock, the **account write lock**: a transaction-scoped advisory lock
+keyed by `user_id`. The account's deletion takes it exclusively; a conferral of
+ownership, a member addition and a grant creation for the account take it
+shared. A deletion takes it right after its `user` row locks, then decides
+whether the account owns a Community, and holds it until the delete commits. A
+conferral takes it as the first statement of the transaction that writes the
+assignment, then checks that the account exists. Whichever comes second waits
+for the first to commit and decides from what it committed: the deletion is
+refused as a Community owner (`409 owns_community`), or the conferral finds no
+such account (provisioning `422 owner_not_found`, role assignment `404`).
 
 Adding the account as a member and granting it a resource permission confer no
 ownership, but each inserts a row whose foreign key references the account, so
@@ -388,7 +389,7 @@ of them. Where it sits in each lock order is defined beside the locks: the
 identity order in the `RefreshTokenRepository` Port
 (`identity/domain/repositories.py`), the community order in
 `community/application/permission_ceiling.py`, and how the two meet in
-`core/adapters/ownership_lock.py`.
+`core/adapters/account_write_lock.py`.
 
 ---
 
@@ -428,13 +429,14 @@ member per resource (its `permissions` set is amended in place). FK
 > attach to the new one. Removing a member or deleting a server therefore removes
 > its grants in the database (Section 10), and no grant can be inserted for a
 > membership or server that is gone. Grant creation checks both up front for a
-> clean error, but those checks are not held until its INSERT; the foreign keys
-> are what keep a removal or deletion committing in between from leaving a ghost
-> grant (issue #3216), and the INSERT's violation is reported as the same
-> not-found the check would have given. `resource_id` references `server` because
-> `server` is the only `resource_type` the CHECK admits; adding a second resource
-> type means replacing this FK (e.g. with one nullable FK column per type), not
-> dropping it.
+> clean error and holds both (`FOR KEY SHARE`) until it commits (issue #3241),
+> so a removal or deletion either commits first and fails the check, or waits
+> and then cascades to the grant. The foreign keys are the backstop (issue
+> #3216): an INSERT whose parent is gone fails them, and the violation is
+> reported as the same not-found the check would have given. `resource_id`
+> references `server` because `server` is the only `resource_type` the CHECK
+> admits; adding a second resource type means replacing this FK (e.g. with one
+> nullable FK column per type), not dropping it.
 
 ---
 
@@ -463,6 +465,8 @@ assigned Worker.
 | `observed_state` | text | last state reported by the Worker: `starting` / `running` / `stopping` / `stopped` / `restarting` / `crashed` / `unknown` (CHECK enum) |
 | `observed_at` | timestamptz nullable | when `observed_state` was last updated |
 | `assigned_worker_id` | uuid nullable | the assigned Worker (FR-WRK-3); **no FK** — there is no `worker` table (Section 7). A soft reference to the in-memory fleet registry; kept when the Worker disconnects, and cleared when a stop releases the server or a failed start is undone (FR-WRK-4) |
+| `crash_reason` | text nullable | the last crash's reason as the Worker classified it: `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` (CHECK enum, mirroring the control-plane `CrashReason`, [`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 6). `NULL` for an unclassified crash, and whenever `observed_state` is not `crashed` |
+| `crash_detail` | text nullable | the last crash's free-text detail from the Worker, bounded to **4 KiB** of UTF-8: a longer one is cut on a character boundary and ends ` … [truncated]`, and NUL is dropped. `NULL` when the Worker sent none, and whenever `observed_state` is not `crashed` |
 | `created_at` / `updated_at` | timestamptz | |
 
 Constraints: `UNIQUE(community_id, name)`, `UNIQUE(game_port)` (deployment-wide,
@@ -524,12 +528,28 @@ two producers: the API infers it when the owning Worker disconnects,
 and a Worker reports it when it cannot currently confirm an instance's fate.
 `desired=running` with `observed=crashed` or `unknown` is closed by the
 reconciler restarting the server on its assigned Worker while that Worker is
-connected. It skips the server while the Worker is disconnected
-([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). A stop of a crashed
+connected. It skips the server while the Worker is disconnected, and it skips
+a crash whose `crash_reason` the Worker does not retry
+(`forge_install_out_of_memory`, `forge_install_java_incompatible`) when that
+crash is newer than the row's `updated_at` (`observed_at > updated_at`), since
+the next attempt fails the same way. `updated_at` is bumped by every write to
+the row, not only an intent commit, so any such write after the crash re-arms
+one restart ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6 lists them).
+The server read and the status snapshot report the same rule as
+`crash_not_restarted`. A stop of a crashed
 server leaves `observed=crashed`. The Worker no
 longer holds the instance, so it reports nothing more, and the crash stays
 recorded as why the server is down. `(stopped, crashed)` with no assigned Worker is at rest and
 startable.
+
+**The last crash.** `crash_reason` and `crash_detail` ride the observed-state
+write: the write that records `crashed` stores the report's reason and detail,
+and the next write of any other state clears both, the `unknown` a Worker
+disconnect writes included, under the same ownership and freshness guards
+(issue #3281). So the server read and the status snapshot can
+explain a crash to a client that missed its live frame, and the reconciler can
+tell a crash that recurs on every attempt from one a restart may fix. A stop of
+a crashed server keeps both, as it keeps `observed=crashed`.
 
 **`assigned_worker_id` nullability and the missing FK.** A server is not
 permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unplaced,

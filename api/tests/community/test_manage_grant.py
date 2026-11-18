@@ -164,6 +164,32 @@ async def test_create_grant_for_a_deleted_account_raises_not_member() -> None:
     assert uow.commits == 0
 
 
+async def test_create_grant_holds_only_the_recipient_account() -> None:
+    # The recipient's account is held, never also the actor's: two accounts
+    # whose lock keys collide share one account write lock, which cannot close
+    # a wait cycle only because no transaction takes it for two accounts
+    # (#3881).
+    uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
+    resource_id = uuid.uuid4()
+    _seed_member(uow, user, community)
+    uow.add_role(actor, community, {Permission("server:start")})
+    uow.add_resource(community, "server", resource_id)
+
+    await CreateGrant(uow=uow, clock=_FakeClock())(
+        community_id=community,
+        actor_id=actor,
+        user_id=user,
+        resource_type="server",
+        resource_id=resource_id,
+        permissions={Permission("server:start")},
+    )
+
+    assert uow.users.checked == [user]
+
+
 async def test_create_grant_rejects_unknown_resource_type() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()

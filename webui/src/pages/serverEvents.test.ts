@@ -170,6 +170,50 @@ describe("parseServerFrame", () => {
     ).toEqual({ kind: "snapshot", state: "stopped", assignedWorkerId: null });
   });
 
+  it("parses the last crash a snapshot frame carries (#3281)", () => {
+    expect(
+      parseServerFrame(
+        frame("snapshot", {
+          state: "crashed",
+          crash_reason: "forge_install_out_of_memory",
+          crash_detail: "installer ran out of memory",
+        }),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      state: "crashed",
+      crash: {
+        reason: "forge_install_out_of_memory",
+        detail: "installer ran out of memory",
+      },
+    });
+    expect(
+      parseServerFrame(
+        frame("snapshot", {
+          state: "running",
+          crash_reason: null,
+          crash_detail: null,
+        }),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      state: "running",
+      crash: { reason: null, detail: null },
+    });
+  });
+
+  it("leaves out a crash the snapshot frame does not carry whole", () => {
+    for (const payload of [
+      { state: "crashed" },
+      { state: "crashed", crash_reason: "forge_install_failed" },
+      { state: "crashed", crash_reason: 7, crash_detail: null },
+    ]) {
+      expect(parseServerFrame(frame("snapshot", payload))).not.toHaveProperty(
+        "crash",
+      );
+    }
+  });
+
   it("drops a snapshot frame without a state", () => {
     expect(parseServerFrame(frame("snapshot", {}))).toBeNull();
     expect(

@@ -41,6 +41,11 @@ _OBSERVED_STATES = (
     "crashed",
     "unknown",
 )
+_CRASH_REASONS = (
+    "forge_install_failed",
+    "forge_install_out_of_memory",
+    "forge_install_java_incompatible",
+)
 
 
 def _in_clause(column: str, values: tuple[str, ...]) -> str:
@@ -73,6 +78,10 @@ class ServerModel(Base):
         CheckConstraint(
             _in_clause("observed_state", _OBSERVED_STATES),
             name="ck_server_observed_state",
+        ),
+        CheckConstraint(
+            _in_clause("crash_reason", _CRASH_REASONS),
+            name="ck_server_crash_reason",
         ),
         # Index on (assigned_worker_id) for "all servers on Worker X" (FR-WRK-4).
         Index("ix_server_assigned_worker_id", "assigned_worker_id"),
@@ -121,3 +130,9 @@ class ServerModel(Base):
     backup_retention: Mapped[dict[str, object] | None] = mapped_column(
         JSONB, nullable=True
     )
+    # The last crash's reason and detail (issue #3281), written with the
+    # observed state: set by the write that records ``crashed``, NULL after any
+    # other. The reason is NULL for an unclassified crash; the detail is the
+    # Worker's text, bounded before the write.
+    crash_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    crash_detail: Mapped[str | None] = mapped_column(String, nullable=True)

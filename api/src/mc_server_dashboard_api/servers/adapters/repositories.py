@@ -40,12 +40,14 @@ from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_fro
 from mc_server_dashboard_api.servers.domain.repositories import ServerRepository
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
     ServerName,
     ServerType,
     WorkerId,
+    bound_status_detail,
 )
 
 
@@ -72,6 +74,10 @@ def _to_server(row: ServerModel) -> Server:
         ),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        crash_reason=(
+            None if row.crash_reason is None else CrashReason(row.crash_reason)
+        ),
+        crash_detail=row.crash_detail,
     )
 
 
@@ -163,6 +169,10 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ),
                 created_at=server.created_at,
                 updated_at=server.updated_at,
+                crash_reason=(
+                    None if server.crash_reason is None else server.crash_reason.value
+                ),
+                crash_detail=server.crash_detail,
             )
         )
 
@@ -337,7 +347,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         unassign: bool = False,
         expected_worker: WorkerId | None = None,
         detail: str = "",
-        reason: str = "",
+        reason: CrashReason | None = None,
         emitted_at: dt.datetime | None = None,
     ) -> bool:
         values: dict[str, Any] = {}
@@ -398,7 +408,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         values: dict[str, Any] | None = None,
         *,
         detail: str = "",
-        reason: str = "",
+        reason: CrashReason | None = None,
         emitted_at: dt.datetime | None = None,
     ) -> int:
         """Write ``observed_state`` to the rows matching ``conditions``; stage frames.
@@ -423,7 +433,17 @@ class SqlAlchemyServerRepository(ServerRepository):
         nothing it does not hold. That keeps the bulk invalidations quiet for
         rows they do not change, while a Worker report that explains itself is
         always relayed. A release of such a row stages the assignment alone.
+
+        The same UPDATE stores the last crash (issue #3281): ``reason`` and
+        ``detail`` when ``observed_state`` is ``crashed``, NULL for every other
+        state, so the stored crash never outlives the state it explains and is
+        written or kept under exactly the guards the state is. ``detail`` is
+        bounded once (:func:`bound_status_detail`) for both the column and the
+        frame, so a page loaded later reads what a live one was told.
         """
+
+        detail = bound_status_detail(detail)
+        crashed = observed_state is ObservedState.CRASHED
 
         locked = (
             await self._session.execute(
@@ -447,6 +467,8 @@ class SqlAlchemyServerRepository(ServerRepository):
             .values(
                 observed_state=observed_state.value,
                 observed_at=observed_at,
+                crash_reason=None if not crashed or reason is None else reason.value,
+                crash_detail=detail if crashed and detail else None,
                 **(values or {}),
             )
         )
@@ -456,7 +478,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 payload |= {
                     "state": observed_state.value,
                     "detail": detail,
-                    "reason": reason,
+                    "reason": "" if reason is None else reason.value,
                 }
             # The only assignment a caller sets here is a release (``unassign``),
             # which changes the row only if a Worker was assigned.

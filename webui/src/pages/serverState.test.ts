@@ -6,6 +6,7 @@ import {
   atRest,
   bucketOf,
   converging,
+  crashNotRestarted,
   isTransitional,
   normalizeState,
   type ObservedState,
@@ -258,6 +259,28 @@ describe("converging", () => {
     "desired=%s observed=%s assigned=%s -> %s",
     (desired, state, assigned, expected) => {
       expect(converging(state, desired, assigned)).toBe(expected);
+    },
+  );
+});
+
+describe("crashNotRestarted", () => {
+  // A crash the reconciler leaves alone (#3281): it holds only while the
+  // server reads crashed under a running intent. The cached flag can outlive
+  // both: a Worker disconnect sends `unknown` without touching it, and a live
+  // crashed frame sets it from the reason alone, so an optimistic stop or a
+  // crash after the stop commit leaves it set under a stopped intent.
+  const cases: Array<[ObservedState, string, boolean, boolean]> = [
+    ["crashed", "running", true, true],
+    ["crashed", "running", false, false],
+    ["unknown", "running", true, false],
+    ["starting", "running", true, false],
+    ["crashed", "stopped", true, false],
+  ];
+
+  it.each(cases)(
+    "observed=%s desired=%s flag=%s -> %s",
+    (state, desired, flag, expected) => {
+      expect(crashNotRestarted(state, desired, flag)).toBe(expected);
     },
   );
 });
