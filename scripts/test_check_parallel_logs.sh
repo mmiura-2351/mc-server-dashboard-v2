@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# test_check_parallel_logs.sh: a gate run keeps the previous run's logs, and
-# hands its log dir to the api test run (issue #3750).
+# test_check_parallel_logs.sh: a gate run keeps the previous run's logs, hands
+# its log dir to the api test run (issue #3750), and runs the argon2 canary
+# into it beside the api chain (issue #3748).
 #
 # The defect. Each run started with `rm -rf` of its log dir, so re-running a
 # red gate -- the documented response to a flake -- destroyed the failing run's
@@ -25,11 +26,26 @@
 #   4. A run that finds check-logs.prev but no check-logs -- the previous run
 #      was killed between moving its predecessor's logs aside and creating its
 #      own -- keeps check-logs.prev: there is nothing newer to replace it with.
+#   5. The argon2 canary runs while the api chain runs, from the api venv's
+#      interpreter with -I at nice 19, told the gate's pid, into
+#      argon2-canary.log, without the gate lock's descriptor; and it is
+#      stopped, with nothing of it left behind, whether the run passes, the api
+#      chain fails, the run is sent SIGTERM, or the canary ignores its SIGTERM.
+#      A canary left running would load the host for the gate after it; one
+#      holding the lock would block it. A canary that logged a MISMATCH or an
+#      ERROR is announced on stderr and its log is kept where neither the
+#      rotation nor a worktree removal reaches -- the git common dir, which
+#      only a linked worktree tells apart from its own git dir -- even when the
+#      run passes, and a clean one is neither. A canary that never got a check
+#      done is announced too: a clean log from it would read as a clean run.
 #
 # The runs use the real script with a stub `make` on PATH, as
 # test_check_parallel_identity.sh does: the stub writes its run's marker and the
 # exported variable into the pre-flight golangci-lint install log -- the first
-# thing the script runs -- and then fails, so no chain is ever spawned. `GIT_*`
+# thing the script runs -- and then fails, so no chain is ever spawned. The
+# canary runs of 5 use a second stub `make` that passes every target, and a stub
+# api venv interpreter that stands in for the canary and records what it was
+# given; neither runs Python, so this suite still needs no dependency. `GIT_*`
 # is unset and the fake worktree has its own repository, so a run never rotates
 # the live gate's logs when this test runs inside `make check`; the lock file is
 # a temp one for the same reason as in that test.
@@ -171,6 +187,285 @@ fi
 		ok "a run with no check-logs keeps check-logs.prev"
 	else
 		fail_test "check-logs holds '$current' and check-logs.prev '$previous' (want fifth, third)"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# 5. The argon2 canary runs beside the api chain, and stops on every way out.
+canary_worktree="$(mktemp -d)"
+canary_stub="$(mktemp -d)"
+linked_primary="$(mktemp -d)"
+trap 'rm -rf "$fake_worktree" "$stub_dir" "$canary_worktree" "$canary_stub" "$linked_primary"' EXIT
+git -C "$canary_worktree" init -q
+canary_logdir="$canary_worktree/.git/check-logs"
+hits_dir="$canary_worktree/.git/argon2-canary-hits"
+
+# The stand-in canary: it records its pid, its parent, niceness, arguments and
+# whether it holds fd 9 -- the gate lock's descriptor -- then idles until a
+# SIGTERM, which it takes a moment over, as the real one does to write its last
+# line: a run that did not wait for it would end with the canary still there.
+# Its log has the real one's start and stopped lines. The trap and the output
+# come before the record, and the record appears whole, so a run that stops the
+# canary as soon as it reads the record finds both in place. CANARY_HIT adds a
+# MISMATCH line; CANARY_IGNORE_TERM makes it ignore SIGTERM; CANARY_CHECKS sets
+# the checks its stopped line counts (1); CANARY_USAGE_ERROR makes it fail at
+# once, as on a bad command line.
+mkdir -p "$canary_worktree/api/.venv/bin"
+cat > "$canary_worktree/api/.venv/bin/python" << 'STUB'
+#!/usr/bin/env bash
+if [ -n "${CANARY_IGNORE_TERM:-}" ]; then
+	trap '' TERM
+else
+	trap 'sleep 0.3
+		echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
+		echo TERM > "$CANARY_RECORD.stopped"
+		exit 0' TERM
+fi
+if [ -n "${CANARY_USAGE_ERROR:-}" ]; then
+	echo "argon2_canary.py: error: the following arguments are required: --parent"
+else
+	echo "2026-11-17T00:00:00.000+00:00 start pid=$$ interval_s=2.0 summary_every=30"
+fi
+[ -z "${CANARY_HIT:-}" ] ||
+	echo "2026-11-17T00:00:00.500+00:00 MISMATCH check=1 kind=p4 tag=00 expected=3a"
+fd9=closed
+[ -e "/proc/$$/fd/9" ] && fd9=open
+echo "pid=$$ ppid=$PPID nice=$(nice) fd9=$fd9 args=$*" > "$CANARY_RECORD.started.tmp"
+mv "$CANARY_RECORD.started.tmp" "$CANARY_RECORD.started"
+[ -z "${CANARY_USAGE_ERROR:-}" ] || exit 2
+while :; do sleep 0.1; done
+STUB
+chmod +x "$canary_worktree/api/.venv/bin/python"
+
+# Every target passes at once, except the api chain's: each waits (bounded) for
+# the canary to have started, so the start never races the chain's end;
+# api-test notes whether the canary is running, and then waits for a release
+# file when the run is to be stopped from outside. CANARY_FAIL_API fails
+# api-lint. proto-check, the first target after every chain has ended, notes
+# whether the canary is still running.
+cat > "$canary_stub/make" << 'STUB'
+#!/usr/bin/env bash
+canary_running() {
+	local pid
+	pid="$(sed -n 's/^pid=\([0-9]*\) .*/\1/p' "$CANARY_RECORD.started" 2> /dev/null)"
+	[ -n "$pid" ] && kill -0 "$pid" 2> /dev/null
+}
+case "$1" in
+api-lint | api-test)
+	for _ in $(seq 1 100); do
+		[ -e "$CANARY_RECORD.started" ] && break
+		sleep 0.05
+	done
+	;;
+esac
+case "$1" in
+api-lint)
+	[ -z "${CANARY_FAIL_API:-}" ] || exit 1
+	;;
+api-test)
+	canary_running && echo running > "$CANARY_RECORD.during-api-test"
+	if [ -n "${CANARY_HOLD_API:-}" ]; then
+		for _ in $(seq 1 200); do
+			[ -e "$CANARY_RECORD.release" ] && break
+			sleep 0.05
+		done
+	fi
+	;;
+proto-check)
+	canary_running && echo running > "$CANARY_RECORD.after-the-chains"
+	;;
+esac
+exit 0
+STUB
+chmod +x "$canary_stub/make"
+
+# canary_run <name> [VAR=value ...]: one gate run in $canary_dir (the canary
+# worktree unless a run says otherwise), in the background, with its records
+# under $canary_stub/<name>; sets gate_pid.
+canary_dir="$canary_worktree"
+canary_run() {
+	local name=$1
+	shift
+	(
+		cd "$canary_dir" &&
+			exec env PATH="$canary_stub:$PATH" \
+				MCSD_CHECK_LOCK_FILE="$canary_stub/lock" \
+				CANARY_RECORD="$canary_stub/$name" "$@" \
+				bash "$ROOT/scripts/check_parallel.sh" "$canary_dir"
+	) > "$canary_stub/$name.out" 2>&1 &
+	gate_pid=$!
+}
+
+# await_gate: reap the run into gate_rc, or fail and stop it after ~20 s: a
+# `wait` on a run that never ends would hang the gate this suite runs in.
+await_gate() {
+	local i
+	for i in $(seq 1 200); do
+		kill -0 "$gate_pid" 2> /dev/null || break
+		sleep 0.1
+	done
+	if kill -0 "$gate_pid" 2> /dev/null; then
+		kill -KILL "$gate_pid" 2> /dev/null
+		fail_test "the $1 run did not end within 20 s: $(cat "$canary_stub/$1.out")"
+	fi
+	wait "$gate_pid" 2> /dev/null
+	gate_rc=$?
+}
+
+# check_canary <name>: the canary of run <name> (the last one started) started
+# as the gate starts it -- the gate's own child, told the gate's pid -- was
+# stopped with a SIGTERM, and is gone.
+check_canary() {
+	local name=$1 started pid
+	started="$(cat "$canary_stub/$name.started" 2> /dev/null)" || started="<never started>"
+	case "$started" in
+		*" ppid=$gate_pid nice=19 fd9=closed args=-I scripts/argon2_canary.py --parent $gate_pid") ok "$name: the canary ran -I at nice 19 as the gate's child, told its pid, without the lock's fd" ;;
+		*) fail_test "$name: the canary started as '$started' (gate pid $gate_pid)" ;;
+	esac
+	if [ -e "$canary_stub/$name.stopped" ]; then
+		ok "$name: the canary was stopped with SIGTERM"
+	else
+		fail_test "$name: the canary was never sent SIGTERM"
+	fi
+	pid="${started#pid=}"
+	pid="${pid%% *}"
+	if [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null; then
+		kill -KILL "$pid" 2> /dev/null
+		fail_test "$name: the canary (pid $pid) outlived the run"
+	else
+		ok "$name: nothing of the canary is left"
+	fi
+}
+
+{
+	canary_run passing
+	await_gate passing
+	check_canary passing
+	# Stopping the canary on the way out leaves the run's verdict alone.
+	if [ "$gate_rc" -eq 0 ]; then
+		ok "a passing run still exits 0"
+	else
+		fail_test "a passing run exited $gate_rc: $(cat "$canary_stub/passing.out")"
+	fi
+	if [ -e "$canary_stub/passing.during-api-test" ]; then
+		ok "the canary runs while the api tests do"
+	else
+		fail_test "the canary was not running during api-test: $(cat "$canary_stub/passing.out")"
+	fi
+	if [ -e "$canary_stub/passing.after-the-chains" ]; then
+		fail_test "the canary was still running after the api chain had ended"
+	else
+		ok "the canary stops as the api chain ends"
+	fi
+	if grep -q ' start pid=' "$canary_logdir/argon2-canary.log" 2> /dev/null; then
+		ok "the canary writes into argon2-canary.log in the run's log dir"
+	else
+		fail_test "argon2-canary.log does not hold the canary's output"
+	fi
+	if grep -q 'argon2 canary' "$canary_stub/passing.out" || [ -e "$hits_dir" ]; then
+		fail_test "a clean canary was announced or kept: $(cat "$canary_stub/passing.out")"
+	else
+		ok "a clean canary is neither announced nor kept"
+	fi
+
+	canary_run failing CANARY_FAIL_API=1
+	await_gate failing
+	check_canary failing
+	if [ "$gate_rc" -ne 0 ]; then
+		ok "a run whose api chain fails still fails"
+	else
+		fail_test "a run whose api chain failed exited 0"
+	fi
+
+	canary_run stopped CANARY_HOLD_API=1
+	for _ in $(seq 1 200); do
+		[ -e "$canary_stub/stopped.during-api-test" ] && break
+		sleep 0.05
+	done
+	kill -TERM "$gate_pid" 2> /dev/null
+	await_gate stopped
+	check_canary stopped
+	touch "$canary_stub/stopped.release"
+
+	# A hit in a passing run: the run still passes, says so, and keeps the log.
+	canary_run hit CANARY_HIT=1
+	await_gate hit
+	check_canary hit
+	if [ "$gate_rc" -eq 0 ]; then
+		ok "a canary hit does not fail the run"
+	else
+		fail_test "a run whose canary hit exited $gate_rc"
+	fi
+	if grep -q '^!!! argon2 canary: a MISMATCH or ERROR' "$canary_stub/hit.out" &&
+		grep -q ' MISMATCH check=1 kind=p4 ' "$canary_stub/hit.out"; then
+		ok "a canary hit is announced with its lines"
+	else
+		fail_test "a canary hit was not announced: $(cat "$canary_stub/hit.out")"
+	fi
+	kept=("$hits_dir"/*-"$(basename "$canary_worktree")".log)
+	if [ "${#kept[@]}" -eq 1 ] && [ -f "${kept[0]}" ] &&
+		grep -q ' MISMATCH check=1 kind=p4 ' "${kept[0]}" &&
+		grep -qF "${kept[0]}" "$canary_stub/hit.out"; then
+		ok "a canary hit's log is kept outside the rotation, and the run names it"
+	else
+		fail_test "a canary hit's log was not kept: $(ls -a "$hits_dir" 2>&1)"
+	fi
+
+	# A canary that ignores its SIGTERM costs the run a bounded wait, no more.
+	canary_run deaf CANARY_IGNORE_TERM=1
+	await_gate deaf
+	started="$(cat "$canary_stub/deaf.started" 2> /dev/null)" || started=""
+	pid="${started#pid=}"
+	pid="${pid%% *}"
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2> /dev/null && [ "$gate_rc" -eq 0 ]; then
+		ok "a canary that ignores SIGTERM is killed, and the run still passes"
+	else
+		[ -z "$pid" ] || kill -KILL "$pid" 2> /dev/null
+		fail_test "a canary that ignores SIGTERM: pid '$pid', run exit $gate_rc"
+	fi
+
+	# A canary that got no check done says so, and the run's verdict stands:
+	# one killed at the bound, one stopped at checks=0, one that never started.
+	if grep -q '^argon2 canary did not run: .* start pid=' "$canary_stub/deaf.out"; then
+		ok "a canary killed at the bound is announced as not run"
+	else
+		fail_test "a canary killed at the bound was not announced: $(cat "$canary_stub/deaf.out")"
+	fi
+	canary_run zero CANARY_CHECKS=0
+	await_gate zero
+	if [ "$gate_rc" -eq 0 ] &&
+		grep -q '^argon2 canary did not run: .* stopped by SIGTERM: checks=0 ' "$canary_stub/zero.out"; then
+		ok "a canary stopped at checks=0 is announced as not run, and the run passes"
+	else
+		fail_test "a canary stopped at checks=0 (run exit $gate_rc): $(cat "$canary_stub/zero.out")"
+	fi
+	canary_run usage CANARY_USAGE_ERROR=1
+	await_gate usage
+	if [ "$gate_rc" -eq 0 ] &&
+		grep -q '^argon2 canary did not run: argon2_canary.py: error: ' "$canary_stub/usage.out"; then
+		ok "a canary that never started is announced as not run, and the run passes"
+	else
+		fail_test "a canary that never started (run exit $gate_rc): $(cat "$canary_stub/usage.out")"
+	fi
+
+	# From a linked worktree, a hit's log goes to the primary checkout's git
+	# dir, which the worktree's removal leaves alone; its own git dir does not.
+	git -C "$linked_primary" init -q
+	git -C "$linked_primary" -c user.name=test -c user.email=test@example.com \
+		commit -q --allow-empty -m init
+	canary_dir="$canary_stub/linked"
+	git -C "$linked_primary" worktree add -q --detach "$canary_dir"
+	mkdir -p "$canary_dir/api/.venv/bin"
+	cp "$canary_worktree/api/.venv/bin/python" "$canary_dir/api/.venv/bin/python"
+	canary_run linked CANARY_HIT=1
+	await_gate linked
+	git -C "$linked_primary" worktree remove --force "$canary_dir"
+	canary_dir="$canary_worktree"
+	kept=("$linked_primary"/.git/argon2-canary-hits/*-linked.log)
+	if [ -f "${kept[0]}" ] && grep -q ' MISMATCH check=1 kind=p4 ' "${kept[0]}"; then
+		ok "a hit from a linked worktree is kept in the primary's git dir, past its removal"
+	else
+		fail_test "a hit from a linked worktree was not kept: $(cat "$canary_stub/linked.out")"
 	fi
 }
 
