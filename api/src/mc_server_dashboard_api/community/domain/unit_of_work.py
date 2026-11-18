@@ -16,6 +16,7 @@ from mc_server_dashboard_api.community.domain.repositories import (
     ResourceExistenceChecker,
     ResourceGrantRepository,
     RoleRepository,
+    UserExistenceChecker,
 )
 
 
@@ -27,6 +28,7 @@ class UnitOfWork(abc.ABC):
     roles: RoleRepository
     resource_grants: ResourceGrantRepository
     resources: ResourceExistenceChecker
+    users: UserExistenceChecker
 
     @abc.abstractmethod
     async def __aenter__(self) -> UnitOfWork:

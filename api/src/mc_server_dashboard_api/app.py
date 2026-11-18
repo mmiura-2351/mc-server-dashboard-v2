@@ -148,6 +148,9 @@ from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
 from mc_server_dashboard_api.servers.adapters.reconciler_loop import (
     run_reconciler_loop,
 )
+from mc_server_dashboard_api.servers.adapters.resource_pack_gc_loop import (
+    run_resource_pack_gc_loop,
+)
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
 )
@@ -193,6 +196,9 @@ from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     RunPluginCacheGc,
 )
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.resource_pack_gc import (
+    RunResourcePackGc,
+)
 from mc_server_dashboard_api.servers.application.schedule_runner import (
     ExecuteScheduleAction,
     RunScheduleTick,
@@ -921,6 +927,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reconciler_task: asyncio.Task[None] | None = None
         jar_gc_task: asyncio.Task[None] | None = None
         plugin_cache_gc_task: asyncio.Task[None] | None = None
+        resource_pack_gc_task: asyncio.Task[None] | None = None
         storage_sweep_task: asyncio.Task[None] | None = None
         session_prune_task: asyncio.Task[None] | None = None
         # Periodic login_attempt prune (SECURITY.md Section 3). Ungated on the
@@ -1315,6 +1322,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             logging.getLogger(__name__).info("plugin-cache GC started")
+        # Run the periodic resource-pack GC as a lifespan task (issue #3277).
+        # Gated on the resource pack store (object backend only), NOT on
+        # control.enabled -- uploads and deletes work without the control plane,
+        # and so do the orphan blobs they leave. Reclaims stored packs no
+        # resource_packs row names, on the storage sweep's cadence.
+        if resource_pack_store is not None:
+            resource_pack_gc = RunResourcePackGc(
+                uow=ServersUnitOfWork(create_session_factory(engine)),
+                store=resource_pack_store,
+                clock=ServersSystemClock(),
+            )
+            resource_pack_gc_task = asyncio.create_task(
+                run_resource_pack_gc_loop(
+                    resource_pack_gc,
+                    tick_seconds=settings.storage_sweep.interval_seconds,
+                )
+            )
+            logging.getLogger(__name__).info("resource-pack GC started")
         # Run the crash-recovery storage sweep on an interval (issue #2252), not
         # just the one-shot startup sweep above. Started unconditionally for both
         # backends — like the startup sweep, and NOT gated on control.enabled —
@@ -1366,6 +1391,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 plugin_cache_gc_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await plugin_cache_gc_task
+            if resource_pack_gc_task is not None:
+                resource_pack_gc_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await resource_pack_gc_task
             if jar_gc_task is not None:
                 jar_gc_task.cancel()
                 with suppress(asyncio.CancelledError):

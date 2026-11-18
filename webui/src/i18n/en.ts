@@ -519,6 +519,9 @@ export const en = {
   "serverDetail.danger.deleteDesc":
     "Permanently removes the server, its data and backups.",
   "serverDetail.danger.deleteButton": "Delete…",
+  // Delete held while a Worker is assigned, and the 409 server_assigned (#3852).
+  "serverDetail.danger.deleteAwaitsRelease":
+    "Stop the server and wait for it to be released before deleting it.",
   "serverDetail.delete.dialogTitle": "Delete server",
   "serverDetail.delete.dialogBody":
     "This permanently deletes the server, its data and backups. This cannot be undone. Type the server name to confirm.",

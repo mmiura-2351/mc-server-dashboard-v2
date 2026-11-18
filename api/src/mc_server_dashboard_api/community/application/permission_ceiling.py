@@ -17,9 +17,15 @@ confers is the one it commits.
 
 Lock order, the same for every transaction that locks through here:
 
+0. the recipient of a role assignment or a grant creation, held against account
+   deletion by its community-ownership lock (``UnitOfWork.users``, issues
+   #3217, #3856), before any lock of this context. A grant creation that held
+   the recipient's membership first would deadlock with the deletion: the
+   deletion's cascade waits for that membership, and the grant's foreign-key
+   check waits for the user row the deletion is deleting;
 1. memberships: the actor's, and the recipient's a role assignment or grant
    creation inserts its row under (``FOR KEY SHARE``, one statement in
-   ascending id order, taken by the use case before anything else);
+   ascending id order, taken by the use case before anything else but step 0);
 2. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
 3. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
    permissions an update replaces ``FOR UPDATE``, in its place in the order);
@@ -38,7 +44,12 @@ Against the deleters:
 - a role deletion locks the role, then its cascade the assignments;
 - a server deletion locks the server, then its cascade the grants;
 - a role unassignment locks only assignments (the Owner ones first, under the
-  last-owner guard).
+  last-owner guard);
+- an account deletion takes the account's community-ownership lock
+  (exclusive) right after its ``user`` row locks and before any other, and its
+  cascade then locks the account's memberships, their assignments and its
+  grants -- the order above. A deletion waiting at step 0 holds only ``user``
+  rows (``FOR NO KEY UPDATE``), which no transaction of this context waits for.
 
 A community deletion cascades through every one of these tables (never to a
 server: it is refused while the community holds one, issue #3218) and is not

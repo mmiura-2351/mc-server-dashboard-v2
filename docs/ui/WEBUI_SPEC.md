@@ -104,8 +104,8 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). A member named `server.properties/…` would publish that name as a directory, which the platform's own writes cannot survive — it is a `422` (`platform_managed_path`), refused before the server row is created, so nothing is left behind. Only the root name is guarded: a nested `backups/server.properties/…` member is ordinary user data. A traversal (zip-slip) member is a `422` (`invalid_path`) the same way. A member at a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), refused the same way rather than dropped. A body the zip reader fails on — not a zip at all, cut short, damage the reader detects in a member, or an encrypted member, the metadata included — is a `422` (`invalid_archive`), refused before the server row is created. |
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
-| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. A DELETE needs the server at rest (`409 server_not_stopped` otherwise) and no Worker assigned: a stop holds its Worker until the final snapshot settles and the server is released, which can wait for the reconciler, and a delete before then is a `409` (`server_assigned`) whose `detail` says to stop the server and wait for the release. A DELETE that waited out the lifecycle lock's acquire budget behind another lifecycle operation is the `409 server_busy` instead, which a retry in a moment clears. |
+| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. A `PUT` to a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), running or at rest; a `DELETE` of such an entry stays allowed, so one planted before the guard can be removed while the server is stopped. |
@@ -320,9 +320,9 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). An object-store outage answers 503 `storage_unavailable`: the file is stored before the pack row is inserted, so no pack was created and the upload is safe to send again (each attempt uses a fresh id). The failed attempt can leave a stored file no pack references — never served; reclaiming it is issue #3277. |
+| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). An object-store outage answers 503 `storage_unavailable`: the file is stored before the pack row is inserted, so no pack was created and the upload is safe to send again (each attempt uses a fresh id). The failed attempt can leave a stored file no pack references — never served, and reclaimed by the resource-pack GC ([`STORAGE.md`](../app/STORAGE.md) Section 4.3). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
-| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served. |
+| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served, and reclaimed by the resource-pack GC ([`STORAGE.md`](../app/STORAGE.md) Section 4.3). |
 | GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store`. `HEAD` is the metadata probe: the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies, because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe: this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. A storage failure writing `server.properties` answers 503 `seed_failed`: the assignment is not committed, so assigning again is safe. The file is not rolled back with it and may already carry the new pack keys. A storage outage while **reading** `server.properties` answers 503 `storage_unavailable`; that read precedes the assignment, so nothing changed. |
@@ -701,7 +701,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Start and Restart are hidden, since the API refuses both there. Under a
   stopped intent Stop is offered exactly while a Worker is still assigned — a
   drained server still running, or a stop left half-done — since the API then
-  converges it at once, and refuses it with no Worker assigned. Start needs no
+  converges it at once, and refuses it with no Worker assigned. Under a running
+  intent with no Worker assigned — a start the reconciler has yet to place —
+  Stop is offered while the server reads stopped, crashed or unknown, since the
+  API then withdraws the intent with no Worker to tell. It is not offered while
+  the server reads running: the stopped intent would keep reading running with
+  no Worker to report otherwise, which nothing converges. Start needs no
   Worker assigned: a stop holds its Worker until the final snapshot settles,
   and the API refuses a start until the release (`409 transition_conflict`).
   So at rest under a stopped intent with a Worker still assigned, Start shows
@@ -714,6 +719,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Worker is assigned, since the API refuses it in both cases
   (`409 invalid_transition`). The dashboard card quick actions follow the same
   rules and disable them.
+- Delete (the Settings tab's danger zone, 6.9) needs no Worker assigned, for
+  the same reason as Start: the API refuses a delete until the release
+  (`409 server_assigned`). While a Worker is assigned, Delete shows disabled
+  with "Stop the server and wait for it to be released before deleting it."
+  beside it, and the release frame frees it. A `409 server_assigned` that a
+  stale cache let through toasts the same words.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.
@@ -797,7 +808,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.9 Server detail — Settings
 - Rename, game-port edit (with availability check), `config` key/value
   editor; execution backend displayed read-only (immutable post-create).
-- Danger zone: delete server (typed confirm), export ZIP.
+- Danger zone: delete server (typed confirm; held while a Worker is assigned,
+  6.4), export ZIP.
 
 ### 6.10 Community settings
 - **Members**: table (username, roles as chips); add-member dialog by exact
@@ -1115,7 +1127,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   server must be stopped, on every surface that can receive it;
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
-  retries in a moment; the sanitized start/restart-failure categories
+  retries in a moment; `server_assigned` on a delete says to stop the server
+  and wait for it to be released before deleting it, since the hold can outlast
+  a retry (6.4); the sanitized start/restart-failure categories
   `port_conflict` / `image_missing` name the cause the Worker classified, and
   `server_properties_unreadable` says the server's `server.properties` is not a
   regular file or is too large and must be restored (Section 2, "A refused

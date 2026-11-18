@@ -1,14 +1,17 @@
 """The ``UserDirectory`` Port: the community context's narrow view of users.
 
-Provisioning a community needs to confirm the initial owner is an existing user
-(FR-COMM-2), but the community domain must never import the identity domain (the
-user is referenced by id value only; DATABASE.md Section 5). This Port is that
-seam: it answers "does this user id exist?", resolves an exact username to its id
-so a community owner can add a member without holding the platform-admin user
-listing (issue #355), and resolves user ids to display usernames for read models
-(member listings, issue #78). It is implemented at the edge (adapters) against the
-identity user store. Keeping it this narrow means the community context stays
-unaware of how users are stored or what else they carry.
+The community domain must never import the identity domain (the user is
+referenced by id value only; DATABASE.md Section 5). This Port is that seam: it
+resolves an exact username to its id so a community owner can add a member
+without holding the platform-admin user listing (issue #355), and resolves user
+ids to display usernames for read models (member listings, issue #78). It is
+implemented at the edge (adapters) against the identity user store. Keeping it
+this narrow means the community context stays unaware of how users are stored or
+what else they carry. It answers outside the caller's transaction and holds
+nothing, so it does not answer whether a user exists: a write that needs the
+user to exist checks it through the unit of work's
+:class:`~...repositories.UserExistenceChecker`, which holds it against account
+deletion (issues #3217, #3856).
 """
 
 from __future__ import annotations
@@ -19,11 +22,7 @@ from mc_server_dashboard_api.community.domain.value_objects import UserId
 
 
 class UserDirectory(abc.ABC):
-    """Port: existence lookup for a user referenced by the community context."""
-
-    @abc.abstractmethod
-    async def exists(self, user_id: UserId) -> bool:
-        """Return whether a user with ``user_id`` exists in the identity store."""
+    """Port: username lookups for users referenced by the community context."""
 
     @abc.abstractmethod
     async def resolve_username(self, username: str) -> UserId | None:

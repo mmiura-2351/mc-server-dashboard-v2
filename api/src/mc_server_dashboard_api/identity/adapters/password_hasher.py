@@ -167,20 +167,3 @@ class BcryptPasswordHasher(PasswordHasher):
         if len(encoded) > _BCRYPT_MAX_BYTES:
             raise ValueError("password exceeds bcrypt's 72-byte limit")
         return encoded
-
-
-def build_dummy_password_hash(algorithm: str, plaintext: str) -> str:
-    """Synchronously hash a static plaintext for the login timing-defence dummy.
-
-    The dummy verification hash (dependencies.py) is a one-time wiring constant,
-    derived from a throwaway plaintext and memoized, that gives the unknown-user
-    login path the same cost as a wrong-password verify. It is built in the sync
-    dependency-assembly path, not on an async request, so it deliberately does
-    *not* go through the now-async :class:`PasswordHasher.hash` (issue #938) —
-    keeping the KDF call here, in the adapter layer, avoids both an event-loop
-    round-trip at construction and leaking algorithm knowledge into the wiring.
-    """
-
-    if algorithm == "bcrypt":
-        return BcryptPasswordHasher()._hash(plaintext)
-    return argon2.PasswordHasher().hash(plaintext)

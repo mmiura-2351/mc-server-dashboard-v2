@@ -20,6 +20,8 @@ describe("serverSettingsErrorPresentation", () => {
     ["config_null_value", "serverDetail.error.configNullValue"],
     ["config_invalid_shape", "serverDetail.error.configInvalidShape"],
     ["config_lone_surrogate", "serverDetail.error.configLoneSurrogate"],
+    // A delete the Worker still holds (#3852): the held Delete button's reason.
+    ["server_assigned", "serverDetail.danger.deleteAwaitsRelease"],
   ] as const)("toasts %s with its specific message", (reason, key) => {
     expect(serverSettingsErrorPresentation(reason)).toEqual({
       target: "toast",

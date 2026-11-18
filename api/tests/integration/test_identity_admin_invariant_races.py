@@ -72,7 +72,6 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 )
 from tests.identity.fakes import (
     FakeClock,
-    FakeCommunityOwnership,
     StubHasher,
     make_user,
 )
@@ -193,15 +192,14 @@ async def _deactivate(uow: SqlAlchemyUnitOfWork, target: UserId) -> None:
 
 
 async def _admin_delete(uow: SqlAlchemyUnitOfWork, target: UserId) -> None:
-    await AdminDeleteUser(
-        uow=uow, ownership=FakeCommunityOwnership(), clock=FakeClock(_NOW)
-    )(actor_id=UserId.new(), target_id=target)
+    await AdminDeleteUser(uow=uow, clock=FakeClock(_NOW))(
+        actor_id=UserId.new(), target_id=target
+    )
 
 
 async def _delete_account(uow: SqlAlchemyUnitOfWork, target: UserId) -> None:
     await DeleteAccount(
         uow=uow,
-        ownership=FakeCommunityOwnership(),
         hasher=StubHasher(),
         clock=FakeClock(_NOW),
     )(user_id=target, password=_PASSWORD)

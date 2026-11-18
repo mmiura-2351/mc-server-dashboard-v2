@@ -9,6 +9,7 @@ and grants are removed by DB cascade, so they are not asserted here.
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 
 import pytest
 
@@ -29,6 +30,7 @@ from tests.identity.fakes import (
     FakeClock,
     FakeCommunityOwnership,
     FakeUnitOfWork,
+    FakeUserRepository,
     StubHasher,
     make_user,
 )
@@ -38,9 +40,9 @@ _PASSWORD = "Wm7!qz#Lp2vT"
 
 
 def _use_case(uow: FakeUnitOfWork, ownership: FakeCommunityOwnership) -> DeleteAccount:
-    return DeleteAccount(
-        uow=uow, ownership=ownership, hasher=StubHasher(), clock=FakeClock(_NOW)
-    )
+    # The ownership seam is bound on the unit of work's transaction (#3217).
+    uow.ownership = ownership
+    return DeleteAccount(uow=uow, hasher=StubHasher(), clock=FakeClock(_NOW))
 
 
 def _active_token(user_id: UserId) -> RefreshToken:
@@ -199,3 +201,51 @@ async def test_delete_account_wrong_password_gates_before_owner_check() -> None:
 
     with pytest.raises(InvalidCredentialsError):
         await _use_case(uow, ownership)(user_id=user.id, password="not-the-password")
+
+
+class _PasswordChangedDuringVerify(StubHasher):
+    """Replaces the stored hash once the password has verified against it.
+
+    Stands in for a password change that commits after the verify and before
+    the deletion locks the account.
+    """
+
+    def __init__(self, users: FakeUserRepository, user_id: UserId) -> None:
+        super().__init__()
+        self._users = users
+        self._user_id = user_id
+
+    async def verify(self, plaintext: str, password_hash: str) -> bool:
+        verified = await super().verify(plaintext, password_hash)
+        stored = self._users.by_id[self._user_id]
+        self._users.by_id[self._user_id] = replace(
+            stored, password_hash="hashed::Np4@xZ#Lq9wR"
+        )
+        return verified
+
+
+@pytest.mark.parametrize("owns_community", [False, True], ids=["plain", "owner"])
+async def test_delete_account_refused_when_the_password_changed_after_the_verify(
+    owns_community: bool,
+) -> None:
+    # The password is verified outside the deletion's transaction (#3861), so a
+    # change can commit before the account is locked. The verify is then stale
+    # and the deletion is refused like a wrong password, ahead of the owner
+    # check, and the account and its sessions survive.
+    user = make_user(now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    uow.refresh_tokens.seed(_active_token(user.id))
+    uow.ownership = FakeCommunityOwnership(owners={user.id} if owns_community else None)
+    use_case = DeleteAccount(
+        uow=uow,
+        hasher=_PasswordChangedDuringVerify(uow.users, user.id),
+        clock=FakeClock(_NOW),
+    )
+
+    with pytest.raises(InvalidCredentialsError):
+        await use_case(user_id=user.id, password=_PASSWORD)
+
+    assert user.id in uow.users.by_id
+    assert all(t.revoked_at is None for t in uow.refresh_tokens.by_hash.values())
+    assert uow.commits == 0

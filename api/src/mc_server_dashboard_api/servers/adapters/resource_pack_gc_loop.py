@@ -1,0 +1,30 @@
+"""Lifespan driver for the periodic resource-pack GC (issue #3277).
+
+Runs :class:`RunResourcePackGc` on a fixed cadence as an asyncio task on the
+FastAPI event loop, mirroring the plugin-cache GC loop. A failure inside one pass
+is logged and the loop continues. Cancelling the task (on shutdown) ends the loop
+cleanly.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from mc_server_dashboard_api.core.adapters.periodic_runner import run_periodic
+from mc_server_dashboard_api.servers.application.resource_pack_gc import (
+    RunResourcePackGc,
+)
+
+_LOG = logging.getLogger(__name__)
+
+
+async def run_resource_pack_gc_loop(
+    gc: RunResourcePackGc, *, tick_seconds: float
+) -> None:
+    """Run one GC pass every ``tick_seconds`` until cancelled."""
+
+    await run_periodic(
+        gc,
+        tick_seconds=tick_seconds,
+        on_error=lambda: _LOG.exception("resource-pack GC pass failed; continuing"),
+    )

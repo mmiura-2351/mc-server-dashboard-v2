@@ -19,6 +19,9 @@ A stop convergence owed for a stopped intent released a row on its cached
 observed state (issue #3766): under a start the Worker had not reported on yet,
 and before the write that stopped the row had bumped the count.
 
+A stop refused a start intent no Worker held yet (issue #3815), so an operator
+could not withdraw one whose placement kept failing.
+
 Each test runs the real use cases, each with its own unit of work over one shared
 repository and one shared ``StopIntentCounter``, as in production. The competing
 write is injected at an exact point: inside the start's re-read once the row
@@ -2173,6 +2176,200 @@ async def test_a_convergence_that_finds_the_row_started_again_withdraws_nothing(
     assert world.cp.live == {world.server_id}
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.intents.current(world.server_id) == count
+
+
+# Issue #3815: a start intent no Worker holds yet, (running, unassigned), while
+# the reconciler retries its placement. A stop of it commits desired=stopped
+# with the compare-and-set and the bump of any stop, and sends nothing: there is
+# no Worker to tell and no placement load to drop. A placement racing the stop
+# wins or loses on the row as the other write left it. Each test names the step
+# of the placement the stop lands at.
+
+
+async def test_a_stop_before_the_placement_leaves_it_no_intent_to_place() -> None:
+    # The reconciler listed the row, then the operator's stop commits before the
+    # placement reads it. The placement finds no running intent and sends nothing.
+    world = _World(desired=DesiredState.RUNNING)
+
+    stopped = await world.stop()
+
+    assert stopped.desired_state is DesiredState.STOPPED
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.intents.current(world.server_id) == 1
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await world.place()
+
+    assert world.kinds() == []
+    assert world.cp.reserved == []
+    assert world.cp.load == []
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionError("commit landed, response lost"), asyncio.CancelledError()],
+    ids=["lost-response", "cancelled"],
+)
+async def test_a_stop_of_an_unplaced_intent_whose_commit_raised_still_bumps(
+    error: BaseException,
+) -> None:
+    # As for an assigned row: the commit may have landed, so the stop bumps.
+    world = _World(desired=DesiredState.RUNNING)
+
+    await _withdraw_raising(world, "stop", error)
+
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.intents.current(world.server_id) == 1
+    assert world.kinds() == []
+
+
+async def test_a_stop_after_the_placement_read_the_row_wins_the_compare() -> None:
+    # The stop commits once the placement has read (running, unassigned), while it
+    # provisions the JAR and picks a Worker. The placement's compare-and-set
+    # expects the row it read and matches nothing: it releases its reservation,
+    # answers the conflict and sends nothing.
+    world = _World(desired=DesiredState.RUNNING)
+
+    async def stop() -> None:
+        await world.stop()
+
+    world.repo.after_next_read = stop
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.place()
+
+    assert world.kinds() == []
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.released == [(world.worker, world.server_id)]
+    assert world.cp.load == []
+    assert world.intents.current(world.server_id) == 1
+
+
+async def test_a_stop_that_read_the_unplaced_row_loses_to_the_placement() -> None:
+    # The stop read (running, unassigned) and waits on its write, while the
+    # placement's compare-and-set lands and its hydrate runs. The stop's own
+    # compare-and-set expects the row unassigned and matches nothing. It answers
+    # the conflict and neither bumps nor drops the load, so the placement still
+    # sends its start. A retried stop finds (running, W) and stops it as usual.
+    world = _World(desired=DesiredState.RUNNING)
+    write = asyncio.Event()
+    world.repo.pause_next_flip = write
+    stop = asyncio.create_task(world.stop())
+    await _either(stop, world.repo.flip_paused)
+    assert world.repo.flip_paused.is_set()
+
+    async def stop_writes() -> None:
+        write.set()
+        with pytest.raises(LifecycleTransitionConflictError):
+            await stop
+
+    world.after_hydrate(stop_writes)
+
+    await world.place()
+
+    assert world.kinds() == ["hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.load == ["confirm"]
+    assert world.intents.current(world.server_id) == 0
+
+
+async def test_a_stop_during_the_placement_hydrate_stops_the_placed_row() -> None:
+    # The placement has committed its Worker, so the stop finds (running, W) and
+    # takes the normal path: it drops the load and sends the stop, which the
+    # Worker answers SERVER_NOT_FOUND as nothing runs yet, then releases the row.
+    # The placement's re-read finds no intent and sends nothing.
+    world = _World(desired=DesiredState.RUNNING)
+
+    async def stop() -> None:
+        await world.stop()
+
+    world.after_hydrate(stop)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.place()
+
+    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+    assert world.cp.load == ["confirm", "drop"]
+    assert world.intents.current(world.server_id) == 1
+
+
+async def test_a_stop_after_the_placement_compare_is_sent_behind_its_start() -> None:
+    # The stop becomes runnable as the placement's re-read closes, after which
+    # nothing awaits before the start is enqueued. The start goes out first, and
+    # the stop behind it is a real stop.
+    world = _World(desired=DesiredState.RUNNING)
+    uow = _ExitRunsHook(servers=world.repo)
+    stops: list[asyncio.Task[Server]] = []
+
+    async def schedule_stop() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+
+    async def arm() -> None:
+        uow.on_next_exit = schedule_stop
+
+    world.after_hydrate(arm)
+
+    await world.start_server(uow).place_and_start(
+        community_id=world.community, server_id=world.server_id
+    )
+    await stops[0]
+
+    assert world.kinds() == ["hydrate", "start", "stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+    assert world.cp.live == set()
+    assert world.cp.load == ["confirm", "drop"]
+
+
+async def test_a_user_start_cannot_place_an_unplaced_intent_until_it_is_stopped() -> (
+    None
+):
+    # A user start creates an intent, so it needs (stopped, unassigned) and
+    # refuses one that already stands. Once a stop withdraws it, the start places
+    # the server and sends its start.
+    world = _World(desired=DesiredState.RUNNING)
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await world.start()
+    assert world.cp.reserved == []
+
+    await world.stop()
+    await world.start()
+
+    assert world.kinds() == ["hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+
+
+async def test_a_stale_placement_loses_to_a_stop_and_the_user_start_after_it() -> None:
+    # The placement read the unplaced intent and holds the lifecycle lock while
+    # it picks a Worker. A stop, which takes no lifecycle lock, withdraws the
+    # intent, and the operator starts the server again: the start waits for the
+    # lock. The placement's compare-and-set matches nothing, so it sends nothing,
+    # and the start then places the server and sends the one start.
+    world = _World(desired=DesiredState.RUNNING)
+    world.lock = lock = _ExclusiveLock()
+    starts: list[asyncio.Task[Server]] = []
+
+    async def stop_then_start() -> None:
+        await world.stop()
+        starts.append(asyncio.create_task(world.start()))
+        await _either(starts[0], lock.waited)
+
+    world.repo.after_next_read = stop_then_start
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.place()
+    await starts[0]
+
+    assert world.kinds() == ["hydrate", "start"]
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.cp.live == {world.server_id}
+    assert world.cp.load == ["confirm"]
+    assert world.cp.released == [(world.worker, world.server_id)]
 
 
 async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends() -> (

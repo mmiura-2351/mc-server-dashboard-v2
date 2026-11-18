@@ -21,8 +21,7 @@ stays an availability failure.
 
 from __future__ import annotations
 
-import io
-import tarfile
+import gzip
 from collections.abc import AsyncIterator
 
 import pytest
@@ -40,7 +39,12 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
-from tests.storage.helpers import healthy_region_bytes, new_scope, region_targz
+from tests.storage.helpers import (
+    healthy_region_bytes,
+    new_scope,
+    region_targz,
+    tar_bytes,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -130,54 +134,36 @@ async def test_truncated_body_with_a_matching_declared_length_is_unreadable() ->
         await storage.check_backup_health(community, server, key)
 
 
-def _restore_accepts(archive: bytes) -> bool:
-    """Does the restore/upload path accept these bytes? (``tarfile.open(r:gz)``.)
-
-    The probe must never condemn an archive this returns ``True`` for: a false
-    "unhealthy" quarantines a restorable backup and emits a spurious audit entry,
-    which is the same class of defect as the false "healthy" this issue is about.
-    """
-
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
-            tar.getmembers()
-    except Exception:
-        return False
-    return True
+_SOUND_TAR = tar_bytes({"world/region/r.0.0.mca": healthy_region_bytes()})
 
 
 @pytest.mark.parametrize(
-    ("label", "suffix"),
+    "archive",
     [
-        # gzip permits members to be appended, and the shell tools do it.
-        ("concatenated second member", region_targz({"world/region/r.0.1.mca": b"y"})),
-        # Padding after a complete member: restore stops at the tar EOF marker and
-        # never reads this far, so it restores fine (measured, issue #2371 review).
-        ("trailing zero padding", b"\x00" * 1024),
-        ("trailing junk", b"not-a-gzip-member"),
+        # gzip permits members to be appended, and the shell tools do it: the tar
+        # goes on in the second member.
+        gzip.compress(_SOUND_TAR[:1024]) + gzip.compress(_SOUND_TAR[1024:]),
+        # Zero padding after the gzip stream, which gzip reads past.
+        _sound_archive() + b"\x00" * 1024,
     ],
-    ids=["concatenated", "zero-padding", "junk"],
+    ids=["concatenated", "zero-padding"],
 )
-async def test_bytes_after_a_complete_member_stay_healthy(
-    label: str, suffix: bytes
-) -> None:
-    """Whatever follows a COMPLETE gzip member cannot make the archive unreadable —
-    the restore path accepts all of these, so the probe must too."""
+async def test_a_gzip_stream_restore_reads_whole_stays_healthy(archive: bytes) -> None:
+    """A gzip stream of several members, or one with zero padding after it, is
+    healthy: restore reads it whole (issue #3798), so the probe must too. A false
+    "unhealthy" quarantines a restorable backup and emits a spurious audit entry,
+    which is the same class of defect as the false "healthy" this issue is about."""
 
     store, storage = _store_and_storage()
     community, server = new_scope()
-    archive = _sound_archive()
     key = await _put_backup(storage, community, server, archive)
-    object_key = storage._backup_key(community, server, key)
-    store.objects[object_key] = archive + suffix
-
-    # The precondition that makes this a false-quarantine test rather than a
-    # preference: restore really does accept these bytes.
-    assert _restore_accepts(archive + suffix), label
 
     report = await storage.check_backup_health(community, server, key)
 
     assert report.healthy
+    # The precondition that makes this a false-quarantine test rather than a
+    # preference: restore really does accept these bytes.
+    await storage.restore_backup(community, server, key)
 
 
 def _damaged_second_member() -> bytes:
@@ -190,16 +176,23 @@ def _damaged_second_member() -> bytes:
     "suffix",
     [
         _damaged_second_member(),
-        # Nothing but the magic: a member that announces itself and then stops. This
-        # is the documented divergence from ``tarfile``, which accepts it because it
-        # never reads past the tar end-of-archive marker.
+        # Nothing but the magic: a member that announces itself and then stops.
         b"\x1f\x8b",
+        # Bytes that are not a gzip member at all.
+        b"not-a-gzip-member",
+        # A second tar.gz: a sound gzip member, but a second tar after the first
+        # one's end-of-archive marker.
+        region_targz({"world/region/r.0.1.mca": b"y"}),
     ],
-    ids=["damaged-member", "header-only"],
+    ids=["damaged-member", "header-only", "junk", "second-tar"],
 )
-async def test_a_damaged_second_member_is_still_unreadable(suffix: bytes) -> None:
-    """Leniency stops at the gzip magic: bytes that announce themselves as another
-    member must actually be one, or the archive is damaged."""
+async def test_bytes_after_the_archive_restore_refuses_are_unreadable(
+    suffix: bytes,
+) -> None:
+    """Restore reads the archive to its gzip end (issue #3798): bytes after the
+    gzip stream must be another sound gzip member or zero padding, and only
+    zeros may follow the tar's end-of-archive marker. So these are unreadable to
+    the probe as they are to restore (issue #3236)."""
 
     store, storage = _store_and_storage()
     community, server = new_scope()
@@ -210,6 +203,8 @@ async def test_a_damaged_second_member_is_still_unreadable(suffix: bytes) -> Non
 
     with pytest.raises(ArchiveUnreadableError):
         await storage.check_backup_health(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await storage.restore_backup(community, server, key)
 
 
 async def test_corrupt_gzip_trailer_is_unreadable() -> None:

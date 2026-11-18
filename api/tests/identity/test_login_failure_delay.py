@@ -15,7 +15,7 @@ import pytest
 from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
     FixedLoginFailureDelay,
 )
-from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.login import DummyPasswordHash, Login
 from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
 from tests.identity.fakes import (
     FakeClock,
@@ -48,7 +48,7 @@ async def test_login_failure_invokes_real_delay_without_sleeping() -> None:
         attempts=FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(delay=_DELAY),
         hasher=StubHasher(),
-        dummy_password_hash="hashed::__dummy__",
+        dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
         tokens=FakeTokenService(),
         clock=FakeClock(_NOW),
         failure_delay=FixedLoginFailureDelay(delay=_DELAY, sleeper=sleeper),
@@ -70,7 +70,7 @@ async def test_login_success_does_not_delay() -> None:
         attempts=FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(delay=_DELAY),
         hasher=StubHasher(),
-        dummy_password_hash="hashed::__dummy__",
+        dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
         tokens=FakeTokenService(),
         clock=FakeClock(_NOW),
         failure_delay=FixedLoginFailureDelay(delay=_DELAY, sleeper=sleeper),

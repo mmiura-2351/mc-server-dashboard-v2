@@ -73,12 +73,14 @@ from tests.storage.helpers import (
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
-# Small enough that the bomb fixture trips it, large enough for every other one.
-_MAX_RESTORE_BYTES = 1024
+# Small enough that the bomb fixture trips it, large enough for every other one,
+# whose ``tarfile`` record padding past the end-of-archive marker counts toward
+# it too (issue #3798).
+_MAX_RESTORE_BYTES = 16 * 1024
 
 _ARCHIVES = {
     "escaping-member": lambda: gzip.compress(malicious_tar_with_escape()),
-    "over-limit": bomb_targz,
+    "over-limit": lambda: bomb_targz(decompressed=4 * _MAX_RESTORE_BYTES),
 }
 
 

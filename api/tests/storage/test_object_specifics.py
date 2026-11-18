@@ -716,6 +716,33 @@ async def test_sweep_aborts_old_orphan_multipart_upload_under_jars_prefix() -> N
     )
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "resource-packs/00000000-0000-0000-0000-000000000001/pack.zip",
+        "plugin-cache/" + "a" * 64,
+    ],
+)
+async def test_sweep_aborts_old_orphan_multipart_upload_under_every_namespace(
+    key: str,
+) -> None:
+    # The resource-pack and plugin-cache stores upload via multipart into the same
+    # bucket (issue #3277), so an upload whose abort failed leaks parts under
+    # their namespaces too. The sweep walks every namespace the API writes to, not
+    # only the two ObjectStorage itself keys under.
+    store, storage = _store_and_storage()
+    store.multipart_uploads["upload-old"] = (
+        key,
+        dt.datetime.now(dt.UTC) - dt.timedelta(hours=2),
+    )
+
+    await storage.sweep()
+
+    assert "upload-old" not in store.multipart_uploads, (
+        f"an orphan multipart upload at {key} older than the threshold must be aborted"
+    )
+
+
 async def test_sweep_spares_young_multipart_upload() -> None:
     # Age threshold (issue #903): an upload initiated within the threshold may be a
     # live put_backup/snapshot member upload in progress, so the sweep must NOT abort
