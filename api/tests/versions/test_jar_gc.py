@@ -567,3 +567,24 @@ async def test_a_jar_whose_unlink_fails_with_eio_does_not_starve_the_others(
             await gc()
 
     assert [entry.sha256 for entry in await pool.list_entries()] == [bad]
+
+
+async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
+    # A pass that stops after five failed deletes in a row did not come round, so
+    # the next pass still starts after the JAR the store gave no answer for
+    # (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(6)
+    store.fail_deletes_of(keys[0])
+    store.faults.error = ObjectStoreUnreachableError
+    resume_point = ResumePoint()
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+    store.faults.clear()
+    store.fail_deletes_of(*keys[1:])
+
+    result = await gc()
+
+    assert result.failed == 5
+    assert resume_point.key == keys[0]

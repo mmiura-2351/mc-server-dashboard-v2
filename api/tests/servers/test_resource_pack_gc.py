@@ -638,3 +638,22 @@ async def test_a_resumed_pass_logs_where_it_starts_at_debug(
     (resumed,) = [line for line in rendered if repr(key) in line]
     assert "after" in resumed
     assert not _forged(resumed)
+
+
+async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
+    # A pass that stops after five failed deletes in a row did not come round, so
+    # the next pass still starts after the pack the store gave no answer for
+    # (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(6)
+    bucket.faults.when = lambda op, key: op == "delete_object" and key == keys[0]
+    bucket.faults.error = ObjectStoreUnreachableError
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+    bucket.faults.clear()
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in keys[1:]
+
+    result = await bucket.gc()
+
+    assert result.failed == 5
+    assert bucket.resume_point.key == keys[0]
