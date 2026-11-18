@@ -124,8 +124,8 @@ def _connect_worker(
 ) -> None:
     """Open a Worker session on the app's loop, left open for the app's lifetime.
 
-    Returns once the registration has rebuilt the Worker's load from its two
-    assigned servers.
+    Returns once the registration has rebuilt the Worker's load from the two
+    servers assigned to it under a running intent.
     """
 
     portal = client.portal
