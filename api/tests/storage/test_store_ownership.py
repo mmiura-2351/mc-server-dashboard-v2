@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -186,6 +188,28 @@ async def test_an_fs_claim_creates_a_root_that_does_not_exist_yet(
 
     assert _named((root / OWNER_MARKER).read_bytes()) == str(_OURS)
     assert await ownership.refusal() is None
+
+
+async def test_an_fs_claim_removes_a_temp_file_a_crashed_claim_left(
+    tmp_path: Path,
+) -> None:
+    # A crash between the temporary write and its removal leaves the temp file at
+    # the root. The next claim removes it once it is old enough that no claim
+    # still running can own it; a fresh one may be another API's, mid-claim.
+    root = tmp_path / "storage"
+    root.mkdir()
+    stale = root / f".{OWNER_MARKER}.{'a' * 32}.tmp"
+    fresh = root / f".{OWNER_MARKER}.{'b' * 32}.tmp"
+    stale.write_bytes(b"{}")
+    fresh.write_bytes(b"{}")
+    two_hours_ago = time.time() - 7200
+    os.utime(stale, (two_hours_ago, two_hours_ago))
+
+    await FsStoreOwnership(root).claim(_OURS)
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert _named((root / OWNER_MARKER).read_bytes()) == str(_OURS)
 
 
 # --- concurrent first starts -------------------------------------------------

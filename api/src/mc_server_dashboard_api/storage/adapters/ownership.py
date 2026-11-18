@@ -33,6 +33,7 @@ import uuid
 from pathlib import Path
 
 from mc_server_dashboard_api.rfc3339 import serialize_utc
+from mc_server_dashboard_api.storage.adapters.fs import _is_stale_spool
 from mc_server_dashboard_api.storage.adapters.object_store import (
     ConditionalPutUnsupportedError,
     S3Client,
@@ -74,8 +75,9 @@ def _refusal(
         return f"this API process has not claimed the store ({location})"
     if body is None:
         return (
-            f"the store owner marker {location} is missing; restart the API to "
-            "claim the store"
+            f"the store owner marker {location} cannot be read back. If it was "
+            "removed, only an API start claims the store again; if it was just "
+            "written, a later pass finds it"
         )
     owner = _named_installation(body)
     if owner is None:
@@ -174,6 +176,11 @@ class FsStoreOwnership:
             return None
 
     def _claim_blocking(self, installation_id: uuid.UUID) -> bool:
+        # A crash before the ``finally`` below leaves a temporary file at the
+        # root. Remove one old enough that no claim still running can own it.
+        for stale in self._root.glob(f".{OWNER_MARKER}.*.tmp"):
+            if _is_stale_spool(stale):
+                stale.unlink(missing_ok=True)
         if self._read_marker() is not None:
             return False
         self._root.mkdir(parents=True, exist_ok=True)

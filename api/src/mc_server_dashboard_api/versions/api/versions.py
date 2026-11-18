@@ -26,6 +26,7 @@ the catalog's domain errors to HTTP codes here.
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
@@ -61,6 +62,8 @@ from mc_server_dashboard_api.versions.domain.errors import (
     UnknownVersionError,
 )
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
+
+_LOG = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/versions", route_class=RequestBodyLimitRoute)
 
@@ -161,13 +164,19 @@ async def jar_pool_gc(
     A bounded scan diffing the pool against the live reference set, skipping JARs
     inside the safety window; returns what it scanned and freed. Audited like the
     catalog refresh. Refused with 409 ``store_not_owned`` when the store's owner
-    marker names another database (STORAGE.md Section 4.3, issue #3870).
+    marker names another database (STORAGE.md Section 4.3, issue #3870); the
+    ``detail`` names the marker and both installations, and the refusal is logged.
     """
 
     try:
         result = await use_case()
     except StoreNotOwnedError as exc:
-        raise problem(status.HTTP_409_CONFLICT, "store_not_owned") from exc
+        _LOG.error("%s", exc)
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "store_not_owned",
+            extensions={"detail": str(exc)},
+        ) from exc
     await recorder.record(
         AuditEvent(
             operation=ops.VERSION_JAR_GC,

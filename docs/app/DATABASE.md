@@ -93,9 +93,12 @@ store they sweep must belong to this database alone. The store's owner marker
 records the installation id of the database that claimed it, and every GC and
 destructive sweep runs only while the marker names this one
 ([`STORAGE.md`](STORAGE.md) Section 4.3, issue #3870). The id travels with the
-data: a dump restored elsewhere, or a restore to an earlier point, keeps it.
-Downgrading past `0045_installation` drops it, and upgrading again mints a new
-one, which an existing marker no longer names.
+data: a dump restored elsewhere, or a restore to an earlier point, keeps it, so a
+database cloned from a dump carries the same id as its source and must never be
+pointed at the source's store. Downgrading past `0045_installation` drops the id,
+and upgrading again mints a new one, which an existing marker no longer names;
+so does upgrading a dump taken before `0045_installation`. The API reads the id
+once, at startup, so stop it before replacing its database.
 
 ---
 
