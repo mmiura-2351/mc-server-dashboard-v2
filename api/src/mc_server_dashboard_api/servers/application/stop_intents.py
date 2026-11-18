@@ -101,7 +101,8 @@ class StopIntentCounter:
     Also which servers have had a start sent that no stop has stopped yet.
     """
 
-    # Neither forgets a deleted server, so each is bounded by the server count.
+    # Neither drops a deleted server's entry: each holds at most one per server
+    # this process has seen.
     _counts: dict[ServerId, int] = field(default_factory=dict)
     _unstopped_starts: set[ServerId] = field(default_factory=set)
 
