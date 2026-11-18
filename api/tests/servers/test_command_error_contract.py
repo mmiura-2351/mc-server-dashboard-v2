@@ -15,12 +15,13 @@ every row, and this module DERIVES its expectations from that column instead of
 maintaining its own list and count:
 
 * the table names, per row, the sites that match the row's ``(kind, code)`` --
-  ``module.py:qualname`` inside ``servers/application/`` -- or says the outcome is
+  ``module.py:qualname`` inside ``servers/application/``, or ``api/module.py`` in
+  the HTTP edge ``servers/api/`` -- or says the outcome is
   absorbed by the catch-all (``command_failed``) or never read at all
   (``fire_and_forget``);
 * :func:`test_declared_api_sites_match_the_source` asserts the
   ``(module, qualname, CommandStatus)`` triples the table declares are EXACTLY the
-  triples an ``ast`` scan finds in the application layer.
+  triples an ``ast`` scan finds in the application layer and the HTTP edge.
 
 That makes both directions consequences of the table rather than thresholds
 somebody can nudge: a new match on a ``(kind, code)`` the Worker never emits has
@@ -46,6 +47,12 @@ A site can also match a status by the reason ``dispatch_failure`` gives it, as
 the reconciler matches a busy start on ``WORKER_BUSY_REASON`` (issue #3808). So a
 read of a ``command_dispatch`` reason constant counts as a reference to the
 status ``_SANITIZED_REASONS`` maps to it.
+
+Known gap: a reason is seen only as a read of that constant by its plain name. A
+literal (``"worker_busy"``), an attribute access (``command_dispatch.X``) or an
+aliased import matches the same status unseen, so a match site must read the
+constant. The lifecycle routes' ``_SERVICE_UNAVAILABLE_REASONS`` held the literal
+until issue #3808.
 """
 
 from __future__ import annotations
@@ -211,7 +218,7 @@ def _collect(body: list[ast.stmt], owner: str, module: str, found: set[Triple]) 
 
 
 def _scanned_triples() -> set[Triple]:
-    """Every ``CommandStatus`` match site in the servers application layer."""
+    """Every status match site in the servers application layer and HTTP edge."""
 
     found: set[Triple] = set()
     for module, tree in _modules():
@@ -234,7 +241,7 @@ def _collect_definitions(
 
 
 def _defined_qualnames() -> set[tuple[str, str]]:
-    """Every ``(module, qualname)`` the application layer defines.
+    """Every ``(module, qualname)`` the application layer and HTTP edge define.
 
     Classes, functions and methods under the same class-qualified naming the match
     scan uses, plus module-level assignments — the full set of things an api entry
@@ -248,7 +255,7 @@ def _defined_qualnames() -> set[tuple[str, str]]:
 
 
 def test_declared_api_sites_match_the_source() -> None:
-    """The table's api column and the application layer name the same sites.
+    """The table's api column and the scanned source name the same sites.
 
     Both directions matter. A ``CommandStatus`` match in source that no row
     declares is the #202 class of bug -- the API acting on a code for a kind the
@@ -307,7 +314,7 @@ def test_declared_via_sites_exist_in_the_source() -> None:
                 missing.append((f"({row['kind']}, {row['precondition']})", entry))
 
     assert not missing, (
-        "these contract rows declare a 'via' consumer the application layer does "
+        "these contract rows declare a 'via' consumer the scanned source does "
         f"not define: {missing}. It was renamed, moved or removed -- update the "
         "'api' column in proto/contract/command_error_contract.json."
     )

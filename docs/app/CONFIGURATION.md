@@ -437,7 +437,14 @@ server waits for that Worker to reconnect. After an API restart the server waits
 the same way, since the Worker has not registered with the new process. Nothing
 moves such a server to another Worker on its own; whether the API should is an
 open decision (issue #3809). If the Worker does not come back, move each server
-by hand:
+by hand.
+
+Do so only once the lost Worker's instances are known to be down: its host is
+stopped, or the Worker process and its containers are gone. The release in step
+1 stops nothing on that Worker. If it is merely unreachable and its instance is
+still alive, step 2 starts a second live instance of the same world elsewhere.
+Nothing fences the old one; the API only drops the old Worker's status reports
+for the server once that Worker no longer owns it (issue #3809).
 
 1. **Stop it.** The stop answers `503 worker_unavailable`, because there is no
    Worker to send it to, but the stop intent stands: `StopServer` commits

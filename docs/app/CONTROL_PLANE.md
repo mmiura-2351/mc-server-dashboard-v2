@@ -1114,9 +1114,12 @@ Table-driven tests hold both sides to it:
   `api/src/mc_server_dashboard_api/servers/application/` and the HTTP edge
   `servers/api/`. A match is a `CommandStatus` reference or a read of a reason
   constant such as `WORKER_BUSY_REASON`, which is how the reconciler matches a
-  busy start and the backup route a `worker_unavailable` snapshot. So
-  an API match on a code the Worker never produces has no row to live on, and
-  a site added or removed in source fails the API suite;
+  busy start and the backup and lifecycle routes a `worker_unavailable` refusal.
+  So an API match on a code the Worker never produces has no row to live on,
+  and a site added or removed in source fails the API suite. The scan sees a
+  reason only as a read of its constant by plain name: a literal, an attribute
+  access or an aliased import goes unseen, so a match site must read the
+  constant;
 - for the declared messages, the Worker test also asserts the driven emission is
   the text the row's `message` names (and that no declared message goes
   undriven), while the API test pins the discriminator constant to the declared

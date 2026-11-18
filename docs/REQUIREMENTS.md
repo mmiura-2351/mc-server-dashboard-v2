@@ -366,7 +366,8 @@ Requirements:
   servers are marked `unknown`, and a running one stays assigned to it. If it
   does not come back, an operator stop and then a start moves each server to
   another eligible Worker after hydrate from authoritative storage
-  ([docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 5.6).
+  ([docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 5.6). Whether the
+  API should move them automatically is an open decision.
 - FR-WRK-5: A Worker can be drained/decommissioned: its servers are stopped
   (a final snapshot is taken) and may be relocated to another Worker.
 - FR-WRK-6: A server is not permanently pinned to a Worker; relocation is

@@ -19,12 +19,12 @@ snapshot only happen after the reconciler's grace window (``grace_seconds``,
 660s default) plus a reconciler tick, and only while the Worker stays
 heartbeating (the reconciler re-sends a stop only to a connected Worker). An
 operator following the FR-WRK-5 workflow MUST keep the Worker up until the stops
-converge — if the host goes down first and the Worker is still gone once the
-grace lapses, the reconciler releases each server with no final snapshot: the
-snapshot is skipped, not deferred (CONFIGURATION.md Section 5.6). The returned
-count is the number of servers this call *marked*, not the number already
-stopped. Confirm convergence PER SERVER, not by assigned load: this call's
-placement-load decrement (see :meth:`_shed_placement_load`) drops ``GET
+converge — if the host goes down first and the Worker stays gone, the reconciler
+releases each server ``grace_seconds`` after the disconnect with no final
+snapshot: the snapshot is skipped, not deferred (CONFIGURATION.md Section 5.6).
+The returned count is the number of servers this call *marked*, not the number
+already stopped. Confirm convergence PER SERVER, not by assigned load: this
+call's placement-load decrement (see :meth:`_shed_placement_load`) drops ``GET
 /workers`` assigned load to 0 synchronously, before any stop runs, so load is not
 a convergence signal. Instead watch each drain-marked server reach unassigned, at
 ``observed=stopped`` (``unknown`` when its Worker went away first) (the admin
