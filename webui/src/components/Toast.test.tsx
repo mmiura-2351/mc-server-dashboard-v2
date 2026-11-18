@@ -532,13 +532,12 @@ describe("Toast", () => {
 describe("Toast focus when the focused toast goes", () => {
   it("moves to the next toast", () => {
     renderToasts();
-    show("Failed 1", "error");
-    show("Failed 2", "error");
+    for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
 
-    act(() => dismissButton("Failed 1").focus());
-    fireEvent.click(dismissButton("Failed 1"));
+    act(() => dismissButton("Failed 2").focus());
+    fireEvent.click(dismissButton("Failed 2"));
 
-    expect(document.activeElement).toBe(dismissButton("Failed 2"));
+    expect(document.activeElement).toBe(dismissButton("Failed 3"));
   });
 
   it("moves to the toast before when the last one goes", () => {
@@ -554,12 +553,14 @@ describe("Toast focus when the focused toast goes", () => {
 
   it("returns to where it came from when no toast is left", () => {
     renderToasts(<button type="button">Page</button>);
-    show("Failed", "error");
+    show("Failed 1", "error");
+    show("Failed 2", "error");
     const page = screen.getByRole("button", { name: "Page" });
 
     act(() => page.focus());
-    act(() => dismissButton("Failed").focus());
-    fireEvent.click(dismissButton("Failed"));
+    act(() => dismissButton("Failed 1").focus());
+    fireEvent.click(dismissButton("Failed 1"));
+    fireEvent.click(dismissButton("Failed 2"));
 
     expect(document.activeElement).toBe(page);
   });
@@ -579,6 +580,8 @@ describe("Toast focus when the focused toast goes", () => {
 
     const main = screen.getByRole("main");
     expect(document.activeElement).toBe(main);
+    // What lets a browser focus it; happy-dom does not check.
+    expect(main).toHaveAttribute("tabindex", "-1");
 
     // Focusable only to take this focus: a click in the page later must not
     // land on it.
@@ -624,7 +627,12 @@ describe("Toast focus when the focused toast goes", () => {
   });
 
   it("is left alone when the toast that goes does not hold it", () => {
-    renderToasts(<button type="button">Page</button>);
+    const onBlur = vi.fn();
+    renderToasts(
+      <button type="button" onBlur={onBlur}>
+        Page
+      </button>,
+    );
     show("Failed 1", "error");
     show("Failed 2", "error");
     const page = screen.getByRole("button", { name: "Page" });
@@ -633,6 +641,8 @@ describe("Toast focus when the focused toast goes", () => {
     fireEvent.click(dismissButton("Failed 1"));
 
     expect(document.activeElement).toBe(page);
+    // Not even moved away and back: the page sees no blur.
+    expect(onBlur).not.toHaveBeenCalled();
   });
 });
 

@@ -214,6 +214,15 @@ describe("Modal focus trap with toasts showing", () => {
     expect(document.activeElement).toBe(toastButtons()[1]);
   });
 
+  it("moves Shift+Tab from the dialog itself to the last toast", () => {
+    renderWithToasts(controls);
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    pressTab(true);
+
+    expect(document.activeElement).toBe(toastButtons()[1]);
+  });
+
   it("moves Shift+Tab from the first toast to the dialog's last control", () => {
     renderWithToasts(controls);
 
@@ -229,6 +238,15 @@ describe("Modal focus trap with toasts showing", () => {
     renderWithToasts(<p>Body</p>);
 
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    pressTab();
+
+    expect(document.activeElement).toBe(toastButtons()[0]);
+  });
+
+  it("wraps Tab from the last toast to the first when the dialog has no controls", () => {
+    renderWithToasts(<p>Body</p>);
+
+    toastButtons()[1].focus();
     pressTab();
 
     expect(document.activeElement).toBe(toastButtons()[0]);
