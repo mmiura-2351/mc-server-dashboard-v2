@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
     ObservedState,
     ServerId,
+    WorkerId,
 )
 from tests.client_utils import enter_client
 from tests.fleet.conftest import publish_burst_on_app_loop, publish_on_app_loop
@@ -106,11 +107,12 @@ class _FakeLookup:
 
 @dataclass(frozen=True)
 class _FakeServer:
-    """The slice of the ``Server`` entity the snapshot reads (id + both states)."""
+    """The slice of the ``Server`` entity the snapshot reads (id, states, Worker)."""
 
     id: ServerId
     observed_state: ObservedState
     desired_state: DesiredState = DesiredState.RUNNING
+    assigned_worker_id: WorkerId | None = None
 
 
 class _FakeListServers:
@@ -457,11 +459,12 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
 
 
 def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
-    # Each entry carries the desired state beside the observed one (#3428), so
-    # a client that missed an intent change converges on it too.
+    # Each entry carries the desired state (#3428) and the assigned Worker
+    # (#3818) beside the observed state, so a client that missed an intent
+    # change or a release converges on it too.
     bus = InProcessRealTimeEvents()
     community = uuid.uuid4()
-    server_a, server_b = uuid.uuid4(), uuid.uuid4()
+    server_a, server_b, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     servers = _FakeListServers(
         [
             _FakeServer(id=ServerId(server_a), observed_state=ObservedState.RUNNING),
@@ -469,6 +472,7 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 id=ServerId(server_b),
                 observed_state=ObservedState.CRASHED,
                 desired_state=DesiredState.STOPPED,
+                assigned_worker_id=WorkerId(worker),
             ),
         ]
     )
@@ -484,11 +488,13 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 "server_id": str(server_a),
                 "state": "running",
                 "desired_state": "running",
+                "assigned_worker_id": None,
             },
             {
                 "server_id": str(server_b),
                 "state": "crashed",
                 "desired_state": "stopped",
+                "assigned_worker_id": str(worker),
             },
         ]
     }
@@ -509,7 +515,7 @@ def test_snapshot_wire_text_is_the_compact_community_frame_shape() -> None:
     assert text == (
         f'{{"stream":"snapshot","ts":"{ts}",'
         f'"payload":{{"servers":[{{"server_id":"{server}","state":"running",'
-        '"desired_state":"running"}]},"server_id":null}'
+        '"desired_state":"running","assigned_worker_id":null}]},"server_id":null}'
     )
 
 
@@ -550,7 +556,12 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
     assert second["stream"] == "snapshot"
     assert second["payload"] == {
         "servers": [
-            {"server_id": str(server), "state": "running", "desired_state": "running"}
+            {
+                "server_id": str(server),
+                "state": "running",
+                "desired_state": "running",
+                "assigned_worker_id": None,
+            }
         ]
     }
     assert third["payload"] == {"state": "3"}

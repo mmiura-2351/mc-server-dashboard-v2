@@ -4,6 +4,7 @@ import {
   memo,
   type ReactNode,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -42,6 +43,7 @@ import {
   atRest,
   converging,
   normalizeState,
+  startAwaitsRelease,
   statePill,
 } from "./serverState.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
@@ -351,9 +353,14 @@ function Header({
 }) {
   const state = normalizeState(server.observed_state);
   const pill = statePill(state);
-  // Show an applying hint until the observed state reaches the intent, which
-  // a stopped intent does at rest (WEBUI_SPEC.md 6.4).
-  const drifting = converging(state, server.desired_state);
+  // Show an applying hint until the server converges on the intent, which a
+  // stopped intent does at rest once its Worker is released (WEBUI_SPEC.md
+  // 6.4).
+  const drifting = converging(
+    state,
+    server.desired_state,
+    server.assigned_worker_id !== null,
+  );
 
   return (
     <div className="page-head">
@@ -469,6 +476,11 @@ function Controls({
   const onForbidden = useOnForbidden();
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
+  const assigned = server.assigned_worker_id !== null;
+  // Start would apply but for the Worker the previous stop still holds: show
+  // it disabled, with the reason (#3818).
+  const startHeld = startAwaitsRelease(state, desired, assigned);
+  const startHeldId = useId();
   const [eulaOpen, setEulaOpen] = useState(false);
 
   const onError = (error: unknown) => {
@@ -511,12 +523,18 @@ function Controls({
   return (
     <>
       <div className="actions">
+        {can("server:start", { serverId: server.id }) && startHeld && (
+          <span className="start-held" id={startHeldId}>
+            {t("serverDetail.startAwaitsRelease")}
+          </span>
+        )}
         {can("server:start", { serverId: server.id }) &&
-          actionApplies("start", state, desired) && (
+          (startHeld || actionApplies("start", state, desired, assigned)) && (
             <button
               type="button"
               className="btn success"
-              disabled={pending}
+              disabled={pending || startHeld}
+              aria-describedby={startHeld ? startHeldId : undefined}
               onClick={() => lifecycle.mutate({ action: "start" })}
             >
               {t(
@@ -527,12 +545,7 @@ function Controls({
             </button>
           )}
         {can("server:stop", { serverId: server.id }) &&
-          actionApplies(
-            "stop",
-            state,
-            desired,
-            server.assigned_worker_id !== null,
-          ) && (
+          actionApplies("stop", state, desired, assigned) && (
             <StopControl
               disabled={pending}
               onStop={(force) =>
@@ -544,12 +557,7 @@ function Controls({
             />
           )}
         {can("server:restart", { serverId: server.id }) &&
-          actionApplies(
-            "restart",
-            state,
-            desired,
-            server.assigned_worker_id !== null,
-          ) && (
+          actionApplies("restart", state, desired, assigned) && (
             <button
               type="button"
               className="btn"

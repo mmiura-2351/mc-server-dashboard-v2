@@ -221,11 +221,13 @@ export function useServerEvents(
     setStatusReason("");
     const key = serverKey(communityId, serverId);
 
-    // The live observed and desired states not yet superseded by a REST
-    // read, each stamped with when it was received (#3213). The two are
-    // stamped apart, as different frames carry them (#3428).
+    // The live observed and desired states and assignment not yet
+    // superseded by a REST read, each stamped with when it was received
+    // (#3213). They are stamped apart, as different frames carry them (#3428,
+    // #3818).
     let observed: { value: string; at: number } | null = null;
     let desired: { value: string; at: number } | null = null;
+    let assigned: { value: string | null; at: number } | null = null;
 
     // Patch `fields` into the detail query so the header pill and controls
     // update live (no refetch). A frame patches only the field it carries, so
@@ -233,7 +235,12 @@ export function useServerEvents(
     // `useLifecycleMutation` put in the cache (#3428); a REST response gets
     // every live state written back over it.
     const patch = (
-      fields: Partial<Pick<ServerResponse, "observed_state" | "desired_state">>,
+      fields: Partial<
+        Pick<
+          ServerResponse,
+          "observed_state" | "desired_state" | "assigned_worker_id"
+        >
+      >,
     ) => {
       if (Object.keys(fields).length === 0) {
         return;
@@ -257,9 +264,13 @@ export function useServerEvents(
         if (desired !== null && desired.at < readStartedAt) {
           desired = null;
         }
+        if (assigned !== null && assigned.at < readStartedAt) {
+          assigned = null;
+        }
         patch({
           ...(observed !== null && { observed_state: observed.value }),
           ...(desired !== null && { desired_state: desired.value }),
+          ...(assigned !== null && { assigned_worker_id: assigned.value }),
         });
       },
     );
@@ -267,6 +278,13 @@ export function useServerEvents(
     const applyDesired = (state: string) => {
       desired = { value: state, at: stamp() };
       patch({ desired_state: state });
+    };
+
+    // A placement or a release (#3818): the Worker badge and the lifecycle
+    // controls follow the assignment, so it is patched like the states.
+    const applyAssigned = (workerId: string | null) => {
+      assigned = { value: workerId, at: stamp() };
+      patch({ assigned_worker_id: workerId });
     };
 
     const applyState = (state: string) => {
@@ -292,6 +310,9 @@ export function useServerEvents(
         if (frame.desiredState !== undefined) {
           applyDesired(frame.desiredState);
         }
+        if (frame.assignedWorkerId !== undefined) {
+          applyAssigned(frame.assignedWorkerId);
+        }
         if (frame.state !== undefined) {
           applyState(frame.state);
           setStatusDetail(frame.detail);
@@ -303,6 +324,9 @@ export function useServerEvents(
       if (frame.kind === "snapshot") {
         if (frame.desiredState !== undefined) {
           applyDesired(frame.desiredState);
+        }
+        if (frame.assignedWorkerId !== undefined) {
+          applyAssigned(frame.assignedWorkerId);
         }
         applyState(frame.state);
         if (frame.state !== detailState) {

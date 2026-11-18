@@ -78,6 +78,15 @@ function intentFrame(serverId: string, desiredState: string) {
   });
 }
 
+function releaseFrame(serverId: string) {
+  return JSON.stringify({
+    stream: "status",
+    ts: "t",
+    payload: { assigned_worker_id: null },
+    server_id: serverId,
+  });
+}
+
 function serverRow(
   id: string,
   observed_state: string,
@@ -95,7 +104,7 @@ function Probe({ communityId }: { communityId: string }) {
   return null;
 }
 
-function setup(seed: ReturnType<typeof serverRow>[] | undefined) {
+function setup(seed: Row[] | undefined) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -201,6 +210,48 @@ describe("useCommunityEvents", () => {
       ]);
     },
   );
+
+  it("patches the cached server's assigned_worker_id on a release frame (#3818)", () => {
+    const { queryClient } = setup([
+      { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: "w1" },
+    ]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(releaseFrame("s1"));
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: null },
+    ]);
+  });
+
+  it("patches every cached server's assigned_worker_id from a snapshot (#3818)", () => {
+    const { queryClient } = setup([
+      { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: "w1" },
+    ]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "snapshot",
+          ts: "t",
+          payload: {
+            servers: [
+              {
+                server_id: "s1",
+                state: "stopped",
+                desired_state: "stopped",
+                assigned_worker_id: null,
+              },
+            ],
+          },
+          server_id: null,
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: null },
+    ]);
+  });
 
   it("patches every cached server's desired_state from a snapshot (#3428)", () => {
     const { queryClient } = setup([serverRow("s1", "running", "running")]);
@@ -491,7 +542,9 @@ describe("useCommunityEvents", () => {
   });
 });
 
-type Row = ReturnType<typeof serverRow>;
+type Row = ReturnType<typeof serverRow> & {
+  assigned_worker_id?: string | null;
+};
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Row[]> }) {
   // The page's order: the events hook, then the list query.
@@ -624,6 +677,21 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     });
     await respond([serverRow("s1", "unknown")]);
     expect(cached()).toEqual([{ id: "s1", observed_state: "unknown" }]);
+  });
+
+  it("keeps a release frame that arrives before the cold list load lands (#3818)", async () => {
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(releaseFrame("s1"));
+    });
+    // The cold read captured the row before its release.
+    await respond([
+      { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: "w1" },
+    ]);
+    expect(cached()).toEqual([
+      { ...serverRow("s1", "stopped", "stopped"), assigned_worker_id: null },
+    ]);
   });
 
   it("orders the observed state and the intent against a read separately (#3428)", async () => {

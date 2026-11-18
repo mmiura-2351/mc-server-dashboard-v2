@@ -353,6 +353,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.installLog.tooLarge":
     "インストールログが大きすぎるため、ここには表示できません。「ファイル」タブから logs/forge-install.log をダウンロードしてください。",
   "serverDetail.installLog.error": "インストールログを読み込めませんでした。",
+  "serverDetail.installLog.stale": "下のログは前回読み込んだ内容です。",
   "serverDetail.converging": "反映中…",
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
@@ -406,6 +407,7 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
   // Lifecycle controls.
   "serverDetail.start": "起動",
+  "serverDetail.startAwaitsRelease": "前回の停止を完了しています…",
   "serverDetail.startCrashed": "再起動",
   "serverDetail.stop": "停止",
   "serverDetail.stopGraceful": "停止（通常）",

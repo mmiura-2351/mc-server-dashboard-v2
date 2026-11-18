@@ -178,6 +178,10 @@ class ServerRepository(abc.ABC):
         counts: a start, a stop or a restart raises
         :class:`LifecycleTransitionConflictError`, a drain skips the server, and
         a failed start's revert leaves the row to the write that moved it.
+
+        A write that changes the desired state (issue #3428) or the assignment
+        (issue #3818) is announced to live subscribers as a status event once
+        the transaction commits, carrying the fields it changed.
         """
 
     @abc.abstractmethod
@@ -225,7 +229,8 @@ class ServerRepository(abc.ABC):
         as a status event once the transaction commits — by the unit of work,
         not by the caller (issue #3212). The same holds for the two bulk
         writes below. Nothing is announced for a dropped write, a rolled-back
-        transaction, or a row already at ``observed_state``.
+        transaction, or a row already at ``observed_state``, except that an
+        ``unassign`` that releases the row announces the release (issue #3818).
         """
 
     @abc.abstractmethod
@@ -248,7 +253,8 @@ class ServerRepository(abc.ABC):
         in practice the guard always matches; it exists to make the late clear a
         no-op rather than a clobber if the row moved out from under us by any other
         path. Returns ``True`` when the assignment was cleared, ``False`` when the
-        guard matched no row.
+        guard matched no row. A clear is announced to live subscribers as a status
+        event once the transaction commits (issue #3818).
         """
 
     @abc.abstractmethod

@@ -530,7 +530,8 @@ async def test_server_stream_carries_the_desired_state_snapshot_and_change(
 ) -> None:
     user = make_user()
     community = await _seed_member(_database, user.id.value)
-    server = await _seed_started_server(_database, community, uuid.uuid4())
+    worker = uuid.uuid4()
+    server = await _seed_started_server(_database, community, worker)
     bus = InProcessRealTimeEvents()
     app = _app(user, bus)
     read_server = _StopDuringSnapshotRead(
@@ -545,8 +546,16 @@ async def test_server_stream_carries_the_desired_state_snapshot_and_change(
     url = f"/api/communities/{community.value}/servers/{server}/events"
     with _client(app).websocket_connect(url) as ws:
         frames = _frames_until_race_over(ws)
+    # The stop never reached the Worker, so the server is still assigned to it.
     assert [(frame["stream"], frame["payload"]) for frame in frames] == [
-        ("snapshot", {"state": "stopped", "desired_state": "stopped"}),
+        (
+            "snapshot",
+            {
+                "state": "stopped",
+                "desired_state": "stopped",
+                "assigned_worker_id": str(worker),
+            },
+        ),
         ("status", {"desired_state": "stopped"}),
     ]
 
@@ -556,7 +565,8 @@ async def test_community_stream_carries_the_desired_state_snapshot_and_change(
 ) -> None:
     user = make_user()
     community = await _seed_member(_database, user.id.value)
-    server = await _seed_started_server(_database, community, uuid.uuid4())
+    worker = uuid.uuid4()
+    server = await _seed_started_server(_database, community, worker)
     bus = InProcessRealTimeEvents()
     app = _app(user, bus, lookup={str(server): community.value})
     list_servers = _StopDuringSnapshotRead(
@@ -583,6 +593,7 @@ async def test_community_stream_carries_the_desired_state_snapshot_and_change(
                         "server_id": str(server),
                         "state": "stopped",
                         "desired_state": "stopped",
+                        "assigned_worker_id": str(worker),
                     }
                 ]
             },

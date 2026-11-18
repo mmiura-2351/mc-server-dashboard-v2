@@ -78,7 +78,8 @@ def _to_server(row: ServerModel) -> Server:
 class StatusEventsNotWiredError(RuntimeError):
     """A state write is about to commit with no bus to publish it on.
 
-    An observed-state write, or a ``desired_state`` change (issue #3428).
+    An observed-state write, a ``desired_state`` change (issue #3428), or a
+    change of the assignment (issue #3818).
 
     A programming error at the composition root, not a runtime condition: the
     owner of the commit was built without the real-time event bus, so the
@@ -131,9 +132,9 @@ class SqlAlchemyServerRepository(ServerRepository):
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
-        # The status events of the observed-state writes and desired-state
-        # changes this repository has executed and its session has not
-        # committed yet, as (server id, event).
+        # The status events of the observed-state writes and the desired-state
+        # and assignment changes this repository has executed and its session
+        # has not committed yet, as (server id, event).
         # Whoever commits the session hands them to :func:`publish_status_events`
         # afterwards; a rollback hands them to nobody (issue #3212).
         self._staged_status_events: list[tuple[str, RealTimeEvent]] = []
@@ -302,18 +303,27 @@ class SqlAlchemyServerRepository(ServerRepository):
         # An UPDATE returns a CursorResult, whose rowcount is the matched count;
         # the compare-and-set matched a row iff it equals 1 (the lost race is 0).
         applied = cast("CursorResult[Any]", result).rowcount == 1
-        # The one place ``desired_state`` changes (issue #3428): stage the frame
-        # that tells live subscribers the new intent, published by whoever
-        # commits the session, like an observed-state write's. A write under an
-        # unchanged intent (a restart, a re-placement) has nothing to announce.
-        if applied and server.desired_state is not expected_from:
+        # The one place ``desired_state`` changes (issue #3428), and where a
+        # start places a server and a failed one is undone (issue #3818): stage
+        # the frame that tells live subscribers what changed, published by
+        # whoever commits the session, like an observed-state write's. The
+        # compare-and-set matched ``expected_*``, so they are the row's values
+        # before the write. A write that changes neither (a restart) has
+        # nothing to announce.
+        payload: dict[str, object] = {}
+        if server.desired_state is not expected_from:
+            payload["desired_state"] = server.desired_state.value
+        if server.assigned_worker_id != expected_assigned_worker_id:
+            payload["assigned_worker_id"] = (
+                None
+                if server.assigned_worker_id is None
+                else str(server.assigned_worker_id.value)
+            )
+        if applied and payload:
             self._staged_status_events.append(
                 (
                     str(server.id.value),
-                    RealTimeEvent(
-                        stream=EventStream.STATUS,
-                        payload={"desired_state": server.desired_state.value},
-                    ),
+                    RealTimeEvent(stream=EventStream.STATUS, payload=payload),
                 )
             )
         return applied
@@ -397,25 +407,31 @@ class SqlAlchemyServerRepository(ServerRepository):
         of it reaches live subscribers: each written row whose state changed
         stages a status event, published by whoever commits the session
         (:func:`publish_status_events`). ``values`` are further columns set in
-        the same UPDATE. Returns the number of rows written.
+        the same UPDATE; a release among them (``assigned_worker_id``) rides the
+        row's frame too (issue #3818). Returns the number of rows written.
 
-        The rows are locked and read first because the previous state decides
-        whether there is anything to announce, and an UPDATE cannot return it.
+        The rows are locked and read first because the previous state and
+        assignment decide whether there is anything to announce, and an UPDATE
+        cannot return them.
         ``FOR UPDATE`` re-evaluates ``conditions`` against the latest committed
         row version once the lock is granted, so the guards a caller passes are
         as atomic as they were inside a single UPDATE, and the row cannot move
         between the read and the write.
 
-        A row already at ``observed_state`` stages nothing unless the write
+        A row already at ``observed_state`` stages no state unless the write
         carries a ``detail`` or ``reason``: the frame would tell a subscriber
         nothing it does not hold. That keeps the bulk invalidations quiet for
         rows they do not change, while a Worker report that explains itself is
-        always relayed.
+        always relayed. A release of such a row stages the assignment alone.
         """
 
         locked = (
             await self._session.execute(
-                select(ServerModel.id, ServerModel.observed_state)
+                select(
+                    ServerModel.id,
+                    ServerModel.observed_state,
+                    ServerModel.assigned_worker_id,
+                )
                 .where(*conditions)
                 # One lock order for every caller, so two bulk writes over
                 # overlapping servers cannot deadlock on each other's rows.
@@ -435,18 +451,26 @@ class SqlAlchemyServerRepository(ServerRepository):
             )
         )
         for row in locked:
-            if row.observed_state == observed_state.value and not (detail or reason):
+            payload: dict[str, object] = {}
+            if row.observed_state != observed_state.value or detail or reason:
+                payload |= {
+                    "state": observed_state.value,
+                    "detail": detail,
+                    "reason": reason,
+                }
+            assigned = (values or {}).get("assigned_worker_id", row.assigned_worker_id)
+            if assigned != row.assigned_worker_id:
+                payload["assigned_worker_id"] = (
+                    None if assigned is None else str(assigned)
+                )
+            if not payload:
                 continue
             self._staged_status_events.append(
                 (
                     str(row.id),
                     RealTimeEvent(
                         stream=EventStream.STATUS,
-                        payload={
-                            "state": observed_state.value,
-                            "detail": detail,
-                            "reason": reason,
-                        },
+                        payload=payload,
                         emitted_at=emitted_at,
                     ),
                 )
@@ -492,7 +516,20 @@ class SqlAlchemyServerRepository(ServerRepository):
             .values(assigned_worker_id=None)
         )
         result = await self._session.execute(stmt)
-        return cast("CursorResult[Any]", result).rowcount == 1
+        cleared = cast("CursorResult[Any]", result).rowcount == 1
+        # The release that ends a stop (issue #3818): the guard matched a row
+        # still assigned, so live subscribers learn it is free to start again.
+        if cleared:
+            self._staged_status_events.append(
+                (
+                    str(server_id.value),
+                    RealTimeEvent(
+                        stream=EventStream.STATUS,
+                        payload={"assigned_worker_id": None},
+                    ),
+                )
+            )
+        return cleared
 
     async def clear_stale_assignment(
         self,

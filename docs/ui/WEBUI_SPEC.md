@@ -333,8 +333,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), or `{desired_state}` for a change of the server's intent (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -342,7 +342,8 @@ right after a `gap` frame when status frames were dropped since the previous
 such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
-them): the persisted observed and desired states of the stream's scope, read
+them): the persisted observed and desired states and the assigned Worker
+(`assigned_worker_id`, `null` when none) of the stream's scope, read
 together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
@@ -364,11 +365,26 @@ Every change of a server's desired state publishes a `status` frame
 `{desired_state}` too, after the write that made it commits: a start, stop or
 drain from any session, a start the API reverts after its dispatch failed,
 and the reconciler's own starts and stops, which go through the same
-operations. A write under an unchanged intent (a restart) publishes nothing.
-The frame carries no `state`: an intent change is not an observation, and a
-client keeps the observed state it holds. A client applies each `status` frame
-by setting the fields it carries, so another tab's dashboard offers the
-actions of the current intent without a reload (#3428).
+operations. The frame carries no `state`: an intent change is not an
+observation, and a client keeps the observed state it holds.
+
+Every change of a server's assignment publishes a `status` frame carrying
+`assigned_worker_id` too — the Worker's id, or `null` once released — after
+the write that made it commits: a start's placement and a failed start's
+revert (in the frame of their `desired_state`), the reconciler's placement of a
+desired-running server and its undo when the launch never reached the Worker,
+and every release of a stopped server: after its final snapshot, on a late
+final-snapshot result, and the reconciler's recovery of a stop left holding
+its Worker. A release changes nothing else, so its frame is
+`{assigned_worker_id: null}` alone, except where the same write converges the
+observed state (a stop left `stopping`, released as `unknown`). Deleting a
+server changes no assignment: the API refuses it while a Worker is assigned.
+A write that changes neither the intent nor the assignment (a restart)
+publishes nothing.
+
+A client applies each `status` frame by setting the fields it carries, so
+another tab's dashboard offers the actions of the current intent without a
+reload (#3428), and gates Start and Stop on the current assignment (#3818).
 
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
@@ -650,9 +666,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("applying…" while the
-  reconciler converges), worker id, port. No hint shows for a server at rest
-  under a stopped intent (observed stopped, crashed or unknown), whether or not
-  a Worker is still assigned; the dashboard rows mark drift by the same rule.
+  reconciler converges), worker id, port. A stopped intent is reached at rest
+  (observed stopped, crashed or unknown) once no Worker is assigned: while one
+  still is, the stop is still finishing (its final snapshot and the release,
+  or for `unknown` the stop itself) and the hint shows. Every release
+  publishes a status frame (Section 2.6), so the hint clears with it. The
+  dashboard rows mark drift by the same rule.
 - Crash banner: while crashed, the `detail`, a guidance line with a link to the
   Console tab, and — keyed on the status event's `reason` — the Forge install
   diagnostics. The guidance line follows the desired state. Under a running
@@ -668,7 +687,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
   under a running intent is neither, so until it is stopped the viewer says to
   stop it first (409 `server_unsettled`); a log that was never written (404)
-  and one past the read cap (413) get their own line too. `detail` and `reason`
+  and one past the read cap (413) get their own line too. A refetch that fails
+  once the log is shown keeps that log on screen, where the operator scrolled
+  it, under a line giving the failure and saying the log is the copy loaded
+  earlier. `detail` and `reason`
   are not persisted, so the banner's diagnostics exist only on a page that was
   open when the crash was reported.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
@@ -677,7 +699,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Start and Restart are hidden, since the API refuses both there. Under a
   stopped intent Stop is offered exactly while a Worker is still assigned — a
   drained server still running, or a stop left half-done — since the API then
-  converges it at once, and refuses it with no Worker assigned. Restart needs a
+  converges it at once, and refuses it with no Worker assigned. Start needs no
+  Worker assigned: a stop holds its Worker until the final snapshot settles,
+  and the API refuses a start until the release (`409 transition_conflict`).
+  So at rest under a stopped intent with a Worker still assigned, Start shows
+  disabled with "Finishing the previous stop…" (on a dashboard card, as the
+  button's tooltip) until the release frame frees it. Restart needs a
   running intent and an assigned Worker: it is hidden under a stopped intent
   even while the process still runs (a drain's grace window), and whenever no
   Worker is assigned, since the API refuses it in both cases

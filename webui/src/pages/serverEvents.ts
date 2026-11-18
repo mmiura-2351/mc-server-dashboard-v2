@@ -26,14 +26,16 @@ export type Stream = "status" | "log" | "metrics";
 /**
  * A parsed status frame. It sets the server state fields it carries: an
  * observed transition carries `state` + optional crash detail, a change of the
- * server's intent carries `desiredState` alone (#3428). `reason` names a crash
- * the Worker classified (e.g. `forge_install_failed`, issue #1093); it is empty
- * for an unclassified crash and for every other state.
+ * server's intent carries `desiredState` (#3428), and a placement or release
+ * carries `assignedWorkerId`, `null` once released (#3818). `reason` names a
+ * crash the Worker classified (e.g. `forge_install_failed`, issue #1093); it is
+ * empty for an unclassified crash and for every other state.
  */
 export interface StatusFrame {
   kind: "status";
   state?: string;
   desiredState?: string;
+  assignedWorkerId?: string | null;
   detail: string;
   reason: string;
 }
@@ -56,14 +58,15 @@ export interface MetricsFrame {
 /**
  * The status snapshot the API sends on subscribe and after every gap that
  * dropped status frames (#1795):
- * the server's persisted observed state and, when the API reports it, its
- * desired state (#3428). No `detail` or `reason` — they ride only a live
- * status transition and are not persisted.
+ * the server's persisted observed state and, when the API reports them, its
+ * desired state (#3428) and assigned Worker (#3818). No `detail` or `reason` —
+ * they ride only a live status transition and are not persisted.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
   state: string;
   desiredState?: string;
+  assignedWorkerId?: string | null;
 }
 
 /** A gap marker: the client fell behind and missed events (best-effort). */
@@ -104,6 +107,21 @@ export function serverEventsUrl(
 }
 
 /**
+ * The `assigned_worker_id` a status or snapshot payload carries: the Worker's
+ * id, `null` for none, or `undefined` when the payload does not carry it (or
+ * carries something that is neither).
+ */
+export function assignmentOf(payload: object): string | null | undefined {
+  if (!("assigned_worker_id" in payload)) {
+    return undefined;
+  }
+  const { assigned_worker_id } = payload;
+  return assigned_worker_id === null || typeof assigned_worker_id === "string"
+    ? assigned_worker_id
+    : undefined;
+}
+
+/**
  * Parse a per-server wire frame into a {@link ServerFrame}, or null when it is
  * malformed or names a stream this client does not surface. The per-server
  * frame carries no `server_id` (one socket per server, so it is implied).
@@ -132,13 +150,19 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       detail?: unknown;
       reason?: unknown;
     };
-    if (typeof state !== "string" && typeof desired_state !== "string") {
+    const assignedWorkerId = assignmentOf(payload);
+    if (
+      typeof state !== "string" &&
+      typeof desired_state !== "string" &&
+      assignedWorkerId === undefined
+    ) {
       return null;
     }
     return {
       kind: "status",
       ...(typeof state === "string" && { state }),
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
+      ...(assignedWorkerId !== undefined && { assignedWorkerId }),
       detail: typeof detail === "string" ? detail : "",
       reason: typeof reason === "string" ? reason : "",
     };
@@ -151,10 +175,12 @@ export function parseServerFrame(raw: string): ServerFrame | null {
     if (typeof state !== "string") {
       return null;
     }
+    const assignedWorkerId = assignmentOf(payload);
     return {
       kind: "snapshot",
       state,
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
+      ...(assignedWorkerId !== undefined && { assignedWorkerId }),
     };
   }
   if (stream === "log") {

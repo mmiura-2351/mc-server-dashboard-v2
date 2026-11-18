@@ -393,6 +393,7 @@ export const en = {
   "serverDetail.installLog.tooLarge":
     "The install log is too large to show here. Download logs/forge-install.log from the Files tab.",
   "serverDetail.installLog.error": "Could not load the install log.",
+  "serverDetail.installLog.stale": "The log below is the copy loaded earlier.",
   "serverDetail.converging": "applying…",
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",
@@ -449,6 +450,7 @@ export const en = {
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
+  "serverDetail.startAwaitsRelease": "Finishing the previous stop…",
   "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",
