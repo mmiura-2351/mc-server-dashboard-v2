@@ -126,6 +126,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind, FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
     NullLifecycleLock,
 )
@@ -211,7 +212,7 @@ class CreateBackup:
         # #827-class gap noted in #827). The same lock serializes this archive
         # against a concurrent restore/delete just as RestoreBackup serializes its
         # republish.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
 
@@ -245,6 +246,11 @@ class CreateBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
+            # The lock may have been lost during the snapshot (issue #3927). The row
+            # and the archive written right behind it are one guarded write; the
+            # check stays outside the compensation below, which must not run for
+            # a holder that knows it lost the lock.
+            await lock.ensure_held()
             async with self.uow:
                 await self.uow.backups.add(backup)
                 await self.uow.commit()
@@ -456,7 +462,7 @@ class RestoreBackup:
         incomplete: BackupRestoreIncompleteError | None = None
         partial: BackupRestorePartiallyPublishedError | None = None
         try:
-            async with self.lifecycle_lock.hold(server_id):
+            async with self.lifecycle_lock.hold(server_id) as lock:
                 async with self.uow:
                     server = await _load(self.uow, community_id, server_id)
                     backup = await self.uow.backups.get_by_id(backup_id)
@@ -468,11 +474,15 @@ class RestoreBackup:
                 if not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))
                 try:
+                    # The store confirms the lock under its own per-server lock,
+                    # after the slow staging and right before it publishes (issue
+                    # #3927): a check here would leave the whole staging unguarded.
                     corrupt_count = await self.backup_store.restore(
                         community_id=community_id,
                         server_id=server_id,
                         storage_ref=storage_ref,
                         force=force,
+                        fence=lock.ensure_held,
                     )
                 except BackupCorruptError:
                     # Refused restore (corrupt, no force): quarantine the backup so an
@@ -502,6 +512,7 @@ class RestoreBackup:
                 # the force-restore it was (issue #3269).
                 try:
                     await self._after_publish(
+                        lock,
                         community_id=community_id,
                         server_id=server_id,
                         server=server,
@@ -547,6 +558,7 @@ class RestoreBackup:
 
     async def _after_publish(
         self,
+        lock: HeldLifecycleLock,
         *,
         community_id: CommunityId,
         server_id: ServerId,
@@ -560,6 +572,10 @@ class RestoreBackup:
             # corrupt restore. Quarantine BEFORE the properties re-apply, so a
             # failure there cannot leave a known-corrupt backup unmarked.
             await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+        # The properties re-apply is an in-place working-set write and the plugin
+        # reconcile rewrites rows from that working set: both rely on the lock
+        # (issue #3927), unlike the verdict about the backup above.
+        await lock.ensure_held()
         await self._reapply_platform_properties(
             community_id=community_id, server_id=server_id, server=server
         )
@@ -924,7 +940,7 @@ class DeleteBackup:
         # delete (issue #827): a concurrent restore that republishes from this same
         # backup, or a delete-server pruning the working set, must serialize with
         # the archive removal rather than race it across the two transactions.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
                 backup = await self.uow.backups.get_by_id(backup_id)
@@ -934,6 +950,7 @@ class DeleteBackup:
             await _delete_archive_then_row(
                 self.uow,
                 self.backup_store,
+                lock,
                 community_id=community_id,
                 server_id=server_id,
                 backup_id=backup_id,
@@ -944,6 +961,7 @@ class DeleteBackup:
 async def _delete_archive_then_row(
     uow: UnitOfWork,
     backup_store: BackupArchiveStore,
+    lock: HeldLifecycleLock,
     *,
     community_id: CommunityId,
     server_id: ServerId,
@@ -956,9 +974,11 @@ async def _delete_archive_then_row(
     retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
     through here, each under the per-server lifecycle lock it already holds.
     The archive delete is idempotent, so a crash between the two leaves a
-    harmless re-deletable dangling row, never an orphaned archive.
+    harmless re-deletable dangling row, never an orphaned archive. Both run only
+    once ``lock`` confirms the lifecycle lock is still held (issue #3927).
     """
 
+    await lock.ensure_held()
     await backup_store.delete(
         community_id=community_id,
         server_id=server_id,
@@ -999,7 +1019,7 @@ class PruneScheduledBackups:
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[Backup]:
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 rows = await self.uow.backups.list_for_server(server_id)
@@ -1021,6 +1041,7 @@ class PruneScheduledBackups:
                 await _delete_archive_then_row(
                     self.uow,
                     self.backup_store,
+                    lock,
                     community_id=community_id,
                     server_id=server_id,
                     backup_id=backup.id,
@@ -1336,7 +1357,7 @@ class UploadBackup:
         # removes the row, and the write then lands an archive no delete saw while
         # this returns a backup that no longer exists. The body is already fully
         # received, so the lock never waits on the client's network.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
 
@@ -1357,6 +1378,9 @@ class UploadBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
+            # One guarded write for the row and the archive behind it, checked
+            # outside the compensation below, as in CreateBackup (issue #3927).
+            await lock.ensure_held()
             async with self.uow:
                 await self.uow.backups.add(backup)
                 await self.uow.commit()

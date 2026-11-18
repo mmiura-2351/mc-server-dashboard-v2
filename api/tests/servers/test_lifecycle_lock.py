@@ -69,6 +69,10 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupSource,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    BackupRestoreIncompleteError,
+    LifecycleLockLostError,
+)
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
@@ -127,6 +131,21 @@ def _assert_around(
         assert (server_id, label) in events, (label, events)
         at = events.index((server_id, label))
         assert acquire_at < at < release_at, (label, events)
+
+
+def _assert_checked_right_before(
+    events: list[tuple[ServerId, str]], server_id: ServerId, *work: str
+) -> None:
+    """Assert the held lock was confirmed immediately before each ``work`` event.
+
+    The lifecycle lock can be lost while its holder runs (issue #3927), so a
+    holder confirms it right before each write that relies on it: nothing else
+    recorded on the timeline may come between the check and the write.
+    """
+
+    for label in work:
+        at = events.index((server_id, label))
+        assert events[at - 1] == (server_id, "check"), (label, events)
 
 
 def _at_rest() -> Server:
@@ -282,7 +301,8 @@ async def test_start_and_restore_take_the_same_keyed_lock() -> None:
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id)
 
-    assert lock.events == [
+    # The holds alone: the checks inside them are pinned below (issue #3927).
+    assert [e for e in lock.events if e[1] != "check"] == [
         (server.id, "acquire"),
         (server.id, "release"),
         (server.id, "acquire"),
@@ -320,7 +340,8 @@ async def test_prune_and_restore_take_the_same_keyed_lock() -> None:
         lifecycle_lock=lock,
     )(community_id=_COMMUNITY, server_id=server.id)
 
-    assert lock.events == [
+    # The holds alone: the checks inside them are pinned below (issue #3927).
+    assert [e for e in lock.events if e[1] != "check"] == [
         (server.id, "acquire"),
         (server.id, "release"),
         (server.id, "acquire"),
@@ -663,3 +684,365 @@ async def test_delete_group_takes_lock_around_its_work() -> None:
     )
 
     _assert_around(lock.events, server.id, "write-file")
+
+
+# --- A lost lock stops its holder before the guarded write (issue #3927) -----
+#
+# The lock lives on a database session, and the database releases it when that
+# session ends without telling the holder. Each holder confirms it right before
+# each write that relies on it; ``checks_before_loss`` loses it at a chosen check.
+
+
+def _restore_case(
+    *, file_store: FakeFileStore | None = None
+) -> tuple[Server, Backup, FakeBackupArchiveStore, RestoreBackup, FakeLifecycleLock]:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    backup = _backup(server.id)
+    backups.seed(backup)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    lock = FakeLifecycleLock()
+    archive.events = lock.events
+    restore = RestoreBackup(
+        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        backup_store=archive,
+        lifecycle_lock=lock,
+        file_store=file_store,
+    )
+    return server, backup, archive, restore, lock
+
+
+async def test_restore_confirms_the_lock_in_the_store_before_it_publishes() -> None:
+    server, backup, archive, restore, lock = _restore_case()
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await restore(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    # The store's fence ran inside the restore call and refused the publish.
+    assert lock.events.index((server.id, "restore")) < lock.events.index(
+        (server.id, "check")
+    )
+    assert archive.restored == []
+
+
+async def test_restore_that_loses_the_lock_after_publishing_writes_nothing_more() -> (
+    None
+):
+    store = FakeFileStore()
+    server, backup, archive, restore, lock = _restore_case(file_store=store)
+    store.events = lock.events
+    lock.checks_before_loss = 1  # the publish fence passes
+
+    with pytest.raises(BackupRestoreIncompleteError) as exc_info:
+        await restore(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    assert isinstance(exc_info.value.cause, LifecycleLockLostError)
+    assert archive.restored == [(server.id, "ref")]
+    # The server.properties re-apply is an in-place working-set write.
+    assert (server.id, "write-file") not in lock.events
+
+
+def _delete_server_case() -> tuple[
+    Server,
+    FakeServerRepository,
+    FakeBackupArchiveStore,
+    DeleteServer,
+    FakeLifecycleLock,
+]:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    backups.seed(_backup(server.id))
+    archive = FakeBackupArchiveStore()
+    archive.archives.update({"ref", "orphan"})
+    lock = FakeLifecycleLock()
+    repo.events = lock.events
+    archive.events = lock.events
+    delete = DeleteServer(
+        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        backup_store=archive,
+        lifecycle_lock=lock,
+    )
+    return server, repo, archive, delete, lock
+
+
+async def test_delete_server_confirms_the_lock_in_the_prune_and_before_each_write() -> (
+    None
+):
+    server, _repo, _archive, delete, lock = _delete_server_case()
+
+    await delete(community_id=_COMMUNITY, server_id=server.id)
+
+    assert lock.events.index((server.id, "prune-final")) < lock.events.index(
+        (server.id, "check")
+    )
+    _assert_checked_right_before(
+        lock.events, server.id, "delete-archive", "delete-server"
+    )
+
+
+@pytest.mark.parametrize(
+    ("checks_before_loss", "pruned", "archives_deleted"),
+    [
+        (0, False, False),  # in the prune's fence
+        (1, True, False),  # before the other archives go
+        (2, True, True),  # before the row goes
+    ],
+)
+async def test_delete_server_that_loses_the_lock_stops_before_the_next_write(
+    checks_before_loss: int, pruned: bool, archives_deleted: bool
+) -> None:
+    server, repo, archive, delete, lock = _delete_server_case()
+    lock.checks_before_loss = checks_before_loss
+
+    with pytest.raises(LifecycleLockLostError):
+        await delete(community_id=_COMMUNITY, server_id=server.id)
+
+    assert (archive.pruned == [server.id]) is pruned
+    assert ("orphan" not in archive.archives) is archives_deleted
+    assert server.id in repo.by_id
+
+
+async def test_delete_backup_that_lost_the_lock_deletes_nothing() -> None:
+    server, repo, lock = _seeded()
+    backups = FakeBackupRepository()
+    backup = _backup(server.id)
+    backups.seed(backup)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    archive.events = lock.events
+    backups.events = lock.events
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await DeleteBackup(
+            uow=FakeUnitOfWork(servers=repo, backups=backups),
+            backup_store=archive,
+            lifecycle_lock=lock,
+        )(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    assert archive.archives == {"ref"}
+    assert backup.id in backups.by_id
+
+
+async def test_create_backup_that_lost_the_lock_writes_no_row_and_no_archive() -> None:
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    backups = FakeBackupRepository()
+    archive.events = lock.events
+    backups.events = lock.events
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await CreateBackup(
+            uow=uow,
+            backup_store=archive,
+            snapshot_server=SnapshotServer(uow=uow, control_plane=FakeControlPlane()),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=lock,
+        )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
+
+    assert backups.by_id == {}
+    assert (server.id, "create-archive") not in lock.events
+
+
+async def test_create_backup_confirms_the_lock_right_before_its_row_and_archive() -> (
+    None
+):
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    backups = FakeBackupRepository()
+    archive.events = lock.events
+    backups.events = lock.events
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    await CreateBackup(
+        uow=uow,
+        backup_store=archive,
+        snapshot_server=SnapshotServer(uow=uow, control_plane=FakeControlPlane()),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )(community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL)
+
+    # The row and the archive written behind it are one guarded write.
+    _assert_checked_right_before(lock.events, server.id, "add-row")
+    assert lock.events.index((server.id, "add-row")) + 1 == lock.events.index(
+        (server.id, "create-archive")
+    )
+
+
+async def test_upload_backup_that_lost_the_lock_writes_no_row_and_no_archive() -> None:
+    server, repo, lock = _seeded()
+    archive = FakeBackupArchiveStore()
+    backups = FakeBackupRepository()
+    archive.events = lock.events
+    backups.events = lock.events
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await UploadBackup(
+            uow=FakeUnitOfWork(servers=repo, backups=backups),
+            backup_store=archive,
+            clock=FakeClock(_NOW),
+            lifecycle_lock=lock,
+        )(community_id=_COMMUNITY, server_id=server.id, content=_targz())
+
+    assert backups.by_id == {}
+    assert (server.id, "store-archive") not in lock.events
+
+
+async def _allow(_perm: str) -> bool:
+    return True
+
+
+async def test_update_server_that_lost_the_lock_commits_nothing() -> None:
+    server, repo, lock = _seeded()
+    repo.events = lock.events
+    uow = FakeUnitOfWork(servers=repo)
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await UpdateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            file_store=FakeFileStore(),
+            port_range=PortRange(start=25565, end=25664),
+            lifecycle_lock=lock,
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            name="renamed",
+            authorize=_allow,
+        )
+
+    assert (server.id, "update-row") not in lock.events
+    assert uow.commits == 0
+
+
+async def test_update_server_confirms_the_lock_again_before_its_file_rewrite() -> None:
+    server, repo, lock = _seeded()
+    store = FakeFileStore()
+    store.files["server.properties"] = b"server-port=25565\n"
+    repo.events = lock.events
+    store.events = lock.events
+    update = UpdateServer(
+        uow=FakeUnitOfWork(servers=repo),
+        clock=FakeClock(_NOW),
+        file_store=store,
+        port_range=PortRange(start=25565, end=25664),
+        lifecycle_lock=lock,
+    )
+
+    await update(
+        community_id=_COMMUNITY, server_id=server.id, game_port=25566, authorize=_allow
+    )
+    _assert_checked_right_before(lock.events, server.id, "update-row")
+    rewrite = lock.events.index((server.id, "write-file"))
+    assert (server.id, "check") in lock.events[
+        lock.events.index((server.id, "update-row")) + 1 : rewrite
+    ]
+
+    lock.events.clear()
+    lock.checks_before_loss = 1
+    with pytest.raises(LifecycleLockLostError):
+        await update(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            game_port=25567,
+            authorize=_allow,
+        )
+    assert (server.id, "update-row") in lock.events
+    assert (server.id, "write-file") not in lock.events
+    assert store.files["server.properties"] == b"server-port=25566\n"
+
+
+def _start(
+    server: Server, repo: FakeServerRepository, lock: FakeLifecycleLock
+) -> tuple[StartServer, FakeFileStore, FakeControlPlane]:
+    store = FakeFileStore()
+    repo.events = lock.events
+    store.events = lock.events
+    cp = FakeControlPlane(place_to=WorkerId(uuid.uuid4()))
+    start = StartServer(
+        uow=FakeUnitOfWork(servers=repo),
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=store,
+        lifecycle_lock=lock,
+    )
+    return start, store, cp
+
+
+async def test_start_confirms_the_lock_before_its_file_writes_and_its_flip() -> None:
+    server, repo, lock = _seeded()
+    start, _store, _cp = _start(server, repo, lock)
+
+    await start(community_id=_COMMUNITY, server_id=server.id, accept_eula=True)
+
+    _assert_checked_right_before(lock.events, server.id, "write-file", "flip")
+
+
+@pytest.mark.parametrize(
+    ("checks_before_loss", "wrote_eula"),
+    [(0, False), (1, True)],
+)
+async def test_start_that_loses_the_lock_does_not_flip(
+    checks_before_loss: int, wrote_eula: bool
+) -> None:
+    server, repo, lock = _seeded()
+    start, store, cp = _start(server, repo, lock)
+    lock.checks_before_loss = checks_before_loss
+
+    with pytest.raises(LifecycleLockLostError):
+        await start(community_id=_COMMUNITY, server_id=server.id, accept_eula=True)
+
+    assert ("eula.txt" in store.files) is wrote_eula
+    assert (server.id, "flip") not in lock.events
+    assert repo.by_id[server.id].desired_state is DesiredState.STOPPED
+    # A placement the flip never committed gives its reservation back.
+    assert cp.released == cp.reserved
+
+
+def _orphan() -> Server:
+    server = _at_rest()
+    server.desired_state = DesiredState.RUNNING
+    return server
+
+
+async def test_place_and_start_confirms_the_lock_before_its_flip() -> None:
+    server = _orphan()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    lock = FakeLifecycleLock()
+    start, _store, _cp = _start(server, repo, lock)
+
+    await start.place_and_start(community_id=_COMMUNITY, server_id=server.id)
+
+    _assert_checked_right_before(lock.events, server.id, "flip")
+
+
+@pytest.mark.parametrize("checks_before_loss", [0, 1])
+async def test_place_and_start_that_loses_the_lock_does_not_assign(
+    checks_before_loss: int,
+) -> None:
+    server = _orphan()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    lock = FakeLifecycleLock()
+    start, _store, cp = _start(server, repo, lock)
+    lock.checks_before_loss = checks_before_loss
+
+    with pytest.raises(LifecycleLockLostError):
+        await start.place_and_start(community_id=_COMMUNITY, server_id=server.id)
+
+    assert (server.id, "flip") not in lock.events
+    assert repo.by_id[server.id].assigned_worker_id is None
+    assert cp.released == cp.reserved

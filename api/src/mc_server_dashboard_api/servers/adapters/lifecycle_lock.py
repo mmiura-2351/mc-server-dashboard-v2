@@ -24,6 +24,22 @@ budget is spent. The acquiring connection runs in AUTOCOMMIT so it never sits
 idle-in-transaction; a session-level advisory lock is connection-scoped, not
 transaction-scoped, so committing does not drop it.
 
+A held lock can be lost (issue #3927). PostgreSQL releases a session lock when
+the session ends -- a dropped connection, a server restart, a terminated backend
+-- and nothing tells the holder, so another operation on the same server can take
+the lock while the first still runs. :meth:`_PgHeldLifecycleLock.ensure_held` is
+the holder's check: it asks ``pg_locks``, on the lock's own connection, whether
+this session still holds the key. A connection that fails, a check that does not
+answer within a few seconds, or an answer of no all mean the lock is lost, and
+raise :class:`~...domain.errors.LifecycleLockLostError`; asking whether the
+session holds the key, rather than whether the connection answers, also catches a
+connection that now reaches a backend which never took the lock. The use cases
+call it immediately before each write that relies on the exclusion. Leaving the
+hold reports a loss the body never checked for as the same error, since the
+body's last writes may have run outside the exclusion. A loss between a check and
+the write it guards still goes unnoticed: closing that window would take fencing
+tokens that neither the database writes nor the storage backends check.
+
 Advisory locks are a PostgreSQL feature. This adapter is wired only behind the
 real Postgres engine; the unit suite uses the in-memory ``LifecycleLock`` fake
 and the no-op :class:`~...domain.lifecycle_lock.NullLifecycleLock`.
@@ -39,8 +55,14 @@ from collections.abc import AsyncIterator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleLockLostError,
+    ServerBusyError,
+)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
+    LifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 # A constant namespace mixed into the lock key so the server-UUID-derived key
@@ -60,6 +82,21 @@ _LOCK_NAMESPACE = "server-lifecycle"
 # for behind a pinned pool slot.
 _ACQUIRE_BUDGET_SECONDS = 5.0
 _ACQUIRE_POLL_SECONDS = 0.1
+
+# How long a held-lock check may take (issue #3927). The check is one catalog read
+# on an open connection; a connection that does not answer it in time counts as
+# lost, because the storage fences await this check under the per-server storage
+# lock, and a check left hanging on a dead peer would hold that lock with it.
+_CHECK_TIMEOUT_SECONDS = 5.0
+
+# Whether THIS session holds the session-level advisory lock on ``key``. A bigint
+# key is stored split across ``classid`` (high 32 bits) and ``objid`` (low 32
+# bits), with ``objsubid = 1``; the shift and OR rebuild the signed key.
+_HELD_SQL = text(
+    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'"
+    " AND pid = pg_backend_pid() AND granted AND objsubid = 1"
+    " AND ((classid::bigint << 32) | objid::bigint) = :key)"
+)
 
 
 def _lock_key(server_id: ServerId) -> int:
@@ -81,6 +118,54 @@ def _lock_key(server_id: ServerId) -> int:
     return unsigned - (1 << 63)
 
 
+class _PgHeldLifecycleLock(HeldLifecycleLock):
+    """The advisory lock a :class:`PgLifecycleLock` hold took, on its connection."""
+
+    def __init__(self, conn: AsyncConnection, key: int, server_id: ServerId) -> None:
+        self._conn = conn
+        self._key = key
+        self._server_id = server_id
+        self._lost = False
+
+    async def ensure_held(self) -> None:
+        if self._lost:
+            raise LifecycleLockLostError(str(self._server_id.value))
+        try:
+            async with asyncio.timeout(_CHECK_TIMEOUT_SECONDS):
+                held = await self._conn.scalar(_HELD_SQL, {"key": self._key})
+        except Exception as exc:
+            # A dead connection fails on its first use and differently after
+            # that; a hung one times out. Either way nothing confirms the lock.
+            await self._lose()
+            raise LifecycleLockLostError(str(self._server_id.value)) from exc
+        if not held:
+            await self._lose()
+            raise LifecycleLockLostError(str(self._server_id.value))
+
+    async def release(self) -> None:
+        if self._lost:
+            # The session that held the lock is gone or no longer holds it, and
+            # the loss was already raised: there is nothing left to release.
+            return
+        try:
+            await self._conn.execute(
+                text("SELECT pg_advisory_unlock(:key)"), {"key": self._key}
+            )
+        except Exception as exc:
+            # The session ended before the release, which released the lock at
+            # that moment: the body's writes since its last check may have run
+            # outside the exclusion.
+            await self._lose()
+            raise LifecycleLockLostError(str(self._server_id.value)) from exc
+
+    async def _lose(self) -> None:
+        self._lost = True
+        # Close the connection instead of returning it to the pool: a connection
+        # that failed or hung must not be reset and handed to the next request.
+        with contextlib.suppress(Exception):
+            await self._conn.invalidate()
+
+
 class PgLifecycleLock(LifecycleLock):
     """:class:`LifecycleLock` over a PostgreSQL session-level advisory lock."""
 
@@ -88,7 +173,7 @@ class PgLifecycleLock(LifecycleLock):
         self._engine = engine
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         key = _lock_key(server_id)
         # A dedicated connection held open for the whole operation: the
         # session-level advisory lock lives on this connection and is released
@@ -109,12 +194,11 @@ class PgLifecycleLock(LifecycleLock):
         async with self._engine.connect() as conn:
             conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
             await self._acquire(conn, key, server_id)
+            held = _PgHeldLifecycleLock(conn, key, server_id)
             try:
-                yield
+                yield held
             finally:
-                await conn.execute(
-                    text("SELECT pg_advisory_unlock(:key)"), {"key": key}
-                )
+                await held.release()
 
     @staticmethod
     async def _acquire(conn: AsyncConnection, key: int, server_id: ServerId) -> None:

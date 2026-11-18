@@ -212,6 +212,18 @@ class ServerBusyError(ServerError):
     """
 
 
+class LifecycleLockLostError(ServerError):
+    """The per-server lifecycle lock was lost while its operation still ran.
+
+    The lock lives on a database session, and PostgreSQL releases it when that
+    session ends (a dropped connection, a server restart) without telling the
+    holder, so another lifecycle operation on the server can take it (issue
+    #3927). A holder checks the lock before each write that relies on it and stops
+    with this error rather than write outside the exclusion. Transient: the edge
+    maps it to 503 ``lifecycle_lock_lost`` and the caller can retry.
+    """
+
+
 class ServerAssignedError(ServerError):
     """A delete found the at-rest server still assigned to a Worker.
 

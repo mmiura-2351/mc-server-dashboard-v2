@@ -57,7 +57,10 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
+    LifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -330,10 +333,10 @@ class _ObservedLifecycleLock(LifecycleLock):
         self.acquiring = asyncio.Event()
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         self.acquiring.set()
-        async with self.inner.hold(server_id):
-            yield
+        async with self.inner.hold(server_id) as held:
+            yield held
 
 
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).

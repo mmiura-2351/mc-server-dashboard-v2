@@ -40,7 +40,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
+    NullHeldLifecycleLock,
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -105,11 +107,11 @@ class _BusyLifecycleLock(LifecycleLock):
         self.acquisitions = 0
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         self.acquisitions += 1
         if self.acquisitions in self.busy:
             raise ServerBusyError(str(server_id.value))
-        yield
+        yield NullHeldLifecycleLock()
 
 
 class _DeletingLifecycleLock(LifecycleLock):
@@ -125,10 +127,10 @@ class _DeletingLifecycleLock(LifecycleLock):
         self.backup = backup
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         self.store.archives.discard(self.backup.storage_ref)
         self.uow.backups.by_id.pop(self.backup.id, None)
-        yield
+        yield NullHeldLifecycleLock()
 
 
 def _wire(

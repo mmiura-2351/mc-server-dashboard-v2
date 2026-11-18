@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     BackupTooLargeError,
     BackupUnreadableError,
+    LifecycleLockLostError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -47,7 +48,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
     ObjectStoreUnavailableError,
 )
-from mc_server_dashboard_api.storage.domain.port import ByteStream
+from mc_server_dashboard_api.storage.domain.port import ByteStream, ExclusionFence
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
 )
@@ -262,6 +263,7 @@ class _RestoreUnavailableStorage(FsStorage):
         key: BackupKey,
         *,
         force: bool = False,
+        fence: ExclusionFence | None = None,
     ) -> WorkingSetReport:
         raise ObjectStoreUnavailableError("object store restore failed")
 
@@ -321,7 +323,11 @@ class _PruneUnavailableStorage(FsStorage):
     """An ``FsStorage`` whose prune fails with a storage-backend error (#2273)."""
 
     async def prune_to_final_snapshot(
-        self, community_id: StorageCommunityId, server_id: StorageServerId
+        self,
+        community_id: StorageCommunityId,
+        server_id: StorageServerId,
+        *,
+        fence: ExclusionFence | None = None,
     ) -> None:
         raise ObjectStoreUnavailableError("object store prune failed")
 
@@ -624,6 +630,53 @@ async def test_prune_to_final_snapshot_packs_and_drops_working_set(
     assert final.is_file()
     assert read_tar(final.read_bytes()) == {"world/level.dat": b"w"}
     assert not (server_root / "current").exists()
+
+
+async def _lost() -> None:
+    raise LifecycleLockLostError("lost")
+
+
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
+async def test_restore_hands_storage_the_fence_and_its_refusal_back_untouched(
+    tmp_path: Path,
+) -> None:
+    # The caller's lifecycle-lock check (issue #3927) runs inside the store's
+    # restore, and the loss it reports crosses the seam as itself.
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"server.properties": b"motd=original"})
+    ref = _ref()
+    await adapter.create_from_current(
+        community_id=community, server_id=server, storage_ref=ref
+    )
+    await _publish(storage, community, server, {"server.properties": b"motd=changed"})
+
+    with pytest.raises(LifecycleLockLostError):
+        await adapter.restore(
+            community_id=community, server_id=server, storage_ref=ref, fence=_lost
+        )
+
+    assert await _hydrate(storage, community, server) == {
+        "server.properties": b"motd=changed"
+    }
+
+
+async def test_prune_hands_storage_the_fence_and_its_refusal_back_untouched(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path, version_retention=10)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"world/level.dat": b"w"})
+
+    with pytest.raises(LifecycleLockLostError):
+        await adapter.prune_to_final_snapshot(
+            community_id=community, server_id=server, fence=_lost
+        )
+
+    assert await _hydrate(storage, community, server) == {"world/level.dat": b"w"}
 
 
 async def test_prune_to_final_snapshot_unpublished_is_a_noop(tmp_path: Path) -> None:

@@ -130,7 +130,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
+    NullHeldLifecycleLock,
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
@@ -901,13 +903,15 @@ class _UnlockFailingLifecycleLock(LifecycleLock):
     """A lock whose release fails, as ``pg_advisory_unlock`` on a lost connection."""
 
     @contextlib.asynccontextmanager
-    async def _hold(self) -> AsyncIterator[None]:
+    async def _hold(self) -> AsyncIterator[HeldLifecycleLock]:
         try:
-            yield
+            yield NullHeldLifecycleLock()
         finally:
             raise OSError("connection to the lock's database was lost")
 
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         return self._hold()
 
 
@@ -3150,7 +3154,9 @@ class _HeldLifecycleLock(LifecycleLock):
     Gives up the way PgLifecycleLock's bounded acquire does (issue #876).
     """
 
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         raise ServerBusyError(str(server_id.value))
 
 

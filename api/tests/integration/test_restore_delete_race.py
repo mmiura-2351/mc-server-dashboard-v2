@@ -71,7 +71,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     S3Client,
     S3Object,
 )
-from mc_server_dashboard_api.storage.domain.port import Storage
+from mc_server_dashboard_api.storage.domain.port import ExclusionFence, Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
@@ -142,9 +142,13 @@ class _HeldFsStorage(FsStorage):
         server_id: StorageServerId,
         staging: Path,
         report: WorkingSetReport,
+        *,
+        fence: ExclusionFence | None = None,
     ) -> None:
         await self._hold()
-        await super()._publish_restore(community_id, server_id, staging, report)
+        await super()._publish_restore(
+            community_id, server_id, staging, report, fence=fence
+        )
 
 
 def _object_storage(tmp_path: Path, hold: _Hold) -> Storage:
