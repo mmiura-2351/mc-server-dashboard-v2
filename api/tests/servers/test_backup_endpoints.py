@@ -24,7 +24,7 @@ import os
 import random
 import tarfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -164,7 +164,11 @@ from tests.servers.fakes import (
 )
 from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
-from tests.servers.test_files import _tar_gz_with_a_bad_sparse_field
+from tests.servers.test_files import (
+    _DAMAGE_ONLY_THE_GZIP_END_SHOWS,
+    _TAR_GZ_PRODUCERS,
+    _tar_gz_with_a_bad_sparse_field,
+)
 from tests.storage.fake_s3 import FakeS3Store
 from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 from tests.storage.helpers import (
@@ -3149,6 +3153,11 @@ def _cut_inside_a_member() -> bytes:
         pytest.param(_cut_inside_a_member(), id="cut-inside-a-member"),
         # tarfile converts a GNU sparse PAX field with a bare int(): ValueError.
         pytest.param(_tar_gz_with_a_bad_sparse_field(), id="bad-sparse-field"),
+        # Damage tarfile alone never reaches (issue #3778).
+        *(
+            pytest.param(content, id=damage)
+            for damage, content in _DAMAGE_ONLY_THE_GZIP_END_SHOWS.items()
+        ),
     ],
 )
 def test_upload_of_an_unreadable_archive_is_422_and_stores_nothing(
@@ -3255,6 +3264,18 @@ def _archive_of(*names: str) -> bytes:
 )
 def test_upload_of_a_restorable_archive_is_201_and_stored(content: bytes) -> None:
     resp, store, backups, server_id = _upload_through_the_route(content)
+
+    assert resp.status_code == 201
+    assert store.stored == [ServerId(server_id)]
+    assert len(backups.by_id) == 1
+
+
+@pytest.mark.parametrize("produce", _TAR_GZ_PRODUCERS)
+def test_upload_of_a_tar_gz_from_each_producer_is_201_and_stored(
+    produce: Callable[[Path], bytes], tmp_path: Path
+) -> None:
+    # Read on to the gzip end, a real producer's archive still passes (#3778).
+    resp, store, backups, server_id = _upload_through_the_route(produce(tmp_path))
 
     assert resp.status_code == 201
     assert store.stored == [ServerId(server_id)]
