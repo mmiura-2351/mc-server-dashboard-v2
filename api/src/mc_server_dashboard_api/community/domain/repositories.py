@@ -334,18 +334,21 @@ class ResourceExistenceChecker(abc.ABC):
 
 
 class UserExistenceChecker(abc.ABC):
-    """Port: does a user exist, held against account deletion? (issue #3217).
+    """Port: does a user exist, held against account deletion? (#3217, #3856).
 
-    A conferral of community ownership -- provisioning a community for its
-    initial Owner, assigning a role -- validates its recipient through this Port
-    as the first statement of its transaction. An account deletion decides
-    whether the account owns a community and then deletes it, cascading its
-    memberships and role assignments, so a conferral committed in between would
-    leave its community without an Owner. The concrete adapter queries the
-    identity context's ``user`` table, bound on the unit of work's session, under
-    the user's community-ownership lock, which the deletion also takes before it
-    decides. :class:`~...user_directory.UserDirectory` answers the same question
-    for callers that confer nothing, outside any transaction and holding nothing.
+    Every community write on a user validates it through this Port as the
+    first statement of its transaction: a conferral of community ownership --
+    provisioning a community for its initial Owner, assigning a role -- and an
+    insert of a row that references the user -- adding it as a member, granting
+    it a resource permission. An account deletion decides whether the account
+    owns a community and then deletes it, cascading its memberships, role
+    assignments and grants. Unheld, a conferral committed in between would leave
+    its community without an Owner, and an insert would fail its foreign key to
+    the deleted user or, for a grant creation, which holds the user's membership
+    before its insert, deadlock with the cascade. The concrete adapter queries
+    the identity context's ``user`` table, bound on the unit of work's session,
+    under the user's community-ownership lock, which the deletion also takes
+    before it decides.
     """
 
     @abc.abstractmethod
@@ -356,7 +359,7 @@ class UserExistenceChecker(abc.ABC):
         user, and holds it until the transaction ends. An account deletion takes
         the same lock exclusively before it reads the account's ownership, so it
         either committed first, and the user is reported absent, or waits until
-        this transaction has committed and then sees the ownership it conferred.
+        this transaction has committed and then sees what it wrote.
         Call it before any other lock of the transaction (``permission_ceiling``,
         step 0).
         """

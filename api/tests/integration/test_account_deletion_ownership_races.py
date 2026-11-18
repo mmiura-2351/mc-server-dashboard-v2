@@ -18,6 +18,15 @@ a community owner, or the conferral finds no such user -- and no interleaving
 leaves a community without an Owner. Two conferrals on one account, by contrast,
 do not wait for each other.
 
+Adding the account as a member, or creating a grant for it, is held the same way
+(#3856), though it confers nothing: each inserts a row whose foreign key
+references the account. Unheld, a deletion committing after the write's check
+fails that insert's foreign key, and a grant creation, which holds the account's
+membership before its insert, deadlocks with the deletion's cascade. Run through
+the same four interleavings (the community side is the "conferral" of their
+names), the losing write finds no such user, and no interleaving ends in an
+error the routes do not map.
+
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5).
 """
@@ -29,7 +38,7 @@ import datetime as dt
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 import pytest
@@ -46,6 +55,7 @@ from mc_server_dashboard_api.community.adapters.unit_of_work import (
 from mc_server_dashboard_api.community.adapters.user_directory import (
     IdentityUserDirectory,
 )
+from mc_server_dashboard_api.community.application.manage_grant import CreateGrant
 from mc_server_dashboard_api.community.application.manage_membership import (
     AddMember,
     AssignRole,
@@ -56,14 +66,17 @@ from mc_server_dashboard_api.community.application.provision_community import (
 )
 from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
+    GrantTargetNotMemberError,
     LastOwnerRemovalError,
     MembershipNotFoundError,
+    MemberUserNotFoundError,
     OwnerUserNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.permissions import OWNER_ROLE_NAME
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     MembershipId,
+    Permission,
     RoleId,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -173,7 +186,11 @@ class _PausingMembershipRepository(SqlAlchemyMembershipRepository):
 
 
 class _CommunityUnitOfWork(CommunityUnitOfWork):
-    """Records its backend pid; with a pause, holds right before the Owner write."""
+    """Records its backend pid; with a pause, holds right before its write.
+
+    That is the Owner assignment, or else the commit, which flushes the one row
+    a member addition or a grant creation staged.
+    """
 
     def __init__(
         self,
@@ -193,16 +210,23 @@ class _CommunityUnitOfWork(CommunityUnitOfWork):
             self.memberships = _PausingMembershipRepository(self._session, self._pause)
         return self
 
+    async def commit(self) -> None:
+        if self._pause is not None:
+            await self._pause.hold()
+        await super().commit()
+
 
 @dataclass(frozen=True)
 class _World:
     factory: async_sessionmaker[AsyncSession]
-    # The account the deletion deletes and the conferral makes an Owner.
+    # The account the deletion deletes and the community write names.
     target: uuid.UUID
-    # The transfer's community, its Owner role and its previous Owner.
+    # The community, its Owner role and its Owner (a transfer's previous Owner).
     community: CommunityId | None = None
     owner_role: RoleId | None = None
-    previous_owner: uuid.UUID | None = None
+    owner: uuid.UUID | None = None
+    # A server of the community, for a grant.
+    server: uuid.UUID | None = None
 
 
 async def _provision_community(
@@ -240,22 +264,44 @@ async def _provision_other(world: _World, uow: CommunityUnitOfWork) -> None:
 
 async def _assign_owner(world: _World, uow: CommunityUnitOfWork) -> None:
     assert world.community is not None and world.owner_role is not None
-    assert world.previous_owner is not None
+    assert world.owner is not None
     await AssignRole(uow=uow)(
         community_id=world.community,
         user_id=CommunityUserId(world.target),
         role_id=world.owner_role,
-        actor_id=CommunityUserId(world.previous_owner),
+        actor_id=CommunityUserId(world.owner),
     )
 
 
 async def _step_down(world: _World, uow: CommunityUnitOfWork) -> None:
     assert world.community is not None and world.owner_role is not None
-    assert world.previous_owner is not None
+    assert world.owner is not None
     await UnassignRole(uow=uow)(
         community_id=world.community,
-        user_id=CommunityUserId(world.previous_owner),
+        user_id=CommunityUserId(world.owner),
         role_id=world.owner_role,
+    )
+
+
+async def _add_member(world: _World, uow: CommunityUnitOfWork) -> None:
+    assert world.community is not None
+    await AddMember(
+        uow=uow,
+        users=IdentityUserDirectory(IdentityUnitOfWork(world.factory)),
+        clock=SystemClock(),
+    )(community_id=world.community, user_id=CommunityUserId(world.target))
+
+
+async def _create_grant(world: _World, uow: CommunityUnitOfWork) -> None:
+    assert world.community is not None and world.owner is not None
+    assert world.server is not None
+    await CreateGrant(uow=uow, clock=SystemClock())(
+        community_id=world.community,
+        actor_id=CommunityUserId(world.owner),
+        user_id=CommunityUserId(world.target),
+        resource_type="server",
+        resource_id=world.server,
+        permissions={Permission("server:start")},
     )
 
 
@@ -290,6 +336,38 @@ async def _transfer_world(engine: AsyncEngine) -> _World:
     async with CommunityUnitOfWork(factory) as uow:
         (owner_role,) = await uow.roles.list_for_community(community.id)
     return _World(factory, target.value, community.id, owner_role.id, previous.value)
+
+
+async def _member_world(engine: AsyncEngine) -> _World:
+    """The target is in no community; another account owns the community."""
+
+    factory = create_session_factory(engine)
+    target = await _seed_user(factory, "target")
+    owner = await _seed_user(factory, "owner")
+    community = await _provision_community(CommunityUnitOfWork(factory), owner.value)
+    return _World(factory, target.value, community.id, owner=owner.value)
+
+
+async def _grant_world(engine: AsyncEngine) -> _World:
+    """As above, with the target a plain member and a server in the community."""
+
+    world = await _member_world(engine)
+    await _add_member(world, CommunityUnitOfWork(world.factory))
+    assert world.community is not None
+    server = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO server "
+                "(id, community_id, name, mc_edition, mc_version, server_type, "
+                "config, slug, desired_state, observed_state, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, 'survival', 'java', '1.21', 'vanilla', "
+                "'{}'::jsonb, 'survival-00', 'stopped', 'stopped', now(), now())"
+            ),
+            {"id": server, "cid": world.community.value},
+        )
+    return replace(world, server=server)
 
 
 _Interleaving = Literal[
@@ -450,7 +528,7 @@ async def test_deletion_racing_an_ownership_transfer_never_orphans_the_community
     engine: AsyncEngine, deletion: str, interleaving: _Interleaving
 ) -> None:
     world = await _transfer_world(engine)
-    assert world.previous_owner is not None
+    assert world.owner is not None
 
     outcomes = await _race(
         engine,
@@ -466,11 +544,42 @@ async def test_deletion_racing_an_ownership_transfer_never_orphans_the_community
     assert all(owners.values()), f"a community has no Owner: {owners}"
     assert _kinds(outcomes) == _TRANSFER_OUTCOMES[interleaving]
     expected = {
-        "previous": {world.previous_owner},
+        "previous": {world.owner},
         "target": {world.target},
-        "both": {world.previous_owner, world.target},
+        "both": {world.owner, world.target},
     }[_TRANSFER_OWNERS[interleaving]]
     assert owners == {_COMMUNITY: expected}
+
+
+# A write that inserts a row referencing the account, the world it runs in, and
+# what it fails with once the account is gone.
+_INSERTS = {
+    "add-member": (_member_world, _add_member, MemberUserNotFoundError),
+    "create-grant": (_grant_world, _create_grant, GrantTargetNotMemberError),
+}
+
+
+@pytest.mark.parametrize("interleaving", _INTERLEAVINGS)
+@pytest.mark.parametrize("insert", list(_INSERTS), ids=list(_INSERTS))
+@pytest.mark.parametrize("deletion", list(_DELETIONS), ids=list(_DELETIONS))
+async def test_deletion_racing_an_insert_referencing_the_account_fails_cleanly(
+    engine: AsyncEngine, deletion: str, insert: str, interleaving: _Interleaving
+) -> None:
+    build, write, refusal = _INSERTS[insert]
+    world = await build(engine)
+
+    outcomes = await _race(
+        engine,
+        [_deleting(world, _DELETIONS[deletion]), _conferring(world, write)],
+        interleaving,
+    )
+
+    if interleaving in ("deletion-first", "deletion-holds"):
+        # The deletion committed first: the write finds no such user.
+        assert _kinds(outcomes) == [None, refusal]
+    else:
+        # The write committed first, and the deletion's cascade removed its row.
+        assert _kinds(outcomes) == [None, None]
 
 
 async def test_conferrals_on_one_account_do_not_wait_for_each_other(

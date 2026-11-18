@@ -81,6 +81,12 @@ deterministic one above. Note also that a map entry alone would not be enough:
 these FKs are not DEFERRABLE, so each violation surfaces at whichever statement
 ends up flushing the staged row, and that statement has to be inside a wrap for
 the entry to be reached at all (issue #2612).
+
+The two ``user`` keys among them are not left to a concurrent account deletion
+either: every write that inserts under them first checks the user under its
+community-ownership lock, which the deletion takes before it deletes, so the
+deletion either committed before the check or waits for the insert to commit
+(``UserExistenceChecker``, issues #3217 and #3856).
 """
 
 from __future__ import annotations
