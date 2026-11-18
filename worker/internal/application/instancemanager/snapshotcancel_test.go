@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
@@ -105,5 +106,36 @@ func TestASnapshotPastItsDeadlineIsStillReportedAsAbandoned(t *testing.T) {
 	}
 	if !warned {
 		t.Fatal("a snapshot abandoned at its deadline logged no WARN")
+	}
+}
+
+// The cancelled snapshot logs the work's own message capped at 1 KiB, on a rune
+// boundary and marked with an ellipsis: an over-limit pack error quotes a path
+// of about 4 KiB. A shorter message is logged whole.
+func TestACancelledSnapshotCapsTheDetailItLogs(t *testing.T) {
+	for _, detail := range []string{"short", strings.Repeat("é", 1000)} {
+		h := &syncSlogHandler{}
+		m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
+		m.snapshotCancelled(snapshotCmd(), detail)
+
+		var logged string
+		for _, r := range h.snapshot() {
+			r.Attrs(func(a slog.Attr) bool {
+				if a.Key == "detail" {
+					logged = a.Value.String()
+				}
+				return true
+			})
+		}
+		if len(detail) <= 1024 {
+			if logged != detail {
+				t.Errorf("detail logged as %q, want %q", logged, detail)
+			}
+			continue
+		}
+		kept, cut := strings.CutSuffix(logged, "…")
+		if !cut || len(kept) > 1024 || !utf8.ValidString(kept) || !strings.HasPrefix(detail, kept) {
+			t.Errorf("a %d-byte detail was logged as %d bytes (%q…), want at most 1024 bytes of it and an ellipsis", len(detail), len(logged), logged[:min(len(logged), 20)])
+		}
 	}
 }

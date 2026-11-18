@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -977,12 +978,25 @@ func (m *Manager) skipAbandonedTail(cmd session.Command) session.CommandResult {
 // own. So it is logged as the cancellation it is, with what the work had
 // reported in detail, and answered as such. The failure code is only what a
 // result needs; no caller reads it.
+//
+// detail is logged capped at 1 KiB, as the session caps the error it logs (issue
+// #3363): the work's message can quote a path of about 4 KiB.
 func (m *Manager) snapshotCancelled(cmd session.Command, detail string) session.CommandResult {
+	if len(detail) > maxLoggedDetailBytes {
+		cut := maxLoggedDetailBytes
+		for cut > 0 && !utf8.RuneStart(detail[cut]) {
+			cut--
+		}
+		detail = detail[:cut] + "…"
+	}
 	m.logger.Info("snapshot cancelled: its session ended before it finished",
 		"server_id", cmd.ServerID, "detail", detail)
 	return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 		"instancemanager: snapshot cancelled: its session ended before it finished")
 }
+
+// maxLoggedDetailBytes caps the work's message a cancelled snapshot logs.
+const maxLoggedDetailBytes = 1024
 
 // finishAttempt is the handler's last duty to an attempt (issue #3511): it
 // restores save-on if one is owed, then drops the handler's share of the claim.
