@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"unicode/utf8"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
@@ -27,6 +28,10 @@ const (
 	installLogHeadBytes = 64 * 1024
 	// installLogOmissionReserve is the room the omission line is given.
 	installLogOmissionReserve = 256
+	// installLogLineSearchBytes bounds how far into the latest output a cut looks
+	// for the start of a line: one very long line must not cost the output
+	// after it.
+	installLogLineSearchBytes = 4 * 1024
 	// installLogTailBytes is the room for the latest output below it: more than
 	// one install attempt prints.
 	installLogTailBytes = execution.ForgeInstallLogMaxBytes - installLogHeadBytes - installLogOmissionReserve
@@ -103,6 +108,10 @@ func (l *installLog) close() {
 // is teed with, it never fails: the first failed write (a full or failing
 // filesystem) is logged at WARN and drops the log for the rest of the install
 // (issue #3744).
+//
+// p must be small next to the bound, as demuxLogsTo's writes are (32 KiB at most,
+// io.CopyN): a compaction leaves the head where earlier writes put it, so the
+// head must be on disk before the first one.
 func (l *installLog) write(p []byte) {
 	if l.file == nil {
 		return
@@ -134,9 +143,10 @@ func (l *installLog) write(p []byte) {
 
 // compact rewrites the log as its head, the omission line and the latest output,
 // the output just written included. The latest output is the current attempt
-// whole when it fits, and at least half the room otherwise, so the next
-// compaction is that far off: the log is rewritten a few times an install, not
-// once a write.
+// whole when it fits, and otherwise at least half the room, less what it takes
+// to start at a line found within installLogLineSearchBytes or else at a
+// character, so the next compaction is that far off: the log is rewritten a few
+// times an install, not once a write.
 //
 // The rewrite is written over the file before the file is cut to its end, never
 // the other way round, and nothing is synced: a Worker that dies in between
@@ -149,9 +159,15 @@ func (l *installLog) compact() error {
 	}
 	kept := l.recent[int64(len(l.recent))-keep:]
 	if keep != l.attempt {
-		// The cut falls inside the output: the kept part starts at its next line.
-		if nl := bytes.IndexByte(kept, '\n'); nl >= 0 {
+		// The cut falls inside the output: the kept part starts at its next line,
+		// or, in a line too long for that, at its next character, so the log stays
+		// valid UTF-8 (the WebUI reads it as latin-1 otherwise).
+		if nl := bytes.IndexByte(kept[:installLogLineSearchBytes], '\n'); nl >= 0 {
 			kept = kept[nl+1:]
+		} else {
+			for n := 0; n < utf8.UTFMax-1 && !utf8.RuneStart(kept[0]); n++ {
+				kept = kept[1:]
+			}
 		}
 	}
 	omitted := l.total - l.headLen - int64(len(kept))

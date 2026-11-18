@@ -633,7 +633,7 @@ the installer downloads Forge's libraries. The installer's combined output is
 written to `logs/forge-install.log` in the server's working set, readable through
 the file API — check it if a Forge first start fails or stalls. The log holds
 the latest start's install only: each start empties it as its install begins,
-and it keeps every attempt of that install, retries included. It stays under
+and it keeps every attempt of that install, retries included. It is at most
 3 MiB, inside the file API's 4 MiB read cap: once an install prints more, the
 log keeps the first 64 KiB of the install's output and its latest output — the
 latest attempt whole when that fits, and always the end, where the installer
