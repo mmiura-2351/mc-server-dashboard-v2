@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import threading
 import time
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -103,10 +104,11 @@ def first_login(monkeypatch: pytest.MonkeyPatch) -> None:
 def _count_dummy_builds(
     monkeypatch: pytest.MonkeyPatch, *, fail_first: bool = False, hold_s: float = 0.0
 ) -> list[str]:
-    """Patch argon2 to record each dummy build; the first fails if ``fail_first``.
+    """Patch argon2 to record the thread of each dummy build.
 
-    ``hold_s`` keeps each build running that long, so concurrent logins overlap.
-    A failure is the one libargon2 reports when it cannot allocate its memory.
+    The first build fails if ``fail_first``, as libargon2 does when it cannot
+    allocate its memory. ``hold_s`` keeps each build running that long, so
+    concurrent logins overlap.
     """
 
     builds: list[str] = []
@@ -117,7 +119,7 @@ def _count_dummy_builds(
     ) -> str:
         if password != dependencies._DUMMY_VERIFY_PLAINTEXT:
             return real_hash(self, password, salt=salt)
-        builds.append("build")
+        builds.append(threading.current_thread().name)
         time.sleep(hold_s)
         if fail_first and len(builds) == 1:
             raise argon2.exceptions.HashingError("Memory allocation error")
@@ -158,6 +160,8 @@ def test_a_dummy_hash_build_failure_answers_503_until_a_build_succeeds(
     assert again.status_code == 200
     # The failure was not remembered, and the success was: two builds, not three.
     assert len(builds) == 2
+    # Off the event loop, on the dedicated KDF pool (#1696).
+    assert all(name.startswith("password-kdf") for name in builds), builds
 
 
 @pytest.mark.usefixtures("alice", "first_login")
