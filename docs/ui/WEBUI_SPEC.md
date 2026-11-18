@@ -1099,9 +1099,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   countdown, so no toast closes or slides out from under the one being read;
   each resumes with the time it had left. Keyboard focus is focus the browser
   shows (`:focus-visible`): the focus a click or a tap leaves on a dismiss
-  button shows none and does not pause the stack, so after a pointer dismiss
-  the other toasts keep counting down. On a touch screen only a finger held on
-  the stack pauses it, since a touch pointer leaves when the finger lifts.
+  button shows none and does not pause the stack, and a pointer dismiss sends
+  focus back out of the stack (Toast focus, below), so the other toasts keep
+  counting down. On a touch screen only a finger held on the stack pauses it,
+  since a touch pointer leaves when the finger lifts.
 - **Toast accessibility.** An error toast is a `role="alert"`, any other a
   `role="status"`, with no explicit `aria-live`: the role already sets it, and
   repeating it double-announces in VoiceOver. The dismiss button is in the tab
@@ -1114,13 +1115,15 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   wraps to the dialog's first control, and Shift+Tab runs the same cycle
   backwards. The stack stays outside the dialog, so a toast is never moved and
   announced again. Escape on a toast dismisses only that toast; Escape anywhere
-  else in the modal closes the modal. When a toast holding focus goes,
-  dismissed, timed out or dropped by the stack cap, focus moves to the next
-  toast's dismiss button, or the one before when it was the last. With no
+  else in the modal closes the modal. When a toast holding keyboard focus
+  goes, dismissed, timed out or dropped by the stack cap, focus moves to the
+  next toast's dismiss button, or the one before when it was the last. With no
   toast left, focus returns to the element it came into the stack from, unless
   that is behind an open modal; failing that, to the open modal, or else to
-  the page's `main` region. It never drops to the page body while any of these
-  exists.
+  the page's `main` region. A toast that goes holding the focus a click or a
+  tap left skips the other toasts and sends focus straight back the same way,
+  without scrolling the page, so a key pressed next cannot dismiss another
+  toast unread. Focus never drops to the page body while any of these exists.
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while

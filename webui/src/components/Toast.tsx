@@ -52,7 +52,7 @@ const MAX_TIMED_TOASTS = 2;
 // `main` takes no focus on its own: it is made focusable just to take this
 // focus, and stops being so once focus leaves it, so a later click in the page
 // does not land on it.
-function focusMain() {
+function focusMain(options: FocusOptions) {
   const main = document.querySelector("main");
   if (main === null) {
     return;
@@ -61,7 +61,7 @@ function focusMain() {
   main.addEventListener("blur", () => main.removeAttribute("tabindex"), {
     once: true,
   });
-  main.focus();
+  main.focus(options);
 }
 
 function autoDismissMs(message: string): number {
@@ -105,14 +105,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // out or dropped by the cap, hands focus on to the next toast, else the one
   // before, else back where focus came from, else to the open modal or `main`.
   // Never to the page body.
+  //
+  // Only keyboard focus moves on through the stack. Focus a click or a tap
+  // left goes straight back, so a key pressed next cannot dismiss another
+  // toast unread, and without scrolling to where it goes: that user was not
+  // looking there.
   const handOffFocus = useCallback((node: HTMLElement) => {
+    const active = document.activeElement;
+    const keyboard = active !== null && isFocusVisible(active);
     const neighbour = (
       node.nextElementSibling ?? node.previousElementSibling
     )?.querySelector("button");
-    if (neighbour) {
+    if (keyboard && neighbour) {
       neighbour.focus();
       return;
     }
+    const options = { preventScroll: !keyboard };
     // Focus leaves the stack here, so where it came from is used up. It is
     // never taken back behind an open modal.
     const returnTo = returnFocusRef.current;
@@ -121,13 +129,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     const back = dialog === null || dialog.contains(returnTo) ? returnTo : null;
     for (const target of [back, dialog]) {
       if (target) {
-        target.focus();
+        target.focus(options);
         if (document.activeElement === target) {
           return;
         }
       }
     }
-    focusMain();
+    focusMain(options);
   }, []);
 
   // A toast removed while it holds focus or sits under the pointer takes them
