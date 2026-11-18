@@ -13,7 +13,8 @@
  *   status frame that landed mid-flight is newer than the captured state and
  *   takes precedence (#1727);
  * - once settled either way, `invalidateKeys` refetch, so the server's own
- *   answer replaces whatever the cache holds.
+ *   answer replaces whatever the cache holds. A success stays pending until
+ *   that refetch answers (#3860); a failure does not wait for it.
  *
  * What a failure means to the operator (the 403 glue, the EULA prompt, the
  * toast) stays with each surface through `onError`.
