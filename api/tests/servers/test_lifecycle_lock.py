@@ -26,7 +26,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from mc_server_dashboard_api.dependencies import get_upload_backup
+from mc_server_dashboard_api.dependencies import (
+    get_delete_server,
+    get_restore_backup,
+    get_upload_backup,
+)
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
@@ -537,6 +541,33 @@ def test_upload_backup_factory_injects_the_shared_lifecycle_lock() -> None:
     upload = get_upload_backup(request, FakeBackupArchiveStore())  # type: ignore[arg-type]
 
     assert isinstance(upload.lifecycle_lock, PgLifecycleLock)
+
+
+def test_restore_and_server_delete_factories_inject_the_shared_lifecycle_lock() -> None:
+    # The production wiring (issue #3904): the lifecycle lock is what keeps a
+    # server delete's prune out of a restore's lock-free copy, so a
+    # NullLifecycleLock on either side lets the restore flip onto a pruned prefix.
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                engine=engine,
+                settings=SimpleNamespace(server=SimpleNamespace(public_base_url=None)),
+                worker_registry=None,
+                control_plane=None,
+            )
+        )
+    )
+
+    restore = get_restore_backup(
+        request,  # type: ignore[arg-type]
+        FakeBackupArchiveStore(),
+        FakeFileStore(),
+    )
+    delete = get_delete_server(request, FakeBackupArchiveStore())  # type: ignore[arg-type]
+
+    assert isinstance(restore.lifecycle_lock, PgLifecycleLock)
+    assert isinstance(delete.lifecycle_lock, PgLifecycleLock)
 
 
 # --- Group file-sync use cases (issue #1222) --------------------------------

@@ -1873,6 +1873,9 @@ class FsStorage(Storage):
                     raise
                 raise RestorePublicationUnknownError(exc, report) from exc
 
+        # The move and flip run under the server lock a prune holds for its whole
+        # run. The lifecycle lock that RestoreBackup and DeleteServer hold keeps a
+        # server delete out of the extraction before it (issue #3904).
         old_snapshot = await self._under_server_lock(
             community_id, server_id, _locked, staging=staging
         )
