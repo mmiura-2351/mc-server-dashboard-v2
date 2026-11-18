@@ -161,7 +161,7 @@ func pollUntil(t *testing.T, timeout time.Duration, what string, cond func() boo
 // process runs on the bare host, which has no access to that resolver, so it
 // reads the IP directly instead). Kept local to this test file rather than
 // added to the production driver, which has no use for it.
-func containerIPAddress(t *testing.T, ctx context.Context, containerName, network string) string {
+func containerIPAddress(ctx context.Context, t *testing.T, containerName, network string) string {
 	t.Helper()
 	// `index` (not dotted field access) because a docker-network name may
 	// contain '-', which Go's text/template parser rejects mid-identifier.
@@ -257,9 +257,9 @@ func TestBedrockTunnelEndToEnd(t *testing.T) {
 			_ = docker.Remove(cleanupCtx, info.ID)
 		}
 	})
-	assertHardenedContainer(t, ctx, containerName)
+	assertHardenedContainer(ctx, t, containerName)
 
-	containerIP := containerIPAddress(t, ctx, containerName, networkName)
+	containerIP := containerIPAddress(ctx, t, containerName, networkName)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mgrCtx, mgrCancel := context.WithCancel(context.Background())
