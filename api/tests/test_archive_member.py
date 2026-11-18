@@ -605,7 +605,8 @@ def test_what_the_walk_reads_between_two_members_is_bounded(
 ) -> None:
     archive = build() + _ZEROS
 
-    with pytest.raises(tarfile.ReadError):
+    # The budget's own refusal, not tarfile's reaction to the reads it clamped.
+    with pytest.raises(tarfile.ReadError, match="headers before a member"):
         _walk(archive, gzipped=gzipped, data=data, cap=len(archive))
 
 
@@ -617,7 +618,7 @@ def test_the_budget_takes_exactly_one_mib_between_two_members(gzipped: bool) -> 
     over_the_budget = _pax_of(_MIB - 1023) + _A + _ZEROS
 
     assert _walk(at_the_budget, gzipped=gzipped)[0] == ["a.txt"]
-    with pytest.raises(tarfile.ReadError):
+    with pytest.raises(tarfile.ReadError, match="headers before a member"):
         _walk(over_the_budget, gzipped=gzipped)
 
 
@@ -627,7 +628,7 @@ def test_an_extended_header_is_read_one_byte_past_the_budget_at_most() -> None:
     source = _Recording(_pax_of(64 * _MIB) + _A + _ZEROS)
     stream = EndCheckedReader(source)
 
-    with pytest.raises(tarfile.ReadError):
+    with pytest.raises(tarfile.ReadError, match="headers before a member"):
         with tarfile.open(fileobj=stream, mode="r:") as tar:
             _names(stream, tar)
     assert source.tell() == _MIB + 1
