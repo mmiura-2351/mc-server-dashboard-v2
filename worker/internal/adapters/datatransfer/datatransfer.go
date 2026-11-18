@@ -396,8 +396,11 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// its joined path (issue #3341): the temp dir's own path can be of any length,
 	// and a member at the snapshot's path limit joined to it is longer than
 	// PATH_MAX.
-	tmpFd, err := unix.Open(tmpDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
+	var tmpFd int
+	if err := ignoringEINTR(func() (err error) {
+		tmpFd, err = unix.Open(tmpDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		return err
+	}); err != nil {
 		return &os.PathError{Op: "open", Path: tmpDir, Err: err}
 	}
 	defer func() { _ = unix.Close(tmpFd) }()
@@ -680,10 +683,26 @@ func fsyncTree(rootFd int, rel string) error {
 	return dir.Sync()
 }
 
+// ignoringEINTR calls fn again for as long as it fails with EINTR, as the os
+// package does around its own system calls, and returns its first other
+// outcome. The hydrate's *at calls go through it, so a scratch filesystem that
+// interrupts them (FUSE, NFS, CIFS) fails a hydrate no more often than the os
+// calls they replaced did.
+func ignoringEINTR(fn func() error) error {
+	for {
+		if err := fn(); !errors.Is(err, unix.EINTR) {
+			return err
+		}
+	}
+}
+
 // openDirAt opens the directory rel below the directory behind rootFd.
 func openDirAt(rootFd int, rel string) (*os.File, error) {
-	fd, err := unix.Openat(rootFd, rel, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
+	var fd int
+	if err := ignoringEINTR(func() (err error) {
+		fd, err = unix.Openat(rootFd, rel, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		return err
+	}); err != nil {
 		return nil, &os.PathError{Op: "openat", Path: rel, Err: err}
 	}
 	return os.NewFile(uintptr(fd), rel), nil
@@ -805,14 +824,10 @@ func writeFile(dirFd int, target string, src io.Reader, mode os.FileMode) error 
 	// unpack target is a brand-new temp tree so no link can pre-exist, but this
 	// keeps the write self-defending against any residual link in the destination.
 	var fd int
-	var err error
-	for {
+	if err := ignoringEINTR(func() (err error) {
 		fd, err = unix.Openat(dirFd, target, unix.O_CREAT|unix.O_TRUNC|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
-		if !errors.Is(err, unix.EINTR) {
-			break
-		}
-	}
-	if err != nil {
+		return err
+	}); err != nil {
 		return &os.PathError{Op: "open", Path: target, Err: err}
 	}
 	out := os.NewFile(uintptr(fd), target)
@@ -848,7 +863,7 @@ func safeRel(name string) (string, error) {
 // rootFd (issue #3341).
 func mkdirAllAt(rootFd int, rel string) error {
 	var st unix.Stat_t
-	if err := unix.Fstatat(rootFd, rel, &st, 0); err == nil {
+	if err := ignoringEINTR(func() error { return unix.Fstatat(rootFd, rel, &st, 0) }); err == nil {
 		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
 			return nil
 		}
@@ -859,10 +874,18 @@ func mkdirAllAt(rootFd int, rel string) error {
 			return err
 		}
 	}
-	if err := unix.Mkdirat(rootFd, rel, 0o750); err != nil && !errors.Is(err, unix.EEXIST) {
-		return &os.PathError{Op: "mkdir", Path: rel, Err: err}
+	err := ignoringEINTR(func() error { return unix.Mkdirat(rootFd, rel, 0o750) })
+	if err == nil {
+		return nil
 	}
-	return nil
+	// As os.MkdirAll does, an existing name is success only when it is a
+	// directory itself, not a link or anything else.
+	if errors.Is(err, unix.EEXIST) &&
+		ignoringEINTR(func() error { return unix.Fstatat(rootFd, rel, &st, unix.AT_SYMLINK_NOFOLLOW) }) == nil &&
+		st.Mode&unix.S_IFMT == unix.S_IFDIR {
+		return nil
+	}
+	return &os.PathError{Op: "mkdir", Path: rel, Err: err}
 }
 
 // The snapshot walk (packTar, walkInto, packDir, packRegular) never resolves a

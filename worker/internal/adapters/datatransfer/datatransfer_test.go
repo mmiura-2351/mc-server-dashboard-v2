@@ -343,6 +343,52 @@ func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
 	}
 }
 
+// A directory member whose name an entry other than a directory already holds
+// fails the unpack, as os.MkdirAll failed it: here a dangling link, which a stat
+// that follows it reports as absent, so the mkdir meets EEXIST.
+func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
+	dest := t.TempDir()
+	if err := os.Symlink(filepath.Join(dest, "nowhere"), filepath.Join(dest, "world")); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unpackTar(&buf, openDirFd(t, dest)); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("unpackTar = %v, want EEXIST for the link at the directory's name", err)
+	}
+}
+
+// ignoringEINTR retries a call the kernel interrupted, as the os package does
+// around its own system calls, and returns any other outcome as it is.
+func TestIgnoringEINTRRetriesOnlyAnInterruptedCall(t *testing.T) {
+	for _, tc := range []struct {
+		results []error
+		want    error
+		calls   int
+	}{
+		{[]error{unix.EINTR, unix.EINTR, nil}, nil, 3},
+		{[]error{unix.EINTR, unix.ENOENT, nil}, unix.ENOENT, 2},
+		{[]error{unix.EEXIST, nil}, unix.EEXIST, 1},
+		{[]error{nil}, nil, 1},
+	} {
+		calls := 0
+		err := ignoringEINTR(func() error {
+			calls++
+			return tc.results[calls-1]
+		})
+		if !errors.Is(err, tc.want) || (tc.want == nil && err != nil) || calls != tc.calls {
+			t.Errorf("results %v: ignoringEINTR = %v after %d calls, want %v after %d", tc.results, err, calls, tc.want, tc.calls)
+		}
+	}
+}
+
 func TestHydrateRejectsSymlinkMember(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
