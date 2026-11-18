@@ -770,7 +770,8 @@ export interface paths {
          *     ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
          *     that does not match, or bytes after the gzip stream that are neither another
-         *     gzip member nor zero padding.
+         *     gzip member nor zero padding. So is a gzip stream of more than 10 000 members
+         *     (issue #3801).
          *
          *     **No directory may stand at the root ``server.properties`` path (issue
          *     #2869).** A restore republishes the archive's members verbatim as the working

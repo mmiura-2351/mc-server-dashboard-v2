@@ -39,6 +39,7 @@ retry.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import gzip
 import hashlib
@@ -156,6 +157,14 @@ _PROPERTIES_REL_PATH = "server.properties"
 # PAX long name compresses to almost nothing, so an unbounded echo would amplify a
 # tiny upload into a huge 422 body.
 _MAX_ECHOED_NAME_CHARS = 256
+
+# The most gzip members an uploaded backup may hold (issue #3801). ``gzip`` pays
+# for each member whatever it holds, so a body of empty ones burns CPU that the
+# decompressed-size cap never counts: about 15 microseconds a member, some 6
+# minutes at the 512 MiB body cap. The backup writer, GNU tar with gzip and pigz
+# each write one member. 10 000 leaves room for concatenated streams and bounds
+# that cost at a fraction of a second.
+MAX_GZIP_MEMBERS = 10_000
 
 
 async def _load(
@@ -1266,6 +1275,14 @@ class UploadBackup:
     :func:`_validate_backup_archive` for why the refusal belongs here rather than
     at restore.
 
+    The validation runs in a worker thread, the default executor ``UploadFile``
+    uses for its own (issue #1620), so it never holds the event loop (issue
+    #3801). The thread reads ``content``, the bytes the route copied out of the
+    request's spooled part, and never the spool, so the spool may close whenever
+    the request ends. A cancelled call stops waiting at once and stores nothing.
+    The thread cannot be stopped: it runs on to its own end, holding ``content``
+    until then, and the caps below bound how long that takes.
+
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
     """
@@ -1276,6 +1293,7 @@ class UploadBackup:
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
     max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES
+    max_gzip_members: int = MAX_GZIP_MEMBERS
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
@@ -1290,10 +1308,15 @@ class UploadBackup:
         # the lock and never extend its hold.
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
-        _validate_backup_archive(
+        # Offloaded to a thread, as UploadFile does (issue #1620): decompression
+        # is CPU-bound up to the decompressed cap, and on the event loop it would
+        # stall every other request on the process (issue #3801).
+        await asyncio.to_thread(
+            _validate_backup_archive,
             content,
             max_entries=self.max_entries,
             max_decompressed_bytes=self.max_decompressed_bytes,
+            max_gzip_members=self.max_gzip_members,
         )
 
         # Hold the per-server lifecycle lock across the server check, the row
@@ -1464,11 +1487,36 @@ async def _chunked(content: bytes) -> AsyncIterator[bytes]:
         yield content[start : start + _UPLOAD_STREAM_CHUNK]
 
 
+class _MemberCappedGzipReader(gzip._GzipReader):
+    """``gzip``'s own reader, refusing a stream of over ``max_members`` members.
+
+    ``gzip.GzipFile`` opened for reading is ``io.BufferedReader(_GzipReader(...))``
+    and nothing more, and ``_read_gzip_header`` runs once for each member it
+    starts. Both names are private to CPython, so this relies on them; in return
+    the stream is read by every rule ``gzip`` reads it by, and only the count is
+    added (issue #3801). The tests that pin the cap fail if either name moves.
+    """
+
+    def __init__(self, fp: IO[bytes], max_members: int) -> None:
+        super().__init__(fp)
+        self._max_members = max_members
+        self._members = 0
+
+    def _read_gzip_header(self) -> bool:
+        if not super()._read_gzip_header():  # type: ignore[misc]
+            return False
+        self._members += 1
+        if self._members > self._max_members:
+            raise InvalidBackupArchiveError("too many gzip members")
+        return True
+
+
 def _validate_backup_archive(
     content: bytes,
     *,
     max_entries: int,
     max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES,
+    max_gzip_members: int = MAX_GZIP_MEMBERS,
 ) -> None:
     """Prove the upload is a traversal-safe, bounded gzip tar before storing (#281).
 
@@ -1499,6 +1547,12 @@ def _validate_backup_archive(
     ISIZE must match, and only another gzip member or zero padding may follow the
     gzip stream. The zeros read there count toward ``max_decompressed_bytes`` too.
 
+    The gzip stream may hold at most ``max_gzip_members`` members (issue #3801):
+    ``gzip`` pays for each member whatever it holds, so a body of empty members
+    would cost minutes of CPU that ``max_decompressed_bytes`` never counts. Zero
+    padding between and after the members is still read the way ``gzip`` reads it,
+    a byte at a time, at about 0.2 s a MiB; only the body cap bounds it.
+
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
     ``arcname=child.name``, and :class:`RestoreBackup` republishes the extraction
@@ -1515,7 +1569,9 @@ def _validate_backup_archive(
 
     try:
         with (
-            gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+            io.BufferedReader(
+                _MemberCappedGzipReader(io.BytesIO(content), max_gzip_members)
+            ) as gz,
             tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tar,
         ):
             count = 0
