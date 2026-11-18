@@ -66,9 +66,10 @@ class OwnerUserNotFoundError(CommunityError):
 class MemberUserNotFoundError(CommunityError):
     """The user named for a manual member-add is not a known user.
 
-    Adding a member validates the user against the :class:`UserDirectory` Port
-    (FR-MEM-1); an unknown user id raises this rather than violating the
-    ``membership.user_id`` foreign key.
+    Adding a member validates the user through the unit of work's
+    :class:`UserExistenceChecker` (FR-MEM-1, issue #3856); an unknown user id or
+    username, or an account a concurrent deletion removed first, raises this
+    rather than violating the ``membership.user_id`` foreign key.
     """
 
 

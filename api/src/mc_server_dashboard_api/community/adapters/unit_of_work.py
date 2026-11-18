@@ -13,9 +13,10 @@ the community resource-grant adapter, and keeps the community *domain* free of a
 other context (ARCHITECTURE.md Section 2.1).
 
 The :class:`UserExistenceChecker` Port is bound the same way, to a query of the
-identity ``user`` table on the same session, so a conferral of community
-ownership validates its recipient inside its own transaction, under the lock an
-account deletion waits for (issue #3217).
+identity ``user`` table on the same session, so a community write on a user -- a
+conferral of community ownership, an insert referencing the user -- validates it
+inside its own transaction, under the lock an account deletion waits for (issues
+#3217, #3856).
 """
 
 from __future__ import annotations

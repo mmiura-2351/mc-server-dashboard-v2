@@ -16,6 +16,8 @@ assume an authorized member and only do the data work.
   (issue #361). Both checks hold their row until commit, in the permission
   ceiling's lock order (#3241): a member removal or server deletion either
   commits before them, failing the check, or waits and cascades to the grant.
+  The recipient's account is held the same way against its deletion, before
+  both (issue #3856).
   The grant's foreign keys to the membership instance (by id) and the server
   back this (issue #3216).
   A duplicate ``(user, resource_type, resource_id)`` surfaces as
@@ -96,7 +98,15 @@ class CreateGrant:
 
         now = self.clock.now()
         async with self.uow:
-            # Hold the recipient's membership (the grant's parent) and the
+            # First, the recipient's account is held against deletion (the
+            # ceiling's lock order, step 0; issue #3856): a deletion either
+            # committed first, and the recipient is not found, or waits for this
+            # commit and cascades the grant. Held after the membership instead,
+            # the deletion's cascade would wait for that membership while the
+            # grant's foreign-key check waits for the deleted user row.
+            if not await self.uow.users.lock_and_check_exists(user_id):
+                raise GrantTargetNotMemberError(str(user_id.value))
+            # Then the recipient's membership (the grant's parent) and the
             # actor's (the ceiling's) before any other lock: the ceiling's lock
             # order (#3241), so a member removal cannot deadlock with this.
             held = await self.uow.memberships.hold_for_users(
