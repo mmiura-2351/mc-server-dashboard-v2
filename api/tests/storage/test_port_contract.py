@@ -2000,6 +2000,29 @@ async def test_backup_within_the_storage_header_limits_is_healthy_and_restores(
     )
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+async def test_a_member_1100_directories_deep_is_healthy_and_restores(
+    harness: StorageHarness,
+) -> None:
+    """A file 1,100 directories deep, with no directory members, is healthy and
+    restores on BOTH backends (issue #3859). The fs restore creates a member's
+    directories one level at a time: ``Path.mkdir(parents=True)`` recursed once
+    for each and raised ``RecursionError``."""
+
+    name = "/".join(["d"] * 1100) + "/f"
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(tar_bytes({name: b"deep"})))
+    )
+
+    assert (await harness.storage.check_backup_health(community, server, key)).healthy
+    await harness.storage.restore_backup(community, server, key)
+    # One file read back, not a hydrate: the fs adapter packs a tree with
+    # ``tarfile``'s recursive ``add``, which cannot pack one this deep either.
+    assert await harness.storage.read_file(community, server, RelPath(name)) == b"deep"
+
+
 # Each a chain of 500 extended headers of one kind before a member.
 _HEADER_CHAINS = archive_cap_shapes.EXTENDED_HEADER_CHAINS
 
@@ -2290,6 +2313,24 @@ async def test_prune_after_restore_still_drops_working_set(
     with pytest.raises(NotFoundError):
         await drain(harness.storage.open_hydrate_source(community, server))
     assert await harness.storage.list_backups(community, server) == [key]
+
+
+async def test_prune_packs_a_final_archive_past_the_cap(
+    backend: str, tmp_path: Path
+) -> None:
+    """The final archive is not held to the backup cap (issue #3859), on BOTH
+    backends: nothing restores or uploads ``final.tar.gz`` again, and refusing it
+    would block the server's delete. A working set whose tar is past the cap is
+    still packed, and the working set is dropped."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=16 * 1024)
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": bytes(32 * 1024)})
+
+    await harness.storage.prune_to_final_snapshot(community, server)
+
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_hydrate_source(community, server))
 
 
 # --- backup transfer: open / put / size (Section 3.3, issue #281) -----------

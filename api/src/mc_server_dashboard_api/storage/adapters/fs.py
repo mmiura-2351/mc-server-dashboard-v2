@@ -4094,9 +4094,10 @@ class _CappedTarGz:
     that would take the tar past ``max_bytes`` is :class:`ArchiveTooLargeError`
     instead. ``None`` writes without a cap.
 
-    Use it as ``with _CappedTarGz(path, max_bytes) as tar``, or call
-    :meth:`close`, which closes :attr:`tar` and then the gzip stream. ``tarfile``
-    leaves a file object it was handed open, so this closes it.
+    Use it as ``with _CappedTarGz(path, max_bytes) as tar``, or close
+    :attr:`tar`, which writes the end-of-archive marker, and then call
+    :meth:`close`. ``tarfile`` leaves a file object it was handed open, so this
+    closes it.
     """
 
     def __init__(self, path: Path, max_bytes: int | None) -> None:
@@ -4110,10 +4111,14 @@ class _CappedTarGz:
             raise
 
     def close(self) -> None:
-        try:
-            self.tar.close()
-        finally:
-            self._gz.close()
+        """Close the gzip stream.
+
+        Without :attr:`tar` closed first, as after a failure, the end-of-archive
+        marker is left out of a spool the caller removes, as ``TarFile`` leaves it
+        out. Written there, it could pass the cap and replace the failure.
+        """
+
+        self._gz.close()
 
     def __enter__(self) -> tarfile.TarFile:
         return self.tar
@@ -4124,12 +4129,11 @@ class _CappedTarGz:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        if exc_type is None:
+        try:
+            if exc_type is None:
+                self.tar.close()
+        finally:
             self.close()
-        else:
-            # As ``TarFile`` leaves it out after a failure: the end-of-archive
-            # marker is not written to a spool the caller removes.
-            self._gz.close()
 
 
 class _CountedWrites(io.RawIOBase):
@@ -4276,14 +4280,14 @@ def _extract_member_capped(
     ``safe`` has passed :func:`_plain_member_filter` already.
     """
 
+    target = dest / safe.name
+    _make_directories(target.parent)
     if not safe.isfile():
         tar.extract(safe, dest, filter="data")
         return total
     handle = tar.extractfile(safe)
     if handle is None:  # pragma: no cover - a file member always yields a handle
         return total
-    target = dest / safe.name
-    target.parent.mkdir(parents=True, exist_ok=True)
     with handle, open(target, "wb") as out:
         while True:
             chunk = handle.read(_CHUNK)
@@ -4296,6 +4300,27 @@ def _extract_member_capped(
     os.chmod(target, safe.mode)
     os.utime(target, (safe.mtime, safe.mtime))
     return total
+
+
+def _make_directories(directory: Path) -> None:
+    """``directory.mkdir(parents=True, exist_ok=True)``, one level at a time.
+
+    ``Path.mkdir`` and ``os.makedirs`` recurse once for each missing directory,
+    so a member about 1,000 directories deep raised ``RecursionError`` (issue
+    #3859), which the restore walk reports as an archive that does not read.
+    """
+
+    pending = [directory]
+    while pending:
+        try:
+            pending[-1].mkdir()
+        except FileNotFoundError:
+            pending.append(pending[-1].parent)  # its parent first
+            continue
+        except OSError:
+            if not pending[-1].is_dir():
+                raise
+        pending.pop()
 
 
 def _drain_member_capped(
