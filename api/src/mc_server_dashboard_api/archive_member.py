@@ -16,8 +16,8 @@ through it.
 
 So does what a walk may decompress (issue #3810): :class:`CappedReader`, beneath
 :class:`EndCheckedReader`, counts every byte the walk takes from the stream
-toward a cap and refuses a walk that seeks back, and :class:`EndCheckedReader`
-bounds what the walk reads between two members.
+toward a cap, and :class:`EndCheckedReader` holds the upload gates' walks to
+header limits.
 """
 
 from __future__ import annotations
@@ -34,14 +34,14 @@ _END_BLOCK = bytes(512)
 # or first the one byte tarfile reads where it seeks to the next header.
 _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 
-# How much the walk may read between handing out one member and the next: that
-# member's header blocks and extended headers (PAX records, GNU long names and
-# links, sparse maps). tarfile holds extended-header data whole, so this bounds
-# what it holds of it at a time (issue #3810). Real extended headers are long
-# names, xattrs and ACLs: kilobytes.
+# The header limits, for a walk that opts in (issue #3810). How much the walk may
+# read between handing out one member and the next: that member's header blocks
+# and extended headers (PAX records, GNU long names and links, sparse maps).
+# tarfile holds extended-header data whole, so this bounds what it holds of it at
+# a time. Real extended headers are long names, xattrs and ACLs: kilobytes.
 _BETWEEN_MEMBERS_BYTES = 1024 * 1024
 
-# What the members a walk hands out may hold (issue #3810). tarfile keeps every
+# What the members a walk hands out may hold. tarfile keeps every
 # member, each with a copy of the global PAX records dict, so a member may hold
 # at most this many PAX records, global and its own...
 _PAX_RECORDS_PER_MEMBER = 32
@@ -63,7 +63,9 @@ _SKIP_CHUNK_BYTES = 1024 * 1024
 
 
 class HeaderLimitError(tarfile.ReadError):
-    """A walk read or kept more header than :class:`EndCheckedReader` allows.
+    """A walk read or kept more header than its header limits allow.
+
+    The limits hold only a walk whose :class:`EndCheckedReader` opts in.
 
     More than 1 MiB of headers between two members, a member with more than 32
     PAX records, or more than 8 Mi characters held by the members handed out
@@ -153,6 +155,9 @@ class EndCheckedReader(io.RawIOBase):
       the header after it) makes the count too large;
     - a stream that ends where a header should start, or partway through one.
 
+    The walk is forward only (issue #3798): a seek back, or one other than from
+    the start of the stream, is a ``ReadError`` (see :meth:`seek`).
+
     One zero block is enough, though the format writes two: nothing is lost after
     it. The check relies on ``tarfile`` reading the block it stops at with one
     512-byte ``read``. Read any other way, the count or the last read differs and
@@ -160,23 +165,31 @@ class EndCheckedReader(io.RawIOBase):
     ``r|`` ``tarfile`` reads the file in whole records, so where its walk stopped
     cannot be seen from here.
 
-    The same count bounds what the walk reads between handing out one member and
-    the next to 1 MiB (issue #3810): the next member's header blocks and extended
-    headers, which ``tarfile`` holds whole. A read then asks the stream for at
-    most one byte past that, and going past it is a ``ReadError``. The caller's
-    reads of member data are not held to it.
+    With ``header_limits`` the walk is also held to header limits (issue #3810).
+    The upload gates set it; their entry cap is what keeps the character limit
+    below out of a real archive's reach. The storage walks leave it off: they
+    have no entry cap, and a large working set would reach that limit.
 
-    ``tarfile`` also keeps every member it hands out, with its name, its link
-    name and a copy of the global PAX records, so :meth:`members` bounds what
-    they hold: at most 32 PAX records in a member, global and its own, and at
-    most 8 Mi characters of names, link names, PAX keys and PAX values in all.
-    The budget and both bounds refuse with :class:`HeaderLimitError`. They leave
-    a sparse member's map out (issue #3869).
+    - The same count bounds what the walk reads between handing out one member
+      and the next to 1 MiB: the next member's header blocks and extended
+      headers, which ``tarfile`` holds whole. A read then asks the stream for at
+      most one byte past that. The caller's reads of member data are not held to
+      it.
+    - ``tarfile`` also keeps every member it hands out, with its name, its link
+      name and a copy of the global PAX records, so :meth:`members` bounds what
+      they hold: at most 32 PAX records in a member, global and its own, and at
+      most 8 Mi characters of names, link names, PAX keys and PAX values in all.
+      Neither bound sees a sparse member's map (issue #3869).
+
+    Going past any of them is :class:`HeaderLimitError`.
     """
 
-    def __init__(self, stream: io.BufferedIOBase) -> None:
+    def __init__(
+        self, stream: io.BufferedIOBase, *, header_limits: bool = False
+    ) -> None:
         super().__init__()
         self._stream = stream
+        self._header_limits = header_limits
         self._last_read = b""
         self._read_since_member = 0
         # Whether the walk, rather than the caller, is reading: from the start
@@ -189,19 +202,21 @@ class EndCheckedReader(io.RawIOBase):
     def seekable(self) -> bool:
         """``True`` whatever the stream: ``tarfile`` seeks in ``r:``.
 
-        Not a promise about the stream. ``gzip.GzipFile`` seeks forward over any
-        source by decompressing on, and seeks back by starting over.
+        Forward only, from the start of the stream (:meth:`seek`). Not a promise
+        about the stream: ``gzip.GzipFile`` seeks forward over any source by
+        decompressing on.
         """
 
         return True
 
     def read(self, size: int = -1, /) -> bytes:
-        if self._walking:
+        budgeted = self._header_limits and self._walking
+        if budgeted:
             allowed = _BETWEEN_MEMBERS_BYTES + 1 - self._read_since_member
             size = allowed if size < 0 else min(size, allowed)
         self._last_read = self._stream.read(size)
         self._read_since_member += len(self._last_read)
-        if self._walking and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
+        if budgeted and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
             raise HeaderLimitError(
                 f"more than {_BETWEEN_MEMBERS_BYTES} bytes of headers before a member"
             )
@@ -212,10 +227,13 @@ class EndCheckedReader(io.RawIOBase):
 
         ``tarfile`` seeks back only when a member's data read ran on past where
         the next header starts, such as a GNU sparse map that takes more data than
-        the member stores. It seeks with ``SEEK_SET`` only.
+        the member stores. It seeks with ``SEEK_SET`` only, so any other ``whence``
+        is a ``ReadError`` too.
         """
 
-        if whence != io.SEEK_SET or offset < self._stream.tell():
+        if whence != io.SEEK_SET:
+            raise tarfile.ReadError("a seek other than from the start of the stream")
+        if offset < self._stream.tell():
             raise tarfile.ReadError("a member's data runs past the member")
         return self._stream.seek(offset)
 
@@ -227,28 +245,31 @@ class EndCheckedReader(io.RawIOBase):
 
         The count of what the walk reads starts over each time the walk resumes
         after a member, which is after the caller has read that member's data.
-        Only the walk's own reads are held to the budget between two members.
-        Each member is held to what members may hold before it is handed out.
+        With header limits, only the walk's own reads are held to the budget
+        between two members, and each member is held to what members may hold
+        before it is handed out.
         """
 
         held = 0
         for member in tar:
-            if len(member.pax_headers) > _PAX_RECORDS_PER_MEMBER:
-                raise HeaderLimitError(
-                    f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
+            if self._header_limits:
+                if len(member.pax_headers) > _PAX_RECORDS_PER_MEMBER:
+                    raise HeaderLimitError(
+                        f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
+                    )
+                held += (
+                    len(member.name)
+                    + len(member.linkname)
+                    + sum(
+                        len(key) + len(value)
+                        for key, value in member.pax_headers.items()
+                    )
                 )
-            held += (
-                len(member.name)
-                + len(member.linkname)
-                + sum(
-                    len(key) + len(value) for key, value in member.pax_headers.items()
-                )
-            )
-            if held > _HELD_CHARACTERS:
-                raise HeaderLimitError(
-                    f"more than {_HELD_CHARACTERS} characters of names, link names"
-                    " and PAX records"
-                )
+                if held > _HELD_CHARACTERS:
+                    raise HeaderLimitError(
+                        f"more than {_HELD_CHARACTERS} characters of names, link"
+                        " names and PAX records"
+                    )
             self._walking = False
             yield member
             self._read_since_member = 0
@@ -304,8 +325,9 @@ class CappedReader(io.BufferedIOBase):
 
     A seek forward reads on and drops what it read, so what ``tarfile`` skips is
     counted as it is decompressed. The stream itself is never seeked. A seek back
-    is a ``ReadError``: over ``gzip.GzipFile`` it would decompress the stream
-    again from its start. ``tarfile`` in ``r:`` made none walking any of 43
+    is a ``ReadError``: it cannot take back what it counted. Under
+    :class:`EndCheckedReader`, which refuses a seek back first (issue #3798), a
+    walk never asks for one. ``tarfile`` in ``r:`` made none walking any of 43
     producers' archives (GNU tar, BusyBox, Go, ``git archive``, Python
     ``tarfile``), with member data read, skipped or partly read. A sparse
     member whose map reaches past its stored data makes one.

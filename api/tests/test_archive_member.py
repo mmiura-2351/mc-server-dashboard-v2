@@ -103,19 +103,28 @@ def _by_gnu_tar(*options: str) -> Callable[[Path], bytes]:
 
 
 def _walk(
-    archive: bytes, *, gzipped: bool, data: str = "read", cap: int | None = None
+    archive: bytes,
+    *,
+    gzipped: bool,
+    data: str = "read",
+    cap: int | None = None,
+    header_limits: bool = False,
 ) -> tuple[list[str], int]:
     """The member names, and the bytes read past the end-of-archive marker.
 
     ``data`` is how much of each member's data the caller reads: all of it
     (``read``), none, so ``tarfile`` seeks over it (``skipped``), or one byte
     (``partly``). With a ``cap``, the stream is read through a
-    :class:`CappedReader`, as the upload gates read it.
+    :class:`CappedReader`, and with ``header_limits`` the walk is held to them,
+    as the upload gates read it.
     """
 
     body = io.BytesIO(gzip.compress(archive) if gzipped else archive)
     source = gzip.GzipFile(fileobj=body) if gzipped else body
-    stream = EndCheckedReader(source if cap is None else CappedReader(source, cap))
+    stream = EndCheckedReader(
+        source if cap is None else CappedReader(source, cap),
+        header_limits=header_limits,
+    )
     names: list[str] = []
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         for member in stream.members(tar):
@@ -191,15 +200,20 @@ _ACCEPTED: list[object] = [
 
 @_both
 @_each_data_read
+@pytest.mark.parametrize("header_limits", [False, True], ids=["storage", "upload"])
 @pytest.mark.parametrize(("produce", "names"), _ACCEPTED)
 def test_an_archive_that_ends_at_its_marker_reads_whole(
     produce: Callable[[Path], bytes],
     names: list[str],
     gzipped: bool,
     data: str,
+    header_limits: bool,
     tmp_path: Path,
 ) -> None:
-    walk = _walk(produce(tmp_path), gzipped=gzipped, data=data)
+    # The storage walks and the upload gates (with the header limits) alike.
+    walk = _walk(
+        produce(tmp_path), gzipped=gzipped, data=data, header_limits=header_limits
+    )
 
     assert walk[0] == names
 
@@ -500,22 +514,33 @@ def test_every_byte_of_the_stream_counts_toward_the_cap(
     # takes the archive and one byte less refuses it.
     archive = produce(tmp_path)
 
-    assert _walk(archive, gzipped=gzipped, data=data, cap=len(archive))[0] == names
+    def walk(cap: int) -> list[str]:
+        walked, _ = _walk(
+            archive, gzipped=gzipped, data=data, cap=cap, header_limits=True
+        )
+        return walked
+
+    assert walk(len(archive)) == names
     with pytest.raises(CapExceededError):
-        _walk(archive, gzipped=gzipped, data=data, cap=len(archive) - 1)
+        walk(len(archive) - 1)
 
 
-@_both
-@pytest.mark.parametrize("data", ["read", "partly"])
-def test_a_walk_that_seeks_back_is_refused(gzipped: bool, data: str) -> None:
-    # An old-GNU sparse member that stores nothing but maps 512 bytes: its data is
-    # read from the next header on, and the walk then seeks back to that header.
-    # Over ``GzipFile`` a seek back decompresses the stream again from its start.
-    archive = _A + _header("s.bin", typ=b"S", sparse=((0, 512),), realsize=512) + _A
-    archive += _ZEROS
+def test_a_capped_reader_refuses_a_seek_back() -> None:
+    # It cannot take back what it counted. Under EndCheckedReader, which refuses a
+    # seek back first (issue #3798), a walk never asks it to.
+    reader = CappedReader(io.BytesIO(bytes(4096)), 4096)
+    reader.read(1024)
 
-    with pytest.raises(tarfile.ReadError):
-        _walk(archive, gzipped=gzipped, data=data, cap=len(archive))
+    with pytest.raises(tarfile.ReadError, match="seeks back"):
+        reader.seek(512)
+
+
+def test_a_seek_other_than_from_the_start_is_refused() -> None:
+    # tarfile seeks with SEEK_SET only (issue #3798).
+    stream = EndCheckedReader(io.BytesIO(bytes(4096)))
+
+    with pytest.raises(tarfile.ReadError, match="other than from the start"):
+        stream.seek(0, io.SEEK_CUR)
 
 
 @pytest.mark.parametrize("size", [-1, 4096])
@@ -608,7 +633,9 @@ def test_what_the_walk_reads_between_two_members_is_bounded(
 
     # The budget's own refusal, not tarfile's reaction to the reads it clamped.
     with pytest.raises(HeaderLimitError, match="headers before a member"):
-        _walk(archive, gzipped=gzipped, data=data, cap=len(archive))
+        _walk(archive, gzipped=gzipped, data=data, cap=len(archive), header_limits=True)
+    # Without the header limits, as the storage walks read it, it is taken.
+    assert _walk(archive, gzipped=gzipped, data=data, cap=len(archive))[0]
 
 
 @_both
@@ -618,16 +645,16 @@ def test_the_budget_takes_exactly_one_mib_between_two_members(gzipped: bool) -> 
     # One byte more PAX data is one more block.
     over_the_budget = _pax_of(_MIB - 1023) + _A + _ZEROS
 
-    assert _walk(at_the_budget, gzipped=gzipped)[0] == ["a.txt"]
+    assert _walk(at_the_budget, gzipped=gzipped, header_limits=True)[0] == ["a.txt"]
     with pytest.raises(HeaderLimitError, match="headers before a member"):
-        _walk(over_the_budget, gzipped=gzipped)
+        _walk(over_the_budget, gzipped=gzipped, header_limits=True)
 
 
 def test_an_extended_header_is_read_one_byte_past_the_budget_at_most() -> None:
     # The header claims 64 MiB of PAX data: tarfile asks for it in one read
     # before 3.13.15 and in 1 MiB parts after.
     source = _Recording(_pax_of(64 * _MIB) + _A + _ZEROS)
-    stream = EndCheckedReader(source)
+    stream = EndCheckedReader(source, header_limits=True)
 
     with pytest.raises(HeaderLimitError, match="headers before a member"):
         with tarfile.open(fileobj=stream, mode="r:") as tar:
@@ -694,9 +721,11 @@ def test_a_member_holds_at_most_32_pax_records(
 ) -> None:
     if refused:
         with pytest.raises(HeaderLimitError, match="PAX records"):
-            _walk(archive, gzipped=gzipped)
+            _walk(archive, gzipped=gzipped, header_limits=True)
     else:
-        assert _walk(archive, gzipped=gzipped)[0]
+        assert _walk(archive, gzipped=gzipped, header_limits=True)[0]
+    # Without the header limits, as the storage walks read it, it is taken.
+    assert _walk(archive, gzipped=gzipped)[0]
 
 
 def _held_by_values(extra: int) -> bytes:
@@ -774,9 +803,11 @@ def test_the_members_hold_at_most_8_mi_characters_of_names_and_pax_records(
     archive = build()
     if refused:
         with pytest.raises(HeaderLimitError, match="characters of names"):
-            _walk(archive, gzipped=gzipped)
+            _walk(archive, gzipped=gzipped, header_limits=True)
     else:
-        assert len(_walk(archive, gzipped=gzipped)[0]) >= 16
+        assert len(_walk(archive, gzipped=gzipped, header_limits=True)[0]) >= 16
+    # Without the header limits, as the storage walks read it, it is taken.
+    assert len(_walk(archive, gzipped=gzipped)[0]) >= 16
 
 
 @pytest.mark.parametrize(
@@ -797,7 +828,7 @@ def test_a_member_is_checked_before_it_is_handed_out(
 ) -> None:
     # The member over a bound is refused before the caller gets it, so the
     # caller never reads its data.
-    stream = EndCheckedReader(io.BytesIO(build()))
+    stream = EndCheckedReader(io.BytesIO(build()), header_limits=True)
     names: list[str] = []
 
     with pytest.raises(HeaderLimitError):

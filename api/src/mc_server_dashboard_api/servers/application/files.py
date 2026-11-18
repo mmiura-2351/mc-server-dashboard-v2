@@ -1008,7 +1008,11 @@ def _tar_gz_entries(
     with (
         gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
         tarfile.open(
-            fileobj=(stream := EndCheckedReader(CappedReader(gz, max_bytes))),
+            fileobj=(
+                stream := EndCheckedReader(
+                    CappedReader(gz, max_bytes), header_limits=True
+                )
+            ),
             mode="r:",
         ) as tf,
     ):
