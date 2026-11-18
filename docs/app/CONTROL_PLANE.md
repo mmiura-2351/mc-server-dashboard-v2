@@ -730,13 +730,16 @@ Notes:
   From then on the instance's working set is the server's: its snapshots,
   including the final one of a stop, publish it over the store. An at-rest
   file edit or a backup restore made while the instance ran under a record
-  that did not name its Worker is therefore overwritten (owner decision #3889).
+  that did not name its Worker is therefore overwritten. The decision is
+  tracked in issue #3889 (option A applied).
   The player files that operator and whitelist groups manage are the
   exception: the start regenerated them into the store before the hydrate was
   refused, so in the same write that records `observed=running` the API owes
   every group-managed file again. The next start after a stop regenerates them
   over what the instance published. A file no group manages is left as the
-  instance has it.
+  instance has it. So is one whose last group was detached or deleted, if an
+  earlier start that never launched already cleared the mark that change left:
+  nothing owes that file any more.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

@@ -641,7 +641,7 @@ class StartServer:
             await self._record_running(server, worker_id, owe_again=owed_group_files)
             _LOG.warning(
                 "worker %s refused the hydrate for server %s because it already "
-                "runs an instance of it; keeping the server on that Worker",
+                "runs an instance of it; this start does not give that Worker back",
                 worker_id.value,
                 server_id.value,
             )
@@ -835,8 +835,8 @@ class StartServer:
                 )
                 _LOG.warning(
                     "worker %s refused the hydrate for server %s because it "
-                    "already runs an instance of it; keeping the server on that "
-                    "Worker",
+                    "already runs an instance of it; this placement does not give "
+                    "that Worker back",
                     worker_id.value,
                     server_id.value,
                 )
@@ -1230,7 +1230,10 @@ class StartServer:
         again in this same transaction: the marks the start cleared, and every
         file a group manages, since an earlier start that never launched on this
         Worker may have cleared a mark the instance never applied. A file no group
-        manages is left as the game left it.
+        manages is left as the game left it. That includes one whose last group
+        was detached or deleted, if an earlier start that never launched cleared
+        the mark that change left: nothing owes it any more, so the instance's
+        copy stays.
         """
 
         observed_at = self.clock.now()
