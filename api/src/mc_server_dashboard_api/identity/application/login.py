@@ -106,8 +106,9 @@ class DummyPasswordHash:
     configured :class:`PasswordHasher`: off the event loop, and with a hasher
     failure raised as :class:`PasswordVerificationUnavailableError` (a 503).
     Every later login reuses it. A failed build is not kept, so the next login
-    tries again (#3832). One instance serves every login of the process, and its
-    lock makes concurrent first logins share one build.
+    tries again (#3832). One instance serves every login of a process that runs
+    one event loop, as under uvicorn: its lock binds to the loop of its first
+    contended use, and makes concurrent first logins share one build.
     """
 
     def __init__(self, hasher: PasswordHasher, plaintext: str) -> None:

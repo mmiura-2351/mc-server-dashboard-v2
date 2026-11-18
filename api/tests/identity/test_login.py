@@ -541,7 +541,8 @@ async def test_failures_across_casing_variants_aggregate_and_lock() -> None:
 
 async def test_unknown_user_and_wrong_password_both_verify() -> None:
     # Both failure paths must invoke the hasher so neither is faster (timing
-    # enumeration defence). The unknown-user path verifies the dummy hash.
+    # enumeration defence). The unknown-user path verifies the dummy hash: a
+    # real hasher refuses any other string without doing the KDF work.
     user = make_user(username="alice", password=_PASSWORD)
 
     def build(hasher: StubHasher, uow: FakeUnitOfWork) -> Login:
@@ -569,8 +570,8 @@ async def test_unknown_user_and_wrong_password_both_verify() -> None:
             username="ghost", password=_PASSWORD
         )
 
-    assert wrong_hasher.verify_calls == 1
-    assert unknown_hasher.verify_calls == 1
+    assert wrong_hasher.verified == [("wrong", user.password_hash)]
+    assert unknown_hasher.verified == [(_PASSWORD, "hashed::__dummy__")]
 
 
 async def test_locked_account_raises_with_retry_after_seconds() -> None:

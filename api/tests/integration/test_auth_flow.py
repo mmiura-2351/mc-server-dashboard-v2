@@ -60,7 +60,8 @@ pytestmark = pytest.mark.skipif(
 _PASSWORD = "Wm7!qz#Lp2vT"
 _REFRESH_TTL = dt.timedelta(days=14)
 _REUSE_GRACE = dt.timedelta(seconds=60)
-# Static dummy hash for the unknown-user verify path (login timing equalization).
+# The unknown-user verify path's dummy hash (login timing equalization): built
+# by the module's first login, then shared by its later ones.
 _DUMMY_HASH = DummyPasswordHash(Argon2PasswordHasher(), "dummy")
 
 
