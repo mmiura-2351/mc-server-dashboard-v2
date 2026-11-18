@@ -202,7 +202,7 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 	if !firstInfo.Running {
 		t.Fatalf("container %s not running after StartServer", name)
 	}
-	assertHardenedContainer(t, ctx, name)
+	assertHardenedContainer(ctx, t, name)
 
 	// Restart through the worker's command path. This is the race: Stop triggers
 	// the async removal of firstInfo's container while Start re-creates the same
@@ -245,7 +245,7 @@ func TestContainerRestartRecreatesContainer(t *testing.T) {
 // (issue #3343), the task limit, a read-only root filesystem and the tmpfs /tmp
 // (issue #3369). It shells out to `docker inspect` because the driver's own
 // Inspect reads only what the driver needs.
-func assertHardenedContainer(t *testing.T, ctx context.Context, containerName string) {
+func assertHardenedContainer(ctx context.Context, t *testing.T, containerName string) {
 	t.Helper()
 	const format = `{{json .HostConfig.CapDrop}} {{json .HostConfig.CapAdd}} {{json .HostConfig.SecurityOpt}} {{.HostConfig.Privileged}} ` +
 		`{{.HostConfig.PidsLimit}} {{.HostConfig.ReadonlyRootfs}} {{json .HostConfig.Tmpfs}}`
