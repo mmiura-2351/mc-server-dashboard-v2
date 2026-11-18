@@ -48,13 +48,18 @@ func TestASnapshotWhoseSessionEndsIsReportedAsCancelled(t *testing.T) {
 
 			done := make(chan session.CommandResult, 1)
 			go func() { done <- m.Handle(sessionCtx, snapshotCmd()) }()
-			if !tc.workAnswersFirst {
+			var res session.CommandResult
+			if tc.workAnswersFirst {
+				// Nothing is held: the answer waits on every phase's filesystem work.
+				res = awaitCompleted(t, done)
+			} else {
 				awaitEnter(t, st.entered)
 				endSession()
+				res = awaitAnswer(t, done)
 			}
-			res := awaitAnswer(t, done)
 			st.unblock()
-			awaitFinished(t, exited, 10*time.Second)
+			// The released transfer still lists the working dir (hasWorkingSet).
+			awaitFinished(t, exited, 120*time.Second)
 
 			if res.Success || !strings.Contains(res.ErrorMessage, "cancelled") || strings.Contains(res.ErrorMessage, "deadline") {
 				t.Fatalf("SnapshotTrigger whose session ended = %+v, want it reported as cancelled", res)

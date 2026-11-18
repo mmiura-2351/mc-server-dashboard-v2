@@ -3,7 +3,10 @@ package datatransfer
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,6 +168,34 @@ func TestPackStopsWithinOneCopyBufferOfALargeFile(t *testing.T) {
 	}
 	if w.n >= 5*buffer {
 		t.Fatalf("the archive holds %d bytes: the copy ran on after the context ended", w.n)
+	}
+}
+
+// A snapshot whose context ends during the upload leaves no spool behind (issue
+// #3340): the upload is aborted and the spool removed, as on any failed upload.
+func TestSnapshotCancelledDuringTheUploadRemovesTheSpool(t *testing.T) {
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(srcDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "level.dat"), []byte("level"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		cancel()
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done() // the Worker drops the request
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.Client()).Snapshot(ctx, srv.URL, "tok", srcDir, 0, ""); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Snapshot err = %v, want context.Canceled", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(scratch, snapshotSpoolPrefix+"*.tar")); len(left) != 0 {
+		t.Fatalf("spools left in the scratch root: %v", left)
 	}
 }
 

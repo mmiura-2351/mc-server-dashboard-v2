@@ -1896,9 +1896,9 @@ as a plain tar only, so a gzip, bzip2 or xz body, sound or not, is refused as
 `422 invalid_archive` (issue #3786). The Worker's pack writes plain tar. It
 refuses a member whose path below the working-set root is longer than 4095 bytes
 (`PATH_MAX` − 1), whatever the Worker's data root, and the hydrate creates each
-member relative to the directory it unpacks into. A member that packs on one
-Worker therefore restores on any other, however long its data root (issue
-#3341). The member walk must end at the tar end-of-archive marker with only zeros after it,
+member relative to the directory it unpacks into. On the Worker side, then, no
+data root's length counts against a member: one that packs on one Worker unpacks
+on any other (issue #3341). The member walk must end at the tar end-of-archive marker with only zeros after it,
 and must not seek back, or the body is `422 invalid_archive` too (issue #3798):
 a header past the first that does not read would otherwise end the walk and
 publish the members before it alone, and a member whose data runs past its last

@@ -110,14 +110,20 @@ func longDir(t *testing.T, n int) string {
 
 // A member at the limit packs from a short data root and is restored under a
 // destination root far longer than the source's: the joined path is longer than
-// PATH_MAX, and the hydrate does not depend on it.
+// PATH_MAX, and the hydrate does not depend on it. That holds for a file and for
+// a directory, whose member name carries one byte more, its trailing slash.
 func TestASnapshotMemberAtThePathLimitRestoresUnderALongerRoot(t *testing.T) {
 	rel := pathOfLength(unix.PathMax - 1)
+	dirRel := rel[:len(rel)-1] + "g" // a sibling of the file, as long
 	srcDir := filepath.Join(t.TempDir(), "server")
 	if err := os.Mkdir(srcDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 	createAt(t, srcDir, rel, "deep")
+	parentFd, name := dirAt(t, srcDir, dirRel, false)
+	if err := unix.Mkdirat(parentFd, name, 0o750); err != nil {
+		t.Fatal(err)
+	}
 
 	spoolPath, cleanup, err := New(nil).PackSnapshot(context.Background(), srcDir)
 	if err != nil {
@@ -136,6 +142,11 @@ func TestASnapshotMemberAtThePathLimitRestoresUnderALongerRoot(t *testing.T) {
 	}
 	if got := readAt(t, destDir, rel); got != "deep" {
 		t.Fatalf("the restored member reads %q, want %q", got, "deep")
+	}
+	parentFd, name = dirAt(t, destDir, dirRel, false)
+	var st unix.Stat_t
+	if err := unix.Fstatat(parentFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		t.Fatalf("the directory at the limit was not restored as one: mode %o, %v", st.Mode, err)
 	}
 }
 

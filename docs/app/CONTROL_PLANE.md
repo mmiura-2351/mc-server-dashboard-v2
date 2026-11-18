@@ -949,7 +949,7 @@ A session that ends first, with a stream drop or a Worker shutdown, ends the
 command the same way, and its work stops just as it does at the deadline. That
 is a cancellation, not a failed snapshot (issue #3340): the session sends nothing
 once it has ended, and the API has already failed the command with the rest of
-that session's in-flight commands (Section 4.4). The Worker logs it at INFO as
+that session's in-flight commands (Section 4.4). The Worker reports it as
 cancelled, not as abandoned at its deadline.
 
 On the deadline the command answers `TRANSFER_FAILED`, with one exception. The
