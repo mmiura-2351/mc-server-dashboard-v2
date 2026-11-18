@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { en } from "../i18n/en.ts";
+import { ja } from "../i18n/ja.ts";
 import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
 
 describe("lifecycleErrorMessage", () => {
@@ -293,23 +294,80 @@ describe("lifecycleErrorMessage", () => {
     },
   );
 
-  // Moving a server off a lost Worker starts it elsewhere, and nothing fences
-  // an instance still alive on the old host, so the offline copy names the
-  // precondition CONFIGURATION.md 5.6 sets (issue #3820).
+  // What the copy promises is the contract for these messages, so each claim
+  // is pinned in both locales (issue #3820):
+  // - an offline stop holds only until the release, which stops nothing on the
+  //   host, so only a host back before then gets the stop;
+  // - an offline restart is never re-sent;
+  // - moving the server is safe only once the old host is down, since nothing
+  //   fences an instance still alive there (CONFIGURATION.md 5.6);
+  // - the reconciler restarts a server that stays down only while its Worker
+  //   is connected.
+  const dictionaries = { en, ja };
   it.each([
-    "dashboard.lifecycle.stopWorkerOffline",
-    "dashboard.lifecycle.restartWorkerOffline",
-  ] as const)("%s moves the server only once the old host is down", (key) => {
-    expect(en[key]).toMatch(/only once you know the old host is down/i);
+    [
+      "en",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /released from that host after a while; if the host comes back before then, the server is stopped there/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /しばらくするとサーバーはこのホストから切り離されます。それまでにホストが戻れば、サーバーはそこで停止されます/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /Restart it again once the host is back/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /ホストが戻ったら、もう一度再起動してください/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /only once you know the old host is down/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /only once you know the old host is down/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /元のホストが確実に停止していると分かってから/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /元のホストが確実に停止していると分かってから/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.restartUnconfirmed",
+      /if it stays down, .*as long as the host stays connected/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.restartUnconfirmed",
+      /停止したままの場合は、ホストとの接続が続いている限り/,
+    ],
+  ] as const)("%s %s states its condition", (locale, key, claim) => {
+    expect(dictionaries[locale][key]).toMatch(claim);
   });
 
-  // The reconciler restarts a server that stays down only while its Worker is
-  // connected, so the unconfirmed-restart copy must not promise more (issue
-  // #3820).
-  it("conditions the unconfirmed-restart promise on a connected host", () => {
-    expect(en["dashboard.lifecycle.restartUnconfirmed"]).toMatch(
-      /if it stays down.*connected/i,
-    );
+  // The steps and the precondition are inline because a member who can stop a
+  // server may have no access to the repository docs (issue #3820).
+  it.each([
+    ["en", "dashboard.lifecycle.stopWorkerOffline"],
+    ["en", "dashboard.lifecycle.restartWorkerOffline"],
+    ["ja", "dashboard.lifecycle.stopWorkerOffline"],
+    ["ja", "dashboard.lifecycle.restartWorkerOffline"],
+  ] as const)("%s %s points to no repository doc", (locale, key) => {
+    expect(dictionaries[locale][key]).not.toMatch(/CONFIGURATION\.md/);
   });
 
   // Start and the verb-agnostic call keep their message for an offline Worker:

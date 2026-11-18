@@ -330,23 +330,29 @@ const VERB_SPECIFIC_503_MESSAGE: Record<
 
 // Consulted before VERB_SPECIFIC_503_MESSAGE when the API names the Worker
 // `not_connected` (the `worker_state` member of a lifecycle 503, issue #3820):
-// not connected at dispatch, or its session ended while the command waited. The
-// unconfirmed messages fit a Worker that is connected and may still finish the
-// command. A Worker that is not connected gets no automatic recovery: the
-// reconciler skips its servers until it returns, and nothing moves them on its
-// own (CONFIGURATION.md 5.6, "A Worker that never reconnects").
+// not connected at dispatch, or its session ended while the command waited (a
+// fast reconnect retires the old session's commands the same way, so the Worker
+// may in fact be back; the recovery below still holds). The unconfirmed
+// messages fit a Worker that is connected and may still finish the command. A
+// Worker that is not connected gets no automatic recovery: the reconciler skips
+// its servers until it returns, and nothing moves them on its own
+// (CONFIGURATION.md 5.6, "A Worker that never reconnects").
 //
 // - stop    — the intent stands, as above, but nothing is re-sent while the
 //             Worker is gone. The reconciler releases the server from it once
 //             its grace lapses, or a second stop does at once, and a start then
-//             places it on another Worker.
-// - restart — desired stays running, and the server stays as it is until its
-//             Worker returns or the operator moves it (stop, stop again, start).
+//             places it on another Worker. A Worker back before the release
+//             gets the stop; one back after it keeps its instance, and nothing
+//             stops it.
+// - restart — desired stays running, but an undelivered restart is never
+//             re-sent, so the operator restarts it once the Worker is back, or
+//             moves it (stop, stop again, start).
 //
 // Both say moving is safe only once the old host is known to be down: the
 // release stops nothing there, so an instance still alive on it would run
-// beside the new one, and nothing fences it. Start is absent for the reason
-// given above. `no_answer`, and no member at all (the Worker's own UNAVAILABLE
+// beside the new one, and nothing fences it. The copy carries the steps and
+// that precondition itself rather than pointing to the docs, which not every
+// member can read. Start is absent for the reason given above. `no_answer`, and no member at all (the Worker's own UNAVAILABLE
 // answer, or a cause the API cannot name), keep the unconfirmed messages.
 const WORKER_NOT_CONNECTED_503_MESSAGE: Record<
   string,

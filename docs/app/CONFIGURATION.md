@@ -450,9 +450,9 @@ for the server once that Worker no longer owns it (issue #3809).
    `worker_state: "not_connected"` ([`AUTH_API.md`](AUTH_API.md) Section 2),
    because there is no Worker to send it to, but the stop intent stands:
    `StopServer` commits `desired=stopped` before it dispatches and reverts
-   nothing on a failed dispatch. The server is then released from the Worker with no final
-   snapshot, by the reconciler once `grace_seconds` lapses, or at once by a
-   second `stop` (for a stopped intent whose Worker is disconnected,
+   nothing on a failed dispatch. The server is then released from the Worker
+   with no final snapshot, by the reconciler once `grace_seconds` lapses, or at
+   once by a second `stop` (for a stopped intent whose Worker is disconnected,
    `stopped_intent_action` selects `clear_stale_assignment`).
 2. **Start it.** The start places the server on another Worker (placement
    offers only online ones, `InMemoryWorkerRegistry.candidates_for_placement`)

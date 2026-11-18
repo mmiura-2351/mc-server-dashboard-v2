@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from typing import assert_never
 
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResult,
@@ -151,6 +152,27 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
 
 def _fleet_worker(worker_id: WorkerId) -> FleetWorkerId:
     return FleetWorkerId(str(worker_id.value))
+
+
+def _unavailable_worker_state(
+    exc: WorkerNotConnectedError | CommandTimedOutError,
+) -> UnavailableWorkerState:
+    """Name the Worker state the lifecycle routes report for ``exc`` (issue #3820).
+
+    Each fleet error is mapped by its own type, so one added to the dispatch's
+    ``except`` tuple fails the type check here instead of being named silently.
+    """
+
+    if isinstance(exc, CommandTimedOutError):
+        return UnavailableWorkerState.NO_ANSWER
+    # SessionEndedError is a WorkerNotConnectedError: the session the command
+    # was queued on ended. That is usually a disconnect, but a fast reconnect
+    # retires the old session's commands the same way, so the Worker may already
+    # be back on a new session. Both are named not_connected, as decided on
+    # issue #3820: the command's session is gone either way.
+    if isinstance(exc, WorkerNotConnectedError):
+        return UnavailableWorkerState.NOT_CONNECTED
+    assert_never(exc)
 
 
 def _servers_worker(worker_id: FleetWorkerId) -> WorkerId:
@@ -511,16 +533,12 @@ class FleetControlPlaneAdapter(ControlPlane):
             # so the assignment is released as before. A disconnect that ended the
             # session while this command awaited its answer is flagged apart from a
             # Worker that was not connected at all: the command may have run
-            # (issue #3781). Either disconnect is a Worker that is not connected,
-            # unlike a timeout, which the client is told apart (issue #3820).
+            # (issue #3781). The client is told a timeout apart from a session
+            # that is gone (issue #3820, ``_unavailable_worker_state``).
             raise WorkerUnavailableError(
                 str(worker_id.value),
                 upload_may_be_live=isinstance(exc, CommandTimedOutError),
                 session_ended_in_flight=isinstance(exc, SessionEndedError),
-                worker_state=(
-                    UnavailableWorkerState.NO_ANSWER
-                    if isinstance(exc, CommandTimedOutError)
-                    else UnavailableWorkerState.NOT_CONNECTED
-                ),
+                worker_state=_unavailable_worker_state(exc),
             ) from exc
         return _to_outcome(result)
