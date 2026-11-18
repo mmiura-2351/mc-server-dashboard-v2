@@ -129,7 +129,8 @@ class UploadResourcePack:
         # Blob first, row second: a store outage raises out of here as
         # ``ResourcePackStorageUnavailableError`` with no row inserted, and the
         # next attempt mints a fresh id (issue #2458). At worst the failed attempt
-        # leaves a blob under its own id that no row names (issue #3277).
+        # leaves a blob under its own id that no row names, which the
+        # resource-pack GC reclaims (issue #3277).
         await self.store.put(pack_id, filename, _bytes_stream(content))
 
         async with self.uow:
@@ -186,7 +187,8 @@ class DeleteResourcePack:
             await self.uow.commit()
 
         # Best-effort blob removal — the DB row is already gone, so a failure
-        # here leaves an orphaned blob which is harmless. A store outage is
+        # here leaves an orphaned blob which is harmless, and which the
+        # resource-pack GC reclaims (issue #3277). A store outage is
         # therefore logged, not raised (issue #2458): the delete the caller asked
         # for has happened, and a retry would find no row to act on.
         try:
