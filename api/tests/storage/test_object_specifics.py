@@ -1330,11 +1330,15 @@ async def test_backup_pack_survives_concurrent_publish_gc() -> None:
     original_write = _os_mod._write_backup_targz
 
     async def _racing_write(
-        client: S3Client, prefix: str, objs: list[S3Object], spool: "Path"
+        client: S3Client,
+        prefix: str,
+        objs: list[S3Object],
+        spool: "Path",
+        max_bytes: int | None = None,
     ) -> None:
         # A concurrent publish flips the pointer. Its GC checks _is_leased.
         await _publish(storage, community, server, {"f": b"NEW"})
-        await original_write(client, prefix, objs, spool)
+        await original_write(client, prefix, objs, spool, max_bytes)
 
     with patch.object(_os_mod, "_write_backup_targz", _racing_write):
         key = await storage.create_backup_from_current(community, server)

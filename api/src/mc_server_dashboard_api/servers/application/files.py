@@ -50,6 +50,7 @@ from pathlib import PurePosixPath
 from typing import IO, cast
 
 from mc_server_dashboard_api.archive_member import (
+    UPLOAD_HEADER_LIMITS,
     CapExceededError,
     CappedReader,
     EndCheckedReader,
@@ -1016,7 +1017,7 @@ def _tar_gz_entries(
         tarfile.open(
             fileobj=(
                 stream := EndCheckedReader(
-                    CappedReader(gz, max_bytes), header_limits=True
+                    CappedReader(gz, max_bytes), header_limits=UPLOAD_HEADER_LIMITS
                 )
             ),
             mode="r:",

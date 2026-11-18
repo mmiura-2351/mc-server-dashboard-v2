@@ -20,7 +20,7 @@ has read it.
 
 The paths that extract an archive with ``tarfile`` instead — restore on both
 backends, and both backends' health checks — reach their verdict through
-:func:`archive_read_errors_as_unreadable` (issue #3230). Every member walk of
+:func:`archive_read_errors_as_verdicts` (issue #3230). Every member walk of
 both backends, snapshot ingest included, reads the headers through
 :class:`HeaderCheckedTarInfo` (issue #3790) and must end at the end-of-archive
 marker, with only zeros after it (``archive_member.EndCheckedReader``, issue
@@ -45,8 +45,15 @@ import zlib
 from collections.abc import Iterator
 from typing import Self, cast
 
-from mc_server_dashboard_api.archive_member import GzipDecoder, unrestorable_reason
-from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
+from mc_server_dashboard_api.archive_member import (
+    CapExceededError,
+    GzipDecoder,
+    unrestorable_reason,
+)
+from mc_server_dashboard_api.storage.domain.errors import (
+    ArchiveTooLargeError,
+    ArchiveUnreadableError,
+)
 
 # Cap the decompressed bytes materialized per ``decompress`` call. The output is
 # discarded immediately, but a gzip member can inflate ~1000x, so an unbounded
@@ -108,7 +115,11 @@ class GzipReadProbe:
 # member that are neither another member nor zero padding (``zlib.error``, or
 # ``ReadError`` where ``tarfile`` reads a header), more than 10,000 gzip members
 # (``BadGzipFile``), and a tar that does not frame, does not end at its
-# end-of-archive marker or holds more than zeros past it (``ReadError``).
+# end-of-archive marker, holds more than zeros past it or goes past the header
+# limits (``ReadError``). A chain of a few hundred extended headers before one
+# member makes ``tarfile``, which reads them recursively, raise
+# ``RecursionError`` (issue #3859); it has unwound by the time it is caught, and
+# the walks' own code does not recurse.
 # Deliberately NOT ``tarfile.TarError`` as a whole: its ``FilterError`` branch
 # refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
@@ -123,6 +134,7 @@ _ARCHIVE_READ_ERRORS = (
     zlib.error,
     gzip.BadGzipFile,
     tarfile.ReadError,
+    RecursionError,
 )
 
 
@@ -202,19 +214,24 @@ def _refuse_invalid_layout(member: tarfile.TarInfo) -> None:
 
 
 @contextlib.contextmanager
-def archive_read_errors_as_unreadable() -> Iterator[None]:
-    """Report a failure to read an archive's bytes as :class:`ArchiveUnreadableError`.
+def archive_read_errors_as_verdicts() -> Iterator[None]:
+    """Report a failure to read an archive's bytes as :class:`ArchiveUnreadableError`,
+    and a read past the decompressed-size cap as :class:`ArchiveTooLargeError`.
 
     Wraps the read of a backup archive in restore and in both backends' health
     checks, so a truncated or bit-rotted archive reaches the caller as the
     modelled storage verdict rather than as a raw ``EOFError`` / ``tarfile`` /
-    ``gzip`` error.
+    ``gzip`` error. So does one whose decompressed stream goes past the cap: the
+    walk reads it through ``archive_member.CappedReader`` (issue #3859), whose
+    ``CapExceededError`` is no storage type.
     """
 
     try:
         yield
     except _ARCHIVE_READ_ERRORS as exc:
         raise ArchiveUnreadableError(f"archive could not be read back: {exc}") from exc
+    except CapExceededError as exc:
+        raise ArchiveTooLargeError(f"restore archive decompresses to {exc}") from exc
 
 
 def refuse_unrestorable_member(member: tarfile.TarInfo) -> None:

@@ -141,6 +141,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupStorageUnavailableError,
+    BackupTooLargeError,
     BackupUnsettledError,
     CommandDispatchError,
     InvalidLifecycleTransitionError,
@@ -299,6 +300,8 @@ def _failure_detail(exc: ServerError) -> str:
         return "no eligible worker"
     if isinstance(exc, BackupCorruptError):
         return "backup corrupt"
+    if isinstance(exc, BackupTooLargeError):
+        return "backup too large"
     if isinstance(exc, BackupStorageUnavailableError):
         return "storage unavailable"
     return "action failed"
@@ -350,8 +353,9 @@ class ActionResult:
     detail: str | None
     community_id: CommunityId | None
     # Whether a FAILURE outcome is worth the one-shot backup retry (#2250). False
-    # only for a provably deterministic failure (a corrupt working set) whose
-    # re-archive can never succeed; True for infra/unexpected faults that may heal.
+    # only for a provably deterministic failure (a corrupt working set, or one too
+    # large to archive, #3859) whose re-archive can never succeed; True for
+    # infra/unexpected faults that may heal.
     retryable: bool = True
 
 
@@ -428,7 +432,9 @@ class ExecuteScheduleAction:
                 outcome,
                 _failure_detail(exc),
                 community_id,
-                retryable=not isinstance(exc, BackupCorruptError),
+                retryable=not isinstance(
+                    exc, (BackupCorruptError, BackupTooLargeError)
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - every execution error is a run outcome
             # An unexpected error (a Storage/OS failure mid-archive, a DB error
