@@ -142,7 +142,9 @@ MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 # expected; the point is bounding the blow-up ratio, not blocking big worlds). The
 # bound counts ACTUAL decompressed bytes. At upload that is every one of them:
 # headers, extended-header data and skipped member data as well as member data as
-# it is drained (issue #3810). A constant is intentional (no config knob
+# it is drained (issue #3810). Restore counts the same toward its own 8 GiB, and
+# the backup writers stay under it, so a backup the platform writes uploads again
+# (issue #3859). A constant is intentional (no config knob
 # requested); document if it ever needs tuning.
 MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 

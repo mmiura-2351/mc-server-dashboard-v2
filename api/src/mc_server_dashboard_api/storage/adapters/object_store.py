@@ -152,7 +152,9 @@ _DEFAULT_VERSION_RETENTION = 10
 # bounded on the way in, but a gzip member can expand ~1000x; the cumulative
 # DECOMPRESSED bytes are counted as members are streamed to staging so a bomb
 # cannot fill the store (#287). 8 GiB bounds the amplification while covering a real
-# Minecraft world; a constant is intentional (no config knob requested).
+# Minecraft world; a constant is intentional (no config knob requested). Every byte
+# of the decompressed stream counts, as at the upload gate, whose cap is the same
+# 8 GiB, and the backup writer stays under it (issue #3859).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 # The single pointer object naming the live snapshot prefix (Section 4.2).
 _POINTER = "current.json"

@@ -18,8 +18,12 @@ import pytest
 from mc_server_dashboard_api.servers.application.backups import (
     _validate_backup_archive,
 )
-from mc_server_dashboard_api.servers.application.files import MAX_ARCHIVE_ENTRIES
+from mc_server_dashboard_api.servers.application.files import (
+    MAX_ARCHIVE_ENTRIES,
+    MAX_DECOMPRESSED_BYTES,
+)
 from mc_server_dashboard_api.servers.domain.errors import InvalidBackupArchiveError
+from mc_server_dashboard_api.storage.adapters import fs, object_store
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import ArchiveTooLargeError
@@ -107,3 +111,13 @@ async def test_one_byte_under_the_cap_refuses_it_everywhere(store: _Store) -> No
         _validate_backup_archive(
             archive, max_entries=MAX_ARCHIVE_ENTRIES, max_decompressed_bytes=cap - 1
         )
+
+
+def test_the_upload_gate_and_both_backends_hold_backups_to_one_cap() -> None:
+    # What the tests above show under an injected cap holds in production only
+    # while the gate's cap is the one both backends restore and write under.
+    assert (
+        MAX_DECOMPRESSED_BYTES
+        == fs._DEFAULT_MAX_RESTORE_BYTES
+        == object_store._DEFAULT_MAX_RESTORE_BYTES
+    )

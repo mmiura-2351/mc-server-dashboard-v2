@@ -2047,7 +2047,7 @@ async def test_backup_whose_sparse_member_follows_global_records_is_unreadable(
 async def test_a_headers_only_bomb_is_unreadable_in_bounded_memory(
     harness: StorageHarness, build: Callable[[], bytes]
 ) -> None:
-    """32 MiB of extended-header data before one member, a 32 KiB body, is
+    """32 MiB of extended-header data before one member, a 143 KiB body, is
     ``ArchiveUnreadableError`` at restore and at the health probe on BOTH
     backends (issue #3859), once the walk has read 1 MiB of headers between two
     members. ``tarfile`` holds extended-header data whole, at several times its
