@@ -948,6 +948,10 @@ class FakeServerRepository(ServerRepository):
         # bit hardest -- the convergence paths call it holding an entity whose
         # ``observed_*`` they loaded a transaction ago.
         current.desired_state = server.desired_state
+        if server.assigned_worker_id != expected_assigned_worker_id:
+            # Mirror the real adapter (issue #3890): only a write that changes the
+            # assignment sets the mark, for a placement, or clears it.
+            current.awaiting_hydrate = server.assigned_worker_id is not None
         current.assigned_worker_id = server.assigned_worker_id
         if write_config:
             current.config = deepcopy(server.config)
@@ -987,6 +991,10 @@ class FakeServerRepository(ServerRepository):
         _observe(server, observed_state, observed_at, detail=detail, reason=reason)
         if unassign:
             server.assigned_worker_id = None
+        # Mirror the real adapter (issue #3890): a release, or a running instance,
+        # owes no hydrate.
+        if unassign or observed_state is ObservedState.RUNNING:
+            server.awaiting_hydrate = False
         return True
 
     async def clear_assignment_after_final_snapshot(
@@ -1002,6 +1010,7 @@ class FakeServerRepository(ServerRepository):
         ):
             return False
         server.assigned_worker_id = None
+        server.awaiting_hydrate = False
         return True
 
     async def clear_stale_assignment(
@@ -1022,6 +1031,22 @@ class FakeServerRepository(ServerRepository):
         ):
             return False
         server.assigned_worker_id = None
+        server.awaiting_hydrate = False
+        return True
+
+    async def set_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, awaiting: bool
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #3890): only while worker_id holds
+        # the row, and only a change counts.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.assigned_worker_id != worker_id
+            or server.awaiting_hydrate is awaiting
+        ):
+            return False
+        server.awaiting_hydrate = awaiting
         return True
 
     async def mark_worker_servers_unknown(
