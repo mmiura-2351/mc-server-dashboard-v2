@@ -95,6 +95,14 @@ Both ``__call__`` and ``place_and_start`` keep the assignment, record
 observed=unknown, and raise the refusal as before, so the reconciler retries the
 start on that same Worker.
 
+A kept Worker has not hydrated the server, and its scratch may be a leftover older
+than the store. The placement's commit sets the row's ``awaiting_hydrate``, and
+``_launch`` clears it only once the Worker holds the store's working set. While it
+is set, nothing publishes a snapshot from that Worker: the periodic tick skips the
+row, ``_final_snapshot`` takes none and lets the stop release, and the data plane
+refuses the Worker's stale publish. A ``running`` report from the Worker clears it
+too, since that instance's working set is what its snapshots capture from then on.
+
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
 and that is what makes every convergence site sound. Until issue #2476 the Worker
 answered the same code for a pending failed-stop orphan — an instance it could not
@@ -775,9 +783,12 @@ class StartServer:
             # Make the owed player-group file changes first, as ``__call__`` does
             # (issue #3223): this path always hydrates, so the store is what gets
             # launched. No Worker holds an unassigned server, so no snapshot can
-            # publish over the write; the lifecycle lock, which this path takes
-            # for it, keeps a second placement of the same orphan from
-            # interleaving. A storage failure raises before a Worker is placed.
+            # publish over the write. Nor can the Worker placed below before its
+            # hydrate lands, even when a refused hydrate keeps it (issue #3890):
+            # the placement marks the row ``awaiting_hydrate``. The lifecycle lock,
+            # which this path takes for it, keeps a second placement of the same
+            # orphan from interleaving. A storage failure raises before a Worker is
+            # placed.
             owed_group_files = await regenerate_pending_group_files(
                 self.uow,
                 self.file_store,
