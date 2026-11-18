@@ -92,8 +92,8 @@ def _refusal(
     if body is None:
         return (
             f"the store owner marker {location} cannot be read back. If it was "
-            "removed, only an API start claims the store again; if it was just "
-            "written, a later pass finds it"
+            "removed, only an API start or the claim command claims the store "
+            "again; if it was just written, a later pass finds it"
         )
     owner = _named_installation(body)
     if owner is None:

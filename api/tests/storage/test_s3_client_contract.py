@@ -149,6 +149,24 @@ async def test_any_object_sees_only_keys_under_its_prefix(
     assert await client.any_object(prefix + "communities/") is False
 
 
+async def test_any_object_finds_a_deep_key_behind_deleted_siblings(
+    s3: tuple[S3Client, str, StoreClock, bool],
+) -> None:
+    # The store owner claim reads "no key" as an empty store it may take
+    # (issue #3886), so a one-key listing must not come back empty while a key
+    # lies deeper, or behind keys deleted earlier that sort first.
+    client, prefix, _clock, _controlled = s3
+    namespace = prefix + "communities/"
+    for gone in ("a/servers/s/incoming/t1/level.dat", "b/servers/s/generation"):
+        await client.put_object(namespace + gone, b"gone")
+        await client.delete_object(namespace + gone)
+    assert await client.any_object(namespace) is False
+
+    await client.put_object(namespace + "c/servers/s/snapshots/x/world/level.dat", b"w")
+
+    assert await client.any_object(namespace) is True
+
+
 async def test_put_if_absent_never_replaces_an_existing_object(
     s3: tuple[S3Client, str, StoreClock, bool],
 ) -> None:
