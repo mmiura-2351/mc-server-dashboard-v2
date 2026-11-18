@@ -69,7 +69,10 @@ from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
     GNU_SPARSE_FORMATS,
     INVALID_SPARSE_LAYOUTS,
+    SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
+    gnu_tar_sparse_archive_cut_in_its_extension_block,
+    tar_cut_in_a_sparse_extension_block,
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
     tar_with_gnu_tar_sparse_members,
@@ -2962,6 +2965,36 @@ def test_snapshot_with_an_invalid_sparse_layout_is_refused_and_not_published(
     # offset) or 422, and the object backend published the member (issue #3802).
     body = tar_with_an_invalid_sparse_layout(layout, after=after)
 
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        *(
+            pytest.param(
+                tar_cut_in_a_sparse_extension_block(cut, after=after), id=f"{cut}-{at}"
+            )
+            for cut in SPARSE_EXTENSION_CUTS
+            for at, after in [
+                ("first", {}),
+                ("after-a-member", {"world/level.dat": b"new"}),
+            ]
+        ),
+        pytest.param(
+            gnu_tar_sparse_archive_cut_in_its_extension_block(), id="gnu-tar-archive"
+        ),
+    ],
+)
+def test_snapshot_that_ends_in_a_sparse_extension_block_is_refused(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], body: bytes
+) -> None:
+    # ``tarfile`` indexes the short extension block of an old GNU sparse header
+    # and raises ``IndexError``, which answered 500 on both backends (issue
+    # #3802).
     assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
 
 

@@ -51,10 +51,12 @@ from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
     GNU_SPARSE_FORMATS,
     INVALID_SPARSE_LAYOUTS,
+    SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     bomb_targz,
     corrupt_region_bytes,
     drain,
+    gnu_tar_sparse_archive_cut_in_its_extension_block,
     healthy_region_bytes,
     malicious_tar_with_escape,
     mode_invariant_corrupt_region_bytes,
@@ -63,6 +65,7 @@ from tests.storage.helpers import (
     region_targz,
     stream_of,
     tar_bytes,
+    tar_cut_in_a_sparse_extension_block,
     tar_stream,
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
@@ -1551,6 +1554,49 @@ async def test_archive_with_an_invalid_sparse_layout_is_unreadable(
     archive = tar_with_an_invalid_sparse_layout(
         layout, after={"server.properties": b"k=v"}
     )
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(archive), chunk=8192)
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize(
+    "archive",
+    [
+        *(
+            pytest.param(
+                tar_cut_in_a_sparse_extension_block(
+                    cut, after={"server.properties": b"k=v"}
+                ),
+                id=cut,
+            )
+            for cut in SPARSE_EXTENSION_CUTS
+        ),
+        pytest.param(
+            gnu_tar_sparse_archive_cut_in_its_extension_block(), id="gnu-tar-archive"
+        ),
+    ],
+)
+async def test_archive_that_ends_in_a_sparse_extension_block_is_unreadable(
+    harness: StorageHarness, archive: bytes
+) -> None:
+    """A tar that ends inside an old GNU sparse member's extension block is
+    ``ArchiveUnreadableError`` on BOTH backends (issue #3802), for the restore and
+    the health probe, not the raw ``IndexError`` ``tarfile`` raises for it; the
+    live snapshot stays untouched."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
     key = await harness.storage.put_backup(
         community, server, stream_of(gzip.compress(archive), chunk=8192)
     )
