@@ -1172,16 +1172,26 @@ class StartServer:
         # has not bumped by then is enqueued after this start, and the Worker's
         # per-server lane runs it as a real stop.
         #
-        # A read that raises (a database error) sends no start either, and each
-        # caller handles it as a failure before the send. ``__call__`` reverts its
-        # intent, as after any such failure (issue #2001); the revert first checks
-        # that the intent is still this start's (issue #3741). ``place_and_start``
-        # keeps its assignment: its hydrate succeeded, so once the reconciler's
-        # grace lapses, and while this Worker is connected, the reconciler re-sends
-        # the start here, without a second hydrate if the store has not moved past
-        # the generation recorded above. ``redispatch_start`` reverts nothing, as on
-        # any failure.
+        # The same unit of work first clears the row's ``awaiting_hydrate`` (issue
+        # #3890): the Worker now holds the store's working set, because the hydrate
+        # above landed or its held generation is at least the store's, so its
+        # snapshots may publish again. It is cleared even if the compare below
+        # then refuses the start, since that is still true.
+        #
+        # A read or write that raises (a database error) sends no start either,
+        # and each caller handles it as a failure before the send. ``__call__``
+        # reverts its intent, as after any such failure (issue #2001); the revert
+        # first checks that the intent is still this start's (issue #3741).
+        # ``place_and_start`` keeps its assignment: its hydrate succeeded, so once
+        # the reconciler's grace lapses, and while this Worker is connected, the
+        # reconciler re-sends the start here, without a second hydrate if the
+        # store has not moved past the generation recorded above.
+        # ``redispatch_start`` reverts nothing, as on any failure.
         async with self.uow:
+            await self.uow.servers.set_awaiting_hydrate(
+                server_id, worker_id, awaiting=False
+            )
+            await self.uow.commit()
             current = await self.uow.servers.get_by_id(server_id)
         if current is None or not self._still_owns(
             current, worker_id, stop_intent_count
@@ -1242,6 +1252,11 @@ class StartServer:
             # ``__call__`` reads the status, finds neither INVALID_STATE nor BUSY, and
             # compensates regardless of ``attempted``.
             #
+            # The skip cleared the row's ``awaiting_hydrate`` on a proof this refusal
+            # has just disproved, so the replay owes the hydrate again until it lands
+            # (issue #3890): a refused replay must not leave the Worker's scratch
+            # publishable.
+            #
             # Log it: the condition means a live Worker's scratch was destroyed
             # underneath it, and a self-healing recovery nobody can see is how the next
             # occurrence gets harder to diagnose. This line and the Worker's own WARN
@@ -1255,6 +1270,11 @@ class StartServer:
                 server_id.value,
                 outcome.message,
             )
+            async with self.uow:
+                await self.uow.servers.set_awaiting_hydrate(
+                    server_id, worker_id, awaiting=True
+                )
+                await self.uow.commit()
             return await self._launch(
                 server,
                 community_id,
@@ -2195,6 +2215,14 @@ class StopServer:
         uploading, so the caller must HOLD the assignment rather than release it
         while the upload is in flight. ``False`` for success and for a worker
         DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
+
+        A row whose Worker has not hydrated it under this assignment
+        (``awaiting_hydrate``, issue #3890) is not snapshotted at all, and this
+        returns ``False`` so the caller releases it. That Worker's scratch may be a
+        leftover older than the store, and publishing it would replace the newer
+        working set. The store wins, as it did when a refused hydrate gave the
+        Worker back, and the next start's hydrate displaces the scratch. The row is
+        read here, so all three callers pass this one check.
         """
 
         # A dispatched snapshot may outlive its caller, so a finished stop recorded
@@ -2203,6 +2231,22 @@ class StopServer:
         # attempt (issue #3682).
         self.unrecorded_stops.forget(server_id)
         self.stop_refusals.forget(server_id)
+        async with self.uow:
+            current = await self.uow.servers.get_by_id(server_id)
+        if (
+            current is not None
+            and current.assigned_worker_id == worker_id
+            and current.awaiting_hydrate
+        ):
+            _LOG.warning(
+                "final snapshot skipped for server %s: worker %s has not hydrated it "
+                "under this assignment, so its scratch may be older than the store. "
+                "The store's working set stands, and the next start's hydrate "
+                "replaces the scratch (issue #3890)",
+                server_id.value,
+                worker_id.value,
+            )
+            return False
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,

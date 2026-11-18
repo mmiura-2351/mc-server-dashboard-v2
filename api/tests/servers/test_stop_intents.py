@@ -868,7 +868,9 @@ async def test_a_start_whose_server_was_re_placed_on_its_worker_is_not_sent() ->
         await world.start()
 
     # The first hydrate, the stop and its release, then the newer start. One start.
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    # The release takes no snapshot: the first start had not recorded its hydrate
+    # yet, so the row still read awaiting_hydrate (issue #3890).
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -890,10 +892,11 @@ async def test_a_start_reads_the_counter_before_its_own_commit() -> None:
     with pytest.raises(LifecycleTransitionConflictError):
         await start(community_id=world.community, server_id=world.server_id)
 
-    # All inside the first start's commit: the stop and its release, then the newer
-    # start. The first start then skips its hydrate (the newer one's hydrate left
-    # the Worker holding the store's generation) and sends nothing.
-    assert world.kinds() == ["stop", "snapshot", "hydrate", "start"]
+    # All inside the first start's commit: the stop and its release, with no
+    # snapshot since nothing had hydrated (issue #3890), then the newer start. The
+    # first start then skips its hydrate (the newer one's hydrate left the Worker
+    # holding the store's generation) and sends nothing.
+    assert world.kinds() == ["stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -917,8 +920,9 @@ async def test_a_placement_reads_the_counter_before_its_own_commit() -> None:
             community_id=world.community, server_id=world.server_id
         )
 
-    # The placement always hydrates; it then sends nothing.
-    assert world.kinds() == ["stop", "snapshot", "hydrate", "start", "hydrate"]
+    # The release takes no snapshot, as above. The placement always hydrates; it
+    # then sends nothing.
+    assert world.kinds() == ["stop", "hydrate", "start", "hydrate"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -1065,7 +1069,7 @@ async def test_a_failed_revert_does_not_hold_back_a_newer_start(kind: str) -> No
 
     await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -1092,7 +1096,7 @@ async def test_a_failed_revert_leaves_a_newer_start_on_its_worker_alone(
 
     await _fails(world, kind)
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.incremented == [world.worker, world.worker]
@@ -1121,7 +1125,7 @@ async def test_a_failed_revert_leaves_a_newer_start_on_another_worker_alone(
 
     await _fails(world, kind)
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert [k for k, _, _ in other.dispatched] == ["hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, elsewhere)
     assert other.live == {world.server_id}
@@ -1202,7 +1206,7 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
     await f
     await newer
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -1311,7 +1315,7 @@ async def test_a_revert_checks_its_intent_once_it_holds_the_lock(kind: str) -> N
 
     await _fails(world, kind)
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -1539,7 +1543,7 @@ async def test_a_start_whose_re_read_fails_leaves_a_newer_start_alone() -> None:
     with pytest.raises(RuntimeError, match="database unavailable"):
         await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -2290,7 +2294,7 @@ async def test_a_stop_during_the_placement_hydrate_stops_the_placed_row() -> Non
     with pytest.raises(LifecycleTransitionConflictError):
         await world.place()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
     assert world.cp.load == ["confirm", "drop"]
