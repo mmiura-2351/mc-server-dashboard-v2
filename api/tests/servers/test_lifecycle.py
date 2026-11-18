@@ -1455,6 +1455,111 @@ async def test_start_after_a_hydrate_that_may_meet_an_instance_places_no_second(
     )
 
 
+class _ReportsDuringTheHydrate(FakeControlPlane):
+    """Worker A reports on the server while it refuses the hydrate (issue #3890).
+
+    The placement commits at ``placed``. A's report lands at ``reported``, during
+    the hydrate's round trip, and the refusal returns at ``answered``.
+    """
+
+    def __init__(
+        self,
+        uow: FakeUnitOfWork,
+        clock: FakeClock,
+        *,
+        report: ObservedState,
+        reported: dt.datetime,
+        answered: dt.datetime,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            outcomes={"hydrate": _hydrate_refused("command_expired")}, **kwargs
+        )
+        self._uow = uow
+        self._clock = clock
+        self._report = report
+        self._reported = reported
+        self._answered = answered
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        self._clock.set(self._reported)
+        await self._uow.servers.record_observed_state(
+            server_id,
+            self._report,
+            self._reported,
+            expected_worker=worker_id,
+            detail="installer ran out of memory",
+            reason=CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        )
+        self._clock.set(self._answered)
+        return await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+
+
+@pytest.mark.parametrize("report", [ObservedState.CRASHED, ObservedState.RUNNING])
+@pytest.mark.parametrize("entry", ["start", "place_and_start"])
+async def test_a_report_during_a_refused_hydrate_outranks_the_keep(
+    entry: str, report: ObservedState
+) -> None:
+    # Review r1 finding 3. Worker A is named from the placement on, so its reports
+    # land while the hydrate waits, an EXPIRED one up to its whole budget. The keep
+    # records unknown as of the placement, so such a report, the newer fact, is
+    # not overwritten, nor the crash reason that holds the reconciler back.
+    placed = _NOW
+    reported = _NOW + dt.timedelta(seconds=10)
+    answered = _NOW + dt.timedelta(seconds=20)
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=(
+                DesiredState.STOPPED if entry == "start" else DesiredState.RUNNING
+            ),
+        )
+    )
+    clock = FakeClock(placed)
+    cp = _ReportsDuringTheHydrate(
+        uow,
+        clock,
+        report=report,
+        reported=reported,
+        answered=answered,
+        place_to=WorkerId(worker),
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+
+    with pytest.raises(CommandDispatchError):
+        if entry == "start":
+            await use_case(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+        else:
+            await use_case.place_and_start(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (stored.observed_state, stored.observed_at) == (report, reported)
+    assert stored.crash_reason == (
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY
+        if report is ObservedState.CRASHED
+        else None
+    )
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
 # --- the hydrate a placed Worker owes (issue #3890, review r1 finding 1) ----------
 #
 # A kept start leaves its Worker assigned without a hydrate. That Worker's scratch
