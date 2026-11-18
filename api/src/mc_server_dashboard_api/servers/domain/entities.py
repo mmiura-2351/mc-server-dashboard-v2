@@ -77,6 +77,13 @@ class Server:
     # crash too; ``crash_detail`` is bounded (``bound_status_detail``).
     crash_reason: CrashReason | None = None
     crash_detail: str | None = None
+    # Whether the assigned Worker has yet to hydrate the server under this
+    # assignment (issue #3890). The repository sets it with a start's placement
+    # and clears it with the release; the start clears it once that Worker holds
+    # the store's working set, and a ``running`` report clears it too. While it
+    # is set, the Worker's scratch may be older than the store, so nothing
+    # publishes a snapshot from it.
+    awaiting_hydrate: bool = False
 
     def observe(self, state: ObservedState, at: dt.datetime) -> None:
         """Reflect an observed-state write that landed (issues #292, #3281).

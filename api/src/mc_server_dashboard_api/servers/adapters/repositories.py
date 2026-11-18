@@ -78,6 +78,7 @@ def _to_server(row: ServerModel) -> Server:
             None if row.crash_reason is None else CrashReason(row.crash_reason)
         ),
         crash_detail=row.crash_detail,
+        awaiting_hydrate=row.awaiting_hydrate,
     )
 
 
@@ -173,6 +174,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                     None if server.crash_reason is None else server.crash_reason.value
                 ),
                 crash_detail=server.crash_detail,
+                awaiting_hydrate=server.awaiting_hydrate,
             )
         )
 
@@ -296,6 +298,12 @@ class SqlAlchemyServerRepository(ServerRepository):
             # its flip. No other transition owns the config: writing back the one
             # it read would undo an edit committed since (issue #3792).
             values["config"] = server.config
+        if server.assigned_worker_id != expected_assigned_worker_id:
+            # A placement owes the Worker its hydrate, and a release owes nothing
+            # (issue #3890). Written only where the assignment changes, so a
+            # transition built from a stale read cannot restore a mark a hydrate
+            # has cleared since.
+            values["awaiting_hydrate"] = server.assigned_worker_id is not None
         stmt = (
             update(ServerModel)
             .where(
@@ -355,6 +363,10 @@ class SqlAlchemyServerRepository(ServerRepository):
         # start can re-place under the unassigned-only CAS (issue #206).
         if unassign:
             values["assigned_worker_id"] = None
+        # A release owes no hydrate, and a running instance's working set is the
+        # one its snapshots will capture, whatever the store holds (issue #3890).
+        if unassign or observed_state is ObservedState.RUNNING:
+            values["awaiting_hydrate"] = False
         # Monotonic guard (issue #216): drop a write stamped no later than the row's
         # current observed_at, so a stale convergence write (stop SERVER_NOT_FOUND,
         # redispatch_start INVALID_STATE) cannot clobber a fresher StatusChange that
@@ -535,7 +547,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ServerModel.desired_state == DesiredState.STOPPED.value,
                 ServerModel.assigned_worker_id == worker_id.value,
             )
-            .values(assigned_worker_id=None)
+            .values(assigned_worker_id=None, awaiting_hydrate=False)
         )
         result = await self._session.execute(stmt)
         cleared = cast("CursorResult[Any]", result).rowcount == 1
@@ -561,13 +573,28 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ServerModel.assigned_worker_id == worker_id.value,
                 ServerModel.observed_at.is_not_distinct_from(observed_at),
             )
-            .values(assigned_worker_id=None)
+            .values(assigned_worker_id=None, awaiting_hydrate=False)
         )
         result = await self._session.execute(stmt)
         cleared = cast("CursorResult[Any]", result).rowcount == 1
         if cleared:
             self._stage_release(server_id)
         return cleared
+
+    async def set_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, awaiting: bool
+    ) -> bool:
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.id == server_id.value,
+                ServerModel.assigned_worker_id == worker_id.value,
+                ServerModel.awaiting_hydrate != awaiting,
+            )
+            .values(awaiting_hydrate=awaiting)
+        )
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount == 1
 
     def _stage_release(self, server_id: ServerId) -> None:
         """Stage the frame of a release that ends a stop (issue #3818).
