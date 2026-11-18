@@ -156,6 +156,8 @@ def _events_app() -> FastAPI:
         observed_state = ObservedState.STOPPED
         desired_state = DesiredState.STOPPED
         assigned_worker_id = None
+        crash_reason = None
+        crash_detail = None
 
     class _Found:
         async def __call__(self, **_kw: object) -> object:
