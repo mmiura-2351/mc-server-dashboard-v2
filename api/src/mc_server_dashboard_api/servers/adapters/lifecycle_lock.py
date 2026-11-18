@@ -133,11 +133,16 @@ class _PgHeldLifecycleLock(HeldLifecycleLock):
         try:
             async with asyncio.timeout(_CHECK_TIMEOUT_SECONDS):
                 held = await self._conn.scalar(_HELD_SQL, {"key": self._key})
-        except Exception as exc:
-            # A dead connection fails on its first use and differently after
-            # that; a hung one times out. Either way nothing confirms the lock.
+        except BaseException as exc:
+            # A dead connection fails, a hung one times out, and this task can be
+            # cancelled mid-query. Each leaves the connection unusable, so it is
+            # closed, which also ends the lock if the session still held it. A
+            # cancellation goes on as itself; anything else means nothing can
+            # confirm the lock.
             await self._lose()
-            raise LifecycleLockLostError(str(self._server_id.value)) from exc
+            if isinstance(exc, Exception):
+                raise LifecycleLockLostError(str(self._server_id.value)) from exc
+            raise
         if not held:
             await self._lose()
             raise LifecycleLockLostError(str(self._server_id.value))

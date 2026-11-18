@@ -143,3 +143,35 @@ async def test_a_check_that_gets_no_answer_in_time_reports_the_lock_lost(
                 with pytest.raises(LifecycleLockLostError):
                     await held.ensure_held()
                 await held.ensure_held()
+
+
+async def test_a_check_cancelled_mid_query_stays_a_cancellation_and_frees_the_lock(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A request whose client goes away is cancelled wherever it waits, the
+    # check's query included. The cancellation must reach the caller as itself,
+    # and the connection the query was cut off on must not keep the lock.
+    monkeypatch.setattr(
+        lifecycle_lock_mod,
+        "_HELD_SQL",
+        text("SELECT true FROM pg_sleep(10) WHERE CAST(:key AS bigint) IS NOT NULL"),
+    )
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+    checking = asyncio.Event()
+
+    async def _gated() -> None:
+        async with lock.hold(server_id) as held:
+            checking.set()
+            await held.ensure_held()
+
+    task = asyncio.create_task(_gated())
+    await checking.wait()
+    await asyncio.sleep(0.2)  # let the check's query reach the server
+    task.cancel()
+    async with asyncio.timeout(5):
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        monkeypatch.undo()
+        async with lock.hold(server_id) as held:
+            await held.ensure_held()
