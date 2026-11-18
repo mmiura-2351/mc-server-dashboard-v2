@@ -10,15 +10,30 @@ import { t } from "../i18n/index.ts";
 // - Focus restore: the element focused when the dialog opened is refocused on
 //   close, so keyboard users land back on the trigger.
 // - Focus trap: Tab / Shift+Tab cycle within the dialog's focusable elements
-//   rather than escaping to the page behind the backdrop.
+//   rather than escaping to the page behind the backdrop. The toast stack
+//   joins the cycle: it sits outside every dialog, but an error raised over
+//   one must stay reachable (WEBUI_SPEC.md Section 7.4).
 // - Stacked dialogs: a module-level stack tracks open dialogs so Escape closes
 //   only the topmost one (the Files history drawer + rollback confirm is a live
 //   stacked case).
 
 // Module-level registry of open dialogs, ordered by open time. The last entry
-// is the topmost; only it reacts to Escape and traps Tab. A symbol per Modal
-// instance keys its slot so unmount removes the right one regardless of order.
-const dialogStack: symbol[] = [];
+// is the topmost; only it reacts to Escape and traps Tab. Each Modal instance
+// keys its slot with its own dialog element, so unmount removes the right one
+// regardless of order.
+const dialogStack: HTMLElement[] = [];
+
+// The topmost open dialog, or null when none is open.
+export function topmostDialog(): HTMLElement | null {
+  return dialogStack.at(-1) ?? null;
+}
+
+// The toast stack, registered by ToastProvider, for the trap to include.
+let toastZone: HTMLElement | null = null;
+
+export function setToastZone(zone: HTMLElement | null): void {
+  toastZone = zone;
+}
 
 function focusableWithin(root: HTMLElement): HTMLElement[] {
   return Array.from(
@@ -48,17 +63,17 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
   // focus restore, move focus into the dialog, and listen on the document for
   // Escape (topmost only) and Tab (focus trap). Cleanup restores trigger focus.
   useEffect(() => {
-    if (!open) {
+    const dialog = dialogRef.current;
+    if (!open || dialog === null) {
       return;
     }
-    const id = Symbol("modal");
-    dialogStack.push(id);
+    dialogStack.push(dialog);
     const trigger = document.activeElement as HTMLElement | null;
-    dialogRef.current?.focus();
+    dialog.focus();
 
     const onKeyDown = (event: KeyboardEvent) => {
       // Only the topmost dialog reacts to keys.
-      if (dialogStack.at(-1) !== id) {
+      if (dialogStack.at(-1) !== dialog) {
         return;
       }
       if (event.key === "Escape") {
@@ -66,25 +81,32 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         return;
       }
       if (event.key === "Tab") {
-        const dialog = dialogRef.current;
-        if (dialog === null) {
-          return;
-        }
-        const focusable = focusableWithin(dialog);
-        if (focusable.length === 0) {
+        // Tab runs natively within the dialog and within the toast stack; at
+        // the end of either it steps to the start of the other.
+        const inDialog = focusableWithin(dialog);
+        const inToasts = toastZone === null ? [] : focusableWithin(toastZone);
+        const cycle = [...inDialog, ...inToasts];
+        if (cycle.length === 0) {
           event.preventDefault();
           dialog.focus();
           return;
         }
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
         const active = document.activeElement;
-        if (event.shiftKey && (active === first || active === dialog)) {
+        let next: HTMLElement | undefined;
+        if (event.shiftKey) {
+          if (active === dialog || active === cycle[0]) {
+            next = cycle.at(-1);
+          } else if (active === inToasts[0]) {
+            next = inDialog.at(-1);
+          }
+        } else if (active === cycle.at(-1)) {
+          next = cycle[0];
+        } else if (active === (inDialog.at(-1) ?? dialog)) {
+          next = inToasts[0];
+        }
+        if (next !== undefined) {
           event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && active === last) {
-          event.preventDefault();
-          first.focus();
+          next.focus();
         }
       }
     };
@@ -92,7 +114,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
 
     return () => {
       document.removeEventListener("keydown", onKeyDown);
-      const slot = dialogStack.indexOf(id);
+      const slot = dialogStack.indexOf(dialog);
       if (slot !== -1) {
         dialogStack.splice(slot, 1);
       }
