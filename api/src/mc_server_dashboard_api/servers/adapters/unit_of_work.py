@@ -66,10 +66,12 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
     ) -> None:
         self._session_factory = session_factory
         self._session: AsyncSession | None = None
-        # The bus a commit publishes its observed-state writes on. Required
-        # by any unit of work that writes ``observed_state``: without it such
-        # a commit raises ``StatusEventsNotWiredError``. ``None`` suits only a
-        # unit of work that never writes the column.
+        # The bus a commit publishes its status events on. Required by any
+        # unit of work that writes ``observed_state``, changes
+        # ``desired_state`` (issue #3428) or places or releases a server
+        # (issue #3818): without it such a commit raises
+        # ``StatusEventsNotWiredError``. ``None`` suits only a unit of work
+        # that does none of these.
         self._real_time_events = real_time_events
 
     async def __aenter__(self) -> SqlAlchemyUnitOfWork:

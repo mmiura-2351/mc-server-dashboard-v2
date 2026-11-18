@@ -400,6 +400,54 @@ describe("useServerEvents", () => {
     });
   });
 
+  it("patches the detail query assigned_worker_id on a release frame (#3818)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "w1",
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { assigned_worker_id: null }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: null,
+    });
+  });
+
+  it("patches the detail query assigned_worker_id from a snapshot frame (#3818)", () => {
+    const { queryClient } = setup();
+    queryClient.setQueryData(serverKey(CID, SID), {
+      id: SID,
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: null,
+    });
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("snapshot", {
+          state: "running",
+          desired_state: "running",
+          assigned_worker_id: "w2",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serverKey(CID, SID))).toEqual({
+      id: SID,
+      observed_state: "running",
+      desired_state: "running",
+      assigned_worker_id: "w2",
+    });
+  });
+
   it("clears windowed metrics when a snapshot shows the server at rest", () => {
     setup();
     act(() => {
@@ -678,7 +726,12 @@ describe("useServerEvents", () => {
   });
 });
 
-type Detail = { id: string; observed_state: string };
+type Detail = {
+  id: string;
+  observed_state: string;
+  desired_state?: string;
+  assigned_worker_id?: string | null;
+};
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Detail> }) {
   // The page's order: the events hook, then the detail query.
@@ -710,12 +763,16 @@ function setupDeferred({ retry = false }: { retry?: number | false } = {}) {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
   render(<LiveProbe queryFn={queryFn} />, { wrapper });
-  // Resolve the oldest outstanding REST read with `observed_state`.
-  const respond = async (observed_state: string) => {
+  // Resolve the oldest outstanding REST read with `observed_state` (and any
+  // further fields of the row).
+  const respond = async (
+    observed_state: string,
+    fields: Partial<Detail> = {},
+  ) => {
     const attempt = pending.shift();
     expect(attempt).toBeDefined();
     await act(async () => {
-      attempt?.resolve({ id: SID, observed_state });
+      attempt?.resolve({ id: SID, observed_state, ...fields });
       await vi.advanceTimersByTimeAsync(0);
     });
   };
@@ -793,6 +850,21 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toBe("stopped");
   });
 
+  it("keeps a release frame that arrives before the cold detail load lands (#3818)", async () => {
+    const { queryClient, respond } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        frame("status", { assigned_worker_id: null }),
+      );
+    });
+    // The cold read captured the row before its release.
+    await respond("stopped", { assigned_worker_id: "w1" });
+    expect(
+      queryClient.getQueryData<Detail>(serverKey(CID, SID))?.assigned_worker_id,
+    ).toBeNull();
+  });
+
   it("lets a REST read started after the frame supersede it", async () => {
     // A worker disconnect commits `unknown` without a frame; a read that
     // started after the last frame is the newer truth.
@@ -812,6 +884,33 @@ describe("useServerEvents with REST reads in flight (#3213)", () => {
     await respond("unknown");
     expect(cached()).toBe("unknown");
   });
+
+  // The same supersede for the intent (#3428) and the assignment (#3818): a
+  // read that started after the frame repairs a frame that went missing since,
+  // so a lost release cannot hold Start for good.
+  it.each([
+    ["desired_state", "desired_state", "stopped", "running"],
+    ["assigned_worker_id", "assigned_worker_id", null, "w1"],
+  ] as const)(
+    "lets a REST read started after the frame supersede its %s",
+    async (_name, field, stored, live) => {
+      const { queryClient, respond } = setupDeferred();
+      act(() => {
+        MockWebSocket.last().open();
+      });
+      await respond("stopped", { [field]: stored });
+      act(() => {
+        MockWebSocket.last().message(frame("status", { [field]: live }));
+      });
+      act(() => {
+        queryClient.invalidateQueries({ queryKey: serverKey(CID, SID) });
+      });
+      await respond("stopped", { [field]: stored });
+      expect(
+        queryClient.getQueryData<Detail>(serverKey(CID, SID))?.[field],
+      ).toBe(stored);
+    },
+  );
 });
 
 describe("useServerEvents with REST retries (#3213)", () => {

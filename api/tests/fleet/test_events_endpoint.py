@@ -68,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
     ObservedState,
+    WorkerId,
 )
 from tests.client_utils import enter_client
 from tests.fleet.conftest import publish_burst_on_app_loop, publish_on_app_loop
@@ -94,18 +95,20 @@ class _FakeChecker(PermissionChecker):
 
 @dataclass(frozen=True)
 class _FakeServer:
-    """The slice of the ``Server`` entity the endpoint reads (its two states)."""
+    """The slice of the ``Server`` entity the endpoint reads (states, assignment)."""
 
     observed_state: ObservedState
     desired_state: DesiredState
+    assigned_worker_id: WorkerId | None
 
 
 class _FakeReadServer:
     """Stands in for ReadServer: the ownership check and the snapshot read.
 
     ``found`` decides the ownership check (cross-community -> not found); a found
-    server reports ``state`` as its observed state and ``desired`` as its desired
-    state, which the on-subscribe snapshot frame carries (#1795, #3428).
+    server reports ``state`` as its observed state, ``desired`` as its desired
+    state and ``assigned`` as its Worker, which the on-subscribe snapshot frame
+    carries (#1795, #3428, #3818).
     """
 
     def __init__(
@@ -114,15 +117,21 @@ class _FakeReadServer:
         found: bool,
         state: ObservedState = ObservedState.RUNNING,
         desired: DesiredState = DesiredState.RUNNING,
+        assigned: WorkerId | None = None,
     ) -> None:
         self._found = found
         self.state = state
         self.desired = desired
+        self.assigned = assigned
 
     async def __call__(self, **_kwargs: object) -> object:
         if not self._found:
             raise ServerNotFoundError("x")
-        return _FakeServer(observed_state=self.state, desired_state=self.desired)
+        return _FakeServer(
+            observed_state=self.state,
+            desired_state=self.desired,
+            assigned_worker_id=self.assigned,
+        )
 
 
 class _Account:
@@ -371,7 +380,11 @@ def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
         third = ws.receive_json()
     assert first["stream"] == "gap"
     assert second["stream"] == "snapshot"
-    assert second["payload"] == {"state": "running", "desired_state": "running"}
+    assert second["payload"] == {
+        "state": "running",
+        "desired_state": "running",
+        "assigned_worker_id": None,
+    }
     assert third["payload"] == {"state": "3"}
 
 
@@ -511,20 +524,28 @@ def _await_subscribers(bus: InProcessRealTimeEvents, server: str, count: int) ->
     assert bus.subscriber_count(server) == count
 
 
-def test_status_subscription_opens_with_a_snapshot_of_both_states() -> None:
-    # The desired state rides the snapshot beside the observed one (#3428), so
-    # a client that missed an intent change converges on it too.
+def test_status_subscription_opens_with_a_snapshot_of_the_states_and_worker() -> None:
+    # The desired state (#3428) and the assigned Worker (#3818) ride the
+    # snapshot beside the observed state, so a client that missed an intent
+    # change or a release converges on it too.
     bus = InProcessRealTimeEvents()
-    community, server = uuid.uuid4(), uuid.uuid4()
+    community, server, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     read_server = _FakeReadServer(
-        found=True, state=ObservedState.CRASHED, desired=DesiredState.STOPPED
+        found=True,
+        state=ObservedState.CRASHED,
+        desired=DesiredState.STOPPED,
+        assigned=WorkerId(worker),
     )
     app = _app(bus=bus, read_server=read_server)
     client = _client(app)
     with client.websocket_connect(_url(community, server)) as ws:
         frame = ws.receive_json()
     assert frame["stream"] == "snapshot"
-    assert frame["payload"] == {"state": "crashed", "desired_state": "stopped"}
+    assert frame["payload"] == {
+        "state": "crashed",
+        "desired_state": "stopped",
+        "assigned_worker_id": str(worker),
+    }
     assert frame["ts"].endswith("Z")
 
 
@@ -538,7 +559,8 @@ def test_snapshot_wire_text_is_the_compact_frame_shape() -> None:
     ts = json.loads(text)["ts"]
     assert text == (
         f'{{"stream":"snapshot","ts":"{ts}",'
-        '"payload":{"state":"running","desired_state":"running"}}'
+        '"payload":{"state":"running","desired_state":"running",'
+        '"assigned_worker_id":null}}'
     )
 
 

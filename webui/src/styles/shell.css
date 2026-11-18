@@ -247,6 +247,12 @@ select.community-switcher {
   gap: 8px;
   flex-shrink: 0;
 }
+/* Why Start is held, beside it: the previous stop has not released the server (#3818). */
+.start-held {
+  align-self: center;
+  color: var(--text-faint);
+  font-size: 12px;
+}
 
 /* ---------- Buttons ---------- */
 .btn {

@@ -86,8 +86,8 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         self._control_plane = control_plane
         self._clock = clock
         # Handed to the StopServer's unit of work like every other one built for
-        # that use case (issue #3212), so an observed-state write it makes is
-        # published; the clear this sink runs today writes none.
+        # that use case (issue #3212), so the release this sink runs is
+        # published (issue #3818).
         self._real_time_events = real_time_events
         # The process-wide stop-convergence exclusion (issue #3491): a late result
         # must not release while another flow's snapshot of the server is in flight.

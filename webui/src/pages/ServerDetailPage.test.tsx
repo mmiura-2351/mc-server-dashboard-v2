@@ -261,25 +261,41 @@ describe("ServerDetailPage scaffold + header", () => {
     ).toBeInTheDocument();
   });
 
-  // Stopping a crashed server ends at (stopped, crashed): at rest, so no hint
-  // even though the two states differ. The rule ignores the assignment, which
-  // the live frames do not carry (#3818).
-  it.each([null, "worker-a"])(
-    "shows no converging hint for a server that crashed under a stopped intent, Worker %s (#3285)",
-    async (worker) => {
+  // Stopping a crashed server ends at (stopped, crashed, released): at rest,
+  // so no hint even though the two states differ (#3285).
+  it("shows no converging hint for a server that crashed under a stopped intent once released (#3285)", async () => {
+    mockApi.get.mockResolvedValue(
+      server({
+        desired_state: "stopped",
+        observed_state: "crashed",
+        assigned_worker_id: null,
+      }),
+    );
+    renderPage();
+
+    await screen.findByRole("heading", { level: 1 });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+  });
+
+  // Until the release the stop is still finishing, and the frames now carry
+  // the release, so the hint cannot go stale (#3818).
+  it.each(["stopped", "crashed", "unknown"])(
+    "shows the converging hint while the stop still holds the Worker at %s (#3818)",
+    async (observed) => {
       mockApi.get.mockResolvedValue(
         server({
           desired_state: "stopped",
-          observed_state: "crashed",
-          assigned_worker_id: worker,
+          observed_state: observed,
+          assigned_worker_id: "worker-a",
         }),
       );
       renderPage();
 
-      await screen.findByRole("heading", { level: 1 });
       expect(
-        screen.queryByText(t("serverDetail.converging")),
-      ).not.toBeInTheDocument();
+        await screen.findByText(t("serverDetail.converging")),
+      ).toBeInTheDocument();
     },
   );
 
@@ -501,6 +517,98 @@ describe("ServerDetailPage lifecycle controls", () => {
     expect(
       screen.queryByRole("button", { name: /Stop/ }),
     ).not.toBeInTheDocument();
+  });
+
+  // The previous stop still holds its Worker for the final snapshot, and the
+  // API refuses a start until the release (409 transition_conflict, #3818):
+  // Start is shown disabled, with the reason.
+  it.each(["stopped", "crashed", "unknown"])(
+    "holds Start with the reason while the stop still holds the Worker at %s (#3818)",
+    async (observed) => {
+      mockApi.get.mockResolvedValue(
+        server({
+          observed_state: observed,
+          desired_state: "stopped",
+          assigned_worker_id: "worker-a",
+        }),
+      );
+      renderPage();
+
+      await screen.findByText("survival");
+      const start = screen.getByRole("button", {
+        name: t(
+          observed === "crashed"
+            ? "serverDetail.startCrashed"
+            : "serverDetail.start",
+        ),
+      });
+      expect(start).toBeDisabled();
+      expect(start).toHaveAccessibleDescription(
+        t("serverDetail.startAwaitsRelease"),
+      );
+      expect(
+        screen.getByText(t("serverDetail.startAwaitsRelease")),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("shows no held-Start reason to a caller who may not start the server", async () => {
+    mockCan = (code) => code !== "server:start";
+    mockApi.get.mockResolvedValue(
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(
+      screen.queryByText(t("serverDetail.startAwaitsRelease")),
+    ).not.toBeInTheDocument();
+  });
+
+  describe("the release frame (#3818)", () => {
+    let restoreWs: () => void;
+    beforeEach(() => {
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    it("offers Start, drops Stop, the Worker badge and the hint once the Worker is released", async () => {
+      mockApi.get.mockResolvedValue(
+        server({
+          observed_state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: "worker-a",
+        }),
+      );
+      renderPage();
+      await screen.findByText("survival");
+      expect(screen.getByRole("button", { name: /Stop/ })).toBeEnabled();
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          serverFrame("status", { assigned_worker_id: null }),
+        );
+      });
+
+      expect(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      ).toBeEnabled();
+      expect(
+        screen.queryByText(t("serverDetail.startAwaitsRelease")),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /Stop/ }),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText(t("serverDetail.noWorker"))).toBeInTheDocument();
+      expect(
+        screen.queryByText(t("serverDetail.converging")),
+      ).not.toBeInTheDocument();
+    });
   });
 
   // A drained server keeps running under a stopped intent; the API's stop
@@ -915,7 +1023,11 @@ describe("ServerDetailPage lifecycle controls", () => {
       // The smoke above drives Restart; this pins that Start on a stopped
       // server sends its own verb and writes its own transitional state.
       mockApi.get.mockResolvedValue(
-        server({ observed_state: "stopped", desired_state: "stopped" }),
+        server({
+          observed_state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: null,
+        }),
       );
       mockApi.post.mockReturnValue(new Promise(() => {}));
       const { queryClient } = renderPage();
@@ -2660,6 +2772,7 @@ describe("ServerDetailPage Overview live streams", () => {
       server({
         observed_state: "crashed",
         desired_state: "stopped",
+        assigned_worker_id: null,
       }),
     );
     renderPage();
