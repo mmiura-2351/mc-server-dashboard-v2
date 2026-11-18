@@ -34,11 +34,12 @@ answer within a few seconds, or an answer of no all mean the lock is lost, and
 raise :class:`~...domain.errors.LifecycleLockLostError`; asking whether the
 session holds the key, rather than whether the connection answers, also catches a
 connection that now reaches a backend which never took the lock. The use cases
-call it immediately before each write that relies on the exclusion. Leaving the
-hold reports a loss the body never checked for as the same error, since the
-body's last writes may have run outside the exclusion. A loss between a check and
-the write it guards still goes unnoticed: closing that window would take fencing
-tokens that neither the database writes nor the storage backends check.
+call it immediately before each write, or run of writes, that relies on the
+exclusion. Leaving the hold reports a loss the body never checked for as the same
+error, since the body's last writes may have run outside the exclusion. A loss
+from a check until the writes it guards are done still goes unnoticed: closing
+that window would take fencing tokens that neither the database writes nor the
+storage backends check.
 
 Advisory locks are a PostgreSQL feature. This adapter is wired only behind the
 real Postgres engine; the unit suite uses the in-memory ``LifecycleLock`` fake

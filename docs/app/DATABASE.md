@@ -586,9 +586,9 @@ writes. A waiter gives up after a few seconds with `409 server_busy`
 PostgreSQL releases the lock when its session ends (a dropped connection, a
 database restart, a terminated backend) and tells the holder nothing, so another
 operation on the same server can take it while the first still runs (issue
-#3927). So the holder checks, right before each write that relies on the lock,
-that its own session still holds it: a query of `pg_locks` on the lock's
-connection. A lock found lost, or a check that fails or gets no answer within a
+#3927). So the holder checks that its own session still holds it, a query of
+`pg_locks` on the lock's connection, right before each write that relies on the
+lock, or before each run of such writes. A lock found lost, or a check that fails or gets no answer within a
 few seconds, stops the operation before that write with
 `503 lifecycle_lock_lost`, and leaves what any failure at that point leaves. A
 restore and a server delete check inside the storage call, under the per-server
@@ -597,9 +597,9 @@ the slow copy or pack before them is covered too. A loss that only the release
 finds is answered the same way, although the writes made since the last check
 stand.
 
-What remains is the window between a check and the write it guards: a lock lost
-there goes unnoticed, and closing it would take fencing tokens that neither the
-database writes nor the storage backends check.
+What remains is the window from a check until the writes it guards are done: a
+lock lost there goes unnoticed, and closing it would take fencing tokens that
+neither the database writes nor the storage backends check.
 
 ### `worker` — no table (in-memory registry)
 
