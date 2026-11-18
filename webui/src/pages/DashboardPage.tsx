@@ -32,6 +32,7 @@ import {
   actionApplies,
   bucketOf,
   converging,
+  crashNotRestarted,
   normalizeState,
   type ObservedState,
   STATE_BUCKETS,
@@ -697,19 +698,23 @@ function StatePill({ state }: { state: ObservedState }) {
 
 // The desired/observed drift affordance for a list row (issue #2443). Mirrors
 // the detail page header's rule and string exactly (ServerDetailPage's
-// `Header`, `converging`): until the server converges on the intent, show an
-// "applying…" hint. Without it a pending intent is invisible on the
+// `Header`, `converging` and `crashNotRestarted`): until the server converges
+// on the intent, show an "applying…" hint, except for a crash the reconciler
+// leaves alone (issue #3281), which nothing converges until the operator acts.
+// Without it a pending intent is invisible on the
 // list — e.g. a stop whose dispatch failed leaves desired=stopped while the
 // process keeps running, yet the row would otherwise show only a green pill.
 // The mark rides on the row wherever the observed state's bucket passes the
 // filter; it does not change which rows `filterServers` keeps.
 function DriftPill({ server }: { server: ServerResponse }) {
+  const state = normalizeState(server.observed_state);
   if (
-    !converging(
-      normalizeState(server.observed_state),
+    crashNotRestarted(
+      state,
       server.desired_state,
-      server.assigned_worker_id !== null,
-    )
+      server.crash_not_restarted,
+    ) ||
+    !converging(state, server.desired_state, server.assigned_worker_id !== null)
   ) {
     return null;
   }

@@ -41,10 +41,12 @@ class ServerStateSink(abc.ABC):
         status event once it is committed (FR-MON-1); a dropped one is not
         (issue #1957). ``detail``, ``reason`` and ``emitted_at`` are the
         report's free text, its crash reason and the Worker's event time: they
-        ride that event and are not persisted. Relaying is the adapter's job,
-        not the caller's, so that every observed-state write — this one, the
-        disconnect below, the API's own convergence writes — publishes through
-        one seam, after its commit (issue #3212).
+        ride that event. The detail and reason of a ``crashed`` report are also
+        stored as the server's last crash, until the next report of another
+        state (issue #3281); the event time is not stored. Relaying is the
+        adapter's job, not the caller's, so that every observed-state write —
+        this one, the disconnect below, the API's own convergence writes —
+        publishes through one seam, after its commit (issue #3212).
 
         ``worker_id`` is the reporting worker; the adapter applies the write
         only when it is the server's assigned worker, so a stale or misrouted

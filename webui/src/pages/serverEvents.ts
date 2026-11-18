@@ -56,17 +56,30 @@ export interface MetricsFrame {
 }
 
 /**
+ * The last crash the API stores with a server's observed state (#3281): the
+ * reason the Worker classified it with and the Worker's detail, each `null`
+ * when there is none. Both are `null` unless the server reads `crashed`.
+ */
+export interface Crash {
+  reason: string | null;
+  detail: string | null;
+}
+
+/**
  * The status snapshot the API sends on subscribe and after every gap that
  * dropped status frames (#1795):
  * the server's persisted observed state and, when the API reports them, its
- * desired state (#3428) and assigned Worker (#3818). No `detail` or `reason` —
- * they ride only a live status transition and are not persisted.
+ * desired state (#3428), assigned Worker (#3818), last crash and whether the
+ * reconciler leaves that crash alone (#3281). The live `detail` of any other
+ * state is not stored, so it has no counterpart.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
   state: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
+  crash?: Crash;
+  crashNotRestarted?: boolean;
 }
 
 /** A gap marker: the client fell behind and missed events (best-effort). */
@@ -118,6 +131,21 @@ export function assignmentOf(payload: object): string | null | undefined {
   const { assigned_worker_id } = payload;
   return assigned_worker_id === null || typeof assigned_worker_id === "string"
     ? assigned_worker_id
+    : undefined;
+}
+
+/**
+ * The last crash a snapshot payload carries, or `undefined` when it does not
+ * carry both fields as a string or `null`.
+ */
+function crashOf(payload: object): Crash | undefined {
+  if (!("crash_reason" in payload && "crash_detail" in payload)) {
+    return undefined;
+  }
+  const { crash_reason: reason, crash_detail: detail } = payload;
+  const valid = (value: unknown) => value === null || typeof value === "string";
+  return valid(reason) && valid(detail)
+    ? { reason: reason as string | null, detail: detail as string | null }
     : undefined;
 }
 
@@ -176,11 +204,19 @@ export function parseServerFrame(raw: string): ServerFrame | null {
       return null;
     }
     const assignedWorkerId = assignmentOf(payload);
+    const crash = crashOf(payload);
+    const { crash_not_restarted } = payload as {
+      crash_not_restarted?: unknown;
+    };
     return {
       kind: "snapshot",
       state,
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
       ...(assignedWorkerId !== undefined && { assignedWorkerId }),
+      ...(crash !== undefined && { crash }),
+      ...(typeof crash_not_restarted === "boolean" && {
+        crashNotRestarted: crash_not_restarted,
+      }),
     };
   }
   if (stream === "log") {

@@ -670,6 +670,11 @@ retry, because a retry cannot fix them:
   (`driver.container.images`) provides an older Java than the
   installer needs. Fix the image mapping.
 
+The API does not restart a server that crashed for either of these reasons on
+its own, even while its desired state is `running`: it stays crashed until it is
+stopped and started again ([`../app/CONFIGURATION.md`](../app/CONFIGURATION.md)
+Section 5.6).
+
 The server detail page shows these explanations in its crash banner and offers
 **View install log** there, which shows the tail of `logs/forge-install.log`.
 The file API serves a server's files only while it is running or at rest, so a

@@ -633,8 +633,7 @@ class StartServer:
             # write won the #216 guard, leave the as-read fields rather than claim a
             # write that did not happen.
             if applied:
-                server.observed_state = ObservedState.RUNNING
-                server.observed_at = observed_at
+                server.observe(ObservedState.RUNNING, observed_at)
                 # Sync the Bedrock tunnel to match the convergence write (issue
                 # #1602): the repository write above bypasses the sink's hook, so
                 # without this the tunnel is never opened on the INVALID_STATE path.
@@ -953,8 +952,7 @@ class StartServer:
             # observed write already won, so leave the entity's observed fields
             # as-read rather than claim a write that did not happen.
             if applied:
-                server.observed_state = ObservedState.RUNNING
-                server.observed_at = observed_at
+                server.observe(ObservedState.RUNNING, observed_at)
                 # Sync the Bedrock tunnel (issue #1602), same as __call__'s arm.
                 await self.bedrock_tunnel_sync.sync_observed(
                     server_id=server_id,
@@ -1779,8 +1777,7 @@ class StopServer:
         # Keep the return honest (issue #292): mutate the entity only when the write
         # landed; if the #216 guard dropped it, leave the observed fields as-read.
         if applied:
-            server.observed_state = ObservedState.STOPPED
-            server.observed_at = observed_at
+            server.observe(ObservedState.STOPPED, observed_at)
             # Close the Bedrock tunnel (issue #1602).
             await self.bedrock_tunnel_sync.sync_observed(
                 server_id=server_id,
@@ -1931,6 +1928,8 @@ class StopServer:
                     at_rest_under_us = True
                     server.observed_state = current.observed_state
                     server.observed_at = current.observed_at
+                    server.crash_reason = current.crash_reason
+                    server.crash_detail = current.crash_detail
                 else:
                     applied = await self.uow.servers.record_observed_state(
                         server_id,
@@ -1947,8 +1946,7 @@ class StopServer:
         # landed; if the #216 guard or the ownership assertion dropped it, leave the
         # observed fields as-read.
         if applied:
-            server.observed_state = ObservedState.STOPPED
-            server.observed_at = observed_at
+            server.observe(ObservedState.STOPPED, observed_at)
         if at_rest_under_us:
             # Close the Bedrock tunnel (issue #1602) on both arms — the process is
             # gone either way, and the call is idempotent. The gate also carries the
@@ -2412,8 +2410,7 @@ class StopServer:
             # Keep the return honest (issue #292): mutate the entity only when the
             # guarded write landed.
             if cleared:
-                server.observed_state = ObservedState.UNKNOWN
-                server.observed_at = observed_at
+                server.observe(ObservedState.UNKNOWN, observed_at)
         else:
             # Record a failed release of a stopped or crashed row (issue #3619): the
             # process is gone, and no final snapshot can still be uploading. Step B's

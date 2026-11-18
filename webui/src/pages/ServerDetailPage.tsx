@@ -42,6 +42,7 @@ import {
   actionApplies,
   atRest,
   converging,
+  crashNotRestarted,
   normalizeState,
   startAwaitsRelease,
   statePill,
@@ -216,7 +217,6 @@ function Loaded({
         can={can}
         degraded={events.degraded}
         statusDetail={events.statusDetail}
-        statusReason={events.statusReason}
         onOpenConsole={() => setTab("console")}
       />
       <div className="tabs" role="tablist">
@@ -315,9 +315,9 @@ function Loaded({
 // ── Overview header + lifecycle controls ────────────────────────────────────
 
 /**
- * The crash reasons a status frame can name (CONTROL_PLANE.md Section 6, issue
- * #1093): each is a crash of the supervised Forge install, whose output is in
- * the install log. An empty or unknown reason is an unclassified crash.
+ * The crash reasons the API reports (CONTROL_PLANE.md Section 6, issue #1093):
+ * each is a crash of the supervised Forge install, whose output is in the
+ * install log. No reason, or an unknown one, is an unclassified crash.
  */
 const FORGE_INSTALL_CRASH_REASONS: ReadonlySet<string> = new Set([
   "forge_install_failed",
@@ -340,7 +340,6 @@ function Header({
   can,
   degraded,
   statusDetail,
-  statusReason,
   onOpenConsole,
 }: {
   server: ServerResponse;
@@ -348,19 +347,29 @@ function Header({
   can: Can;
   degraded: boolean;
   statusDetail: string;
-  statusReason: string;
   onOpenConsole: () => void;
 }) {
   const state = normalizeState(server.observed_state);
+  // The last crash is stored with the observed state and live frames patch
+  // it into the server (issue #3281), so a reload explains it too.
+  const crashDetail = server.crash_detail ?? "";
+  const crashReason = server.crash_reason ?? "";
+  // A crash under a running intent that the reconciler leaves crashed, as the
+  // next attempt fails the same way (issue #3281). The API decides it, by the
+  // reconciler's own rule: until an operator start, or any other write to the
+  // server, comes after the crash.
+  const notRestarted = crashNotRestarted(
+    state,
+    server.desired_state,
+    server.crash_not_restarted,
+  );
   const pill = statePill(state);
   // Show an applying hint until the server converges on the intent, which a
   // stopped intent does at rest once its Worker is released (WEBUI_SPEC.md
-  // 6.4).
-  const drifting = converging(
-    state,
-    server.desired_state,
-    server.assigned_worker_id !== null,
-  );
+  // 6.4). A crash the reconciler does not restart is not converging.
+  const drifting =
+    !notRestarted &&
+    converging(state, server.desired_state, server.assigned_worker_id !== null);
 
   return (
     <div className="page-head">
@@ -391,32 +400,35 @@ function Header({
         </div>
         {state === "crashed" && (
           <div className="crash-detail">
-            {statusDetail.length > 0 && (
+            {crashDetail.length > 0 && (
               <div>
                 <span className="crash-detail-label">
                   {t("serverDetail.crashDetail")}
                 </span>{" "}
-                {statusDetail}
+                {crashDetail}
               </div>
             )}
-            {statusReason in CRASH_REASON_MESSAGE && (
+            {crashReason in CRASH_REASON_MESSAGE && (
               <div>
-                {t(CRASH_REASON_MESSAGE[statusReason as SpecificCrashReason])}
+                {t(CRASH_REASON_MESSAGE[crashReason as SpecificCrashReason])}
               </div>
             )}
             <div>
               {/* Under a running intent the API refuses start and restart and
-                  the reconciler restarts the server itself (issue #3419). */}
+                  the reconciler restarts the server itself (issue #3419),
+                  unless the crash recurs on every attempt (issue #3281). */}
               {t(
-                server.desired_state === "running"
-                  ? "serverDetail.crashBanner.autoRestart"
-                  : "serverDetail.crashBanner.guidance",
+                server.desired_state !== "running"
+                  ? "serverDetail.crashBanner.guidance"
+                  : notRestarted
+                    ? "serverDetail.crashBanner.noAutoRestart"
+                    : "serverDetail.crashBanner.autoRestart",
               )}{" "}
               <button type="button" className="link" onClick={onOpenConsole}>
                 {t("serverDetail.crashBanner.viewConsole")}
               </button>
             </div>
-            {FORGE_INSTALL_CRASH_REASONS.has(statusReason) &&
+            {FORGE_INSTALL_CRASH_REASONS.has(crashReason) &&
               can("file:read", { serverId: server.id }) && (
                 <ForgeInstallLog
                   communityId={communityId}

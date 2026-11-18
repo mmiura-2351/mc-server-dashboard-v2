@@ -67,6 +67,9 @@ function snapshotFrame(
     state: string;
     desired_state?: string;
     assigned_worker_id?: string | null;
+    crash_reason?: string | null;
+    crash_detail?: string | null;
+    crash_not_restarted?: boolean;
   }[],
 ) {
   return JSON.stringify({
@@ -219,6 +222,55 @@ describe("parseCommunityFrame", () => {
         },
         { serverId: "s2", state: "stopped", assignedWorkerId: null },
       ],
+    });
+  });
+
+  it("parses the crash reason a crashed status frame carries (#3281)", () => {
+    const crashed = (detail: string, reason: string) =>
+      JSON.stringify({
+        stream: "status",
+        ts: "t",
+        payload: { state: "crashed", detail, reason },
+        server_id: "s1",
+      });
+    expect(
+      parseCommunityFrame(
+        crashed("installer ran out of memory", "forge_install_out_of_memory"),
+      ),
+    ).toEqual({
+      kind: "status",
+      serverId: "s1",
+      state: "crashed",
+      crashReason: "forge_install_out_of_memory",
+    });
+    // An unclassified crash carries no reason.
+    expect(parseCommunityFrame(crashed("", ""))).toEqual({
+      kind: "status",
+      serverId: "s1",
+      state: "crashed",
+      crashReason: "",
+    });
+    expect(
+      parseCommunityFrame(statusFrame("s1", "running")),
+    ).not.toHaveProperty("crashReason");
+  });
+
+  it("parses whether each snapshot entry's crash is restarted (#3281)", () => {
+    expect(
+      parseCommunityFrame(
+        snapshotFrame([
+          {
+            server_id: "s1",
+            state: "crashed",
+            crash_reason: "forge_install_java_incompatible",
+            crash_detail: "java.lang.UnsupportedClassVersionError",
+            crash_not_restarted: true,
+          },
+        ]),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      servers: [{ serverId: "s1", state: "crashed", crashNotRestarted: true }],
     });
   });
 

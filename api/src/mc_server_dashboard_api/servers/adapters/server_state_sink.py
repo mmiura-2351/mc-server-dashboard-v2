@@ -53,6 +53,7 @@ from mc_server_dashboard_api.servers.adapters.repositories import (
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    CrashReason,
     ObservedState,
     ServerId,
     WorkerId,
@@ -186,7 +187,9 @@ class ServersServerStateSink(ServerStateSink):
                 # flip the tunnel).
                 expected_worker=WorkerId(parsed_worker),
                 detail=detail,
-                reason=reason,
+                # The servicer maps the wire enum onto these names, "" for an
+                # unclassified crash (CONTROL_PLANE.md Section 6).
+                reason=CrashReason(reason) if reason else None,
                 emitted_at=emitted_at,
             )
             require_status_events_wired(repo, self._real_time_events)
