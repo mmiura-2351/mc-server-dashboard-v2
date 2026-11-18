@@ -954,10 +954,9 @@ uses the store, delete `mcsd-owner.json`, and start the API whose database shoul
 own it. It claims the store at startup if the store is empty or its database has
 a server or resource-pack row; otherwise run the claim command above and restart
 it. Its next passes reclaim everything in the store that its database does not
-name. A downgrade of migration
-`0045_installation` followed by an upgrade mints a new installation id, which the
-marker no longer names, and so does upgrading a dump taken before it; the passes
-then refuse until this reset.
+name. A downgrade of migration `0045_installation` followed by an upgrade mints a
+new installation id, which the marker no longer names, and so does upgrading a
+dump taken before it; the passes then refuse until this reset.
 
 ### 4.4 Single-file writes
 
