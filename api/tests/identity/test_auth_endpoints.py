@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import Literal
 
 import argon2
+import bcrypt
 import httpx2
 import pytest
 from fastapi import FastAPI
@@ -28,10 +29,13 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
     BcryptPasswordHasher,
-    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
-from mc_server_dashboard_api.identity.application.login import Login, LoginResult
+from mc_server_dashboard_api.identity.application.login import (
+    DummyPasswordHash,
+    Login,
+    LoginResult,
+)
 from mc_server_dashboard_api.identity.application.restore_session import RestoreResult
 from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.entities import User
@@ -238,7 +242,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
         id=UserId.new(),
         username=Username("alice"),
         email=EmailAddress("alice@example.com"),
-        password_hash=build_dummy_password_hash("bcrypt", "Wm7!qz#Lp2vT"),
+        password_hash=bcrypt.hashpw(b"Wm7!qz#Lp2vT", bcrypt.gensalt()).decode(),
         created_at=now,
         updated_at=now,
     )
@@ -249,7 +253,7 @@ def test_login_over_72_byte_password_under_bcrypt_returns_uniform_401() -> None:
         attempts=FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(),
         hasher=hasher,
-        dummy_password_hash=build_dummy_password_hash("bcrypt", "dummy"),
+        dummy_password_hash=DummyPasswordHash(hasher, "dummy"),
         tokens=FakeTokenService(),
         clock=FakeClock(now),
         failure_delay=RecordingFailureDelay(),
@@ -286,7 +290,7 @@ def test_login_answers_503_when_argon2_runs_out_of_memory(
         id=UserId.new(),
         username=Username("alice"),
         email=EmailAddress("alice@example.com"),
-        password_hash=build_dummy_password_hash("argon2", "Wm7!qz#Lp2vT"),
+        password_hash=argon2.PasswordHasher().hash("Wm7!qz#Lp2vT"),
         created_at=now,
         updated_at=now,
     )
@@ -298,7 +302,7 @@ def test_login_answers_503_when_argon2_runs_out_of_memory(
         attempts=attempts,
         brute_force=make_brute_force_config(),
         hasher=hasher,
-        dummy_password_hash=build_dummy_password_hash("argon2", "dummy"),
+        dummy_password_hash=DummyPasswordHash(hasher, "dummy"),
         tokens=FakeTokenService(),
         clock=FakeClock(now),
         failure_delay=RecordingFailureDelay(),

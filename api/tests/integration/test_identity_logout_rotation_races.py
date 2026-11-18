@@ -55,7 +55,11 @@ from mc_server_dashboard_api.identity.application.admin_delete_user import (
 from mc_server_dashboard_api.identity.application.change_password import (
     ChangePassword,
 )
-from mc_server_dashboard_api.identity.application.login import Login, LoginResult
+from mc_server_dashboard_api.identity.application.login import (
+    DummyPasswordHash,
+    Login,
+    LoginResult,
+)
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import (
     RefreshSession,
@@ -677,7 +681,7 @@ def _login(uow: SqlAlchemyUnitOfWork) -> Login:
         attempts=FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(),
         hasher=StubHasher(),
-        dummy_password_hash="hashed::__dummy__",
+        dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
         tokens=_TokenService("login"),
         clock=FakeClock(_NOW),
         failure_delay=RecordingFailureDelay(),

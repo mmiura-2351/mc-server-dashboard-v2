@@ -7,13 +7,14 @@ both run the artificial-delay hook, and neither commits a token row.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from collections.abc import Callable
 from dataclasses import replace
 
 import pytest
 
-from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.login import DummyPasswordHash, Login
 from mc_server_dashboard_api.identity.domain.brute_force import backoff_cap_count
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
@@ -48,7 +49,7 @@ def _login(
         attempts=attempts or FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(),
         hasher=hasher or StubHasher(),
-        dummy_password_hash="hashed::__dummy__",
+        dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
         tokens=FakeTokenService(),
         clock=FakeClock(now),
         failure_delay=delay,
@@ -234,6 +235,92 @@ async def test_verifier_failure_is_no_failed_attempt(username: str) -> None:
     assert uow.refresh_tokens.by_hash == {}
 
 
+class _CountingHasher(StubHasher):
+    """Counts ``hash`` calls; the first ``failures`` fail, as argon2 out of memory."""
+
+    def __init__(self, failures: int = 0) -> None:
+        super().__init__()
+        self.hash_calls = 0
+        self._failures = failures
+
+    async def hash(self, plaintext: str) -> str:
+        self.hash_calls += 1
+        # Yield to the loop, as the real adapter does while its KDF runs off it,
+        # so concurrent callers overlap.
+        await asyncio.sleep(0)
+        if self.hash_calls <= self._failures:
+            raise PasswordVerificationUnavailableError
+        return await super().hash(plaintext)
+
+
+@pytest.mark.parametrize("username", ["alice", "ghost"])
+async def test_dummy_hash_build_failure_is_no_failed_attempt(username: str) -> None:
+    # Failing to build the dummy hash is a hasher failure like any other (a 503
+    # with nothing recorded, #3832). The known user "alice" fails too: had only
+    # the unknown-user path needed the dummy, the status would tell them apart.
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    delay = RecordingFailureDelay()
+    login = replace(
+        _login(uow, delay, attempts),
+        dummy_password_hash=DummyPasswordHash(_CountingHasher(failures=1), "x"),
+    )
+
+    with pytest.raises(PasswordVerificationUnavailableError):
+        await login(username=username, password=_PASSWORD, ip="203.0.113.7")
+
+    assert attempts.attempts == []
+    assert attempts.lockouts == {}
+    assert delay.calls == 0
+    assert uow.refresh_tokens.by_hash == {}
+
+
+async def test_a_blocked_login_does_not_build_the_dummy_hash() -> None:
+    # A blocked login verifies nothing, so it needs no dummy hash: it keeps its
+    # uniform 401 and Retry-After even while the hasher cannot build one.
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    await attempts.lock(
+        "alice", locked_until=_NOW + dt.timedelta(minutes=10), lockout_count=1
+    )
+    hasher = _CountingHasher(failures=1)
+    login = replace(
+        _login(uow, RecordingFailureDelay(), attempts),
+        dummy_password_hash=DummyPasswordHash(hasher, "x"),
+    )
+
+    with pytest.raises(InvalidCredentialsError) as exc_info:
+        await login(username="alice", password=_PASSWORD, ip="198.51.100.1")
+
+    assert exc_info.value.retry_after == 600
+    assert hasher.hash_calls == 0
+
+
+async def test_a_failed_dummy_hash_build_is_not_kept() -> None:
+    hasher = _CountingHasher(failures=1)
+    dummy = DummyPasswordHash(hasher, "__dummy__")
+
+    with pytest.raises(PasswordVerificationUnavailableError):
+        await dummy.get()
+    assert await dummy.get() == "hashed::__dummy__"
+    assert await dummy.get() == "hashed::__dummy__"
+
+    # Built again after the failure, then kept.
+    assert hasher.hash_calls == 2
+
+
+async def test_concurrent_first_gets_build_the_dummy_hash_once() -> None:
+    hasher = _CountingHasher()
+    dummy = DummyPasswordHash(hasher, "__dummy__")
+
+    hashes = await asyncio.gather(*(dummy.get() for _ in range(4)))
+
+    assert hashes == ["hashed::__dummy__"] * 4
+    assert hasher.hash_calls == 1
+
+
 async def test_failure_records_attempt_with_username_and_ip() -> None:
     uow = FakeUnitOfWork()
     uow.users.seed(make_user(password=_PASSWORD))
@@ -413,7 +500,7 @@ async def test_disabled_brute_force_skips_store() -> None:
         attempts=attempts,
         brute_force=make_brute_force_config(enabled=False),
         hasher=StubHasher(),
-        dummy_password_hash="hashed::__dummy__",
+        dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
         tokens=FakeTokenService(),
         clock=FakeClock(_NOW),
         failure_delay=RecordingFailureDelay(),
@@ -454,7 +541,8 @@ async def test_failures_across_casing_variants_aggregate_and_lock() -> None:
 
 async def test_unknown_user_and_wrong_password_both_verify() -> None:
     # Both failure paths must invoke the hasher so neither is faster (timing
-    # enumeration defence). The unknown-user path verifies the dummy hash.
+    # enumeration defence). The unknown-user path verifies the dummy hash: a
+    # real hasher refuses any other string without doing the KDF work.
     user = make_user(username="alice", password=_PASSWORD)
 
     def build(hasher: StubHasher, uow: FakeUnitOfWork) -> Login:
@@ -463,7 +551,7 @@ async def test_unknown_user_and_wrong_password_both_verify() -> None:
             attempts=FakeLoginAttemptStore(),
             brute_force=make_brute_force_config(),
             hasher=hasher,
-            dummy_password_hash="hashed::__dummy__",
+            dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
             tokens=FakeTokenService(),
             clock=FakeClock(_NOW),
             failure_delay=RecordingFailureDelay(),
@@ -482,8 +570,8 @@ async def test_unknown_user_and_wrong_password_both_verify() -> None:
             username="ghost", password=_PASSWORD
         )
 
-    assert wrong_hasher.verify_calls == 1
-    assert unknown_hasher.verify_calls == 1
+    assert wrong_hasher.verified == [("wrong", user.password_hash)]
+    assert unknown_hasher.verified == [(_PASSWORD, "hashed::__dummy__")]
 
 
 async def test_locked_account_raises_with_retry_after_seconds() -> None:

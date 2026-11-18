@@ -156,7 +156,6 @@ from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
     BcryptPasswordHasher,
-    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.adapters.sleeper import AsyncioSleeper
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
@@ -178,7 +177,7 @@ from mc_server_dashboard_api.identity.application.change_password import ChangeP
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
 from mc_server_dashboard_api.identity.application.list_sessions import ListSessions
 from mc_server_dashboard_api.identity.application.list_users import ListUsers
-from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.login import DummyPasswordHash, Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
@@ -797,12 +796,13 @@ def _build_password_hasher(password: PasswordSettings) -> PasswordHasher:
 # unknown-user login path the same cost as a wrong-password verify.
 _DUMMY_VERIFY_PLAINTEXT = "dummy-password-for-timing-equalization"
 
-
-@lru_cache(maxsize=2)
-def _dummy_password_hash(algorithm: str) -> str:
-    """Pre-compute the static dummy hash for ``algorithm`` once (login timing)."""
-
-    return build_dummy_password_hash(algorithm, _DUMMY_VERIFY_PLAINTEXT)
+# One dummy hash per algorithm, shared by every login of the process. Created
+# here rather than on first use so concurrent first logins cannot each get their
+# own; the KDF work waits for the first login (#3832).
+_DUMMY_PASSWORD_HASHES = {
+    "argon2": DummyPasswordHash(Argon2PasswordHasher(), _DUMMY_VERIFY_PLAINTEXT),
+    "bcrypt": DummyPasswordHash(BcryptPasswordHasher(), _DUMMY_VERIFY_PLAINTEXT),
+}
 
 
 @lru_cache(maxsize=1)
@@ -1010,7 +1010,7 @@ def get_login(request: Request) -> Login:
         attempts=SqlAlchemyLoginAttemptStore(session_factory),
         brute_force=brute_force,
         hasher=_build_password_hasher(settings.auth.password),
-        dummy_password_hash=_dummy_password_hash(settings.auth.password.hash),
+        dummy_password_hash=_DUMMY_PASSWORD_HASHES[settings.auth.password.hash],
         tokens=_build_token_service(settings.auth.token, clock),
         clock=clock,
         failure_delay=FixedLoginFailureDelay(
