@@ -7,13 +7,90 @@ from unittest.mock import Mock
 
 import pytest
 
+from mc_server_dashboard_api.core.adapters import periodic_runner
 from mc_server_dashboard_api.core.adapters.periodic_runner import run_periodic
+from tests.core.fakes import RecordingSleep
 
 
 async def _cancel(task: asyncio.Task[None]) -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def _noop() -> None:
+    pass
+
+
+@pytest.mark.parametrize(
+    ("tick_seconds", "draw", "first_delay"),
+    [
+        # A long interval caps the window at 10 minutes.
+        (86400, 0.5, 300.0),
+        # An interval shorter than 10 minutes is the window itself.
+        (120, 0.5, 60.0),
+        # The low end of the window: the first pass runs at once.
+        (86400, 0.0, 0.0),
+    ],
+)
+async def test_first_delay_is_a_random_point_in_the_startup_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tick_seconds: float,
+    draw: float,
+    first_delay: float,
+) -> None:
+    monkeypatch.setattr(periodic_runner._RNG, "random", lambda: draw)
+    sleep = RecordingSleep(returns=0)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    task = asyncio.create_task(
+        run_periodic(_noop, tick_seconds=tick_seconds, on_error=Mock())
+    )
+
+    await sleep.parked.wait()
+
+    assert sleep.delays == [first_delay]
+    await _cancel(task)
+
+
+async def test_later_delays_follow_the_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(periodic_runner._RNG, "random", lambda: 0.5)
+    sleep = RecordingSleep(returns=2)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    task = asyncio.create_task(run_periodic(_noop, tick_seconds=86400, on_error=Mock()))
+
+    await sleep.parked.wait()
+
+    assert sleep.delays == [300.0, 86400, 86400]
+    await _cancel(task)
+
+
+async def test_can_wait_one_interval_before_the_first_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_calls = 0
+
+    async def callback() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+
+    sleep = RecordingSleep(returns=1)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    task = asyncio.create_task(
+        run_periodic(
+            callback,
+            tick_seconds=86400,
+            on_error=Mock(),
+            first_pass="after_interval",
+        )
+    )
+
+    await sleep.parked.wait()
+
+    assert sleep.delays == [86400, 86400]
+    assert callback_calls == 1
+    await _cancel(task)
 
 
 async def test_waits_before_the_first_callback(
@@ -174,7 +251,7 @@ async def test_can_run_the_initial_callback_immediately(
             callback,
             tick_seconds=1,
             on_error=Mock(),
-            run_immediately=True,
+            first_pass="immediately",
         )
     )
 

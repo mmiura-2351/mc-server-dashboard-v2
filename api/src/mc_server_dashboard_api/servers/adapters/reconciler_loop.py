@@ -101,5 +101,5 @@ async def run_reconciler_loop(
         run_tick,
         tick_seconds=tick_seconds,
         on_error=on_error,
-        run_immediately=True,
+        first_pass="immediately",
     )

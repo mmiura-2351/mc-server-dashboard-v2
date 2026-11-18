@@ -8,6 +8,7 @@ dummy URL is never dialed (NFR-TEST-1).
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import uuid
@@ -21,6 +22,7 @@ from fastapi import FastAPI
 
 from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.core.adapters import periodic_runner
 from mc_server_dashboard_api.dependencies import get_audit_recorder
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
@@ -217,6 +219,20 @@ async def _no_installation_id(_session_factory: object) -> uuid.UUID:
 @pytest.fixture(autouse=True)
 def _dummy_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_test_env(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _defer_periodic_first_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Draw every periodic loop's first-pass delay at the end of its window (#3868).
+
+    The draw is random, so a test whose lifespan happened to outlast it would run
+    a background pass mid-test: a prune against the unreachable dummy database
+    (the traceback noise of #1740) or a GC pass. The largest draw keeps the first
+    pass a full window out. Tests of the runner pin their own draw.
+    """
+    monkeypatch.setattr(
+        periodic_runner._RNG, "random", lambda: math.nextafter(1.0, 0.0)
+    )
 
 
 @pytest.fixture(autouse=True)

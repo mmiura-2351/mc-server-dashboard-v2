@@ -7,6 +7,7 @@ from typing import cast
 
 import pytest
 
+from mc_server_dashboard_api.core.adapters.periodic_runner import FirstPass
 from mc_server_dashboard_api.servers.adapters import reconciler_loop
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
 from mc_server_dashboard_api.servers.application.startup_reset import (
@@ -79,10 +80,10 @@ async def test_reset_and_warning_run_before_the_first_tick(
         *,
         tick_seconds: float,
         on_error: ErrorHandler,
-        run_immediately: bool,
+        first_pass: FirstPass,
     ) -> None:
         assert tick_seconds == 17
-        assert run_immediately
+        assert first_pass == "immediately"
         await _run_callbacks(callback, on_error=on_error, calls=1)
 
     monkeypatch.setattr(reconciler_loop, "run_periodic", runner)
@@ -111,10 +112,10 @@ async def test_failed_reset_skips_ticks_until_it_recovers(
         *,
         tick_seconds: float,
         on_error: ErrorHandler,
-        run_immediately: bool,
+        first_pass: FirstPass,
     ) -> None:
         assert tick_seconds == 17
-        assert run_immediately
+        assert first_pass == "immediately"
         await _run_callbacks(callback, on_error=on_error, calls=3)
 
     monkeypatch.setattr(reconciler_loop, "run_periodic", runner)
@@ -143,10 +144,10 @@ async def test_successful_startup_work_is_not_repeated(
         *,
         tick_seconds: float,
         on_error: ErrorHandler,
-        run_immediately: bool,
+        first_pass: FirstPass,
     ) -> None:
         assert tick_seconds == 17
-        assert run_immediately
+        assert first_pass == "immediately"
         await _run_callbacks(callback, on_error=on_error, calls=3)
 
     monkeypatch.setattr(reconciler_loop, "run_periodic", runner)
@@ -175,10 +176,10 @@ async def test_warning_failure_does_not_gate_ticks_and_retries(
         *,
         tick_seconds: float,
         on_error: ErrorHandler,
-        run_immediately: bool,
+        first_pass: FirstPass,
     ) -> None:
         assert tick_seconds == 17
-        assert run_immediately
+        assert first_pass == "immediately"
         await _run_callbacks(callback, on_error=on_error, calls=3)
 
     monkeypatch.setattr(reconciler_loop, "run_periodic", runner)
