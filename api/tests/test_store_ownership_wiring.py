@@ -9,7 +9,8 @@ installation id is fixed.
 
 With a marker naming another installation, none of them deletes anything. With
 no marker, the app writes one naming its own installation and the startup sweep
-runs.
+runs. On the default fs backend, a marker file at the root naming another
+installation blocks the startup and periodic sweeps the same way.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,6 +34,7 @@ from mc_server_dashboard_api.fleet.adapters.drain_store import (
 )
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.storage.adapters import ownership as ownership_module
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
 from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
@@ -85,6 +88,10 @@ class _Captured:
         return _record
 
 
+async def _ours(_session_factory: object) -> uuid.UUID:
+    return _OURS
+
+
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
     backing = FakeS3Store()
@@ -107,12 +114,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
         ownership_module.ObjectStoreOwnership,
     )
 
-    async def _installation_id(_session_factory: object) -> uuid.UUID:
-        return _OURS
-
-    monkeypatch.setattr(
-        "mc_server_dashboard_api.app.read_installation_id", _installation_id
-    )
+    monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
 
     async def _drained(self: SqlAlchemyWorkerDrainStore) -> frozenset[WorkerId]:
         return frozenset()
@@ -184,3 +186,41 @@ async def test_an_unmarked_bucket_is_claimed_and_swept(
         # The startup sweep reclaimed the orphan staging and the old upload.
         assert _STAGED not in store.objects
         assert "upload-old" not in store.multipart_uploads
+
+
+async def test_an_fs_root_another_database_owns_blocks_both_sweeps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured: _Captured,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The default backend: the marker is a file at the fs root (issue #3870).
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership",
+        ownership_module.FsStoreOwnership,
+    )
+    monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
+    (tmp_path / OWNER_MARKER).write_bytes(_marker(_THEIRS))
+    staged = tmp_path / "communities" / "c" / "servers" / "s" / "incoming" / "t1"
+    staged.mkdir(parents=True)
+    (staged / "level.dat").write_bytes(b"in flight")
+    app = create_app()
+
+    with caplog.at_level(logging.ERROR):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            assert isinstance(app.state.storage, FsStorage)
+            assert staged.exists()
+            # The fs sweep is blocking; its loop runs it off the event loop.
+            await asyncio.to_thread(captured.loops["run_storage_sweep_loop"])
+
+    assert staged.exists()
+    assert (tmp_path / OWNER_MARKER).read_bytes() == _marker(_THEIRS)
+    assert any(
+        rec.levelno == logging.ERROR
+        and "storage sweep refused" in rec.getMessage()
+        and str(_THEIRS) in rec.getMessage()
+        for rec in caplog.records
+    )

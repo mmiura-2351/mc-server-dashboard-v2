@@ -175,6 +175,18 @@ async def test_a_marker_replaced_after_the_claim_refuses(backend: _Backend) -> N
     assert await ownership.refusal() is not None
 
 
+async def test_an_fs_claim_creates_a_root_that_does_not_exist_yet(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "not-yet"
+    ownership = FsStoreOwnership(root)
+
+    await ownership.claim(_OURS)
+
+    assert _named((root / OWNER_MARKER).read_bytes()) == str(_OURS)
+    assert await ownership.refusal() is None
+
+
 # --- concurrent first starts -------------------------------------------------
 
 
