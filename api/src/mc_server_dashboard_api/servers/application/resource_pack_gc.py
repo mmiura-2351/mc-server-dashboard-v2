@@ -44,7 +44,10 @@ one pack that keeps failing must not starve every pack after it (issue #3871). F
 failed deletes in a row end the pass, and its summary is then at WARNING with the
 reason (``gc_pass``, issue #3906). A store that gives no answer at all
 (:class:`ResourcePackStorageUnreachableError`) ends the pass at once, as does a
-cancellation; neither logs a summary.
+cancellation; neither logs a summary. The GC's :class:`ResumePoint` keeps the key
+such a pass ended at, and the next pass walks the blobs in key order starting after
+it, so a failure tied in fact to that one key cannot starve the packs after it
+(issue #3934). A pass that walks every blob without one clears it.
 """
 
 from __future__ import annotations
@@ -115,11 +118,17 @@ class RunResourcePackGc:
         failed = 0
         failed_in_a_row = 0
         stopped = False
+        if self.resume_point.key is not None:
+            _LOG.debug(
+                "resource-pack GC pass starts after %r, where the last pass ended "
+                "on an unreachable store",
+                self.resume_point.key,
+            )
         # The window is judged per blob, while ``store.delete`` removes every blob
         # under the pack id. The two agree because each upload puts one blob under
         # a freshly minted id; a second blob per pack would need the window judged
         # on the pack's newest blob instead.
-        for entry in entries:
+        for entry in self.resume_point.order(entries, lambda e: e.key):
             if entry.pack_id in live:
                 continue
             if entry.modified_at > cutoff:
@@ -137,7 +146,9 @@ class RunResourcePackGc:
                 await self.store.delete(entry.pack_id)
             except ResourcePackStorageUnreachableError:
                 # Not this pack but the store: every later delete would fail the
-                # same way, so the pass ends here.
+                # same way, so the pass ends here. If it is this pack after all,
+                # the next pass starts after it (issue #3934).
+                self.resume_point.key = entry.key
                 raise
             except Exception as exc:  # noqa: BLE001 - one pack must not end the pass
                 failed += 1
@@ -169,6 +180,9 @@ class RunResourcePackGc:
                 entry.size_bytes,
                 now - entry.modified_at,
             )
+        if not stopped:
+            # The pass came round without a store failure (issue #3934).
+            self.resume_point.key = None
         level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(
             logging.WARNING if stopped else level,
