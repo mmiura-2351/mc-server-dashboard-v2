@@ -217,6 +217,31 @@ _WORKING_SET_ABSENT_MARKER = "working dir absent"
 # it down, and what the operator has to act on is the scratch.
 _WORKING_SET_ABSENT_REASON = "working_set_absent"
 
+# The hydrate refusals after which an instance of the server may still run on the
+# Worker that refused, though the server's record does not name it (issue #3890).
+# Placement cannot see such an instance, so a start or placement that gave the
+# Worker back would let the next one start the same world on a second host. Each
+# is answered before the Worker could rule an instance out, which only an answer
+# given after both ``reserve()`` and its leftover check passed does:
+#
+# * ``BUSY``: ``reserve()`` found another command's reservation for the server (a
+#   start or a stop may be in flight) or a failed-stop orphan, whose process may
+#   still be alive.
+# * ``UNAVAILABLE``: a container of the server the Worker does not track may be
+#   running against its working set; it could not be ended, or the daemon could
+#   not say.
+# * ``EXPIRED``: the session answered before the hydrate reached the Worker's
+#   checks at all. It waited past its budget, behind the Worker-wide cap or behind
+#   another command for this server.
+#
+# ``INVALID_STATE`` (a live instance) has its own arm. Every other answer gives
+# the Worker back: ``TRANSFER_FAILED`` comes after both checks passed, with the id
+# held through the transfer, and the rest are not reachable on a hydrate this API
+# sends (CONTROL_PLANE.md Section 5).
+_HYDRATE_REFUSALS_KEEPING_THE_WORKER = frozenset(
+    {CommandStatus.BUSY, CommandStatus.UNAVAILABLE, CommandStatus.EXPIRED}
+)
+
 
 def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     """Whether an outcome is the Worker's "I hold no working set for this id" refusal.
@@ -662,9 +687,19 @@ class StartServer:
             # caller sees a retryable conflict. A later reconcile tick takes the
             # redispatch_start path to the SAME Worker once the Worker settles (a
             # genuine success then emits a StatusChange; a failure leaves the row
-            # diverged for the next retry). Gate on ``dispatch.attempted`` so a
-            # PRE-dispatch BUSY — a hydrate refused for either reason — still
-            # compensates below: that one never reached the start.
+            # diverged for the next retry). A PRE-dispatch BUSY, a hydrate refused
+            # for either reason, keeps the Worker too, in the arm below.
+            raise failure
+        if (
+            not dispatch.attempted
+            and outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER
+        ):
+            # The Worker refused the HYDRATE with an answer that leaves an instance
+            # of this server there possible (issue #3890). Compensating would let a
+            # later start place it on another Worker while that instance runs. So
+            # keep desired=running and the assignment for the reconciler's
+            # redispatch_start to this Worker, and record what is known.
+            await self._record_unknown(server, worker_id)
             raise failure
         await self._compensate(
             community_id,
@@ -846,15 +881,20 @@ class StartServer:
             )
             # A failed START outcome may reflect a command the Worker partially
             # applied; keep the assignment for a same-Worker redispatch. A failed
-            # HYDRATE outcome (not dispatched) never reached the start, so unassign.
+            # HYDRATE outcome (not dispatched) never reached the start, so unassign,
+            # unless its answer leaves an instance of this server on the Worker
+            # possible (issue #3890): then keep the Worker, as ``__call__`` does.
             if not dispatch.attempted:
-                await self._unassign(
-                    community_id,
-                    server_id,
-                    worker_id,
-                    stop_intent_count=stop_intent_count,
-                    original=failure,
-                )
+                if outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER:
+                    await self._record_unknown(server, worker_id)
+                else:
+                    await self._unassign(
+                        community_id,
+                        server_id,
+                        worker_id,
+                        stop_intent_count=stop_intent_count,
+                        original=failure,
+                    )
             raise failure
         return server
 
@@ -1267,6 +1307,33 @@ class StartServer:
                 bedrock_port=server.bedrock_port,
                 running=True,
             )
+
+    async def _record_unknown(self, server: Server, worker_id: WorkerId) -> None:
+        """Record observed=unknown for a server kept on ``worker_id`` (issue #3890).
+
+        The Worker refused the hydrate with an answer that does not rule out an
+        instance of the server there, and the start keeps the server on it. The
+        observed state the row carries was not reported by this Worker, which
+        cannot report on a server no record named, so it says nothing about it.
+        ``unknown`` is what the API knows. It also sends both reconciler arms back
+        to this Worker: a running intent is retried here (a stale ``running``
+        would read converged, and nothing would retry the start that was never
+        sent), and a stop whose dispatch fails is sent again rather than released
+        under that instance on the strength of a stale ``stopped``. The write
+        asserts the row is still on ``worker_id``.
+        """
+
+        observed_at = self.clock.now()
+        async with self.uow:
+            applied = await self.uow.servers.record_observed_state(
+                server.id,
+                observed_state=ObservedState.UNKNOWN,
+                observed_at=observed_at,
+                expected_worker=worker_id,
+            )
+            await self.uow.commit()
+        if applied:
+            server.observe(ObservedState.UNKNOWN, observed_at)
 
     async def _generation_before_hydrate(
         self, community_id: CommunityId, server_id: ServerId
