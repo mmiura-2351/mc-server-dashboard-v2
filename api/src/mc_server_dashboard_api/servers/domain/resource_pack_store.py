@@ -8,11 +8,25 @@ Resource packs are global (not community-scoped), keyed by
 from __future__ import annotations
 
 import abc
+import datetime as dt
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 
 ByteStream = AsyncIterator[bytes]
+
+
+@dataclass(frozen=True)
+class StoredBlob:
+    """One stored blob: the pack it belongs to and its store time (issue #3277).
+
+    ``modified_at`` (UTC, timezone-aware) is what the orphan GC's safety window
+    compares against ``now``.
+    """
+
+    pack_id: ResourcePackId
+    modified_at: dt.datetime
 
 
 class ResourcePackStore(abc.ABC):
@@ -27,8 +41,8 @@ class ResourcePackStore(abc.ABC):
         Raises ``ResourcePackStorageUnavailableError`` when the store could not
         take the upload (issue #2458). The blob is then normally absent, but
         that is not guaranteed: a store that completed the upload and lost the
-        response leaves it behind (reclaiming it is issue #3277). The caller must
-        not record the pack, and may try again under a fresh pack id.
+        response leaves it behind, for the orphan GC to reclaim (issue #3277). The
+        caller must not record the pack, and may try again under a fresh pack id.
         """
 
     @abc.abstractmethod
@@ -60,4 +74,13 @@ class ResourcePackStore(abc.ABC):
         and ``ResourcePackStorageUnavailableError`` when the store could not answer
         (issue #2455) — the same two outcomes :meth:`open` reports, so one outage
         yields one status whichever of the two a download strikes.
+        """
+
+    @abc.abstractmethod
+    async def list_entries(self) -> list[StoredBlob]:
+        """Enumerate every stored blob with its pack id and store time.
+
+        The orphan GC's input (issue #3277): it diffs the pack ids against the
+        pack rows. Raises ``ResourcePackStorageUnavailableError`` when the store
+        could not answer.
         """

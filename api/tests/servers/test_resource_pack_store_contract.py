@@ -72,6 +72,7 @@ from tests.storage.fake_s3 import (
     close_tracking_factory,
     fake_s3_factory,
 )
+from tests.store_clock import StoreClock
 
 _ENDPOINT = os.environ.get("MCD_TEST_S3_ENDPOINT")
 _BUCKET = os.environ.get("MCD_TEST_S3_BUCKET", "mcsd")
@@ -227,6 +228,69 @@ async def test_delete_of_an_already_deleted_pack_is_a_no_op(
 
     with pytest.raises(ResourcePackNotFoundError):
         await store.size(pack, _FILENAME)
+
+
+async def test_list_entries_names_the_pack_of_every_stored_blob(
+    store: ResourcePackStore, pack: ResourcePackId
+) -> None:
+    # The orphan GC's input (issue #3277): one entry per stored blob, carrying the
+    # pack id the blob is stored under. Filtered to this test's pack, because the
+    # live arm's bucket is shared with whatever else has stored packs in it.
+    await _put(store, pack, "one.zip")
+    await _put(store, pack, "two.zip")
+
+    listed = [entry.pack_id for entry in await store.list_entries()]
+
+    assert [pack_id for pack_id in listed if pack_id == pack] == [pack, pack]
+
+
+async def test_list_entries_omits_a_deleted_pack(
+    store: ResourcePackStore, pack: ResourcePackId
+) -> None:
+    await _put(store, pack)
+    await store.delete(pack)
+
+    assert pack not in {entry.pack_id for entry in await store.list_entries()}
+
+
+@pytest.mark.parametrize("arm", ["fake", "fake-s3"])
+async def test_list_entries_reports_the_store_time(arm: str) -> None:
+    # The GC's safety window reads this time (issue #3277), so both doubles must
+    # report the time the blob was stored, as the store does. Only these two arms:
+    # a live endpoint's clock is not the test's to set.
+    clock = StoreClock()
+    store: ResourcePackStore = (
+        FakeResourcePackStore(clock=clock)
+        if arm == "fake"
+        else ObjectResourcePackStore(
+            close_tracking_factory(fake_s3_factory(FakeS3Store(clock=clock)))
+        )
+    )
+    pack_id = ResourcePackId(uuid.uuid4())
+
+    await _put(store, pack_id)
+
+    (entry,) = await store.list_entries()
+    assert (entry.pack_id, entry.modified_at) == (pack_id, clock.now)
+
+
+async def test_list_entries_skips_a_key_that_names_no_pack() -> None:
+    # Only ``resource-packs/<pack-id>/<filename>`` names a pack. Any other key
+    # under the namespace is listed as nothing at all, so the GC never deletes a
+    # pack id it read out of a key the adapter did not write (issue #3277).
+    backing = FakeS3Store()
+    store = ObjectResourcePackStore(close_tracking_factory(fake_s3_factory(backing)))
+    pack_id = ResourcePackId(uuid.uuid4())
+    await _put(store, pack_id)
+    for stray in (
+        "resource-packs/not-a-uuid/pack.zip",
+        f"resource-packs/{pack_id.value.hex}/pack.zip",
+        f"resource-packs/{uuid.uuid4()}",
+        f"resource-packs/{uuid.uuid4()}/",
+    ):
+        backing.objects[stray] = b"stray"
+
+    assert [entry.pack_id for entry in await store.list_entries()] == [pack_id]
 
 
 # --- the seam under a store outage (issue #2455) ---------------------------
@@ -406,6 +470,15 @@ async def test_delete_interrupted_partway_translates_and_a_retry_finishes_it() -
     await healthy.delete(pack_id)
 
     assert backing.objects == {}
+
+
+async def test_list_entries_backend_failure_translates() -> None:
+    store = ObjectResourcePackStore(
+        close_tracking_factory(_write_fault_factory(FakeS3Store(), fail_list=True))
+    )
+
+    with pytest.raises(ResourcePackStorageUnavailableError):
+        await store.list_entries()
 
 
 # --- an upload the store completed but could not acknowledge (issue #2458) --

@@ -47,6 +47,7 @@ behind:
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
@@ -57,6 +58,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
+    StoredBlob,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import (
     KeyNamespace,
@@ -74,6 +76,25 @@ def _prefix(pack_id: ResourcePackId) -> str:
 
 def _key(pack_id: ResourcePackId, filename: str) -> str:
     return _prefix(pack_id) + filename
+
+
+def _pack_id_of(key: str) -> ResourcePackId | None:
+    """The pack a ``resource-packs/<pack-id>/<filename>`` key names, else ``None``.
+
+    Only a key :func:`_key` could have built names a pack: a canonical UUID and a
+    non-empty filename. A stray key under the namespace is no pack's, so it is
+    neither an error (one would stop every GC pass for good) nor a pack id the GC
+    could act on (issue #3277).
+    """
+
+    head, _, filename = key.removeprefix(KeyNamespace.RESOURCE_PACKS).partition("/")
+    try:
+        pack_uuid = uuid.UUID(head)
+    except ValueError:
+        return None
+    if not filename or str(pack_uuid) != head:
+        return None
+    return ResourcePackId(pack_uuid)
 
 
 class ObjectResourcePackStore(ResourcePackStore):
@@ -149,3 +170,16 @@ class ObjectResourcePackStore(ResourcePackStore):
         if result is None:
             raise ResourcePackNotFoundError(key)
         return result
+
+    async def list_entries(self) -> list[StoredBlob]:
+        prefix = KeyNamespace.RESOURCE_PACKS
+        try:
+            async with self._client_factory() as client:
+                objects = await client.list_objects(prefix)
+        except ObjectStoreUnavailableError as exc:
+            raise ResourcePackStorageUnavailableError(prefix) from exc
+        return [
+            StoredBlob(pack_id=pack_id, modified_at=obj.last_modified)
+            for obj in objects
+            if (pack_id := _pack_id_of(obj.key)) is not None
+        ]

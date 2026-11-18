@@ -1,0 +1,208 @@
+"""Resource-pack orphan GC (issue #3277).
+
+The pack row is the source of truth, so a stored blob no row names is never
+served -- and nothing removed it. Each orphan here is made the way production
+makes it, by the use case that leaves it behind, and stored through the real
+:class:`ObjectResourcePackStore` over the in-memory S3 stub, whose store clock
+stamps each blob with the time the GC's safety window reads.
+
+The two guards are pinned the same way: an upload in flight has stored its blob
+but not yet committed its row, and is spared by the safety window; a row that
+commits after the GC read the rows is caught by the re-read just before the
+delete.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import io
+import json
+import uuid
+import zipfile
+from collections.abc import AsyncIterator
+
+import pytest
+
+from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
+    ObjectResourcePackStore,
+)
+from mc_server_dashboard_api.servers.application.resource_pack_gc import (
+    GC_SAFETY_WINDOW,
+    RunResourcePackGc,
+)
+from mc_server_dashboard_api.servers.application.resource_packs import (
+    DeleteResourcePack,
+    UploadResourcePack,
+)
+from mc_server_dashboard_api.servers.domain.errors import (
+    ResourcePackStorageUnavailableError,
+)
+from mc_server_dashboard_api.servers.domain.resource_pack import (
+    ResourcePack,
+    ResourcePackId,
+)
+from tests.servers.fakes import FakeClock, FakeResourcePackRepository, FakeUnitOfWork
+from tests.storage.fake_s3 import FakeS3Store
+from tests.storage.faulty_s3 import Faults, faulty_s3_factory
+
+_T0 = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.UTC)
+_FILENAME = "pack.zip"
+
+
+def _pack_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("pack.mcmeta", json.dumps({"pack": {"pack_format": 15}}))
+    return buf.getvalue()
+
+
+class _Bucket:
+    """The bucket, the store over it, and the one clock both sides read."""
+
+    def __init__(self) -> None:
+        self.clock = FakeClock(_T0)
+        self.backing = FakeS3Store(clock=self.clock.now)
+        self.faults = Faults()
+        self.store = ObjectResourcePackStore(
+            faulty_s3_factory(self.backing, self.faults)
+        )
+        self.rows = FakeResourcePackRepository()
+
+    def blob_keys(self) -> list[str]:
+        return [
+            key for key in self.backing.objects if key.startswith("resource-packs/")
+        ]
+
+    async def upload(self, uow: FakeUnitOfWork | None = None) -> ResourcePack:
+        return await UploadResourcePack(
+            uow=uow or FakeUnitOfWork(resource_packs=self.rows),
+            store=self.store,
+            clock=self.clock,
+        )(
+            filename=_FILENAME,
+            display_name="Pack",
+            content=_pack_zip(),
+            uploaded_by=uuid.uuid4(),
+        )
+
+    async def gc(self) -> None:
+        """Run one pass once every blob stored so far is past the safety window."""
+
+        self.clock.set(self.clock.now() + GC_SAFETY_WINDOW + dt.timedelta(minutes=1))
+        await RunResourcePackGc(
+            uow=FakeUnitOfWork(resource_packs=self.rows),
+            store=self.store,
+            clock=self.clock,
+        )()
+
+
+class _CommitFailsUnitOfWork(FakeUnitOfWork):
+    """A unit of work whose commit fails, so the INSERT it staged never lands."""
+
+    async def commit(self) -> None:
+        # The fake keys a row in on ``add``; a failed commit leaves no row.
+        self.resource_packs.packs.clear()
+        raise RuntimeError("commit failed")
+
+
+async def test_reclaims_the_blob_a_failed_delete_left() -> None:
+    # DeleteResourcePack commits the row's delete first and removes the blob
+    # best-effort (issue #1962): a store outage there answers 204 and leaves the
+    # blob, and a repeated DELETE is a 404 that never reaches the store.
+    bucket = _Bucket()
+    pack = await bucket.upload()
+    bucket.faults.when = lambda op, key: op == "delete_object"
+    await DeleteResourcePack(
+        uow=FakeUnitOfWork(resource_packs=bucket.rows), store=bucket.store
+    )(resource_pack_id=pack.id, caller_id=pack.uploaded_by, is_platform_admin=False)
+    assert bucket.rows.packs == {}
+    assert bucket.blob_keys() != []
+    bucket.faults.clear()
+
+    await bucket.gc()
+
+    assert bucket.blob_keys() == []
+
+
+async def test_reclaims_the_blob_a_failed_commit_left() -> None:
+    # UploadResourcePack stores the blob before it commits the row (issue #2458).
+    bucket = _Bucket()
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await bucket.upload(_CommitFailsUnitOfWork(resource_packs=bucket.rows))
+    assert bucket.rows.packs == {}
+    assert bucket.blob_keys() != []
+
+    await bucket.gc()
+
+    assert bucket.blob_keys() == []
+
+
+async def test_reclaims_the_blob_an_unacknowledged_upload_left() -> None:
+    # The store completed the upload and the response was lost: the upload answers
+    # 503 with no row, and the completed blob stays (issue #2458).
+    bucket = _Bucket()
+    bucket.faults.lose_response = lambda op, key: op == "upload_multipart"
+    with pytest.raises(ResourcePackStorageUnavailableError):
+        await bucket.upload()
+    bucket.faults.clear()
+    assert bucket.blob_keys() != []
+
+    await bucket.gc()
+
+    assert bucket.blob_keys() == []
+
+
+async def test_keeps_the_blob_of_a_pack_with_a_row() -> None:
+    bucket = _Bucket()
+    pack = await bucket.upload()
+
+    await bucket.gc()
+
+    assert bucket.blob_keys() == [f"resource-packs/{pack.id.value}/{_FILENAME}"]
+
+
+async def test_spares_the_blob_of_an_upload_in_flight() -> None:
+    # Mid-upload: the blob is stored and the row not yet committed, exactly the
+    # state of an orphan -- told apart only by its age. A pass that runs then must
+    # leave the blob for the row about to name it.
+    bucket = _Bucket()
+    pack_id = ResourcePackId(uuid.uuid4())
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield _pack_zip()
+
+    await bucket.store.put(pack_id, _FILENAME, _body())
+    bucket.clock.set(_T0 + GC_SAFETY_WINDOW - dt.timedelta(seconds=1))
+    await RunResourcePackGc(
+        uow=FakeUnitOfWork(resource_packs=bucket.rows),
+        store=bucket.store,
+        clock=bucket.clock,
+    )()
+
+    assert bucket.blob_keys() == [f"resource-packs/{pack_id.value}/{_FILENAME}"]
+
+
+class _RowCommitsAfterTheRead(FakeResourcePackRepository):
+    """Rows whose next pack commits just after the GC has read them."""
+
+    def __init__(self, late: ResourcePack) -> None:
+        super().__init__()
+        self._late = late
+
+    async def list_all(self) -> list[ResourcePack]:
+        rows = await super().list_all()
+        await self.add(self._late)
+        return rows
+
+
+async def test_keeps_the_blob_of_a_row_committed_after_the_rows_were_read() -> None:
+    # The blob is old and its row is missing from the rows the GC read, so neither
+    # the listing nor the safety window spares it: only the re-read of the row
+    # immediately before the delete sees the commit that landed in between.
+    bucket = _Bucket()
+    pack = await bucket.upload()
+    bucket.rows = _RowCommitsAfterTheRead(late=pack)
+
+    await bucket.gc()
+
+    assert bucket.blob_keys() == [f"resource-packs/{pack.id.value}/{_FILENAME}"]
