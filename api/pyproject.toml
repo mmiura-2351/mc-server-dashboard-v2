@@ -657,8 +657,10 @@ forbidden_modules = [
 # a file format, not an HTTP header) — and `archive_member`, the standard-library
 # backup archive member rule that storage's restore and the servers upload gate
 # both judge members by (issue #3579), and the end-of-archive read beside it
-# (issue #3778). Keep the list in step with that `ls`: a
-# new root-level module belongs here unless it is neutral in the same way.
+# (issue #3778); and `gc_pass`, the import-free limit on failed deletes in a row
+# at which the versions and servers GCs both end a pass (issue #3906). Keep the
+# list in step with that `ls`: a new root-level module belongs here unless it is
+# neutral in the same way.
 [[tool.importlinter.contracts]]
 name = "no context's domain or application imports a root-level module"
 type = "forbidden"

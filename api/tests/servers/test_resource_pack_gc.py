@@ -260,6 +260,49 @@ async def test_a_pass_whose_every_delete_failed_logs_its_summary_at_info(
     assert "1 failed" in summary.getMessage()
 
 
+async def test_five_failed_deletes_in_a_row_end_the_pass(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A store that fails every delete costs each one its retries and a WARNING
+    # with a traceback. Five in a row end the pass, which still logs its summary,
+    # at WARNING with the reason; the pack after them is not tried (issue #3906).
+    bucket = _Bucket()
+    keys = await bucket.orphans(6)
+    failing = keys[:5]
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in failing
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await bucket.gc()
+
+    assert sorted(bucket.blob_keys()) == keys
+    assert (result.scanned, result.deleted, result.failed) == (6, 0, 5)
+    summary = caplog.records[-1]
+    assert summary.levelno == logging.WARNING
+    assert vars(summary).get("reason") == "stopped_after_consecutive_failures"
+    assert "6 blob(s) listed, 0 reclaimed (0 bytes), 5 failed" in summary.getMessage()
+
+
+async def test_a_reclaimed_pack_restarts_the_count_of_failed_deletes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Four failures, one success, four more: never five in a row, so the pass
+    # reaches every pack and ends as usual (issue #3906).
+    bucket = _Bucket()
+    keys = await bucket.orphans(9)
+    reclaimed = keys.pop(4)
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in keys
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await bucket.gc()
+
+    assert reclaimed not in bucket.blob_keys()
+    assert sorted(bucket.blob_keys()) == keys
+    assert (result.scanned, result.deleted, result.failed) == (9, 1, 8)
+    summary = caplog.records[-1]
+    assert summary.levelno == logging.INFO
+    assert "reason" not in vars(summary)
+
+
 # A pack stored before the upload refused such a name (issue #3907): logged raw,
 # its newline would start a line that reads as a record of its own, and its
 # escape sequence would clear the terminal tailing the log.
@@ -391,6 +434,86 @@ async def test_keeps_the_blob_of_a_row_committed_after_the_rows_were_read() -> N
     await bucket.gc()
 
     assert bucket.blob_keys() == [f"resource-packs/{pack.id.value}/{_FILENAME}"]
+
+
+class _DatabaseDown(Exception):
+    """The row read failing: the database, not the bucket."""
+
+
+class _ReReadFails(FakeResourcePackRepository):
+    """Rows the GC can list, whose re-read before a delete fails."""
+
+    async def get_by_id(self, pack_id: ResourcePackId) -> ResourcePack | None:
+        raise _DatabaseDown("re-read failed")
+
+
+async def test_a_failed_re_read_ends_the_pass_and_is_not_a_failed_delete() -> None:
+    # The re-read before each delete sits outside the per-pack ``try``: a re-read
+    # that fails says nothing about the pack, and without it no pack may be
+    # deleted. It leaves the pass rather than being counted as a failed delete
+    # (issue #3906).
+    bucket = _Bucket()
+    keys = await bucket.orphans(2)
+    bucket.rows = _ReReadFails()
+
+    with pytest.raises(_DatabaseDown):
+        await bucket.gc()
+
+    assert sorted(bucket.blob_keys()) == keys
+
+
+def _row(pack_id: ResourcePackId) -> ResourcePack:
+    """The row of a pack stored under *pack_id*; the GC reads only its id."""
+
+    return ResourcePack(
+        id=pack_id,
+        filename=_FILENAME,
+        display_name="Pack",
+        description=None,
+        sha1_hash="",
+        sha256_hash="",
+        size_bytes=0,
+        uploaded_by=uuid.uuid4(),
+        created_at=_T0,
+        updated_at=_T0,
+    )
+
+
+async def test_a_skipped_pack_leaves_the_count_of_failed_deletes_alone() -> None:
+    # A real bucket mixes live and young packs among the orphans. A pack the pass
+    # skips says nothing about the store, so it neither adds to the count nor
+    # restarts it: five failures with a live, a young and a re-read-spared pack
+    # between them still end the pass, and the pack after them is not tried
+    # (issue #3906).
+    bucket = _Bucket()
+    ids = sorted(
+        (ResourcePackId(uuid.uuid4()) for _ in range(9)), key=lambda p: str(p.value)
+    )
+    live, young, spared, last = ids[2], ids[4], ids[6], ids[8]
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield _pack_zip()
+
+    for pack_id in ids:
+        # Stored two minutes after the rest, the young pack is still inside the
+        # safety window when the pass meets it.
+        bucket.clock.set(_T0 + dt.timedelta(minutes=2) if pack_id == young else _T0)
+        await bucket.store.put(pack_id, _FILENAME, _body())
+    bucket.clock.set(_T0)
+    keys = [f"resource-packs/{pack_id.value}/{_FILENAME}" for pack_id in ids]
+    failing = [
+        key
+        for pack_id, key in zip(ids, keys, strict=True)
+        if pack_id not in (live, young, spared, last)
+    ]
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in failing
+    bucket.rows = _RowCommitsAfterTheRead(late=_row(spared))
+    await bucket.rows.add(_row(live))
+
+    result = await bucket.gc()
+
+    assert sorted(bucket.blob_keys()) == keys
+    assert (result.scanned, result.deleted, result.failed) == (9, 0, 5)
 
 
 async def test_refuses_a_bucket_another_database_owns(
