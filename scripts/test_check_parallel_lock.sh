@@ -104,12 +104,12 @@ fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 # the log rotation and the stub's touch go to the suite's temp dir, which is on
 # the disk unless TMPDIR says otherwise, and every command a run spawns is
 # exec'd from the disk. Under IO load each of those can wait seconds, and one
-# wait can span several runs: after the release the four queued waiters pass
-# the lock one at a time in no fixed order, and the copy in 9 inits two
-# repositories and completes two runs before it reports its first assertion.
-# The old 10 s ceiling lost exactly those waits under heavy IO load. A passing
-# run pays none of this; a red pays it once for each wait that never ends,
-# beside an api chain that takes far longer.
+# wait can cover more than one run: the copy in 9 inits two repositories and
+# completes two runs before it reports its first assertion, and after the
+# release the four queued waiters pass the lock one at a time, in an order
+# flock does not fix. The old 10 s ceiling failed three of these waits under
+# heavy IO load. A passing run pays none of this; a red pays it once for each
+# wait that never ends, beside an api chain that takes far longer.
 ceiling=1200
 
 # Poll for a file to appear, up to the ceiling. Used instead of a fixed sleep
