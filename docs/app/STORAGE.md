@@ -1534,8 +1534,8 @@ The live copy on a Worker is different. While a server runs, its own code, which
 the system does not trust ([SECURITY.md](SECURITY.md) Section 6), has that copy
 bind-mounted and can create symlinks in it at will. The snapshot walk skips them
 without following them, and the Worker's file operations on a running server
-refuse to follow them, so none of them reaches the store. One can therefore reach the
-stored working set only out of band, from an operator over SSH.
+refuse to follow them, so none of them reaches the store. One can therefore
+reach the stored working set only out of band, from an operator over SSH.
 
 Every operation that takes a `rel_path` resolves it the same way, in this order:
 
@@ -1898,12 +1898,13 @@ refuses a member whose path below the working-set root is longer than 4095 bytes
 (`PATH_MAX` − 1), whatever the Worker's data root, and the hydrate creates each
 member relative to the directory it unpacks into. On the Worker side, then, no
 data root's length counts against a member: one that packs on one Worker unpacks
-on any other (issue #3341). The member walk must end at the tar end-of-archive marker with only zeros after it,
-and must not seek back, or the body is `422 invalid_archive` too (issue #3798):
-a header past the first that does not read would otherwise end the walk and
-publish the members before it alone, and a member whose data runs past its last
-512-byte block would be published padded with the next member's bytes (one that
-stays within the block's padding is issue #3828).
+on any other (issue #3341). The member walk must end at the tar end-of-archive
+marker with only zeros after it, and must not seek back, or the body is
+`422 invalid_archive` too (issue #3798): a header past the first that does not
+read would otherwise end the walk and publish the members before it alone, and
+a member whose data runs past its last 512-byte block would be published padded
+with the next member's bytes (one that stays within the block's padding is
+issue #3828).
 
 **Endpoints** (scoped by `(community_id, server_id)`). Like the rest of the HTTP
 API these are namespaced under `/api`; the API builds the full
