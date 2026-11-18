@@ -71,6 +71,7 @@ from tests.storage.helpers import (
     GNU_SPARSE_FORMATS,
     GO_PACK_FILES,
     INVALID_SPARSE_LAYOUTS,
+    OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
@@ -80,6 +81,7 @@ from tests.storage.helpers import (
     go_archive_tar,
     needs_gnu_tar,
     needs_go,
+    over_the_upload_header_limits_tar,
     tar_cut_in_a_sparse_extension_block,
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
@@ -3098,6 +3100,27 @@ def test_snapshot_from_each_producer_is_published(
     )
 
     assert (status, hydrated, staging) == (204, files, [])
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+def test_snapshot_over_the_upload_header_limits_is_published(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The header limits the upload doors hold a walk to (issue #3810) are not the
+    # ingest's: it has no entry cap, so a large working set would reach the
+    # character limit. 2 MiB of extended headers before a member, a member of 33
+    # PAX records and more than 8 Mi characters of PAX values are published. The
+    # Worker credential keeps the route's own body limit, as above.
+    monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: _CREDENTIAL)
+    status, _, hydrated, staging = _post_snapshot_over_a_prior(
+        tmp_path, make_storage, over_the_upload_header_limits_tar()
+    )
+
+    assert (status, hydrated, staging) == (204, OVER_THE_UPLOAD_HEADER_LIMITS_FILES, [])
 
 
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(

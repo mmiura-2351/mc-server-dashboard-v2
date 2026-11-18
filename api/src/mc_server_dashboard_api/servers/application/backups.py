@@ -53,7 +53,10 @@ from pathlib import PurePosixPath
 from typing import IO
 
 from mc_server_dashboard_api.archive_member import (
+    CapExceededError,
+    CappedReader,
     EndCheckedReader,
+    HeaderLimitError,
     unrestorable_reason,
     without_tar_root_prefix,
 )
@@ -1505,11 +1508,22 @@ def _validate_backup_archive(
     backslashes is refused here as well, on top of that rule.
 
     The compressed body is already capped, but a gzip member can expand ~1000x, so
-    each file member's body is drained and the cumulative DECOMPRESSED byte count
-    is bounded by ``max_decompressed_bytes`` (#287). The count is over actual bytes
-    read, not the (forgeable) member header, so a member that under-reports its size
-    cannot slip past. Raises :class:`InvalidBackupArchiveError` (422) on any
-    violation.
+    the DECOMPRESSED byte count is bounded by ``max_decompressed_bytes`` (#287).
+    Every byte decompressed counts (issue #3810): the stream is read through
+    :class:`~mc_server_dashboard_api.archive_member.CappedReader`, so headers,
+    extended-header data, skipped member data, padding and the read past the
+    end-of-archive marker count as member data does, and a walk that seeks back,
+    which would decompress the stream again, is refused. So is one over the
+    header limits, with the limit as the message: more than 1 MiB of headers
+    between two members, since ``tarfile`` holds extended-header data whole, or
+    members that hold more than 32 PAX records each or 8 Mi characters of names,
+    link names and PAX records in all, since ``tarfile`` keeps every member with
+    its names and a copy of the global records. So is a chain of extended headers
+    too long for ``tarfile`` to read. Each
+    file member's body is drained too, and what it holds counts toward the same
+    cap on its own: for a sparse member that includes holes restore writes but
+    nothing decompresses.
+    Raises :class:`InvalidBackupArchiveError` (422) on any violation.
 
     The archive must also read to its end (issue #3778). The tar is walked
     through :class:`EndCheckedReader` over ``gzip.GzipFile``: the walk must stop
@@ -1517,7 +1531,7 @@ def _validate_backup_archive(
     is refused rather than cutting the member list short, and the stream is then
     read on to the gzip end. Only zeros may follow the marker, the gzip CRC32 and
     ISIZE must match, and only another gzip member or zero padding may follow the
-    gzip stream. The zeros read there count toward ``max_decompressed_bytes`` too.
+    gzip stream.
 
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
@@ -1536,7 +1550,14 @@ def _validate_backup_archive(
     try:
         with (
             gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
-            tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tar,
+            tarfile.open(
+                fileobj=(
+                    stream := EndCheckedReader(
+                        CappedReader(gz, max_decompressed_bytes), header_limits=True
+                    )
+                ),
+                mode="r:",
+            ) as tar,
         ):
             count = 0
             total = 0
@@ -1575,10 +1596,12 @@ def _validate_backup_archive(
                     handle = tar.extractfile(member)
                     if handle is not None:
                         total = _drain_capped(handle, total, max_decompressed_bytes)
-            for chunk in stream.read_past_end_marker():
-                total += len(chunk)
-                if total > max_decompressed_bytes:
-                    raise InvalidBackupArchiveError("decompressed size exceeds cap")
+            for _chunk in stream.read_past_end_marker():
+                pass
+    except CapExceededError as exc:
+        raise InvalidBackupArchiveError("decompressed size exceeds cap") from exc
+    except HeaderLimitError as exc:
+        raise InvalidBackupArchiveError(str(exc)) from exc
     except _TAR_GZ_READ_ERRORS as exc:
         # Not ``tarfile.TarError`` alone: a cut or damage inside a member's data
         # surfaces from the gzip layer as ``EOFError`` / ``zlib.error``, and a bad
@@ -1590,7 +1613,9 @@ def _validate_backup_archive(
         # ``ServerError`` s, none of which subclasses a member of the tuple. The
         # read past the end-of-archive marker raises them by design (#3778): a
         # ``ReadError`` for anything but zeros there, and the gzip layer's own
-        # errors for its trailer.
+        # errors for its trailer. So does ``CappedReader`` for a seek back
+        # (#3810); the cap is ``CapExceededError``, not one of them, and a walk
+        # over the header limits is named above.
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 
@@ -1608,13 +1633,15 @@ def _echoed_name(name: str) -> str:
 
 
 def _drain_capped(handle: IO[bytes], total: int, max_bytes: int) -> int:
-    """Drain a member's decompressed body in chunks, bounding the cumulative total.
+    """Drain a member's body in chunks, bounding the cumulative total.
 
     Mirrors ``files._read_capped`` (#262) but counts only — the validator never
     needs the bytes, just proof the archive stays under the cap. ``total`` is the
     running sum across prior members; the sum is checked after every chunk so a
-    single high-ratio member aborts mid-decompression rather than materializing
-    first (the gzip-bomb defence). Returns the updated running total.
+    single member aborts mid-read rather than materializing first. The
+    ``CappedReader`` beneath already bounds what is decompressed; this bounds what
+    a member holds, which for a sparse member includes its holes (issue #3810).
+    Returns the updated running total.
     """
 
     while True:

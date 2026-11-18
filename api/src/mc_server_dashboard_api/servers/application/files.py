@@ -49,7 +49,12 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import IO, cast
 
-from mc_server_dashboard_api.archive_member import EndCheckedReader
+from mc_server_dashboard_api.archive_member import (
+    CapExceededError,
+    CappedReader,
+    EndCheckedReader,
+    HeaderLimitError,
+)
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
 )
@@ -130,22 +135,25 @@ MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 # archive inflates on extraction (a gzip bomb). 8 GiB bounds that amplification
 # while comfortably covering a real Minecraft world (restores of large worlds are
 # expected; the point is bounding the blow-up ratio, not blocking big worlds). The
-# bound counts ACTUAL decompressed bytes as members are drained, so a member that
-# under-reports its header size cannot slip past. A constant is intentional (no
-# config knob requested); document if it ever needs tuning.
+# bound counts ACTUAL decompressed bytes. At upload that is every one of them:
+# headers, extended-header data and skipped member data as well as member data as
+# it is drained (issue #3810). A constant is intentional (no config knob
+# requested); document if it ever needs tuning.
 MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 
 # The archive-entry-count cap. The cumulative-size cap alone does not bound a
 # member-count bomb: a tiny archive of hundreds of thousands of 1-byte members
 # stays under MAX_UPLOAD_BYTES yet each member is a separate versioned write
 # (an atomic temp+fsync+rename plus a retained version), so an unbounded member
-# count is a DoS amplification independent of total size. 10_000 entries
-# comfortably covers a real mod/datapack/world archive while refusing a
-# pathological count. Exceeding it is reported as :class:`FileTooLargeError`
-# (413) — the same response the size cap uses, since both are "this archive is
-# too costly to extract" rejections and a single response keeps the edge mapping
-# simple. A constant is intentional (no config knob requested); document if it
-# ever needs tuning.
+# count is a DoS amplification independent of total size. A tar.gz's directory
+# members count too (issue #3810): they are not written, but each is a header
+# the walk reads and a member ``tarfile`` keeps. 10_000 entries comfortably
+# covers a real mod/datapack/world archive while refusing a pathological count.
+# Exceeding it is reported as :class:`FileTooLargeError` (413) — the same
+# response the size cap uses, since both are "this archive is too costly to
+# extract" rejections and a single response keeps the edge mapping simple. A
+# constant is intentional (no config knob requested); document if it ever needs
+# tuning.
 MAX_ARCHIVE_ENTRIES = 10_000
 
 # How much to pull per chunk when streaming an archive member's decompressed
@@ -166,7 +174,13 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # header; ``ValueError`` for a GNU sparse PAX field that is not a number, which it
 # converts with a bare ``int()``), and ``EndCheckedReader`` adds a ``ReadError``
 # for a walk that did not stop at the end-of-archive marker or anything but zeros
-# past it. ``zipfile`` raises far more than ``BadZipFile``:
+# past it, and ``CappedReader`` one for a walk that seeks back (#3810). A walk
+# over the header limits is a ``ReadError`` too, ``HeaderLimitError``, which the
+# doors catch first to name it. ``tarfile`` reads a chain of extended headers
+# recursively, so a few hundred of them before a member are a ``RecursionError``
+# (#3810): it unwinds before it is caught, and the readers do not recurse
+# otherwise.
+# ``zipfile`` raises far more than ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
 # (as its ``NotImplementedError`` subclass) for an unsupported compression method,
@@ -181,6 +195,7 @@ _TAR_GZ_READ_ERRORS: tuple[type[Exception], ...] = (
     zlib.error,
     gzip.BadGzipFile,
     ValueError,
+    RecursionError,
 )
 _ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
     zipfile.BadZipFile,
@@ -859,7 +874,8 @@ def _archive_entries(
     relative with no ``..`` component (a hostile entry like ``../../etc/passwd``
     is the zip-slip vector), and only regular files are accepted — a symlink,
     device, or other special member is refused outright rather than materialized.
-    Directory members carry no bytes and are skipped (their files re-create them).
+    Directory members carry no bytes and are not written (their files re-create
+    them); a tar.gz's count toward the entry cap all the same (issue #3810).
     Raises :class:`InvalidFilePathError` for an unsafe or special member, and
     :class:`UnreadableArchiveError` when the reader itself fails on the archive's
     bytes (truncated, not an archive, damaged, encrypted; issue #3769).
@@ -869,7 +885,14 @@ def _archive_entries(
     :class:`FileTooLargeError` when either running total would exceed its cap. The
     size cap is enforced *during* decompression on both paths (a member is read in
     chunks, counted as it inflates), so a single high-ratio member cannot be
-    materialized in memory before the guard trips.
+    materialized in memory before the guard trips. A tar.gz is read through
+    :class:`~mc_server_dashboard_api.archive_member.CappedReader` too, so every
+    byte it decompresses counts toward ``max_bytes``, headers and skipped data
+    included. A walk that seeks back, or reads a chain of extended headers too
+    long for ``tarfile``, is :class:`UnreadableArchiveError` (issue #3810). So is
+    one over the header limits, named in its ``refusal``: more than 1 MiB of
+    headers between two members, or members holding more than 32 PAX records
+    each or 8 Mi characters of names, link names and PAX records in all.
 
     This is the SAME generator both the validate pass and the write pass run over,
     so the per-entry checks are defined once (no duplication). The validate pass
@@ -886,8 +909,12 @@ def _archive_entries(
         raise InvalidFilePathError(filename)
     try:
         yield from entries(content, max_bytes=max_bytes, max_entries=max_entries)
+    except HeaderLimitError as exc:
+        raise UnreadableArchiveError(filename, refusal=str(exc)) from exc
     except read_errors as exc:
         raise UnreadableArchiveError(filename) from exc
+    except CapExceededError as exc:
+        raise FileTooLargeError(str(exc)) from exc
 
 
 def _validate_archive(
@@ -980,9 +1007,20 @@ def _tar_gz_entries(
     count = 0
     with (
         gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
-        tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tf,
+        tarfile.open(
+            fileobj=(
+                stream := EndCheckedReader(
+                    CappedReader(gz, max_bytes), header_limits=True
+                )
+            ),
+            mode="r:",
+        ) as tf,
     ):
         for member in stream.members(tf):
+            # Every member counts, a directory too: the walk reads each one.
+            count += 1
+            if count > max_entries:
+                raise FileTooLargeError(str(count))
             if member.isdir():
                 continue
             # Only regular files are materialized; a symlink/hardlink/device/fifo
@@ -990,20 +1028,15 @@ def _tar_gz_entries(
             if not member.isreg():
                 raise InvalidFilePathError(member.name)
             _check_entry_path(member.name)
-            count += 1
-            if count > max_entries:
-                raise FileTooLargeError(str(count))
             handle = tf.extractfile(member)
-            # tarfile never delivers more than member.size, so counting actual
-            # bytes is defence in depth, not a header-lie guard; the chunked
-            # drain enforces the cap mid-member.
+            # The CappedReader counts what is decompressed. This counts what is
+            # extracted, which for a sparse member includes the holes tarfile
+            # fills with zeros and never decompresses.
             data = b"" if handle is None else _read_capped(handle, total, max_bytes)
             total += len(data)
             yield member.name, data
-        for chunk in stream.read_past_end_marker():
-            total += len(chunk)
-            if total > max_bytes:
-                raise FileTooLargeError(str(total))
+        for _chunk in stream.read_past_end_marker():
+            pass
 
 
 @dataclass(frozen=True)

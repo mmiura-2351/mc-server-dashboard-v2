@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.storage.adapters.fs import _write_tar_gz
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+from tests.servers import archive_cap_shapes
 from tests.servers.fakes import FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -3746,6 +3747,181 @@ async def test_upload_extract_tar_over_entry_count_cap_is_too_large() -> None:
             content=archive,
             extract=True,
         )
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_CAP)
+async def test_upload_extract_counts_what_tarfile_reads_outside_member_data(
+    build: Callable[[], bytes],
+) -> None:
+    # Skipped sparse data, PAX data and a GNU long name are decompressed as much
+    # as member data is, so they count toward the same cap (issue #3810).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=archive_cap_shapes.CAP,
+    )
+
+    content = build()
+    assert len(content) <= archive_cap_shapes.CAP  # the body itself is under it
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=content,
+            extract=True,
+        )
+    assert store.writes == []
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_THE_BUDGET)
+async def test_upload_extract_refuses_extended_headers_over_the_budget(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile holds an extended header's data whole, so what the walk reads
+    # between two members is bounded (issue #3810). The caps are the production
+    # ones: only that bound can refuse this archive.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError) as refused:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=build(),
+            extract=True,
+        )
+    assert refused.value.refusal == archive_cap_shapes.OVER_THE_BUDGET_DETAIL
+    assert store.writes == []
+
+
+@pytest.mark.parametrize(("build", "detail"), archive_cap_shapes.OVER_WHAT_MEMBERS_HOLD)
+async def test_upload_extract_refuses_members_that_hold_too_much(
+    build: Callable[[], bytes], detail: str
+) -> None:
+    # tarfile keeps every member, with its names and a copy of the global PAX
+    # records, so what they hold is bounded (issue #3810). The caps are the
+    # production ones: only that bound can refuse this archive.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError) as refused:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=build(),
+            extract=True,
+        )
+    assert refused.value.refusal == detail
+    assert store.writes == []
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.EXTENDED_HEADER_CHAINS)
+async def test_upload_extract_refuses_a_chain_of_extended_headers(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile recurses once per extended header, so a long chain of them raised
+    # RecursionError, a 500 (issue #3810).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError) as refused:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=build(),
+            extract=True,
+        )
+    assert refused.value.refusal is None
+    assert store.writes == []
+
+
+@pytest.mark.parametrize("slack", [0, -1], ids=["at-the-cap", "one-byte-under"])
+async def test_upload_extract_holds_a_tar_gz_to_its_cap_to_the_byte(
+    slack: int,
+) -> None:
+    # The cap is the stream's own length: header, data and padding.
+    content = _tar_gz_bytes({"a.txt": b"A"})
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=len(gzip.decompress(content)) + slack,
+    )
+    upload = use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="pack.tar.gz",
+        content=content,
+        extract=True,
+    )
+
+    if slack:
+        with pytest.raises(FileTooLargeError):
+            await upload
+        assert store.writes == []
+    else:
+        await upload
+        assert dict(store.writes) == {"a.txt": b"A"}
+
+
+async def test_upload_extract_tar_that_seeks_back_writes_nothing() -> None:
+    # A seek back would decompress the stream again from its start, once per
+    # sparse member here, so it is refused (issues #3798, #3810). The caps are
+    # the production ones. The refusal is EndCheckedReader's: a walk that read
+    # on from where it did not seek back would be refused too, later.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError) as refused:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=archive_cap_shapes.sparse_maps_past_stored_data(),
+            extract=True,
+        )
+    assert str(refused.value.__cause__) == "a member's data runs past the member"
+    assert store.writes == []
+
+
+async def test_upload_extract_tar_counts_directory_members_toward_the_entry_cap() -> (
+    None
+):
+    # A directory member carries no bytes and is not written, but the walk still
+    # reads it, so it counts toward the entry cap (issue #3810).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id), file_store=store, max_entries=5
+    )
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="dirs.tar.gz",
+            content=archive_cap_shapes.directories(5),
+            extract=True,
+        )
+    assert store.writes == []
 
 
 async def test_upload_extract_tar_symlink_member_is_invalid_path() -> None:
