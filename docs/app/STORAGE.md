@@ -422,11 +422,23 @@ probe and the snapshot ingest do not apply these limits: they have no entry
 cap, and a large working set would reach the character limit (131,072 files
 with 64-character names do). The gate also refuses a chain of extended headers
 too long for `tarfile`, which reads them recursively: a few hundred before one
-member. The gate runs in a worker thread, off the
-event loop (issue #3801). The CPU of the gate, restore and the probe is not
-bounded yet: empty gzip members and zero padding after the gzip stream add no
-decompressed bytes, so only the stored body's size bounds what they cost,
-minutes for one archive near the 512 MiB body cap (issue #3835). Each member is
+member. The gate runs off the event loop thread
+(issue #3801), on a pool of two threads that it shares with the files upload's
+extract and nothing else (issue #3843), so a slow archive cannot hold the
+default executor that the fs backend, the sweep and import run on. The two
+upload routes admit at most four archive uploads at a time between them: two
+validating and two waiting. One past that is `503 upload_busy`, refused before
+its body is read into memory. A validating thread still holds the GIL, so the
+event loop runs late while it decompresses: with one such thread, a 1 ms loop
+tick was measured late by up to 29 ms at the 99th percentile and 100 ms at
+most (several threads were not measured). Once an upload's body is read, a
+client that disconnects does not cancel it: the validation runs to its end,
+keeping its pool thread and its admission slot, and the backup is stored. The
+CPU of the gate, restore and the probe is not bounded yet: empty gzip members
+(about 1 CPU-second a MiB) and zero padding after the gzip stream (about 0.11
+CPU-second a MiB) add no decompressed bytes, so only the stored body's size
+bounds what they cost, minutes for one archive near the 512 MiB body cap
+(issue #3835). Each member is
 first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from

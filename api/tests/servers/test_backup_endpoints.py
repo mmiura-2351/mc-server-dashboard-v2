@@ -47,6 +47,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_archive_upload_admission,
     get_audit_recorder,
     get_authenticate_download_grant,
     get_authenticate_request,
@@ -82,6 +83,10 @@ from mc_server_dashboard_api.servers.adapters.backup_store import (
 )
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
+)
+from mc_server_dashboard_api.servers.api import backups as backups_api
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
 )
 from mc_server_dashboard_api.servers.application.backups import (
     ListedBackup,
@@ -119,6 +124,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UploadBusyError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
@@ -3021,6 +3027,104 @@ def test_upload_storage_unavailable_is_503_with_reason() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
     assert resp.status_code == 503
     assert resp.json()["reason"] == "storage_unavailable"
+
+
+# --- only a few archive uploads at a time (issue #3843) --------------------
+#
+# The backup upload and the files extract validate on one small pool, so they
+# admit only a few archive uploads at a time between them and refuse the rest
+# at once, before the body is read into memory.
+
+
+def _uploaded_backup() -> Backup:
+    return Backup(
+        id=BackupId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        storage_ref="ref",
+        size_bytes=9,
+        source=BackupSource.UPLOADED,
+        health=BackupHealth.UNKNOWN,
+        created_by=uuid.uuid4(),
+        created_at=_NOW,
+    )
+
+
+def _with_admission(app: object, admission: ArchiveUploadAdmission) -> None:
+    cast(FastAPI, app).dependency_overrides[get_archive_upload_admission] = lambda: (
+        admission
+    )
+
+
+def test_upload_while_every_admission_slot_is_held_is_503_upload_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b""
+
+    monkeypatch.setattr(backups_api, "_read_capped_upload", read)
+    use_case = _FakeUseCase(result=_uploaded_backup())
+    admission = ArchiveUploadAdmission(limit=1)
+    app = _app(member=True, allow=True, upload=use_case)
+    _with_admission(app, admission)
+    client = _client(app)
+
+    with admission.slot():
+        resp = client.post(
+            _url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart()
+        )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "upload_busy"
+    # Nothing knows when a slot frees, so no number is invented.
+    assert "Retry-After" not in resp.headers
+    assert reads == []
+    assert use_case.calls == []
+
+
+class _SlotProbingUpload(_FakeUseCase):
+    """An upload use case that records whether its request still holds a slot."""
+
+    def __init__(
+        self, admission: ArchiveUploadAdmission, *, error: Exception | None = None
+    ) -> None:
+        super().__init__(result=_uploaded_backup(), error=error)
+        self._admission = admission
+        self.held_a_slot: list[bool] = []
+
+    async def __call__(self, **kwargs: object) -> object:
+        try:
+            with self._admission.slot():
+                self.held_a_slot.append(False)
+        except UploadBusyError:
+            self.held_a_slot.append(True)
+        return await super().__call__(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        pytest.param(None, 201, id="stored"),
+        pytest.param(InvalidBackupArchiveError("bad"), 422, id="refused"),
+    ],
+)
+def test_an_upload_holds_a_slot_until_it_ends(
+    error: Exception | None, status_code: int
+) -> None:
+    admission = ArchiveUploadAdmission(limit=1)
+    use_case = _SlotProbingUpload(admission, error=error)
+    app = _app(member=True, allow=True, upload=use_case)
+    _with_admission(app, admission)
+    client = _client(app)
+
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "/upload"), files=_multipart())
+
+    assert resp.status_code == status_code
+    assert use_case.held_a_slot == [True]
+    with admission.slot():  # free again
+        pass
 
 
 class _HeldLifecycleLock(LifecycleLock):

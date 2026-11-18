@@ -76,6 +76,7 @@ import binascii
 import posixpath
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import nullcontext
 from typing import Annotated
 from urllib.parse import quote
 
@@ -95,6 +96,7 @@ from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_archive_upload_admission,
     get_audit_recorder,
     get_delete_file,
     get_download_file,
@@ -130,6 +132,9 @@ from mc_server_dashboard_api.http_streaming import (
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
+)
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
 )
 from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
@@ -168,6 +173,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotStoppedError,
     UnreadableArchiveError,
+    UploadBusyError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -175,10 +181,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, Se
 router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
-
-# How much of the multipart body to pull per chunk while counting it against the
-# upload cap (the bounded-read loop in ``_read_capped_upload``).
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 # The longest ``content_base64`` an edit may carry (issue #3363): the base64 of a
 # file at the edit cap, 4 characters per 3 bytes with the last group padded. The
@@ -687,6 +689,7 @@ async def upload_file(
     ],
     use_case: Annotated[UploadFileUseCase, Depends(get_upload_file)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    admission: Annotated[ArchiveUploadAdmission, Depends(get_archive_upload_admission)],
     path: Annotated[str, Query()] = ".",
     extract: Annotated[bool, Query()] = False,
 ) -> None:
@@ -735,19 +738,29 @@ async def upload_file(
     archive member landing at a root name starting ``.mcsd_generation`` — the
     Worker's generation marker — or under one is 422 ``reserved_name``, refused in
     the same pre-write scan on the resulting path.
+
+    **Only a few extracts at a time (issue #3843).** With ``extract=true`` this
+    route and the backup upload validate on one small pool, and admit at most four
+    archive uploads at a time between them: two validating and two waiting. One
+    past that is 503 ``upload_busy``, refused before its body is read into memory,
+    with nothing written; sending it again shortly is the remedy. An upload without
+    ``extract`` is never refused this way.
     """
 
     filename = file.filename or ""
-    content = await _read_capped_upload(file)
     try:
-        await use_case(
-            community_id=CommunityId(community_id),
-            server_id=ServerId(server_id),
-            dir_path=path,
-            filename=filename,
-            content=content,
-            extract=extract,
-        )
+        with admission.slot() if extract else nullcontext():
+            content = await _read_capped_upload(file)
+            await use_case(
+                community_id=CommunityId(community_id),
+                server_id=ServerId(server_id),
+                dir_path=path,
+                filename=filename,
+                content=content,
+                extract=extract,
+            )
+    except UploadBusyError as exc:
+        raise _service_unavailable("upload_busy") from exc
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     except InvalidFilePathError as exc:
@@ -1330,28 +1343,21 @@ async def search_files(
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
-    """Pull the multipart body in chunks, aborting with 413 past the upload cap.
+    """Read the multipart part whole, refusing it with 413 past the upload cap.
 
-    Starlette spools the multipart part to a temp file as it parses the request,
-    but ``file.read()`` with no argument then pulls the whole part into memory at
-    once. Reading in bounded chunks and checking the running count after each lets
-    an over-cap upload be refused as soon as the count crosses MAX_UPLOAD_BYTES,
-    rather than materializing a body far larger than the cap first (mirroring the
-    streamed byte-counting in ``dataplane/api/transfers.py``). The use case
-    re-checks the cap, so this is the edge's early-out, not the only guard.
+    Starlette spools the part to a temp file as it parses the request. One read
+    pulls it into memory, and Starlette runs that read on its thread pool for a
+    part spooled to disk (every part past 1 MiB), so copying up to 512 MiB never
+    runs on the event loop (issue #3843). A part of at most 1 MiB is still in
+    memory and is copied on the loop. The route's request body limit already
+    bounds the part to the cap plus the multipart envelope, so the read never
+    holds more than that. The use case re-checks the cap.
     """
 
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_UPLOAD_BYTES:
-            raise _too_large()
-        chunks.append(chunk)
-    return b"".join(chunks)
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise _too_large()
+    return content
 
 
 async def _record_file(

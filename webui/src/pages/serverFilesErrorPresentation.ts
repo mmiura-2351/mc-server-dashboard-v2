@@ -84,11 +84,19 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.invalidInput" };
       }
     case 503:
-      // The store holding the files, not the server's Worker, did not answer.
-      // Without this case the message would blame an agent that is fine.
-      return error.reason === "storage_unavailable"
-        ? { key: "files.error.storageUnavailable" }
-        : { key: "files.error.workerUnavailable" };
+      switch (error.reason) {
+        // The store holding the files, not the server's Worker, did not
+        // answer. Without this case the message would blame an agent that is
+        // fine.
+        case "storage_unavailable":
+          return { key: "files.error.storageUnavailable" };
+        // Too many archive uploads at once (issue #3843): nothing was written,
+        // and sending it again shortly is the remedy.
+        case "upload_busy":
+          return { key: "files.error.uploadBusy" };
+        default:
+          return { key: "files.error.workerUnavailable" };
+      }
     default:
       return { key: "files.error.generic" };
   }

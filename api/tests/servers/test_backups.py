@@ -76,6 +76,11 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from tests.servers import archive_cap_shapes
+from tests.servers.executor_starvation import (
+    IN_FLIGHT,
+    InFlight,
+    assert_default_executor_free,
+)
 from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
@@ -1545,6 +1550,35 @@ async def test_cancelling_an_upload_mid_validation_stores_nothing(
 
     assert archive.stored == []
     assert await uow.backups.list_for_server(server.id) == []
+
+
+async def test_uploads_validating_together_leave_the_default_executor_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Validation runs on its own pool (issue #3843). On the default executor, a
+    # few crafted uploads validating for minutes would take every worker from
+    # the fs Storage calls, the sweep and everything else that runs there.
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    in_flight = InFlight()
+    monkeypatch.setattr(
+        backups_module,
+        "_validate_backup_archive",
+        lambda content, **_caps: in_flight.block(),
+    )
+
+    uploads = [
+        _upload_task(archive, FakeUnitOfWork(servers=repo), server)
+        for _ in range(IN_FLIGHT)
+    ]
+    try:
+        await assert_default_executor_free(in_flight)
+    finally:
+        await asyncio.gather(*uploads)
+
+    assert archive.stored == [server.id] * IN_FLIGHT
 
 
 # --- gzip members and zero padding read as gzip reads them -----------------

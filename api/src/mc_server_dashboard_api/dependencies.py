@@ -242,6 +242,9 @@ from mc_server_dashboard_api.servers.adapters.unit_of_work import (
 from mc_server_dashboard_api.servers.adapters.version_validator import (
     CatalogVersionValidator,
 )
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
+)
 from mc_server_dashboard_api.servers.application.backups import (
     ClearBackupRetention,
     CreateBackup,
@@ -481,6 +484,24 @@ def get_transfer_semaphore(request: Request) -> asyncio.Semaphore:
         sem = asyncio.Semaphore(_MAX_CONCURRENT_TRANSFERS)
         state.transfer_semaphore = sem
     return sem
+
+
+def get_archive_upload_admission(request: Request) -> ArchiveUploadAdmission:
+    """Return the per-process archive-upload admission (issue #3843).
+
+    One instance for both upload doors -- the backup upload and the files upload
+    with ``extract`` -- so the limit counts their archive uploads together, as
+    one pool validates them all.
+    """
+
+    state = request.app.state
+    admission: ArchiveUploadAdmission | None = getattr(
+        state, "archive_upload_admission", None
+    )
+    if admission is None:
+        admission = ArchiveUploadAdmission()
+        state.archive_upload_admission = admission
+    return admission
 
 
 def get_version_catalog(request: Request) -> VersionCatalog:

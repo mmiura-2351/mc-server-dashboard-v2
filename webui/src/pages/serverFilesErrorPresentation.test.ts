@@ -133,6 +133,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.storageUnavailable" },
     ],
     [
+      "maps too many archive uploads at once apart from the worker (#3843)",
+      new ApiError(503, { reason: "upload_busy" }),
+      { key: "files.error.uploadBusy" },
+    ],
+    [
       "falls back for an unknown API status",
       new ApiError(500, { reason: "internal_error" }),
       { key: "files.error.generic" },

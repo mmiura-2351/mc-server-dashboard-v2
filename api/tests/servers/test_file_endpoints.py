@@ -49,6 +49,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_archive_upload_admission,
     get_audit_recorder,
     get_authenticate_download_grant,
     get_authenticate_request,
@@ -79,9 +80,13 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.api import files as files_api
 from mc_server_dashboard_api.servers.api.files import (
     MAX_EDIT_BASE64_CHARS,
     MAX_WRITE_BODY_BYTES,
+)
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
 )
 from mc_server_dashboard_api.servers.application.export_import import (
     export_download_grant_resource,
@@ -110,6 +115,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     ServerNotStoppedError,
     UnreadableArchiveError,
+    UploadBusyError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -1387,6 +1393,124 @@ def test_upload_over_cap_body_is_413_before_use_case(
     assert resp.status_code == 413
     assert resp.json()["reason"] == "file_too_large"
     assert upload.calls == []  # aborted before the use case ran
+
+
+# --- only a few extracts at a time (issue #3843) ----------------------------
+#
+# The files extract and the backup upload validate on one small pool, so they
+# admit only a few archive uploads at a time between them and refuse the rest
+# at once, before the body is read into memory.
+
+
+def _with_admission(app: object, admission: ArchiveUploadAdmission) -> None:
+    cast(FastAPI, app).dependency_overrides[get_archive_upload_admission] = lambda: (
+        admission
+    )
+
+
+def _post_upload(client: TestClient, *, extract: bool) -> httpx2.Response:
+    return client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload"),
+        params={"path": ".", "extract": str(extract).lower()},
+        files={"file": ("pack.zip", b"zip-bytes", "application/zip")},
+    )
+
+
+def test_extract_while_every_admission_slot_is_held_is_503_upload_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b""
+
+    monkeypatch.setattr(files_api, "_read_capped_upload", read)
+    upload = _FakeUpload()
+    admission = ArchiveUploadAdmission(limit=1)
+    app = _app(member=True, allow=True, upload=upload)
+    _with_admission(app, admission)
+
+    with admission.slot():
+        resp = _post_upload(_client(app), extract=True)
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "upload_busy"
+    # Nothing knows when a slot frees, so no number is invented.
+    assert "Retry-After" not in resp.headers
+    assert reads == []
+    assert upload.calls == []
+
+
+def test_an_upload_without_extract_takes_no_slot() -> None:
+    upload = _FakeUpload()
+    admission = ArchiveUploadAdmission(limit=1)
+    app = _app(member=True, allow=True, upload=upload)
+    _with_admission(app, admission)
+
+    with admission.slot():
+        resp = _post_upload(_client(app), extract=False)
+
+    assert resp.status_code == 204
+    assert upload.calls[0]["content"] == b"zip-bytes"
+
+
+class _SlotProbingUpload(_FakeUpload):
+    """A fake upload that records whether its request still holds a slot."""
+
+    def __init__(
+        self, admission: ArchiveUploadAdmission, *, error: Exception | None = None
+    ) -> None:
+        super().__init__(error=error)
+        self._admission = admission
+        self.held_a_slot: list[bool] = []
+
+    async def __call__(
+        self,
+        *,
+        community_id: ServerCommunityId,
+        server_id: ServerScopeId,
+        dir_path: str,
+        filename: str,
+        content: bytes,
+        extract: bool,
+    ) -> None:
+        try:
+            with self._admission.slot():
+                self.held_a_slot.append(False)
+        except UploadBusyError:
+            self.held_a_slot.append(True)
+        await super().__call__(
+            community_id=community_id,
+            server_id=server_id,
+            dir_path=dir_path,
+            filename=filename,
+            content=content,
+            extract=extract,
+        )
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        pytest.param(None, 204, id="extracted"),
+        pytest.param(UnreadableArchiveError("pack.zip"), 422, id="refused"),
+    ],
+)
+def test_an_extract_holds_a_slot_until_it_ends(
+    error: Exception | None, status_code: int
+) -> None:
+    admission = ArchiveUploadAdmission(limit=1)
+    upload = _SlotProbingUpload(admission, error=error)
+    app = _app(member=True, allow=True, upload=upload)
+    _with_admission(app, admission)
+
+    resp = _post_upload(_client(app), extract=True)
+
+    assert resp.status_code == status_code
+    assert upload.held_a_slot == [True]
+    with admission.slot():  # free again
+        pass
 
 
 # --- audit recording -------------------------------------------------------
