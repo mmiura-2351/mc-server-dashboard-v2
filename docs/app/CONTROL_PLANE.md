@@ -769,10 +769,15 @@ Notes:
   names. With `unknown`, the reconciler re-sends the start to that Worker once
   its grace lapses, even where the server read a stale `running`. A stop whose
   dispatch fails is sent again rather than released under the instance on the
-  strength of a stale `stopped`. Once the reservation, orphan, leftover or
-  queue clears, the re-sent start hydrates and launches there. If the Worker's
-  session ends instead, the server waits for it as any of its servers does,
-  until an operator stop releases it (Section 4.4).
+  strength of a stale `stopped`. In the same write the API owes again the
+  player-file marks the start cleared before its hydrate, for a launch that
+  did not happen. If the Worker turns out to run the server, the re-sent start
+  keeps that instance without owing anything (issue #3901), and its snapshots
+  publish its own player files, so the next start after a stop regenerates
+  them. Once the reservation, orphan, leftover or queue clears, the re-sent
+  start hydrates and launches there. If the Worker's session ends instead, the
+  server waits for it as any of its servers does, until an operator stop
+  releases it (Section 4.4).
   Every other answer to a hydrate gives the Worker back. `TRANSFER_FAILED`
   comes after both checks passed, with the reservation held through the
   transfer. The one site that answers it before them needs a Worker with no

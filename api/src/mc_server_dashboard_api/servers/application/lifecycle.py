@@ -710,7 +710,7 @@ class StartServer:
             # later start place it on another Worker while that instance runs. So
             # keep desired=running and the assignment for the reconciler's
             # redispatch_start to this Worker, and record what is known.
-            await self._record_unknown(server, worker_id)
+            await self._record_unknown(server, worker_id, owe_again=owed_group_files)
             raise failure
         await self._compensate(
             community_id,
@@ -900,7 +900,9 @@ class StartServer:
             # possible (issue #3890): then keep the Worker, as ``__call__`` does.
             if not dispatch.attempted:
                 if outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER:
-                    await self._record_unknown(server, worker_id)
+                    await self._record_unknown(
+                        server, worker_id, owe_again=owed_group_files
+                    )
                 else:
                     await self._unassign(
                         community_id,
@@ -1322,7 +1324,13 @@ class StartServer:
                 running=True,
             )
 
-    async def _record_unknown(self, server: Server, worker_id: WorkerId) -> None:
+    async def _record_unknown(
+        self,
+        server: Server,
+        worker_id: WorkerId,
+        *,
+        owe_again: list[PendingGroupSync],
+    ) -> None:
         """Record observed=unknown for a server kept on ``worker_id`` (issue #3890).
 
         The Worker refused the hydrate with an answer that does not rule out an
@@ -1335,6 +1343,12 @@ class StartServer:
         sent), and a stop whose dispatch fails is sent again rather than released
         under that instance on the strength of a stale ``stopped``. The write
         asserts the row is still on ``worker_id``.
+
+        ``owe_again`` is the marks the start cleared with its intent, for a launch
+        that did not happen. They are owed again in the same transaction. If the
+        Worker's instance turns out live, ``redispatch_start`` adopts it without
+        owing anything, and its snapshots publish its own player files over the
+        regenerated ones, so the next start must make the change again.
         """
 
         observed_at = self.clock.now()
@@ -1345,6 +1359,10 @@ class StartServer:
                 observed_at=observed_at,
                 expected_worker=worker_id,
             )
+            owed = {mark.kind for mark in owe_again}
+            for kind in GroupKind:
+                if kind in owed:
+                    await self.uow.groups.mark_sync_pending([server.id], kind)
             await self.uow.commit()
         if applied:
             server.observe(ObservedState.UNKNOWN, observed_at)
