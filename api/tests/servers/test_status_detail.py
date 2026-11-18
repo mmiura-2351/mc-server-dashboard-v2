@@ -30,13 +30,16 @@ def test_a_longer_detail_is_cut_to_the_bound_and_marked() -> None:
 
 
 def test_the_cut_never_splits_a_character() -> None:
-    # Three-byte characters: the byte budget left for the text is not a multiple
-    # of three, so a byte cut would land inside one.
-    bounded = bound_status_detail("あ" * MAX_STATUS_DETAIL_BYTES)
+    # One ASCII byte, then three-byte characters: the byte budget left for the
+    # text is a multiple of three, so the cut lands inside a character.
+    budget = MAX_STATUS_DETAIL_BYTES - len(STATUS_DETAIL_TRUNCATION_MARKER.encode())
+    assert budget % 3 == 0
+    bounded = bound_status_detail("x" + "あ" * MAX_STATUS_DETAIL_BYTES)
 
     text = bounded.removesuffix(STATUS_DETAIL_TRUNCATION_MARKER)
-    assert set(text) == {"あ"}
-    assert len(bounded.encode()) <= MAX_STATUS_DETAIL_BYTES
+    assert text == "x" + "あ" * ((budget - 1) // 3)
+    # The partial character is dropped, so the result is short of the bound.
+    assert len(bounded.encode()) < MAX_STATUS_DETAIL_BYTES
 
 
 def test_a_nul_is_dropped() -> None:
