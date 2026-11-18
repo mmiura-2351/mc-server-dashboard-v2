@@ -218,8 +218,8 @@ describe("admin overview stats", () => {
 
   it("re-fetches worker data after 12 s so heartbeat ages do not freeze (#791)", async () => {
     // shouldAdvanceTime lets react-query timers fire while async utilities still
-    // resolve (mirrors the AdminWorkersPage timer pattern). Clock is restored in
-    // afterEach along with vi.clearAllTimers() to prevent timer leaks (#817).
+    // resolve. Clock is restored in afterEach along with vi.clearAllTimers() to
+    // prevent timer leaks (#817).
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(NOW);
     signedInAs(ADMIN);
