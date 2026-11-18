@@ -15,6 +15,10 @@ A lifecycle write compares the assignment it read as well as the desired state
 failed placement released it wrote the released Worker back, and a write that
 does not own the config wrote back the config it read over a later edit.
 
+A stop convergence owed for a stopped intent released a row on its cached
+observed state (issue #3766): under a start the Worker had not reported on yet,
+and before the write that stopped the row had bumped the count.
+
 Each test runs the real use cases, each with its own unit of work over one shared
 repository and one shared ``StopIntentCounter``, as in production. The competing
 write is injected at an exact point: inside the start's re-read once the row
