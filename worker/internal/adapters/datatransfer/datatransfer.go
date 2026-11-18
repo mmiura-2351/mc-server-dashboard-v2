@@ -35,7 +35,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -393,7 +392,17 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// place (RemoveAll on a now-absent path is a no-op).
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	if err := unpackTar(r, tmpDir); err != nil {
+	// Everything below the temp dir is named relative to this descriptor, never by
+	// its joined path (issue #3341): the temp dir's own path can be of any length,
+	// and a member at the snapshot's path limit joined to it is longer than
+	// PATH_MAX.
+	tmpFd, err := unix.Open(tmpDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: tmpDir, Err: err}
+	}
+	defer func() { _ = unix.Close(tmpFd) }()
+
+	if err := unpackTar(r, tmpFd); err != nil {
 		return err
 	}
 
@@ -403,7 +412,7 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// gen 0 and re-dispatches hydrate, and that spurious retry discards this working
 	// set whenever a .displaced-<id> is retained (issue #2278). writeFile fsyncs the
 	// contents; fsyncTree below makes the dir entry durable.
-	if err := writeFile(filepath.Join(tmpDir, scratchformat.GenerationMarkerFile),
+	if err := writeFile(tmpFd, scratchformat.GenerationMarkerFile,
 		strings.NewReader(strconv.FormatUint(gen, 10)), 0o640); err != nil {
 		return err
 	}
@@ -414,7 +423,7 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// those files) are durable too. A power loss after the swap must never persist
 	// the new destDir and the generation marker over a tree whose files or names are
 	// not yet on disk — the #767 skip gate would boot that torn world.
-	if err := fsyncTree(tmpDir); err != nil {
+	if err := fsyncTree(tmpFd, "."); err != nil {
 		return err
 	}
 
@@ -641,23 +650,43 @@ var swapRename = os.Rename
 // the suite runs as root (issue #2278). Production always uses os.ReadDir.
 var readDir = os.ReadDir
 
-// fsyncTree fsyncs every directory in the tree rooted at dir (post-order, so a
-// child dir is durable before its parent's entry for it). File contents are already
-// fsynced as written (writeFile); this makes the directory entries durable so a
-// crash cannot lose a just-created name. Issue #787.
-func fsyncTree(dir string) error {
-	entries, err := os.ReadDir(dir)
+// fsyncTree fsyncs every directory in the tree rooted at rel below the directory
+// behind rootFd (post-order, so a child dir is durable before its parent's entry
+// for it). File contents are already fsynced as written (writeFile); this makes
+// the directory entries durable so a crash cannot lose a just-created name. Issue
+// #787. Each directory is named relative to rootFd (issue #3341), and is open only
+// while it is listed or synced, so the walk holds no descriptor per level.
+func fsyncTree(rootFd int, rel string) error {
+	dir, err := openDirAt(rootFd, rel)
+	if err != nil {
+		return err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			if err := fsyncTree(filepath.Join(dir, e.Name())); err != nil {
+			if err := fsyncTree(rootFd, path.Join(rel, e.Name())); err != nil {
 				return err
 			}
 		}
 	}
-	return fsyncDir(dir)
+	if dir, err = openDirAt(rootFd, rel); err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
+}
+
+// openDirAt opens the directory rel below the directory behind rootFd.
+func openDirAt(rootFd int, rel string) (*os.File, error) {
+	fd, err := unix.Openat(rootFd, rel, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "openat", Path: rel, Err: err}
+	}
+	return os.NewFile(uintptr(fd), rel), nil
 }
 
 // fsyncDir fsyncs a directory so renames/creates within it are durable. The dir is
@@ -694,15 +723,12 @@ func sweepHydrateLeftovers(parent, serverID string) {
 	}
 }
 
-// unpackTar extracts a tar stream into destDir, rejecting any member whose
-// resolved path escapes destDir (absolute paths, "..", and link targets that
-// point outside). This mirrors the API-side filter="data" sandbox.
-func unpackTar(r io.Reader, destDir string) error {
-	root, err := filepath.Abs(destDir)
-	if err != nil {
-		return err
-	}
-
+// unpackTar extracts a tar stream into the directory behind destFd, rejecting any
+// member whose path escapes it (absolute paths, "..", and link members). This
+// mirrors the API-side filter="data" sandbox. Every member is created by its path
+// relative to destFd, never by the path joined to destFd's own (issue #3341), so
+// the length of the directory's path does not count against a member's.
+func unpackTar(r io.Reader, destFd int) error {
 	tr := tar.NewReader(r)
 	for {
 		header, err := tr.Next()
@@ -713,7 +739,7 @@ func unpackTar(r io.Reader, destDir string) error {
 			return err
 		}
 
-		target, err := safeJoin(root, header.Name)
+		target, err := safeRel(header.Name)
 		if err != nil {
 			return err
 		}
@@ -730,14 +756,14 @@ func unpackTar(r io.Reader, destDir string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o750); err != nil {
+			if err := mkdirAllAt(destFd, target); err != nil {
 				return err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			if err := mkdirAllAt(destFd, path.Dir(target)); err != nil {
 				return err
 			}
-			if err := writeFile(target, tr, os.FileMode(header.Mode)); err != nil {
+			if err := writeFile(destFd, target, tr, os.FileMode(header.Mode)); err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
@@ -754,7 +780,7 @@ func unpackTar(r io.Reader, destDir string) error {
 
 // isRootGenerationMarkerMember reports whether a tar member lies at or under a
 // root entry whose name starts with the generation marker's — the same prefix
-// match walkInto excludes from a snapshot. Called only on a name safeJoin
+// match walkInto excludes from a snapshot. Called only on a name safeRel
 // accepted, so there is no ".." component to clean away.
 func isRootGenerationMarkerMember(name string) bool {
 	first, _, _ := strings.Cut(path.Clean(filepath.ToSlash(name)), "/")
@@ -769,17 +795,27 @@ func isRootGenerationMarkerMember(name string) bool {
 // world. fsyncing per file as it is written keeps the cost proportional to the data
 // already streamed (one extra flush per file, not a re-read of the whole tree); the
 // per-dir entries are made durable by a single recursive dir-fsync after unpack.
-func writeFile(target string, src io.Reader, mode os.FileMode) error {
+//
+// target is named relative to the directory behind dirFd (issue #3341).
+func writeFile(dirFd int, target string, src io.Reader, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o640
 	}
 	// O_NOFOLLOW refuses to follow a symlink at the final path component. The
 	// unpack target is a brand-new temp tree so no link can pre-exist, but this
 	// keeps the write self-defending against any residual link in the destination.
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|syscall.O_NOFOLLOW, mode.Perm())
-	if err != nil {
-		return err
+	var fd int
+	var err error
+	for {
+		fd, err = unix.Openat(dirFd, target, unix.O_CREAT|unix.O_TRUNC|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
 	}
+	if err != nil {
+		return &os.PathError{Op: "open", Path: target, Err: err}
+	}
+	out := os.NewFile(uintptr(fd), target)
 	defer func() { _ = out.Close() }()
 	if _, err := io.Copy(out, src); err != nil {
 		return err
@@ -790,11 +826,11 @@ func writeFile(target string, src io.Reader, mode os.FileMode) error {
 	return out.Close()
 }
 
-// safeJoin joins name under root and verifies the result stays inside root.
-// Absolute paths and any ".." component are rejected outright (not clamped),
-// mirroring the API-side filter="data" discipline; the realpath containment
-// check then catches any residual escape.
-func safeJoin(root, name string) (string, error) {
+// safeRel returns name as a clean path relative to the unpack root ("." for the
+// root itself). Absolute paths and any ".." component are rejected outright (not
+// clamped), mirroring the API-side filter="data" discipline; a relative path with
+// no ".." component cannot clean to one that leaves the root.
+func safeRel(name string) (string, error) {
 	slashed := filepath.ToSlash(name)
 	if path.IsAbs(slashed) {
 		return "", fmt.Errorf("datatransfer: refusing absolute member %q", name)
@@ -804,11 +840,29 @@ func safeJoin(root, name string) (string, error) {
 			return "", fmt.Errorf("datatransfer: refusing path escape %q", name)
 		}
 	}
-	joined := filepath.Join(root, filepath.FromSlash(slashed))
-	if joined != root && !strings.HasPrefix(joined, root+string(os.PathSeparator)) {
-		return "", fmt.Errorf("datatransfer: refusing path escape %q", name)
+	return path.Clean(slashed), nil
+}
+
+// mkdirAllAt creates the directory rel below the directory behind rootFd, with
+// any missing parents, as os.MkdirAll does (mode 0o750), naming each relative to
+// rootFd (issue #3341).
+func mkdirAllAt(rootFd int, rel string) error {
+	var st unix.Stat_t
+	if err := unix.Fstatat(rootFd, rel, &st, 0); err == nil {
+		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+			return nil
+		}
+		return &os.PathError{Op: "mkdir", Path: rel, Err: unix.ENOTDIR}
 	}
-	return joined, nil
+	if parent := path.Dir(rel); parent != "." {
+		if err := mkdirAllAt(rootFd, parent); err != nil {
+			return err
+		}
+	}
+	if err := unix.Mkdirat(rootFd, rel, 0o750); err != nil && !errors.Is(err, unix.EEXIST) {
+		return &os.PathError{Op: "mkdir", Path: rel, Err: err}
+	}
+	return nil
 }
 
 // The snapshot walk (packTar, walkInto, packDir, packRegular) never resolves a
@@ -860,6 +914,17 @@ const (
 // snapshot (a Minecraft tree is around ten levels deep).
 const maxPackDepth = 128
 
+// maxMemberPath is the longest path a snapshot member may have, in bytes, relative
+// to the working-set root (issue #3341): PATH_MAX-1, the longest pathname one
+// system call takes. It is fixed rather than derived from a data root, because the
+// Worker that restores a snapshot need not be the one that packed it, and the
+// staging directory a hydrate unpacks into can lie under a root of any length. The
+// hydrate names every member relative to that directory's descriptor (unpackTar),
+// so the joined path never has to fit in PATH_MAX; the member's own path does, and
+// this limit is what guarantees it. It is no lower than what the walk accepted
+// before, PATH_MAX-2 less the length of the source root.
+const maxMemberPath = unix.PathMax - 1
+
 // statAt lstats the entry name of the directory behind dirFd (the walk's hint),
 // and openAt opens it. Both act relative to a descriptor only. They are variables
 // so a test can make an entry vanish, or replace it, at an exact point of the
@@ -906,10 +971,7 @@ func packTar(ctx context.Context, srcDir string, w io.Writer, log *slog.Logger) 
 	}
 
 	tw := tar.NewWriter(w)
-	// A member's path may be as long as the path-based walk could resolve below
-	// root, and no longer: a hydrate unpacks by path, so an archive holding a
-	// longer name could be published but never restored.
-	if err := walkInto(ctx, tw, rootFd, "", unix.PathMax-1-len(root)-1, 0, log); err != nil {
+	if err := walkInto(ctx, tw, rootFd, "", 0, log); err != nil {
 		_ = tw.Close()
 		return err
 	}
@@ -919,11 +981,11 @@ func packTar(ctx context.Context, srcDir string, w io.Writer, log *slog.Logger) 
 // walkInto adds the contents of the directory behind dirFd to tw, recursing in
 // lexicographic order for a deterministic-ish archive. It takes ownership of
 // dirFd. rel is the directory's slash-separated path below the root ("" for the
-// root itself); it names members and labels errors and is never resolved. maxRel
-// is the longest member path allowed, depth the directory's level below the root.
-// It returns ctx's error before the next entry once ctx is done, so an entry that
-// writes nothing to the archive (one left out) is not walked past it either.
-func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, maxRel, depth int, log *slog.Logger) error {
+// root itself); it names members and labels errors and is never resolved. depth
+// is the directory's level below the root. It returns ctx's error before the next
+// entry once ctx is done, so an entry that writes nothing to the archive (one left
+// out) is not walked past it either.
+func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, depth int, log *slog.Logger) error {
 	dir := os.NewFile(uintptr(dirFd), rel)
 	defer func() { _ = dir.Close() }()
 	names, err := dir.Readdirnames(-1)
@@ -951,8 +1013,9 @@ func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, maxRel
 		if rel != "" {
 			entryRel = rel + "/" + name
 		}
-		if len(entryRel) > maxRel {
-			return &os.PathError{Op: "stat", Path: entryRel, Err: unix.ENAMETOOLONG}
+		if len(entryRel) > maxMemberPath {
+			return fmt.Errorf("datatransfer: snapshot member path is longer than %d bytes at %q: %w",
+				maxMemberPath, entryRel, unix.ENAMETOOLONG)
 		}
 
 		var hint unix.Stat_t
@@ -973,7 +1036,7 @@ func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, maxRel
 		}
 		switch hint.Mode & unix.S_IFMT {
 		case unix.S_IFDIR:
-			err = packDir(ctx, tw, dirFd, name, entryRel, maxRel, depth+1, log)
+			err = packDir(ctx, tw, dirFd, name, entryRel, depth+1, log)
 		case unix.S_IFREG:
 			err = packRegular(tw, dirFd, name, entryRel, log)
 		default:
@@ -989,7 +1052,7 @@ func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, maxRel
 
 // packDir archives the directory name of the directory behind parentFd, then
 // everything beneath it. depth is the level of the directory being archived.
-func packDir(ctx context.Context, tw *tar.Writer, parentFd int, name, rel string, maxRel, depth int, log *slog.Logger) error {
+func packDir(ctx context.Context, tw *tar.Writer, parentFd int, name, rel string, depth int, log *slog.Logger) error {
 	if depth > maxPackDepth {
 		return fmt.Errorf("datatransfer: snapshot source is nested deeper than %d directories at %q", maxPackDepth, rel)
 	}
@@ -1031,7 +1094,7 @@ func packDir(ctx context.Context, tw *tar.Writer, parentFd int, name, rel string
 		_ = unix.Close(fd)
 		return err
 	}
-	return walkInto(ctx, tw, fd, rel, maxRel, depth, log)
+	return walkInto(ctx, tw, fd, rel, depth, log)
 }
 
 // packRegular archives the regular file name of the directory behind dirFd.

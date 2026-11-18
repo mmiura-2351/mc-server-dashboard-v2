@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -51,14 +50,14 @@ func openDirFd(t *testing.T, dir string) int {
 	return fd
 }
 
-// walkRoot runs walkInto over root as packTar does, without a path-length limit.
+// walkRoot runs walkInto over root as packTar does.
 func walkRoot(t *testing.T, tw *tar.Writer, root string, log *slog.Logger) error {
 	t.Helper()
 	fd, err := unix.Open(root, packOpenDirFlags, 0)
 	if err != nil {
 		t.Fatalf("open %s: %v", root, err)
 	}
-	return walkInto(context.Background(), tw, fd, "", unix.PathMax, 0, log)
+	return walkInto(context.Background(), tw, fd, "", 0, log)
 }
 
 // packMembers packs srcDir and returns each member's body by name (a directory
@@ -322,27 +321,6 @@ func TestPackBoundsItsDepth(t *testing.T) {
 	err := packTar(context.Background(), nested(maxPackDepth+1), &buf, slog.Default())
 	if err == nil || !strings.Contains(err.Error(), "nested deeper") {
 		t.Fatalf("a tree %d levels deep must fail the pack on its depth, got: %v", maxPackDepth+1, err)
-	}
-}
-
-// A member whose path is longer than the limit fails the pack, as a path too long
-// to resolve failed the path-based walk: such a member could not be unpacked.
-func TestPackRefusesAMemberPathOverTheLimit(t *testing.T) {
-	work := filepath.Join(t.TempDir(), "work")
-	writeTree(t, work, map[string]string{"dir/12345.txt": "x"})
-
-	run := func(maxRel int) error {
-		fd, err := unix.Open(work, packOpenDirFlags, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return walkInto(context.Background(), tar.NewWriter(io.Discard), fd, "", maxRel, 0, slog.Default())
-	}
-	if err := run(len("dir/12345.txt")); err != nil {
-		t.Fatalf("a member path exactly at the limit must pack, got: %v", err)
-	}
-	if err := run(len("dir/12345.txt") - 1); !errors.Is(err, unix.ENAMETOOLONG) {
-		t.Fatalf("a member path over the limit must fail with ENAMETOOLONG, got: %v", err)
 	}
 }
 
