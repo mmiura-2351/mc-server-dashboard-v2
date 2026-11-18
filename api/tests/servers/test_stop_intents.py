@@ -1842,16 +1842,22 @@ async def test_an_operator_stop_after_a_silent_withdrawal_stops_the_launching_st
     assert world.stored() == (DesiredState.STOPPED, None)
 
 
-async def test_a_refused_stop_does_not_count_as_stopping_the_start() -> None:
-    # The stop that withdrew the intent was sent behind the start, but the Worker
-    # refused it: it waited behind the start past its expiry. The start is still
-    # launching, so the operator's retry must send a stop again, not release.
+@pytest.mark.parametrize("refused", ["withdrawing-stop", "owed-stop"])
+async def test_a_refused_stop_does_not_count_as_stopping_the_start(
+    refused: str,
+) -> None:
+    # A stop sent behind the start, either the one that withdrew the intent or
+    # the one an operator stop owed after a drain, is refused by the Worker: it
+    # waited behind the start past its expiry. The start is still launching, so
+    # the operator's retry must send a stop again, not release.
     world = _World()
     world.cp.stop_refusals.append(
         CommandOutcome(status=CommandStatus.EXPIRED, message="expired in the lane")
     )
 
     async def stop_refused() -> None:
+        if refused == "owed-stop":
+            assert await world.drain() == [world.server_id]
         with pytest.raises(CommandDispatchError):
             await world.stop()
 
