@@ -450,7 +450,7 @@ func TestStopEndsTheInstallSupervisorsHandOverWalk(t *testing.T) {
 		installExit waitResult
 	}{
 		{"before the launch container", waitResult{code: 0}},
-		{"before the install retry", waitResult{code: 1, err: statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}}},
+		{"before the install retry", waitResult{code: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prev := installRetryBackoff

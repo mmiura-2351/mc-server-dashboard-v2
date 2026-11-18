@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
 )
@@ -261,5 +262,148 @@ func TestInstallLogCutShortMidCompactionStillHoldsTheLatestOutput(t *testing.T) 
 	}
 	if latest := given.String()[given.Len()-1<<20:]; !strings.Contains(string(data), latest) {
 		t.Fatal("install log cut short does not hold the latest MiB of output it was given")
+	}
+}
+
+// A log that cannot be opened is refused once for the start's install, not once
+// an attempt: the install has one log.
+func TestForgeInstallLogIsRefusedOnceForEveryAttemptOfAStart(t *testing.T) {
+	shrinkInstallBackoff(t)
+	dir, outside := t.TempDir(), t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "logs")); err != nil {
+		t.Fatal(err)
+	}
+	docker := newForgeFakeDocker()
+	scriptInstallOutputs(docker, "attempt 1\n", "attempt 2\n", "attempt 3\n")
+	logged := &syncBuffer{}
+	d := forgeDriver(docker)
+	d.logger = slog.New(slog.NewTextHandler(logged, nil))
+
+	runFailingForgeStart(t, d, docker, dir)
+
+	if n := strings.Count(logged.String(), "forge install log not written"); n != 1 {
+		t.Fatalf("worker log = %q, want one warning that the install log was not written, got %d", logged.String(), n)
+	}
+	assertEmptyDir(t, outside)
+}
+
+// A write that fails in one attempt drops the log for the rest of the start's
+// install: a later attempt writes nothing to it, even once the filesystem has
+// room again, and the failure is warned of once.
+func TestInstallLogWriteFailureDropsTheLogForTheRestOfTheInstall(t *testing.T) {
+	dir := t.TempDir()
+	sink := &failingLogFile{limit: len(installLogOutput)}
+	docker := newForgeFakeDocker()
+	docker.logBodies[forgeInstallID] = string(frame(dockerStreamStdout, installLogOutput)) +
+		string(frame(dockerStreamStdout, "attempt 1, the write that fails\n"))
+	logged := &syncBuffer{}
+	i := &instance{docker: docker, spec: forgeSpec(dir), logger: slog.New(slog.NewTextHandler(logged, nil)),
+		installLogSink: func(f *os.File) installLogFile { sink.f = f; return sink }}
+	log := i.startInstallLog()
+	defer log.close()
+
+	i.captureInstallOutput(context.Background(), forgeInstallID, log)
+	sink.limit = 1 << 20
+	docker.mu.Lock()
+	docker.logBodies[forgeInstallID] = string(frame(dockerStreamStdout, "attempt 2\n"))
+	docker.mu.Unlock()
+	i.captureInstallOutput(context.Background(), forgeInstallID, log)
+
+	if got := readInstallLog(t, dir); got != installLogOutput {
+		t.Fatalf("install log = %q, want only what attempt 1 wrote before the failure", got)
+	}
+	if n := strings.Count(logged.String(), "forge install log write failed"); n != 1 {
+		t.Fatalf("worker log = %q, want one warning of the failed write, got %d", logged.String(), n)
+	}
+}
+
+// fileInstallLog is an install log of one attempt written straight to a file of
+// its own, for a test to hand output to the way demuxLogsTo does, and the path
+// of that file.
+func fileInstallLog(t *testing.T) (*installLog, string) {
+	t.Helper()
+	f, err := os.Create(filepath.Join(t.TempDir(), "forge-install.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	l := &installLog{f: f, file: f, logger: slog.New(slog.DiscardHandler)}
+	l.beginAttempt()
+	return l, f.Name()
+}
+
+// demuxChunk is the most demuxLogsTo hands the install log in one write.
+const demuxChunk = 32 << 10
+
+// writeInChunks hands output to l in writes of at most demuxChunk bytes.
+func writeInChunks(l *installLog, output string) {
+	for len(output) > 0 {
+		n := min(demuxChunk, len(output))
+		l.write([]byte(output[:n]))
+		output = output[n:]
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// One line longer than the room for the latest output does not cost that output,
+// even when its newline comes in the write that compacts the log: the kept part
+// starts at a line only when one starts close by, and at a character otherwise.
+func TestInstallLogKeepsTheLatestOutputOfALineLongerThanItsRoom(t *testing.T) {
+	l, path := fileInstallLog(t)
+	var printed strings.Builder
+	write := func(p string) {
+		writeInChunks(l, p)
+		printed.WriteString(p)
+	}
+	write(installOutput("attempt 1", 1<<20))
+	// A line of about 3.5 MiB ends the output, its last write the one that takes
+	// the log past its bound.
+	for line := 0; line < 3<<20 || l.size+demuxChunk <= execution.ForgeInstallLogMaxBytes; line += demuxChunk {
+		write(strings.Repeat("x", demuxChunk))
+	}
+	write(strings.Repeat("x", int(execution.ForgeInstallLogMaxBytes-l.size)) + "\n")
+
+	log := readFile(t, path)
+	if len(log) > execution.ForgeInstallLogMaxBytes {
+		t.Fatalf("install log is %d bytes, want at most %d", len(log), execution.ForgeInstallLogMaxBytes)
+	}
+	_, _, latest := splitAtOmission(t, log)
+	if !strings.HasSuffix(printed.String(), latest) {
+		t.Fatalf("install log after the omission line starts with %.80q, want the end of the output", latest)
+	}
+	if len(latest) < 1<<20 {
+		t.Fatalf("install log keeps %d bytes of the latest output, want at least 1 MiB", len(latest))
+	}
+}
+
+// Output with no newline at all, in characters of more than one byte, is cut on
+// a character: the log stays valid UTF-8, which the WebUI reads it as only when
+// all of it is.
+func TestInstallLogCutsOutputWithoutNewlinesOnACharacter(t *testing.T) {
+	// Each lead puts the cut at a different byte of a three-byte character.
+	for lead := range 3 {
+		t.Run(fmt.Sprintf("lead %d", lead), func(t *testing.T) {
+			l, path := fileInstallLog(t)
+			output := strings.Repeat("a", lead) + strings.Repeat("日本語", (13<<18)/9)
+			writeInChunks(l, output)
+
+			log := readFile(t, path)
+			if len(log) > execution.ForgeInstallLogMaxBytes {
+				t.Fatalf("install log is %d bytes, want at most %d", len(log), execution.ForgeInstallLogMaxBytes)
+			}
+			_, _, latest := splitAtOmission(t, log)
+			if !utf8.ValidString(latest) || !strings.HasSuffix(output, latest) {
+				t.Fatalf("install log after the omission line starts with %+q, want whole characters from the end of the output",
+					latest[:min(len(latest), 8)])
+			}
+		})
 	}
 }

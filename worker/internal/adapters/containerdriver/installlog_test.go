@@ -136,7 +136,7 @@ func plantAtLogPath(t *testing.T, dir string) string {
 }
 
 // The log file swapped for a symlink to a file outside the working set: that
-// file is not appended to.
+// file is neither emptied nor written.
 func TestInstallLogRefusesSymlinkedLogFile(t *testing.T) {
 	dir, outside := t.TempDir(), t.TempDir()
 	victim := filepath.Join(outside, "victim")
@@ -168,8 +168,8 @@ func TestInstallLogRefusesDanglingLogFileSymlink(t *testing.T) {
 	assertRefused(t, logged)
 }
 
-// The log path as a second name of a file kept elsewhere: an append through it
-// would land in that file too, so it is refused.
+// The log path as a second name of a file kept elsewhere: emptying and writing
+// the log through it would empty and write that file too, so it is refused.
 func TestInstallLogRefusesHardLinkedLogFile(t *testing.T) {
 	dir := t.TempDir()
 	victim := filepath.Join(dir, "victim")
