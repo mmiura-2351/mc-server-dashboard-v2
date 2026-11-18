@@ -28,6 +28,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     WorkingSetSeedFailedError,
@@ -526,3 +527,75 @@ async def test_an_adopted_instance_owes_every_group_managed_file(
     await _adopt(entry, _start(uow, store, _WorkerAlreadyRunningIt(store)), server.id)
 
     assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == owed
+
+
+class _LaunchInFlightThenLive(_WorkerAlreadyRunningIt):
+    """Worker A is still launching the server for an earlier command (issue #3890).
+
+    It refuses the first hydrate ``BUSY``, on that launch's reservation, and then
+    runs the instance the launch started, on its own working set, as
+    :class:`_WorkerAlreadyRunningIt` does.
+    """
+
+    def __init__(self, store: _VersionedFileStore) -> None:
+        super().__init__(store)
+        self._launching = True
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        if not self._launching:
+            return await super().hydrate(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+        self._launching = False
+        await FakeControlPlane.hydrate(
+            self, worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        return CommandOutcome(
+            status=worker_status("HydrateTrigger", "command_in_flight"),
+            message="instancemanager: a lifecycle command is already in flight",
+        )
+
+
+@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
+@pytest.mark.parametrize("entry", ["start", "place_and_start"])
+async def test_a_start_kept_on_a_busy_worker_leaves_the_owed_player_files_owed(
+    entry: str, by: str
+) -> None:
+    # Issue #3890. The start regenerated the owed ops.json into the store and
+    # cleared its mark with the intent. Then Worker A refused the hydrate BUSY: an
+    # earlier launch of the server holds the id there. The start keeps A and
+    # launches nothing, so the regeneration is owed again. That launch then runs
+    # on A's own working set, with the stale file. The reconciler's re-sent start
+    # finds it live and keeps it, and its snapshots put the stale file back in the
+    # store. So the next start, after a stop, must make the change again.
+    uow = FakeUnitOfWork()
+    server = _server()
+    await _operator_removed_while_running(uow, server, by=by)
+    if entry == "place_and_start":
+        server.desired_state = DesiredState.RUNNING
+        uow.servers.seed(server)
+    store = _VersionedFileStore()
+    cp = _LaunchInFlightThenLive(store)
+    clock = FakeClock(_NOW + dt.timedelta(minutes=1))
+    use_case = _start(uow, store, cp, clock=clock)
+
+    with pytest.raises(CommandDispatchError):
+        if entry == "start":
+            await use_case(community_id=_COMMUNITY, server_id=server.id)
+        else:
+            await use_case.place_and_start(community_id=_COMMUNITY, server_id=server.id)
+    owed_once_kept = [p.kind for p in await uow.groups.list_sync_pending(server.id)]
+    clock.set(_NOW + dt.timedelta(minutes=20))
+    await use_case.redispatch_start(community_id=_COMMUNITY, server_id=server.id)
+    await StopServer(uow=uow, control_plane=cp, clock=clock)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+    await _start(uow, store, cp, clock=clock)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
+    assert owed_once_kept == [GroupKind.OP]
+    assert json.loads(store.files["ops.json"]) == []
+    assert await uow.groups.list_sync_pending(server.id) == []
