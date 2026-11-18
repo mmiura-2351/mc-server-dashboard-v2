@@ -125,6 +125,12 @@ function server(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// A lifecycle toast's text: the message, named for the server it is about, as
+// on the dashboard (#3862).
+function aboutServer(name: string, message: string): string {
+  return `${name}: ${message}`;
+}
+
 // Route api.get by path: the Settings tab's resource-pack assignment (#1179) is
 // its own endpoint whose contract is `null | ResourcePackAssignmentResponse`, so
 // it must not be answered by the server-detail catch-all (issue #2247), and
@@ -959,7 +965,10 @@ describe("ServerDetailPage lifecycle controls", () => {
 
     expect(
       await screen.findByText(
-        t("permissions.deniedNamed", { permission: "server:restart" }),
+        aboutServer(
+          "survival",
+          t("permissions.deniedNamed", { permission: "server:restart" }),
+        ),
       ),
     ).toBeInTheDocument();
   });
@@ -1027,7 +1036,9 @@ describe("ServerDetailPage lifecycle controls", () => {
       act(() => rejectPost(new ApiError(409, { reason: "command_failed" })));
 
       expect(
-        await screen.findByText(t("dashboard.lifecycle.restartPending")),
+        await screen.findByText(
+          aboutServer("survival", t("dashboard.lifecycle.restartPending")),
+        ),
       ).toBeInTheDocument();
       // The failed restart does not roll the newer crash back to "running".
       expect(statePill()).toBe(t("dashboard.state.crashed"));
