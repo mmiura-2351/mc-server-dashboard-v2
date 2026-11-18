@@ -233,13 +233,16 @@ canary_expired="$canary_stub/canary-start-expired"
 # canary as soon as it reads the record finds both in place. CANARY_HIT adds a
 # MISMATCH line; CANARY_IGNORE_TERM makes it ignore SIGTERM; CANARY_CHECKS sets
 # the checks its stopped line counts (1); CANARY_USAGE_ERROR makes it fail at
-# once, as on a bad command line.
+# once, as on a bad command line, and with no TERM trap, as the real one fails
+# before it installs its handler: a run that stops it after the record and
+# before its exit must still find the usage error last in its log.
 mkdir -p "$canary_worktree/api/.venv/bin"
 cat > "$canary_worktree/api/.venv/bin/python" << 'STUB'
 #!/usr/bin/env bash
 if [ -n "${CANARY_IGNORE_TERM:-}" ]; then
 	trap '' TERM
-else
+elif [ -z "${CANARY_USAGE_ERROR:-}" ]; then
+	# Residual: if nice 19 starves this past the gate's 5 s grace, .stopped is lost.
 	trap 'sleep 0.3
 		echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
 		echo TERM > "$CANARY_RECORD.stopped"
