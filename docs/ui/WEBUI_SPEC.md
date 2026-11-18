@@ -1155,16 +1155,20 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   order and at least 24×24 px, and Escape dismisses the toast whose button has
   focus. The button is described by its toast's message, so it reads as more
   than "Close", the name the modal's backdrop shares.
-- **Modal focus.** While a modal is open, focus stays in the topmost dialog
-  and the toast stack. Tab or Shift+Tab from anywhere else, such as the page
-  body after a click on a toast's text, the page behind or a dialog below,
-  moves to the dialog's first or last control, or to the dialog itself when it
-  has none, so focus never walks the page behind. A control disabled while it
-  holds focus, as a confirm button is while its action runs, hands focus to
-  the dialog itself without scrolling, and focus does not go back when the
-  control is enabled again. Only that loss moves focus, so focus moves at
-  most once per confirm, not on every busy toggle, and a screen reader is not
-  given the dialog to announce anew each time.
+- **Modal focus.** While a modal is open, Tab keeps focus in the topmost
+  dialog and the toast stack. Focus that lands anywhere else, such as the page
+  behind or a dialog below, however it got there, is pulled back to the
+  dialog's first control, or its last after Shift+Tab, or to the dialog itself
+  when it has none, without scrolling the page; a Tab that landed it there and
+  scrolled the page is undone. So focus never walks the page behind. Tab from
+  the page body is the browser's: after a focused control is removed it goes
+  on from where that control was, and after a click on a toast's text it goes
+  to that toast's dismiss button. A control disabled while it holds focus, as
+  a confirm button is while its action runs, hands focus to the dialog itself
+  without scrolling, and focus does not go back when the control is enabled
+  again. Only that loss moves focus, so focus moves at most once per confirm,
+  not on every busy toggle, and a screen reader is not given the dialog to
+  announce anew each time.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast

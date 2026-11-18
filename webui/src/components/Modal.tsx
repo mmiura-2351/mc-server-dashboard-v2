@@ -12,9 +12,9 @@ import { t } from "../i18n/index.ts";
 // - Focus trap: Tab / Shift+Tab cycle within the dialog's focusable elements
 //   rather than escaping to the page behind the backdrop. The toast stack
 //   joins the cycle: it sits outside every dialog, but an error raised over
-//   one must stay reachable (WEBUI_SPEC.md Section 7.4). Focus anywhere else,
-//   on the page body or behind, re-enters the dialog on the next Tab, and a
-//   control disabled while it holds focus hands it to the dialog itself.
+//   one must stay reachable (WEBUI_SPEC.md Section 7.4). Focus that lands
+//   anywhere else is pulled back into the dialog, and a control disabled
+//   while it holds focus hands it to the dialog itself.
 // - Stacked dialogs: a module-level stack tracks open dialogs so Escape closes
 //   only the topmost one (the Files history drawer + rollback confirm is a live
 //   stacked case).
@@ -37,12 +37,30 @@ export function setToastZone(zone: HTMLElement | null): void {
   toastZone = zone;
 }
 
+// `:disabled`, unlike `[disabled]`, also matches a control inside a disabled
+// fieldset.
 function focusableWithin(root: HTMLElement): HTMLElement[] {
   return Array.from(
     root.querySelectorAll<HTMLElement>(
-      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
     ),
   );
+}
+
+// Focuses the first of `targets` that takes focus, else the dialog itself. A
+// control can match the selector above and still refuse focus (one under
+// `display: none`), and a Tab the trap has taken over must land somewhere.
+function focusFirstOf(
+  targets: HTMLElement[],
+  dialog: HTMLElement,
+  options?: FocusOptions,
+): void {
+  for (const target of [...targets, dialog]) {
+    target.focus(options);
+    if (document.activeElement === target) {
+      return;
+    }
+  }
 }
 
 interface ModalProps {
@@ -94,6 +112,33 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
       subtree: true,
     });
 
+    // The last Tab's direction and the page's scroll before it, kept until
+    // the browser has moved focus for it.
+    let lastTab: { shiftKey: boolean; x: number; y: number } | null = null;
+
+    // Focus that lands outside the dialog and the toast stack, from a Tab the
+    // browser ran or any other way, is pulled back without scrolling: to the
+    // dialog's first control, or its last after Shift+Tab. A Tab that landed
+    // it on the page behind may have scrolled the page; that is undone.
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target as Node;
+      if (
+        dialogStack.at(-1) !== dialog ||
+        dialog.contains(target) ||
+        toastZone?.contains(target)
+      ) {
+        return;
+      }
+      const inDialog = focusableWithin(dialog);
+      focusFirstOf(lastTab?.shiftKey ? inDialog.reverse() : inDialog, dialog, {
+        preventScroll: true,
+      });
+      if (lastTab !== null) {
+        window.scrollTo(lastTab.x, lastTab.y);
+      }
+    };
+    document.addEventListener("focusin", onFocusIn);
+
     const onKeyDown = (event: KeyboardEvent) => {
       // Only the topmost dialog reacts to keys.
       if (dialogStack.at(-1) !== dialog) {
@@ -104,6 +149,21 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         return;
       }
       if (event.key === "Tab") {
+        lastTab = {
+          shiftKey: event.shiftKey,
+          x: window.scrollX,
+          y: window.scrollY,
+        };
+        setTimeout(() => {
+          lastTab = null;
+        });
+        const active = document.activeElement;
+        // From the page body the browser runs Tab: after a focused control is
+        // removed it goes on from where that control was. Focus it lands
+        // outside is pulled back above.
+        if (active === null || active === document.body) {
+          return;
+        }
         // Tab runs natively within the dialog and within the toast stack; at
         // the end of either it steps to the start of the other.
         const inDialog = focusableWithin(dialog);
@@ -114,26 +174,26 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
           dialog.focus();
           return;
         }
-        const active = document.activeElement;
-        let next: HTMLElement | undefined;
+        // Where Tab goes, best first.
+        let order: HTMLElement[] | undefined;
         if (!dialog.contains(active) && !toastZone?.contains(active)) {
-          // From outside both, as on the page body after a click on a
-          // toast's text, Tab re-enters the dialog at its start or end.
-          next = (event.shiftKey ? inDialog.at(-1) : inDialog[0]) ?? dialog;
+          // From outside both, on the page behind or in a dialog below, Tab
+          // enters the dialog at its start or end.
+          order = event.shiftKey ? [...inDialog].reverse() : inDialog;
         } else if (event.shiftKey) {
           if (active === dialog || active === cycle[0]) {
-            next = cycle.at(-1);
+            order = [...cycle].reverse();
           } else if (active === inToasts[0]) {
-            next = inDialog.at(-1);
+            order = [...inDialog].reverse();
           }
         } else if (active === cycle.at(-1)) {
-          next = cycle[0];
+          order = cycle;
         } else if (active === (inDialog.at(-1) ?? dialog)) {
-          next = inToasts[0];
+          order = inToasts;
         }
-        if (next !== undefined) {
+        if (order !== undefined) {
           event.preventDefault();
-          next.focus();
+          focusFirstOf(order, dialog);
         }
       }
     };
@@ -141,6 +201,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
 
     return () => {
       observer.disconnect();
+      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("keydown", onKeyDown);
       const slot = dialogStack.indexOf(dialog);
       if (slot !== -1) {
