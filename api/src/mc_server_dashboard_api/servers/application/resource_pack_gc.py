@@ -3,12 +3,11 @@
 The pack row is the source of truth: a blob no row names is never served, and
 nothing else removes it. Two use cases can leave one behind, each ordering its
 writes so a failure leaves an unserved blob rather than a row whose blob is gone.
-``DeleteResourcePack`` commits the row's delete
-before it removes the blob, so a store outage there leaves the blob (#1962).
-``UploadResourcePack`` stores the blob before it commits the row, so a failed
-commit -- or an upload the store completed but could not acknowledge -- leaves
-the blob with no row (#2458). Mirrors the plugin-cache GC (#1332) in structure
-and safety model.
+``DeleteResourcePack`` commits the row's delete before it removes the blob, so a
+store outage there leaves the blob (#1962). ``UploadResourcePack`` stores the
+blob before it commits the row, so a failed commit -- or an upload the store
+completed but could not acknowledge -- leaves the blob with no row (#2458).
+Mirrors the plugin-cache GC (#1332) in structure and safety model.
 
 **Reference model.** A stored blob is LIVE iff a ``resource_packs`` row carries
 the pack id it is stored under. Every upload mints a fresh id, so a blob under an

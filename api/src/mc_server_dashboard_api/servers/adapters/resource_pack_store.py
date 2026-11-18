@@ -42,7 +42,7 @@ behind:
   key as success — so re-running it finishes the job. Its one caller commits the
   row's delete first and treats this as best-effort cleanup, so the outage is
   logged there rather than answered: the pack is already gone, and a 503 would
-  invite a retry that can only find a 404. What it leaves is the GC's too.
+  invite a retry that can only find a 404. The same GC reclaims what it leaves.
 
 :meth:`list_entries` feeds that GC: every blob under the namespace, with the pack
 id its key names and its store time.
