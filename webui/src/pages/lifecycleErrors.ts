@@ -209,8 +209,10 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // least tells us the host is busy, which is what this message can honestly say.
 //
 // `invalid_transition` on start is start-only for the same reason: StartServer
-// raises it only when desired_state is ALREADY running (lifecycle.py, the entry
-// guard), which is exactly the state a pending start leaves behind. An operator
+// raises it when desired_state is ALREADY running (lifecycle.py, the entry
+// guard), which is exactly the state a pending start leaves behind, and when the
+// Worker it placed the server on refused the hydrate because it already runs
+// the server, which leaves that same state (issue #3865). An operator
 // told the start is pending who clicks start again would otherwise get the
 // generic state-changed toast — a second, contradictory answer (issue #2445) —
 // so start alone maps it to a message that says the server is already coming up.
