@@ -42,16 +42,18 @@ refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
 Worker refusing because another mutating command is already in flight, or because a
 failed-stop orphan it is still converging holds the id — either way the outcome is
-unknown), and an ``INVALID_STATE`` outcome of the start or of its hydrate (the Worker
-refusing because an instance is already live there), do NOT compensate — see the
-assignment-stickiness note below.
+unknown), an ``INVALID_STATE`` outcome of the start or of its hydrate (the Worker
+refusing because an instance is already live there), and a hydrate refused ``BUSY``,
+``UNAVAILABLE`` or ``EXPIRED`` (an answer that does not rule an instance there out),
+do NOT compensate — see the assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from
 Storage (a server with no published working set yet hydrates to an empty dir, the
 data-plane endpoint being 204), then dispatches the launch; a failure before the
-start command is sent (a failed hydrate, unless refused ``INVALID_STATE`` as below,
-or a pre-dispatch ``WorkerUnavailableError``) compensates the committed intent. The
+start command is sent (a failed hydrate, unless its refusal leaves an instance on
+the Worker possible as below, or a pre-dispatch ``WorkerUnavailableError``)
+compensates the committed intent. The
 launch carries a conventional ``server.jar`` relpath and the server's recorded MC
 version (FR-EXE-5: the Worker picks the Java runtime).
 
@@ -83,6 +85,15 @@ but the instance runs its own working set, and its snapshots publish that set's
 files over the store. ``place_and_start`` then returns, as nothing failed;
 ``__call__`` answers ``InvalidLifecycleTransitionError``, since its start launched
 nothing and the instance may run an older working set than the store's.
+
+A hydrate refused ``BUSY``, ``UNAVAILABLE`` or ``EXPIRED`` is not a failure before
+dispatch in that sense either (issue #3890). It proves no instance, but it does not
+rule one out on that Worker (``_HYDRATE_REFUSALS_KEEPING_THE_WORKER``): another
+command or a failed-stop orphan holds the id, a container the Worker does not track
+may run against the working set, or the hydrate expired before the Worker looked.
+Both ``__call__`` and ``place_and_start`` keep the assignment, record
+observed=unknown, and raise the refusal as before, so the reconciler retries the
+start on that same Worker.
 
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
 and that is what makes every convergence site sound. Until issue #2476 the Worker
@@ -732,14 +743,17 @@ class StartServer:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
-          ever reached a Worker, so re-placing elsewhere cannot double-start. Two
+          ever reached a Worker, so re-placing elsewhere cannot double-start. Three
           exceptions keep the assignment. The re-read just before the send raising
           (a database error, issue #3741): the hydrate succeeded, so the
           assignment is kept for a re-send to the same Worker (see ``_launch``).
-          And a hydrate refused ``INVALID_STATE`` (issue #3865): the Worker
+          A hydrate refused ``INVALID_STATE`` (issue #3865): the Worker
           already runs an instance of the server, so re-placing elsewhere WOULD
           double-start. That one records observed=running, as
-          ``redispatch_start`` does, and returns.
+          ``redispatch_start`` does, and returns. And a hydrate refused ``BUSY``,
+          ``UNAVAILABLE`` or ``EXPIRED`` (issue #3890): the Worker may run an
+          instance, so re-placing elsewhere MAY double-start. That one records
+          observed=unknown and raises, and the next tick retries this Worker.
         - After the start was dispatched (a failed outcome, or a timeout/lost-response
           ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
           assignment. Subsequent ticks then take the ``redispatch_start`` path to the
@@ -1554,7 +1568,8 @@ class StartServer:
 
         Called by ``place_and_start`` only when the failure happened BEFORE the start
         command was sent (a failed hydrate, but not one refused ``INVALID_STATE``,
-        which proves a live instance): no start ever reached a Worker, so
+        which proves a live instance, nor one whose refusal leaves an instance
+        possible, issue #3890): no start ever reached a Worker, so
         clearing the assignment to let a later tick re-place elsewhere cannot
         double-start (issue #101's stickiness invariant). A post-dispatch failure
         does NOT call this — the assignment must stick for a same-Worker redispatch.
