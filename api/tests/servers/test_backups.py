@@ -30,7 +30,6 @@ import pytest
 
 from mc_server_dashboard_api.servers.application import backups as backups_module
 from mc_server_dashboard_api.servers.application.backups import (
-    MAX_GZIP_MEMBERS,
     CreateBackup,
     DeleteBackup,
     DownloadBackup,
@@ -1450,12 +1449,11 @@ async def test_cancelling_an_upload_mid_validation_stores_nothing(
     assert await uow.backups.list_for_server(server.id) == []
 
 
-# --- the gzip member count is capped (issue #3801) --------------------------
+# --- gzip members and zero padding read as gzip reads them -----------------
 #
-# Each gzip member costs a header parse and a fresh decompressor whatever it
-# holds, so a body of empty members burns CPU the decompressed-size cap never
-# sees: about 0.75 s per MiB, some 6 minutes at the 512 MiB body cap. Every
-# producer the platform expects writes one member.
+# Concatenated gzip members, with zero padding between and after them, are part
+# of the gzip format. Issue #3835 replaces the gzip layer to bound what they cost,
+# so this pins what it must keep accepting.
 
 
 def _raw_tar(files: dict[str, bytes]) -> bytes:
@@ -1469,7 +1467,6 @@ def _raw_tar(files: dict[str, bytes]) -> bytes:
 
 
 _RAW_TAR = _raw_tar({"server.properties": b"k=v", "world/level.dat": b"w" * 2048})
-_EMPTY_GZIP_MEMBER = gzip.compress(b"", mtime=0)
 
 
 def _in_gzip_members(raw: bytes, parts: int) -> bytes:
@@ -1482,8 +1479,7 @@ def _in_gzip_members(raw: bytes, parts: int) -> bytes:
 
 
 def test_validate_accepts_a_tar_split_across_gzip_members_with_zero_padding() -> None:
-    # The member cap leaves what gzip itself reads alone: concatenated members,
-    # with zero padding between and after them. The cuts fall inside records.
+    # The cuts fall inside records.
     head, tail = _RAW_TAR[:2000], _RAW_TAR[2000:]
     content = (
         _in_gzip_members(head, 2) + bytes(512) + _in_gzip_members(tail, 1) + bytes(1024)
@@ -1491,50 +1487,6 @@ def test_validate_accepts_a_tar_split_across_gzip_members_with_zero_padding() ->
 
     # No raise.
     _validate_backup_archive(content, max_entries=10)
-
-
-@pytest.mark.parametrize(
-    "content",
-    [
-        # Read while tarfile reads the first header.
-        pytest.param(
-            _EMPTY_GZIP_MEMBER * 2 + gzip.compress(_RAW_TAR), id="before-the-tar"
-        ),
-        pytest.param(_in_gzip_members(_RAW_TAR, 3), id="within-the-tar"),
-        # Read on the way to the gzip end, past the end-of-archive marker.
-        pytest.param(
-            gzip.compress(_RAW_TAR) + _EMPTY_GZIP_MEMBER * 2, id="after-the-tar"
-        ),
-    ],
-)
-def test_validate_refuses_more_gzip_members_than_the_cap(content: bytes) -> None:
-    with pytest.raises(InvalidBackupArchiveError, match="too many gzip members"):
-        _validate_backup_archive(content, max_entries=10, max_gzip_members=2)
-
-
-def test_validate_accepts_gzip_members_up_to_the_cap() -> None:
-    # No raise.
-    _validate_backup_archive(
-        _in_gzip_members(_RAW_TAR, 2), max_entries=10, max_gzip_members=2
-    )
-
-
-async def test_upload_refuses_a_gzip_stream_past_the_member_cap() -> None:
-    server = _at_rest()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    archive = FakeBackupArchiveStore()
-    uow = FakeUnitOfWork(servers=repo)
-    content = _valid_tar_gz() + _EMPTY_GZIP_MEMBER * MAX_GZIP_MEMBERS
-
-    with pytest.raises(InvalidBackupArchiveError, match="too many gzip members"):
-        await UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))(
-            community_id=_COMMUNITY,
-            server_id=server.id,
-            content=content,
-            created_by=uuid.uuid4(),
-        )
-    assert archive.stored == []
 
 
 async def test_server_statistics_aggregates_count_bytes_and_bounds() -> None:

@@ -158,14 +158,6 @@ _PROPERTIES_REL_PATH = "server.properties"
 # tiny upload into a huge 422 body.
 _MAX_ECHOED_NAME_CHARS = 256
 
-# The most gzip members an uploaded backup may hold (issue #3801). ``gzip`` pays
-# for each member whatever it holds, so a body of empty ones burns CPU that the
-# decompressed-size cap never counts: about 15 microseconds a member, some 6
-# minutes at the 512 MiB body cap. The backup writer, GNU tar with gzip and pigz
-# each write one member. 10 000 leaves room for concatenated streams and bounds
-# that cost at a fraction of a second.
-MAX_GZIP_MEMBERS = 10_000
-
 
 async def _load(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
@@ -1281,7 +1273,14 @@ class UploadBackup:
     request's spooled part, and never the spool, so the spool may close whenever
     the request ends. A cancelled call stops waiting at once and stores nothing.
     The thread cannot be stopped: it runs on to its own end, holding ``content``
-    until then, and the caps bound how long that takes.
+    until then.
+
+    The caps do not bound all of that thread's CPU. ``gzip`` pays for every gzip
+    member whatever it holds, about 1 s a MiB of empty members, and reads zero
+    padding after the gzip stream one byte at a time, about 0.2 s a MiB. Neither
+    adds decompressed bytes, so only the 512 MiB body cap bounds them: minutes
+    for one upload, now in the worker thread rather than on the event loop.
+    Issue #3835 bounds both.
 
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
@@ -1485,38 +1484,11 @@ async def _chunked(content: bytes) -> AsyncIterator[bytes]:
         yield content[start : start + _UPLOAD_STREAM_CHUNK]
 
 
-class _MemberCappedGzipReader(gzip._GzipReader):
-    """``gzip``'s own reader, refusing a stream of over ``max_members`` members.
-
-    ``gzip.GzipFile`` opened for reading is ``io.BufferedReader(_GzipReader(...))``
-    and nothing more, and ``_read_gzip_header`` runs once for each member it
-    starts. Both names are private to CPython, so this relies on them; in return
-    the stream is read by every rule ``gzip`` reads it by, and only the count is
-    added (issue #3801). The tests that pin the cap fail if either name moves.
-    The count runs over the whole read, so a backward seek, which ``gzip`` serves
-    by reading again from the start, counts the members it reads again too.
-    """
-
-    def __init__(self, fp: IO[bytes], max_members: int) -> None:
-        super().__init__(fp)
-        self._max_members = max_members
-        self._members = 0
-
-    def _read_gzip_header(self) -> bool:
-        if not super()._read_gzip_header():  # type: ignore[misc]
-            return False
-        self._members += 1
-        if self._members > self._max_members:
-            raise InvalidBackupArchiveError("too many gzip members")
-        return True
-
-
 def _validate_backup_archive(
     content: bytes,
     *,
     max_entries: int,
     max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES,
-    max_gzip_members: int = MAX_GZIP_MEMBERS,
 ) -> None:
     """Prove the upload is a traversal-safe, bounded gzip tar before storing (#281).
 
@@ -1547,12 +1519,6 @@ def _validate_backup_archive(
     ISIZE must match, and only another gzip member or zero padding may follow the
     gzip stream. The zeros read there count toward ``max_decompressed_bytes`` too.
 
-    The gzip stream may hold at most ``max_gzip_members`` members (issue #3801):
-    ``gzip`` pays for each member whatever it holds, so a body of empty members
-    would cost minutes of CPU that ``max_decompressed_bytes`` never counts. Zero
-    padding between and after the members is still read the way ``gzip`` reads it,
-    a byte at a time, at about 0.2 s a MiB; only the body cap bounds it.
-
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
     ``arcname=child.name``, and :class:`RestoreBackup` republishes the extraction
@@ -1569,9 +1535,7 @@ def _validate_backup_archive(
 
     try:
         with (
-            io.BufferedReader(
-                _MemberCappedGzipReader(io.BytesIO(content), max_gzip_members)
-            ) as gz,
+            gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
             tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tar,
         ):
             count = 0

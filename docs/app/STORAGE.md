@@ -354,11 +354,14 @@ ordinary name character. The gate reads the archive whole, which restore and the
 probe do not (issue #3778, `archive_member.EndCheckedReader`): the member walk
 must stop at the end-of-archive marker, only zeros may follow it, the gzip
 CRC32 and ISIZE must match, and only another gzip member or zero padding may
-follow the gzip stream, which may hold at most 10 000 members (issue #3801). So
-the gate refuses a header past the first that does
+follow the gzip stream. So the gate refuses a header past the first that does
 not read, which restore takes for the end and so cuts the member list short, a
 missing or cut marker, a second tar after the first and bytes after the gzip
-stream, all of which restore and the probe accept today (issue #3798). Each
+stream, all of which restore and the probe accept today (issue #3798). The gate
+runs in a worker thread, off the event loop (issue #3801). Its CPU is not bounded
+there yet: empty gzip members and zero padding after the gzip stream add no
+decompressed bytes, so only the 512 MiB body cap bounds what they cost, minutes
+for one upload (issue #3835). Each
 member is first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
