@@ -153,12 +153,15 @@ describe("actionApplies", () => {
   });
 
   // Under a running intent no Worker holds yet (the reconciler still owes its
-  // placement), the API withdraws the intent on a stop whatever the server was
-  // last observed as (#3815). Nothing applies while transitional, as elsewhere.
-  it("stop under desired=running applies while no worker is assigned", () => {
-    for (const state of ["running", "stopped", "crashed", "unknown"] as const) {
+  // placement), the API withdraws the intent on a stop (#3815). Not while the
+  // server still reads running: the stopped intent would keep reading running
+  // with no Worker to report otherwise, which nothing converges. Nothing
+  // applies while transitional, as elsewhere.
+  it("stop under desired=running with no worker applies while at rest", () => {
+    for (const state of ["stopped", "crashed", "unknown"] as const) {
       expect(actionApplies("stop", state, "running", false)).toBe(true);
     }
+    expect(actionApplies("stop", "running", "running", false)).toBe(false);
     expect(actionApplies("stop", "stopped", "running", true)).toBe(false);
     expect(actionApplies("stop", "stopped", "running")).toBe(false);
     expect(actionApplies("stop", "starting", "running", false)).toBe(false);
