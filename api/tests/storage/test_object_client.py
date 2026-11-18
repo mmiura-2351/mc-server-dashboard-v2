@@ -708,6 +708,28 @@ async def test_delete_object_translates_transport_errors(error: BaseException) -
     assert isinstance(excinfo.value, StorageUnreachableError)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ClientError({"Error": {"Code": "InternalError"}}, "DeleteObject"),
+        EndpointConnectionError(endpoint_url="http://store:8333"),
+    ],
+)
+async def test_delete_object_failure_names_its_key_escaped(
+    error: BaseException,
+) -> None:
+    # A GC pass logs a failed delete with this error in its traceback, and a key
+    # stored before the resource-pack upload refused control characters carries
+    # them (issue #3907): raw, its newline would start a line of its own.
+    key = "resource-packs/p/x\nINFO forged\x1b[2J.zip"
+    client = _Aioboto3S3Client(_RaisingWriteClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.delete_object(key)
+
+    assert repr(key) in str(excinfo.value)
+
+
 # --- put_object_if_absent: the owner-marker claim (issue #3870) -----------
 
 

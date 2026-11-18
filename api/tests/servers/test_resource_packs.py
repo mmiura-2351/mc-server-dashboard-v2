@@ -127,6 +127,28 @@ class TestUploadResourcePack:
                 uploaded_by=uuid.uuid4(),
             )
 
+    @pytest.mark.parametrize(
+        "filename",
+        ["a\nb.zip", "a\x85b.zip", "a\ud800b.zip", "a/b.zip", "a\\b.zip", ""],
+    )
+    async def test_upload_refuses_a_filename_a_key_or_url_cannot_carry(
+        self, filename: str
+    ) -> None:
+        # The name becomes the object key and the public URL's last segment
+        # (issue #3907): it is refused before anything is stored.
+        uow = FakeUnitOfWork()
+        store = FakeResourcePackStore()
+        uc = _make_upload(uow=uow, store=store)
+        with pytest.raises(ValueError, match="cannot name a resource pack"):
+            await uc(
+                filename=filename,
+                display_name="Bad",
+                content=_ZIP_CONTENT,
+                uploaded_by=uuid.uuid4(),
+            )
+        assert store.calls == []
+        assert uow.resource_packs.packs == {}
+
     async def test_upload_rejects_oversized(self) -> None:
         uc = _make_upload()
         big = b"\x00" * (MAX_RESOURCE_PACK_BYTES + 1)

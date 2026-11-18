@@ -35,7 +35,9 @@ asks the bucket's owner marker first and is refused, with an ERROR, unless it
 names this installation (STORAGE.md Section 4.3, issue #3870).
 
 **Record and failures.** Each reclaimed blob is logged at INFO with its pack id,
-key, size and age, since it was the only copy of a user upload, and each pass ends
+key, size and age, since it was the only copy of a user upload. The key ends in
+the upload's filename, and one stored before the upload refused control
+characters may carry them, so it is logged escaped (issue #3907). Each pass ends
 with one summary line, at DEBUG when the pass neither reclaimed nor failed anything.
 A pack whose delete fails is logged at WARNING and skipped, and the pass goes on:
 one pack that keeps failing must not starve every pack after it (issue #3871). A
@@ -128,7 +130,7 @@ class RunResourcePackGc:
             except Exception as exc:  # noqa: BLE001 - one pack must not end the pass
                 failed += 1
                 _LOG.warning(
-                    "resource-pack GC could not delete pack %s (%s), skipped it: "
+                    "resource-pack GC could not delete pack %s (%r), skipped it: "
                     "%s: %s",
                     entry.pack_id.value,
                     entry.key,
@@ -141,7 +143,7 @@ class RunResourcePackGc:
             freed_bytes += entry.size_bytes
             # The blob was the only copy of a user upload: say what went.
             _LOG.info(
-                "resource-pack GC reclaimed pack %s (%s, %d bytes, stored %s ago): "
+                "resource-pack GC reclaimed pack %s (%r, %d bytes, stored %s ago): "
                 "no row names it",
                 entry.pack_id.value,
                 entry.key,

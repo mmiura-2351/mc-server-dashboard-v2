@@ -295,15 +295,19 @@ class _Aioboto3S3Client:
         #
         # The two halves stay apart (issue #3871): a store that answered, even with a
         # 5xx or a refusal, failed this key; one that gave no answer is unreachable.
+        #
+        # The key is repr'd: a GC pass logs this error in its traceback, and a
+        # resource-pack key stored before the upload refused control characters
+        # may carry them (issue #3907).
         try:
             await self._client.delete_object(Bucket=self._bucket, Key=key)
         except _TRANSPORT_FAILURE_ERRORS as exc:
             raise ObjectStoreUnreachableError(
-                f"object store delete failed for {key}"
+                f"object store delete failed for {key!r}"
             ) from exc
         except ClientError as exc:
             raise ObjectStoreUnavailableError(
-                f"object store delete failed for {key}"
+                f"object store delete failed for {key!r}"
             ) from exc
 
     async def list_objects(self, prefix: str) -> list[S3Object]:

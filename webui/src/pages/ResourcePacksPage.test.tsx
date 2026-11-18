@@ -96,6 +96,7 @@ interface MockOverrides {
   listError?: boolean;
   uploadError?: boolean;
   uploadStorageUnavailable?: boolean;
+  uploadInvalidFilename?: boolean;
   downloadStorageUnavailable?: boolean;
   deleteError?: boolean;
   deleteInUse?: boolean;
@@ -126,6 +127,9 @@ function signedIn(overrides: MockOverrides = {}) {
       if (url === "/api/resource-packs" && method === "POST") {
         if (overrides.uploadStorageUnavailable) {
           return Promise.resolve(errorResponse(503, "storage_unavailable"));
+        }
+        if (overrides.uploadInvalidFilename) {
+          return Promise.resolve(errorResponse(422, "invalid_filename"));
         }
         return Promise.resolve(
           overrides.uploadError
@@ -381,6 +385,42 @@ describe("resource packs library", () => {
 
     expect(
       await screen.findByText(t("resourcePacks.error.storageUnavailable")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("resourcePacks.error.uploadFailed")),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names the filename when an upload answers 422 invalid_filename", async () => {
+    // The file's name cannot be stored as a pack's (issue #3907): renaming the
+    // file is the remedy, which the generic toast would not say.
+    signedIn({ uploadInvalidFilename: true });
+
+    renderApp({ path: "/resource-packs" });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("resourcePacks.upload") }),
+    );
+
+    const nameInput = await screen.findByRole("textbox");
+    fireEvent.change(nameInput, { target: { value: "My Pack" } });
+
+    const fileInput = screen.getByLabelText(
+      t("common.chooseFile"),
+    ) as HTMLInputElement;
+    const file = new File(["content"], "pack.zip", {
+      type: "application/zip",
+    });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("resourcePacks.uploadDialog.submit"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(t("resourcePacks.error.invalidFilename")),
     ).toBeInTheDocument();
     expect(
       screen.queryByText(t("resourcePacks.error.uploadFailed")),

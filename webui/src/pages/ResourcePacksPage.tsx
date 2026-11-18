@@ -25,7 +25,7 @@ import { useToast } from "../components/Toast.tsx";
 import { UploadProgress } from "../components/UploadProgress.tsx";
 import { useUploadProgress } from "../components/useUploadProgress.ts";
 import { formatDateTime, humanizeBytes, shortId } from "../format.ts";
-import { t } from "../i18n/index.ts";
+import { type TranslationKey, t } from "../i18n/index.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
 
@@ -42,6 +42,21 @@ const PACKS_KEY = ["resource-packs"] as const;
  */
 function isStorageUnavailable(error: unknown): boolean {
   return error instanceof ApiError && error.reason === "storage_unavailable";
+}
+
+/**
+ * The toast for a failed upload. A 422 `invalid_filename` is the file's name,
+ * not its content (issue #3907): the pack cannot be stored under that name, so
+ * renaming the file is the remedy, which the generic toast does not say.
+ */
+function uploadErrorKey(error: unknown): TranslationKey {
+  if (isStorageUnavailable(error)) {
+    return "resourcePacks.error.storageUnavailable";
+  }
+  if (error instanceof ApiError && error.reason === "invalid_filename") {
+    return "resourcePacks.error.invalidFilename";
+  }
+  return "resourcePacks.error.uploadFailed";
 }
 
 export function ResourcePacksPage() {
@@ -265,14 +280,7 @@ function UploadDialog({
       progress.reset();
       if (isUploadAbortError(error)) return;
       if (onForbidden(error)) return;
-      showToast(
-        t(
-          isStorageUnavailable(error)
-            ? "resourcePacks.error.storageUnavailable"
-            : "resourcePacks.error.uploadFailed",
-        ),
-        "error",
-      );
+      showToast(t(uploadErrorKey(error)), "error");
     },
   });
 
