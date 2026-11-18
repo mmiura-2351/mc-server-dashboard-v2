@@ -252,10 +252,11 @@ class AssignRole:
         actor_id: UserId,
     ) -> None:
         async with self.uow:
-            # Before any lock of this context (the ceiling's lock order, step 0):
-            # a deletion of the recipient committed first leaves no member to
-            # assign to, or waits for this commit and then refuses an Owner.
-            if not await self.uow.users.exists(user_id):
+            # Before any lock of this context (the ceiling's lock order, step 0).
+            # A recipient whose account a deletion removed first is not found
+            # here, before the membership lookup; a later deletion waits for
+            # this commit and then refuses an Owner.
+            if not await self.uow.users.lock_and_check_exists(user_id):
                 raise MembershipNotFoundError(str(user_id.value))
             # The recipient's membership (the assignment's parent) and the
             # actor's (the ceiling's) are held first, and the assigned role is

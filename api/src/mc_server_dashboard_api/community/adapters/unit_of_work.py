@@ -89,7 +89,7 @@ class SqlAlchemyUserExistenceChecker(UserExistenceChecker):
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def exists(self, user_id: UserId) -> bool:
+    async def lock_and_check_exists(self, user_id: UserId) -> bool:
         # Shared: an account deletion holds the lock exclusively from before its
         # ownership check until it commits, so this waits for one in flight,
         # and the read below, a new snapshot, sees whether it deleted the user.

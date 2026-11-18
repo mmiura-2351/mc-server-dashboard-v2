@@ -80,7 +80,7 @@ class ProvisionCommunity:
         async with self.uow:
             # First, before any other lock: the owner is held against account
             # deletion until this commits (issue #3217).
-            if not await self.uow.users.exists(owner_user_id):
+            if not await self.uow.users.lock_and_check_exists(owner_user_id):
                 raise OwnerUserNotFoundError(str(owner_user_id.value))
             if await self.uow.communities.get_by_name(community_name) is not None:
                 raise CommunityAlreadyExistsError(community_name.value)

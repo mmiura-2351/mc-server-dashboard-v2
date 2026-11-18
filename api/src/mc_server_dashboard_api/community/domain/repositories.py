@@ -349,8 +349,8 @@ class UserExistenceChecker(abc.ABC):
     """
 
     @abc.abstractmethod
-    async def exists(self, user_id: UserId) -> bool:
-        """Return whether ``user_id`` exists, held against deletion until commit.
+    async def lock_and_check_exists(self, user_id: UserId) -> bool:
+        """Take ``user_id``'s ownership lock (shared); return whether it exists.
 
         Takes the user's community-ownership lock, shared, before reading the
         user, and holds it until the transaction ends. An account deletion takes

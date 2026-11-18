@@ -425,7 +425,7 @@ class FakeUserExistenceChecker(UserExistenceChecker):
     def __init__(self) -> None:
         self.absent: set[UserId] = set()
 
-    async def exists(self, user_id: UserId) -> bool:
+    async def lock_and_check_exists(self, user_id: UserId) -> bool:
         return user_id not in self.absent
 
 
