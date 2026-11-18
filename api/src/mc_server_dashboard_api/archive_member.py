@@ -133,9 +133,10 @@ UPLOAD_HEADER_LIMITS = HeaderLimits(characters_a_member=0)
 # and ``size``, ``uid``, ``gid``, ``uname`` or ``gname`` when out of the ustar
 # fields' range): under 9 Ki characters for a name of 4095 bytes, Linux's
 # PATH_MAX, which bounds every name the fs writer reads from disk and the Worker
-# packs. So 16 Ki a member takes every backup the writers write of such names,
-# and the 8 Mi on top takes every archive the upload gates admit. An object
-# store's key is bounded by the store's own key limit instead (1024 bytes on S3).
+# packs. So 16 Ki a member takes every backup the fs writer writes, and the 8 Mi
+# on top takes every archive the upload gates admit. The object writer's names
+# are the snapshot's object keys, so its backups are taken alike only while every
+# key is at most 4095 bytes, which nothing enforces yet (issue #3931).
 STORAGE_HEADER_LIMITS = HeaderLimits(characters_a_member=16 * 1024)
 
 
