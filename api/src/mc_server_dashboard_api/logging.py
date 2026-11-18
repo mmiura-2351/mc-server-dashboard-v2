@@ -27,10 +27,23 @@ _RESERVED_KEYS = frozenset(
     vars(logging.LogRecord("", 0, "", 0, "", (), None)).keys()
 ) | {"taskName", "message", "asctime", "color_message"}
 
-# C0 (CR, LF and TAB included), DEL and C1 controls, written as visible escapes
+# C0 (CR, LF and TAB included), DEL and C1 controls, the line and paragraph
+# separators (some readers break a line on them) and the bidi controls (a
+# bidi-aware terminal reorders the rest of the line), written as visible escapes
 # the way ``repr`` writes them. A traceback or stack keeps its line breaks.
+_ESCAPED = (
+    *range(0x20),
+    *range(0x7F, 0xA0),
+    0x061C,
+    0x200E,
+    0x200F,
+    0x2028,
+    0x2029,
+    *range(0x202A, 0x202F),
+    *range(0x2066, 0x206A),
+)
 _LINE_ESCAPES = {
-    code: f"\\x{code:02x}" for code in (*range(0x20), *range(0x7F, 0xA0))
+    code: f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}" for code in _ESCAPED
 } | {ord("\t"): "\\t", ord("\n"): "\\n", ord("\r"): "\\r"}
 _BLOCK_ESCAPES = {
     code: escape for code, escape in _LINE_ESCAPES.items() if code != ord("\n")
@@ -53,7 +66,7 @@ class JsonFormatter(logging.Formatter):
         }
         for key, value in record.__dict__.items():
             if key not in _RESERVED_KEYS:
-                payload[key] = value
+                payload[key] = _json_value(value)
         cid = correlation_id.get()
         if cid is not None:
             payload["correlation_id"] = cid
@@ -77,6 +90,21 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+# What rendering an extra raises when it cannot be written: a dict with a key
+# JSON has no form for (TypeError), a circular container (ValueError), or a
+# weakref proxy whose object is gone (ReferenceError, from ``str``). Such an
+# extra is written as its ``repr`` rather than losing the line.
+_UNRENDERABLE = (TypeError, ValueError, ReferenceError)
+
+
+def _json_value(value: Any) -> Any:
+    try:
+        json.dumps(value, default=str)
+    except _UNRENDERABLE:
+        return repr(value)
+    return value
+
+
 class TextFormatter(logging.Formatter):
     """Render a log record as ``LEVEL logger message key=value ...``.
 
@@ -86,9 +114,10 @@ class TextFormatter(logging.Formatter):
     in its fields (a command's ``kind`` and ``server_id``) says nothing in this
     format (issue #3363). A value with a space or other ambiguity is ``repr``-ed.
 
-    No control character is written raw (issue #3928): a request path or a
-    filename in a message could otherwise put a terminal escape sequence, or a
-    line break that fakes a record, into the log. The message line escapes every
+    No control character, line or paragraph separator, or bidi control is
+    written raw (issue #3928): a request path or a filename in a message could
+    otherwise put a terminal escape sequence, a line break that fakes a record,
+    or a reordering of the line into the log. The message line escapes every
     one, so a record starts exactly one line; a traceback keeps its line breaks.
     """
 
@@ -122,7 +151,10 @@ class TextFormatter(logging.Formatter):
 
 
 def _text_value(value: Any) -> str:
-    text = str(value)
+    try:
+        text = str(value)
+    except _UNRENDERABLE:
+        return repr(value)
     return text if text and text.isprintable() and " " not in text else repr(value)
 
 

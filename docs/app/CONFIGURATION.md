@@ -593,18 +593,27 @@ clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
 | `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). `text` prints `LEVEL logger message` followed by the same structured fields and correlation ID as `key=value`. |
 
 Both formats also carry uvicorn's own server and access lines, which therefore
-go to stderr with every other line. Neither format writes a control character
-raw, so text a client controls (a crafted URL path, a header, a filename)
-cannot put a terminal escape sequence or a fake record into the log. `json`
-escapes them as JSON does. `text` writes every C0 control (CR, LF and TAB
-included), DEL and C1 control on a record's line, fields included, as a visible
-escape (`\x1b`, `\n`, `\x85`), so each record starts exactly one line. A
-backslash is not escaped, so `\x1b` in a line can also be those four characters
-as sent. A traceback keeps its line breaks and escapes every other control. One
-residual remains in `text`: a line break inside an exception's own message (or
-note) still starts a new line in its traceback, because nothing tells it apart
-from the traceback's own breaks. Use `json`, the default, where one record must
-be one line.
+go to stderr with every other line. `log.level` does not filter them: uvicorn
+keeps its own loggers at `INFO`. Under uvicorn's `--reload` or `--workers`
+supervisor (`api/README.md`) the parent process never builds the app, so its own
+lines keep uvicorn's format; the image's entry point uses neither.
+
+Neither format writes a control character raw, so text a client controls (a
+crafted URL path, a header, a filename) cannot put a terminal escape sequence or
+a fake record into the log. `json` escapes them as JSON does, and writes every
+other non-ASCII character as `\uXXXX` too. `text` writes every C0 control (CR,
+LF and TAB included), DEL and C1 control on a record's line, fields included, as
+a visible escape (`\x1b`, `\n`, `\x85`), so each record starts exactly one
+line. It does the same (`\u2028`, `\u202e`) for the line and paragraph
+separators U+2028 and U+2029, which some readers break a line on, and for the
+bidi controls U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069,
+which reorder the rest of a line. Other text, such as a no-break space, U+3000
+or a zero-width joiner, is written as is. A backslash is not escaped, so `\x1b`
+in a line can also be those four characters as sent. A traceback keeps its line
+breaks and escapes every other character above. One residual remains in `text`:
+a line break inside an exception's own message (or note) still starts a new line
+in its traceback, because nothing tells it apart from the traceback's own
+breaks. Use `json`, the default, where one record must be one line.
 
 The Prometheus exposition is served on a **separate HTTP listener**, never on
 `server.http_port`: the bundled `cloudflared` service forwards the

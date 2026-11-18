@@ -372,10 +372,18 @@ def test_startup_warnings_use_configured_json_format() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _is_control(ch: str) -> bool:
-    """C0 (CR, LF and TAB included), DEL or C1."""
+# Line and paragraph separators (some readers break a line on them) and the
+# bidi controls (a bidi-aware terminal reorders the rest of the line).
+_SEPARATORS_AND_BIDI = frozenset(
+    "\u061c\u200e\u200f\u2028\u2029\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069"
+)
 
-    return ord(ch) < 0x20 or 0x7F <= ord(ch) < 0xA0
+
+def _is_control(ch: str) -> bool:
+    """C0 (CR, LF and TAB included), DEL, C1, a separator or a bidi control."""
+
+    return ord(ch) < 0x20 or 0x7F <= ord(ch) < 0xA0 or ch in _SEPARATORS_AND_BIDI
 
 
 def _raised(message: str) -> ValueError:
@@ -396,7 +404,24 @@ _CONTROLS = [
     pytest.param("\x85", "\\x85", id="c1-nel"),
     pytest.param("\x9b", "\\x9b", id="c1-csi"),
     pytest.param("\x9f", "\\x9f", id="c1-last"),
-    pytest.param(" é\xa0~", " é\xa0~", id="printable-kept"),
+    pytest.param("\u061c", "\\u061c", id="bidi-alm"),
+    pytest.param("\u200e", "\\u200e", id="bidi-lrm"),
+    pytest.param("\u200f", "\\u200f", id="bidi-rlm"),
+    pytest.param("\u2028", "\\u2028", id="line-separator"),
+    pytest.param("\u2029", "\\u2029", id="paragraph-separator"),
+    pytest.param("\u202a", "\\u202a", id="bidi-lre"),
+    pytest.param("\u202e", "\\u202e", id="bidi-rlo"),
+    pytest.param("\u2066", "\\u2066", id="bidi-lri"),
+    pytest.param("\u2069", "\\u2069", id="bidi-pdi"),
+    # NBSP, the ideographic space, ZWNJ and ZWJ belong in legitimate names.
+    pytest.param(
+        " é\xa0~\u3000\u200c\u200d", " é\xa0~\u3000\u200c\u200d", id="printable-kept"
+    ),
+    pytest.param(
+        "\u061b\u061d\u2027\u202f\u2065\u206a",
+        "\u061b\u061d\u2027\u202f\u2065\u206a",
+        id="neighbours-kept",
+    ),
 ]
 
 
@@ -465,7 +490,7 @@ def test_text_formatter_escapes_controls_in_the_stack() -> None:
 
 
 def test_json_formatter_writes_no_raw_control_character() -> None:
-    raw = "\x00\x1b[2J\t\r\n\x7f\x85\x9b"
+    raw = "\x00\x1b[2J\t\r\n\x7f\x85\x9b\u2028\u202e"
     exc = _raised(raw)
     record = _record("serving %s")
     record.args = (raw,)
@@ -527,10 +552,43 @@ def test_an_extra_json_cannot_encode_keeps_its_line(
     assert handler.lines == [expected]
 
 
+def _dead_proxy() -> object:
+    target = _Connection()
+    proxy = weakref.proxy(target)
+    del target
+    return proxy
+
+
+_UNENCODABLE = [
+    pytest.param({(1, 2): "x"}, id="non-str-key"),
+    pytest.param(_dead_proxy(), id="dead-proxy"),
+]
+
+
+@pytest.mark.parametrize("value", _UNENCODABLE)
+def test_json_formatter_writes_an_extra_it_cannot_encode_as_its_repr(
+    value: object,
+) -> None:
+    record = _record("x")
+    record.subject = value
+
+    assert json.loads(JsonFormatter().format(record))["subject"] == repr(value)
+
+
+@pytest.mark.parametrize("value", _UNENCODABLE)
+def test_text_formatter_writes_an_extra_it_cannot_encode_as_its_repr(
+    value: object,
+) -> None:
+    record = _record("x")
+    record.subject = value
+
+    assert TextFormatter().format(record) == f"INFO test x subject={value!r}"
+
+
 def test_a_crafted_path_reaches_the_problem_error_line_escaped() -> None:
     # The whole path from the issue: a request on a route that answers 500.
-    # ``urlsplit`` drops TAB, CR and LF from ``request.url.path``, so the path
-    # can carry ESC, DEL and C1 only; the formatter tests above cover the rest.
+    # ``urlsplit`` drops TAB, CR and LF from ``request.url.path``; the path
+    # carries everything else, and the formatter tests above cover those three.
     app = FastAPI()
     install_problem_handlers(app)
     app.middleware("http")(unhandled_exception_middleware)
@@ -545,7 +603,7 @@ def test_a_crafted_path_reaches_the_problem_error_line_escaped() -> None:
     problem_logger.addHandler(handler)
     try:
         resp = TestClient(app, raise_server_exceptions=False).get(
-            "/boom/%1B%5B2J%7F%C2%85%C2%9B"
+            "/boom/%1B%5B2J%7F%C2%85%C2%9B%E2%80%A8%E2%80%AE"
         )
     finally:
         problem_logger.removeHandler(handler)
@@ -554,7 +612,7 @@ def test_a_crafted_path_reaches_the_problem_error_line_escaped() -> None:
     [line] = handler.lines
     assert line.split("\n")[0] == (
         "ERROR mc_server_dashboard_api.http_problem unhandled exception serving "
-        "GET /boom/\\x1b[2J\\x7f\\x85\\x9b"
+        "GET /boom/\\x1b[2J\\x7f\\x85\\x9b\\u2028\\u202e"
     )
     assert [ch for ch in line if _is_control(ch) and ch != "\n"] == []
 
@@ -563,7 +621,8 @@ def test_a_crafted_path_reaches_the_problem_error_line_escaped() -> None:
 def _restore_logging() -> Iterator[None]:
     """Put back the loggers these tests reconfigure process-wide."""
 
-    loggers = [logging.getLogger(n) for n in ("", "uvicorn", "uvicorn.access")]
+    names = ("", "uvicorn", "uvicorn.error", "uvicorn.access")
+    loggers = [logging.getLogger(n) for n in names]
     saved = [(lg, lg.handlers[:], lg.propagate, lg.level) for lg in loggers]
     yield
     for lg, handlers, propagate, level in saved:
