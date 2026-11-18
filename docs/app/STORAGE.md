@@ -675,7 +675,7 @@ the FR-DATA-5 RPO.
 |---|---|---|
 | During **stage** (writing `incoming/`) | `current` still points at the old snapshot; orphan staging dir is cleaned by `abort_snapshot` or a startup sweep | pointer still references old prefix; orphan data objects under the un-referenced prefix are GC'd |
 | After stage, before the staged copy is **moved into `snapshots/`** | `current` unchanged (old snapshot); the staged dir in `incoming/` is an orphan, cleaned on recovery | pointer still references old prefix; new prefix is orphaned and GC'd |
-| After move into `snapshots/`, before the **symlink flip** | `current` still points at the old snapshot; the freshly moved `snapshots/<snapshot-id>/` is not yet referenced, so it is an orphan, cleaned by the sweep (it is unreferenced because no symlink targets it) | (no analogue — object stage writes directly under the new prefix) |
+| After move into `snapshots/`, before the **symlink flip** | `current` still points at the old snapshot; the freshly moved `snapshots/<snapshot-id>/` is not yet referenced, so it is an orphan, cleaned by the startup sweep (it is unreferenced because no symlink targets it, and the crash took the publish's registration with it, below) | (no analogue — object stage writes directly under the new prefix) |
 | During the **symlink flip** | same-directory rename is atomic — `current` resolves to either the old or the new snapshot; it is never absent and never a partial pointer | the pointer PUT is atomic — it either references the old or the new prefix |
 | After the flip, before prior-snapshot reclaim | `current` points at the new snapshot; the prior `snapshots/<snapshot-id>/` is an orphan (unreferenced by `current`), cleaned on recovery | pointer references the new prefix; old prefix is an orphan, GC'd |
 
@@ -686,6 +686,35 @@ targeted by `current` and any leftover `incoming/` staging dir, and re-running
 `abort_snapshot` or the sweep is always safe. The sweep runs at API startup and
 then on a periodic loop (`storage_sweep.interval_seconds`, daily by default;
 CONFIGURATION.md Section 5.15).
+
+**The snapshot a publish is still filling** (#3893). Until its flip, a publish's
+new `snapshots/<snapshot-id>/` is named by no pointer, so it looks like an
+orphan. On the object backend that lasts for the whole server-side copy, minutes
+for a big world, and then for the wait for the per-server lock and the gates
+before the flip; on fs, for the move into `snapshots/` plus one directory fsync.
+A sweep that reclaimed it then would let the publish flip onto a partial or
+missing snapshot and report success. So every whole-working-set publish (a
+snapshot commit, a backup restore, and the first file write to a server that has
+never published) registers the new snapshot in memory before its first write
+into it, and releases it only after the flip or once the publish has failed. The
+registration holds for as long as the publish runs, however long that is.
+
+The sweep decides about each candidate snapshot when it is about to delete it, not
+from its listing, and it reads the registration before the pointer. A publish
+releases its registration only after its flip, so a candidate found unregistered
+has either been flipped already, which the pointer read then shows, or been
+abandoned. A pass that overlaps a publish therefore never reclaims the snapshot
+being filled, whatever the sweep cadence. A hydrate reader's lease is read the
+other way round, after the pointer: it is taken on the live snapshot and outlives
+the flip that supersedes it.
+
+The registration is in process, like the `incoming/` staging pin, the hydrate
+reader leases and the per-server lock (Section 2), so it assumes the single API
+instance Section 1 targets: **one API process per store**. A sweep in a second
+process would not see it. A crash takes the process's registrations with it, together with the
+publishes they belonged to, so the snapshot an interrupted publish was filling is
+an ordinary orphan. The startup sweep reclaims it before the restarted API serves,
+when no publish can be in flight.
 
 The post-flip reclaim is best-effort on every backend (#3269). On fs, a fault
 reclaiming the prior snapshot is logged and the tree is left to the sweep. On

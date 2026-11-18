@@ -819,6 +819,11 @@ class FsStorage(Storage):
         # The removals of each staging dir under way (issue #3664), each owning the
         # removal owed when it ends. Guarded by ``_lease_lock``.
         self._staging_removers: dict[Path, int] = {}
+        # In-flight publishes (issue #3893): the ``snapshots/<id>/`` dir a publish
+        # moves its staging into is held here from before the move until its flip,
+        # so the sweep keeps it. In process only, like the staging pins: the API is
+        # one process per store (STORAGE.md Section 4.3). Guarded by ``_lease_lock``.
+        self._publishing: set[Path] = set()
         self._lease_lock = threading.Lock()
         # Per-server publish/edit serialization (issue #899). Every authoritative
         # mutation of ``current/`` and its generation marker — a snapshot commit, a
@@ -1049,6 +1054,20 @@ class FsStorage(Storage):
     def _is_staging_active(self, staging: Path) -> bool:
         with self._lease_lock:
             return staging in self._active_staging
+
+    # --- in-flight publishes (issue #3893) ----------------------------------
+
+    def _register_publish(self, snapshot: Path) -> None:
+        with self._lease_lock:
+            self._publishing.add(snapshot)
+
+    def _release_publish(self, snapshot: Path) -> None:
+        with self._lease_lock:
+            self._publishing.discard(snapshot)
+
+    def _is_publishing(self, snapshot: Path) -> bool:
+        with self._lease_lock:
+            return snapshot in self._publishing
 
     async def _run_on_staging(
         self,
@@ -1350,6 +1369,18 @@ class FsStorage(Storage):
         pointer now names it. This mirrors the object adapter's per-candidate
         pointer re-read (issue #113).
 
+        In-flight publish (issue #3893): between its move into ``snapshots/`` and
+        its flip, a publish's new snapshot is named by no pointer. The publish
+        registers it in memory before the move and releases it only after the
+        flip, and a registered candidate is skipped. The registration is read
+        before the pointer, so a candidate found unregistered was either flipped
+        already, which the pointer read then shows, or abandoned. A hydrate
+        reader's lease is read after the pointer, as before: it is taken on the
+        live snapshot and outlives the flip. The registration is in process, so
+        this holds for the one API process a store has; a crashed process's
+        abandoned snapshot is reclaimed by the next startup sweep, before the API
+        serves.
+
         In-flight staging (issue #183): a transfer staged but not yet committed is
         pinned by an in-process active-staging lease taken at ``begin_snapshot`` (and
         at ``restore_backup``) and released at commit/abort, so a sweep scheduled
@@ -1382,6 +1413,11 @@ class FsStorage(Storage):
         snapshots = server_root / "snapshots"
         if snapshots.is_dir():
             for snap in sorted(snapshots.iterdir(), key=lambda p: p.name):
+                # A snapshot a publish is still moving in is kept (issue #3893).
+                # Checked before the pointer: a publish is released only after its
+                # flip.
+                if self._is_publishing(snap):
+                    continue
                 # Re-read the live name per candidate: a concurrent publish may
                 # have flipped ``current`` onto this candidate after the iteration
                 # started (issue #1606, mirroring the object adapter's #113 guard).
@@ -1894,27 +1930,35 @@ class FsStorage(Storage):
 
         snapshot_id = SnapshotId.new()
         snapshot_dir = snapshots / snapshot_id.value
-        # Same-filesystem rename: staging (incoming/) and snapshots/ share <root>
-        # (Section 7.1 caveat), so this is an atomic move, never a copy.
-        os.replace(staging, snapshot_dir)
-        # Make the rename entry durable so a crash after the flip cannot lose the
-        # directory the new symlink points at (issue #1943).
-        _fsync_dir(snapshots)
+        # Register the new snapshot before it appears under ``snapshots/`` and
+        # release it once ``current`` names it, so a concurrent sweep never takes it
+        # for an orphan (issue #3893). The sweep does not take the server lock this
+        # runs under.
+        self._register_publish(snapshot_dir)
+        try:
+            # Same-filesystem rename: staging (incoming/) and snapshots/ share
+            # <root> (Section 7.1 caveat), so this is an atomic move, never a copy.
+            os.replace(staging, snapshot_dir)
+            # Make the rename entry durable so a crash after the flip cannot lose
+            # the directory the new symlink points at (issue #1943).
+            _fsync_dir(snapshots)
 
-        self._seam.reach(PublishPhase.AFTER_MOVE)
+            self._seam.reach(PublishPhase.AFTER_MOVE)
 
-        link = server_root / "current"
-        old_snapshot_name = self._live_snapshot_name(server_root)
-        # New symlink at a temp name in the *same* directory, then atomic rename
-        # over ``current`` (Section 4.2). The target is relative so the tree is
-        # relocatable.
-        tmp_link = server_root / f".current.{uuid.uuid4().hex}"
-        os.symlink(os.path.join("snapshots", snapshot_id.value), tmp_link)
-        if on_attempt is not None:
-            on_attempt(snapshot_id.value)
-        os.replace(tmp_link, link)
-        if on_flip is not None:
-            on_flip()
+            link = server_root / "current"
+            old_snapshot_name = self._live_snapshot_name(server_root)
+            # New symlink at a temp name in the *same* directory, then atomic rename
+            # over ``current`` (Section 4.2). The target is relative so the tree is
+            # relocatable.
+            tmp_link = server_root / f".current.{uuid.uuid4().hex}"
+            os.symlink(os.path.join("snapshots", snapshot_id.value), tmp_link)
+            if on_attempt is not None:
+                on_attempt(snapshot_id.value)
+            os.replace(tmp_link, link)
+            if on_flip is not None:
+                on_flip()
+        finally:
+            self._release_publish(snapshot_dir)
 
         self._seam.reach(PublishPhase.AFTER_FLIP)
 

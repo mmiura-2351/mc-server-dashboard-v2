@@ -37,8 +37,8 @@ async def run_storage_sweep_loop(sweep: Sweep, *, tick_seconds: float) -> None:
             await asyncio.to_thread(sweep)
 
     # One full interval first, unlike the GC loops (issue #3868): the lifespan
-    # already sweeps before serving on every start, and an early pass would land
-    # among the post-restart snapshot publishes the sweep can race (#3893).
+    # already sweeps before serving on every start, so an early pass would only
+    # repeat that sweep.
     await run_periodic(
         run_sweep,
         tick_seconds=tick_seconds,

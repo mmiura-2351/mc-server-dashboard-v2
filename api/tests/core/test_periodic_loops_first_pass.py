@@ -138,8 +138,7 @@ async def test_storage_sweep_loop_waits_one_interval_before_its_first_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The lifespan sweeps before serving on every start, so an early loop pass
-    # would reclaim nothing new and would land among the post-restart snapshot
-    # publishes the sweep can race (#3893).
+    # would reclaim nothing new.
     sleep = RecordingSleep(returns=2)
     monkeypatch.setattr(asyncio, "sleep", sleep)
     counter = _PassCounter()
