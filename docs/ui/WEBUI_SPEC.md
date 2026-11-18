@@ -288,7 +288,9 @@ non-null only while the deployment's Bedrock gate is on AND the server carries
 at least one *enabled* Geyser plugin copy — see `BEDROCK.md`; the end-to-end
 Bedrock join is verified on Paper only, BEDROCK.md Section 1),
 `desired_state`, `observed_state`, `observed_at`,
-`assigned_worker_id`, `backup_retention` (the scheduled-backup retention
+`assigned_worker_id`, `crash_reason` and `crash_detail` (the last crash's
+reason and the Worker's detail, both null unless the server is crashed;
+DATABASE.md Section 7), `backup_retention` (the scheduled-backup retention
 policy; null while unconfigured).
 
 Server state model: `desired_state` ∈ {running, stopped};
@@ -333,8 +335,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -342,12 +344,15 @@ right after a `gap` frame when status frames were dropped since the previous
 such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
-them): the persisted observed and desired states and the assigned Worker
-(`assigned_worker_id`, `null` when none) of the stream's scope, read
-together from each server's row — the server for the per-server stream (only when `status` is among the
+them): the persisted observed and desired states, the assigned Worker
+(`assigned_worker_id`, `null` when none) and the last crash (`crash_reason` and
+`crash_detail`, both `null` unless the server is crashed) of the stream's
+scope, read together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
-Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
-only a live `status` transition carries. A client applies it like status frames, and
+Its `ts` is the time the snapshot was read. Its `crash_reason` and `crash_detail`
+are the stored `reason` and `detail` of the crashed `status` frame. The live
+`detail` of any other state is not stored, so the snapshot has no counterpart
+for it. A client applies it like status frames, and
 on the community stream it is the complete server set, so a server missing from
 the client's list (or absent from the snapshot) means the set changed. A
 server deleted before its per-server snapshot can be read closes the socket
@@ -674,13 +679,21 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   or for `unknown` the stop itself) and the hint shows. Every release
   publishes a status frame (Section 2.6), so the hint clears with it. The
   dashboard rows mark drift by the same rule.
-- Crash banner: while crashed, the `detail`, a guidance line with a link to the
-  Console tab, and — keyed on the status event's `reason` — the Forge install
-  diagnostics. The guidance line follows the desired state. Under a running
-  intent the API refuses start and restart (the Worker holds no live
-  instance) and the reconciler restarts the server on its own, so the line says
-  the system will restart it automatically and that the operator can stop it
-  instead; it names no delay. Under a stopped intent the line points to the
+- Crash banner: while crashed, the crash's detail, a guidance line with a link
+  to the Console tab, and — keyed on the crash's reason — the Forge install
+  diagnostics. Both come from the server's stored last crash (`crash_detail`,
+  `crash_reason`: the server read, the snapshot, and the `detail` and `reason`
+  of a crashed status frame), so a page loaded after the crash, or remounted
+  by a language switch, shows the same banner. The guidance line follows the
+  desired state. Under a running intent the API refuses start and restart (the
+  Worker holds no live instance) and the reconciler restarts the server on its
+  own, so the line says the system will restart it automatically and that the
+  operator can stop it instead; it names no delay. For
+  `forge_install_out_of_memory` and `forge_install_java_incompatible`, which
+  the reconciler does not restart because the next attempt fails the same way
+  (CONFIGURATION.md Section 5.6), the line says instead that the server will
+  not be restarted automatically, and to stop it, fix the cause and start it
+  again. Under a stopped intent the line points to the
   Start button, which reads **Restart** for a crashed server.
   `forge_install_out_of_memory` and `forge_install_java_incompatible` each add
   a specific, localised explanation of what to change. Any `forge_install_*` reason adds a **View install log**
@@ -692,9 +705,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   and one past the read cap (413) get their own line too. A refetch that fails
   once the log is shown keeps that log on screen, where the operator scrolled
   it, under a line giving the failure and saying the log is the copy loaded
-  earlier. `detail` and `reason`
-  are not persisted, so the banner's diagnostics exist only on a page that was
-  open when the crash was reported.
+  earlier.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
   Delete — each disabled by state machine (e.g. Start hidden while running)
   and permission. A server crashed under a running intent offers Stop only:

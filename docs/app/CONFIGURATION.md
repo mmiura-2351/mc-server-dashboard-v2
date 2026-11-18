@@ -403,6 +403,21 @@ whether the Worker still holds a working set at least as fresh as the store:
 Until the restart, a `start` answers `409 invalid_transition`, because the intent
 already is running. To bring the server back sooner, stop it and start it again.
 
+One crash is not restarted: a Forge install that ran out of memory or cannot run
+on the Java the Minecraft version selects (crash reasons
+`forge_install_out_of_memory` and `forge_install_java_incompatible`,
+[`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 6). The Worker reports these
+without retrying, because the next install fails the same way, so a restart
+would only run it again. The server stays crashed, and its crash banner says it
+will not be restarted automatically: stop it, fix the cause (raise its memory
+limit, or fix the Java image mapping) and start it again. The skip holds only
+for a crash reported after the server's last start or stop. After that stop and
+start the old reason stays recorded until the Worker reports the new launch,
+and a start whose answer was lost there is still re-sent. Every other crash,
+`forge_install_failed` included, is restarted with its backoff. So is a server
+whose Worker disconnected while it was crashed: the disconnect records
+`unknown`, which drops the stored reason.
+
 The stop side needs no such detour. A server whose intent is already stopped but
 which is still assigned to a Worker — a drained Worker's server still running, or
 a stop left half-done (`stopping`, `unknown`, or `stopped`/`crashed` still
