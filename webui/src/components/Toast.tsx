@@ -107,7 +107,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     const neighbour = (
       node.nextElementSibling ?? node.previousElementSibling
     )?.querySelector("button");
-    for (const target of [neighbour, returnFocusRef.current, topmostDialog()]) {
+    if (neighbour) {
+      neighbour.focus();
+      return;
+    }
+    // Focus leaves the stack here, so where it came from is used up.
+    const returnTo = returnFocusRef.current;
+    returnFocusRef.current = null;
+    for (const target of [returnTo, topmostDialog()]) {
       if (target) {
         target.focus();
         if (document.activeElement === target) {
