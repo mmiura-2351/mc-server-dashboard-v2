@@ -395,13 +395,16 @@ fails later (issue #3579). The gate also refuses a `..` between backslashes
 (`world\..\level.dat`), a separator only on Windows; restore reads `\` as an
 ordinary name character. The gate, restore and the probe all read the archive
 whole (issues #3778, #3798, `archive_member.EndCheckedReader`): the tar is
-decompressed by our own `gzip.GzipFile`, the member walk must stop at the
-end-of-archive marker, only zeros may follow it, the gzip CRC32 and ISIZE of
-every gzip member must match, and only another gzip member or zero padding may
-follow a gzip member. So all three refuse a header past the first that does not
-read, which `tarfile` takes for the end and so would cut the member list short,
-a missing or cut marker, a second tar after the first and bytes after the gzip
-stream, and all three read every member of a `tar.gz` of several gzip members.
+decompressed by our own gzip reader (`archive_member.GzipReader`, issue #3835),
+the member walk must stop at the end-of-archive marker, only zeros may follow
+it, every gzip member's header, CRC32 and ISIZE must check, only another gzip
+member or zero padding may follow a gzip member, and the stream may hold at
+most 10,000 gzip members. So all three refuse a header past the first that does
+not read, which `tarfile` takes for the end and so would cut the member list
+short, a missing or cut marker, a second tar after the first, bytes after the
+gzip stream, a gzip member header whose CRC does not match or that sets a
+reserved flag bit (issue #3847), and more than 10,000 gzip members, and all
+three read every member of a `tar.gz` of several gzip members.
 The walk is forward only: a member whose data runs on past its last 512-byte
 block, such as a GNU sparse map that takes more data than the member stores,
 makes `tarfile` seek back to the next header, and all three refuse that seek. A
@@ -436,12 +439,12 @@ event loop runs late while it decompresses: with one such thread, a 1 ms loop
 tick was measured late by up to 29 ms at the 99th percentile and 100 ms at
 most (several threads were not measured). Once an upload's body is read, a
 client that disconnects does not cancel it: the validation runs to its end,
-keeping its pool thread and its admission slot, and the backup is stored. The
-CPU of the gate, restore and the probe is not bounded yet: empty gzip members
-(about 1 CPU-second a MiB) and zero padding after the gzip stream (about 0.11
-CPU-second a MiB) add no decompressed bytes, so only the stored body's size
-bounds what they cost, minutes for one archive near the 512 MiB body cap
-(issue #3835). Each member is
+keeping its pool thread and its admission slot, and the backup is stored.
+Empty gzip members and zero padding after the gzip stream add no decompressed
+bytes, so no decompressed-size cap sees them; the gzip reader bounds what they
+cost in the gate, restore and the probe instead (issue #3835): at most 10,000
+gzip members, and zero padding skipped in bulk rather than one byte at a time.
+Each member is
 first read without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
@@ -495,7 +498,12 @@ gzip trailer is cut or whose header past the first does not read, all admitted
 before PR #3800, and one with a sparse member whose data runs past its last
 512-byte block, admitted until issue #3798. This is intended: such an archive
 cannot be shown to hold every member it claims, and no producer the platform
-runs writes one. Both backup writers use `tarfile`'s `w:gz`, the Worker's pack closes its
+runs writes one. Until issue #3835 the gate read gzip with `gzip.GzipFile`, so
+it also admitted any number of gzip members, a gzip member header whose CRC
+does not match and one that sets a reserved flag bit. Restore and the probe
+now refuse all three the same way. No producer the platform runs or tests
+writes any of them. A writer that puts at most 64 KiB of tar in each gzip
+member, as BGZF does, passes 10,000 members at about 620 MiB of tar. Both backup writers use `tarfile`'s `w:gz`, the Worker's pack closes its
 tar writer on every path, and GNU tar, pigz, Go `archive/tar` and Python
 `tarfile` archives read whole.
 
@@ -1763,16 +1771,17 @@ so until a sweep completes a `quarantined` row may mean either finding.
 
 A false *unhealthy* is as harmful as a false *healthy* — it
 condemns a restorable backup and emits a spurious audit entry — so the gzip
-probe refuses nothing after a **complete** member that restore accepts. Restore
-reads the archive with our own `gzip.GzipFile` to its end (One archive member
-rule, Section 3.3), checking every member's CRC32 and ISIZE as the probe does. A
-concatenated second member (legal gzip, and what the shell tools produce) is
-walked by both. Anything else after a complete member ends the probe's walk
-without a verdict: the member walk that follows it on the spool reads the
-archive as restore does, so it accepts zero padding there and refuses any other
-byte, a second tar after the end-of-archive marker, or a first gzip member that
-holds only part of the tar (issue #3236). So the health check and restore
-reach one verdict on whatever follows a complete gzip member.
+probe refuses nothing that restore accepts. The probe reads gzip through the
+same decoder as restore (`archive_member.GzipDecoder`, issues #3835, #3847;
+One archive member rule, Section 3.3): every gzip member, a concatenated one
+too (legal gzip, and what the shell tools produce), its header CRC and reserved
+flag bits, its CRC32 and ISIZE, zero padding between and after members, and at
+most 10,000 members. Only the end of the stream waits for the whole body, so a
+body cut short reaches the re-read below. The member walk that follows the
+probe on the spool reads the archive as restore does, so it refuses a second
+tar after the end-of-archive marker, or a first gzip member that holds only
+part of the tar (issue #3236). So the health check and restore reach one
+verdict on the gzip stream, its headers and trailers included.
 
 Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or

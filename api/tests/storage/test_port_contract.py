@@ -46,6 +46,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from mc_server_dashboard_api.storage.integrity.region import ReasonCode
+from tests import gzip_shapes
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
@@ -1457,15 +1458,17 @@ def _unreadable_archive(shape: str) -> bytes:
 
     One shape per way the read reports it, so every exception the adapters
     translate is pinned by a real archive rather than by a raised stand-in. The
-    adapters decompress with ``gzip.GzipFile`` (issue #3798).
+    adapters decompress with ``archive_member.GzipReader`` (issue #3835); its
+    ``BadGzipFile``, more than 10,000 gzip members, is in the gzip layer's
+    shapes below.
     """
 
     if shape == "not_gzip":
-        # Not even a gzip stream (``BadGzipFile``).
+        # Not even a gzip stream (``zlib.error``).
         return b"not a gzip stream " * 16
     if shape == "bad_method":
         # A gzip magic naming a compression method that is not deflate
-        # (``BadGzipFile``).
+        # (``zlib.error``).
         return b"\x1f\x8b\x07\x00" + b"\x00" * 60
     # One member large enough that damage partway lands inside its body.
     tar = tar_bytes({"world/region/r.0.0.mca": bytes(range(256)) * 1000})
@@ -1482,7 +1485,7 @@ def _unreadable_archive(shape: str) -> bytes:
         return _GZIP_HEADER + body + b"\xff" * 64
     if shape == "split_member":
         # A complete gzip member holding only the first part of the tar, followed
-        # by bytes that are not another member (``BadGzipFile``).
+        # by bytes that are not another member (``zlib.error``).
         return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
     assert shape == "split_at_a_tar_member"
     # The same, its first gzip member ending where the tar member's data does:
@@ -1816,6 +1819,38 @@ async def test_backup_of_two_gzip_members_restores_whole(
     it restored in part, and split inside one it refused."""
 
     await _restore_and_health_accept(harness, two_gzip_members(split), END_CHECK_FILES)
+
+
+_GZIP_REFUSED = gzip_shapes.refused(END_CHECK_TAR)
+_GZIP_ACCEPTED = gzip_shapes.accepted(END_CHECK_TAR)
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("shape", list(_GZIP_REFUSED))
+async def test_backup_whose_gzip_stream_the_gzip_layer_refuses_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """Restore and the health probe give the gzip layer's one verdict on BOTH
+    backends (issues #3835, #3847): more than 10,000 gzip members, a non-zero
+    byte between or after them, and a member header whose CRC does not match or
+    that sets a reserved flag bit are ``ArchiveUnreadableError``. The object
+    backend's probe refused the two header shapes while restore took them."""
+
+    await _restore_and_health_refuse(harness, _GZIP_REFUSED[shape])
+
+
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
+@pytest.mark.parametrize("shape", list(_GZIP_ACCEPTED))
+async def test_backup_whose_gzip_stream_the_gzip_layer_accepts_restores(
+    harness: StorageHarness, shape: str
+) -> None:
+    """10,000 gzip members, zero padding between and after them, and a member
+    header CRC that matches are healthy and restore whole on BOTH backends
+    (issues #3835, #3847)."""
+
+    await _restore_and_health_accept(harness, _GZIP_ACCEPTED[shape], END_CHECK_FILES)
 
 
 # 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).

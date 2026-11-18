@@ -34,7 +34,6 @@ import datetime as dt
 import enum
 import errno
 import functools
-import gzip
 import hashlib
 import io
 import logging
@@ -53,6 +52,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
     EndCheckedReader,
+    GzipReader,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -1873,6 +1873,9 @@ class FsStorage(Storage):
                     raise
                 raise RestorePublicationUnknownError(exc, report) from exc
 
+        # The move and flip run under the server lock a prune holds for its whole
+        # run. The lifecycle lock that RestoreBackup and DeleteServer hold keeps a
+        # server delete out of the extraction before it (issue #3904).
         old_snapshot = await self._under_server_lock(
             community_id, server_id, _locked, staging=staging
         )
@@ -4085,11 +4088,12 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     be restored from it, override or not, which is the verdict that error models.
 
     The archive is read to its end (issue #3798), as the upload gate reads it: the
-    tar is decompressed by our own ``gzip.GzipFile`` and walked through
+    tar is decompressed by ``GzipReader`` and walked through
     :class:`EndCheckedReader`. The walk must stop at the end-of-archive marker,
-    only zeros may follow it, the gzip CRC32 and ISIZE must match, and only
-    another gzip member or zero padding may follow a gzip member; anything else
-    is :class:`ArchiveUnreadableError`. The zeros past the marker count toward
+    only zeros may follow it, each gzip member's header, CRC32 and ISIZE must
+    check, only another gzip member or zero padding may follow one, and there
+    may be at most 10,000 of them (issue #3835); anything else is
+    :class:`ArchiveUnreadableError`. The zeros past the marker count toward
     ``max_bytes`` too.
 
     A member at, or under, the reserved generation-marker root name is left out
@@ -4104,7 +4108,7 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     try:
         with (
             archive_read_errors_as_unreadable(),
-            gzip.GzipFile(archive) as gz,
+            GzipReader(open(archive, "rb")) as gz,
             tarfile.open(
                 fileobj=(stream := EndCheckedReader(gz)),
                 mode="r:",

@@ -18,12 +18,20 @@ So does what a walk may decompress (issue #3810): :class:`CappedReader`, beneath
 :class:`EndCheckedReader`, counts every byte the walk takes from the stream
 toward a cap, and :class:`EndCheckedReader` holds the upload gates' walks to
 header limits.
+
+So does how gzip is read (issue #3835): :class:`GzipReader`, beneath both,
+decompresses a ``tar.gz`` through :class:`GzipDecoder`, which the object
+backend's health probe reads gzip through too, so every read of a ``tar.gz``
+takes and refuses the same gzip streams (issue #3847).
 """
 
 from __future__ import annotations
 
+import gzip
 import io
+import sys
 import tarfile
+import zlib
 from collections.abc import Iterator
 from pathlib import PurePosixPath
 
@@ -59,8 +67,28 @@ _HELD_CHARACTERS = 8 * 1024 * 1024
 _TAIL_CHUNK_BYTES = 1024 * 1024
 
 # How much a CappedReader reads at a time to skip forward. Each chunk counts
-# toward the cap before the next one is read.
+# toward the cap before the next one is read. A GzipReader skips the same way.
 _SKIP_CHUNK_BYTES = 1024 * 1024
+
+# zlib's gzip mode: it reads each member's header, refusing a header CRC that does
+# not match and a reserved flag bit, and checks each member's CRC32 and ISIZE.
+_GZIP_WBITS = 16 + zlib.MAX_WBITS
+
+# The most members a gzip stream may hold (issue #3835). Each one costs a
+# decompressor whatever it holds, and an empty one decompresses to nothing, so no
+# decompressed-size cap sees it. The producers we know write one.
+_MAX_GZIP_MEMBERS = 10_000
+
+# How much of the compressed bytes zlib is handed at a time. zlib copies what it
+# leaves of them, at a member's end and when a read is full, so this bounds that
+# copy whatever the bytes fed at once.
+_GZIP_PIECE_BYTES = 16 * 1024
+
+# Zero padding a whole piece long, to recognize one in a single comparison.
+_ZERO_PIECE = bytes(_GZIP_PIECE_BYTES)
+
+# How much of its source a GzipReader reads at a time.
+_GZIP_SOURCE_BYTES = 1024 * 1024
 
 
 class HeaderLimitError(tarfile.ReadError):
@@ -142,7 +170,7 @@ class EndCheckedReader(io.RawIOBase):
     short there.
 
     Pass it as ``tarfile.open(fileobj=reader, mode="r:")`` over the decompressed
-    stream (``gzip.GzipFile`` for a ``tar.gz``), walk the archive through
+    stream (:class:`GzipReader` for a ``tar.gz``), walk the archive through
     :meth:`members`, then iterate :meth:`read_past_end_marker`.
 
     The walk counts as having stopped at the marker only when everything it read
@@ -207,7 +235,7 @@ class EndCheckedReader(io.RawIOBase):
         """``True`` whatever the stream: ``tarfile`` seeks in ``r:``.
 
         Forward only, from the start of the stream (:meth:`seek`). Not a promise
-        about the stream: ``gzip.GzipFile`` seeks forward over any source by
+        about the stream: :class:`GzipReader` seeks forward over any source by
         decompressing on.
         """
 
@@ -285,10 +313,9 @@ class EndCheckedReader(io.RawIOBase):
         marker's second block and the producer's record padding. Anything else,
         such as a second tar after the first, is a ``ReadError``. POSIX leaves
         the rest of the last record undefined; this is stricter on purpose, since
-        restore never reads what lies there. Over ``gzip.GzipFile``, reading to
-        the end is what checks the trailer: a mismatch is ``BadGzipFile``, and so
-        are bytes after the gzip stream that are neither another gzip member nor
-        zero padding.
+        restore never reads what lies there. Over :class:`GzipReader`, reading to
+        the end is what checks the trailer, and what refuses bytes after the gzip
+        stream that are neither another gzip member nor zero padding.
 
         The chunks are yielded as they are read. Read through a
         :class:`CappedReader`, each counts toward the cap.
@@ -321,9 +348,8 @@ class CappedReader(io.BufferedIOBase):
     or skipped, the stored data of a sparse member, padding and the read past
     the end-of-archive marker. A read past the cap raises
     :class:`CapExceededError`, having taken at most one byte more than the cap
-    from the stream. The stream may decompress more than it hands over:
-    ``gzip.GzipFile`` reads ahead by ``io.DEFAULT_BUFFER_SIZE``, 8 KiB on 3.13
-    and 128 KiB on 3.14.
+    from the stream. :class:`GzipReader` decompresses no more than it is asked
+    for.
 
     A seek forward reads on and drops what it read, so what ``tarfile`` skips is
     counted as it is decompressed. The stream itself is never seeked. A seek back
@@ -372,3 +398,142 @@ class CappedReader(io.BufferedIOBase):
 
     def tell(self) -> int:
         return self._position
+
+
+class GzipDecoder:
+    """A gzip stream decompressed from the bytes fed to it (issue #3835).
+
+    Feed the compressed bytes with :meth:`feed`, take what they decompress to
+    with :meth:`decompress`, and call :meth:`finish` once the stream has ended.
+    :class:`GzipReader` reads a file through it, and the object backend's health
+    probe the parts the store delivers, so both read gzip as one (issue #3847).
+
+    The stream is one or more gzip members, and zlib's gzip mode reads each one:
+    a header CRC that does not match, a reserved flag bit, damaged deflate data,
+    a CRC32 or ISIZE that does not match, and bytes that do not start a member
+    are ``zlib.error``. Zeros after a member are padding, skipped in bulk; zeros
+    before the first member are not. A 10,001st member is ``gzip.BadGzipFile``
+    as it starts, and a stream that does not end at a member's end is
+    ``EOFError`` (:meth:`finish`).
+
+    Only documented API is used (DEPENDENCIES.md Section 7). ``gzip.GzipFile``
+    reads the same members, but it reads zero padding one byte at a time, pays
+    for every member however many there are, and checks neither the header CRC
+    nor the reserved flag bits.
+    """
+
+    def __init__(self) -> None:
+        self._decompressor = zlib.decompressobj(_GZIP_WBITS)
+        self._members = 1
+        self._input = memoryview(b"")
+
+    def feed(self, data: bytes) -> None:
+        """Hand over the next compressed bytes, once :meth:`decompress` has taken
+        all the ones fed before."""
+
+        self._input = memoryview(data)
+
+    def decompress(self, max_length: int) -> bytes:
+        """Up to ``max_length`` decompressed bytes, at least one asked for.
+
+        ``b""`` once every byte fed has been taken: feed the next ones, or
+        :meth:`finish` if there are none.
+        """
+
+        while self._input:
+            if self._decompressor.eof:
+                if not self._input[0]:
+                    head = bytes(self._input[:_GZIP_PIECE_BYTES])
+                    padding = (
+                        len(head)
+                        if head == _ZERO_PIECE
+                        else len(head) - len(head.lstrip(b"\0"))
+                    )
+                    self._input = self._input[padding:]
+                    continue
+                self._members += 1
+                if self._members > _MAX_GZIP_MEMBERS:
+                    raise gzip.BadGzipFile(
+                        f"more than {_MAX_GZIP_MEMBERS} gzip members"
+                    )
+                self._decompressor = zlib.decompressobj(_GZIP_WBITS)
+            piece = self._input[:_GZIP_PIECE_BYTES]
+            data = self._decompressor.decompress(piece, max_length)
+            # What zlib left of the piece. At a member's end that is the bytes
+            # after it, and the tail can still hold an earlier call's.
+            left = (
+                self._decompressor.unused_data
+                if self._decompressor.eof
+                else self._decompressor.unconsumed_tail
+            )
+            self._input = self._input[len(piece) - len(left) :]
+            if data:
+                return data
+        return b""
+
+    def finish(self) -> None:
+        """Refuse a stream that did not end at a member's end, as ``EOFError``."""
+
+        if not self._decompressor.eof:
+            raise EOFError("the gzip stream ended before the end of a member")
+
+
+class GzipReader(io.BufferedIOBase):
+    """The decompressed bytes of the gzip stream in ``source`` (issue #3835).
+
+    The stream a ``tar.gz`` walk reads: pass it to :class:`EndCheckedReader`, or
+    to the :class:`CappedReader` beneath one. It reads ``source`` 1 MiB at a time
+    through a :class:`GzipDecoder`, so it takes and refuses what the decoder
+    does, the stream's end included once a read reaches it. Closing it closes
+    ``source``.
+
+    A read returns all it asks for until the stream ends: ``tarfile`` takes a
+    short read for the end of the data. A seek reads forward to its offset; a
+    seek back, or one other than from the start, is ``io.UnsupportedOperation``.
+    """
+
+    def __init__(self, source: io.BufferedIOBase) -> None:
+        super().__init__()
+        self._source = source
+        self._decoder = GzipDecoder()
+        self._position = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        wanted = sys.maxsize if size is None or size < 0 else size
+        parts = []
+        while wanted:
+            data = self._decoder.decompress(wanted)
+            if not data:
+                compressed = self._source.read(_GZIP_SOURCE_BYTES)
+                if not compressed:
+                    self._decoder.finish()
+                    break
+                self._decoder.feed(compressed)
+                continue
+            parts.append(data)
+            wanted -= len(data)
+        read = b"".join(parts)
+        self._position += len(read)
+        return read
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
+        if whence != io.SEEK_SET or offset < self._position:
+            raise io.UnsupportedOperation("a gzip stream seeks forward only")
+        while self._position < offset and self.read(
+            min(offset - self._position, _SKIP_CHUNK_BYTES)
+        ):
+            pass
+        return self._position
+
+    def tell(self) -> int:
+        return self._position
+
+    def close(self) -> None:
+        self._source.close()
+        super().close()
