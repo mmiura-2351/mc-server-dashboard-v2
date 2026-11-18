@@ -594,14 +594,13 @@ def within_the_storage_header_limits_tar() -> bytes:
     )
 
 
-def sparse_holes_over(size: int) -> bytes:
+def sparse_holes_over(size: int, *, name: str = "world/sparse.dat") -> bytes:
     """An old GNU sparse member storing 512 bytes whose real size is ``size``:
-    restore writes ``size`` bytes, the rest holes nothing decompresses."""
+    restore writes ``size`` bytes, the rest holes nothing decompresses. At a
+    reserved root ``name``, restore reads them and leaves the member out."""
 
     return _tar_of(
-        _old_gnu_sparse_member(
-            "world/sparse.dat", [(0, 512), (size, 0)], size, b"D" * 512
-        )
+        _old_gnu_sparse_member(name, [(0, 512), (size, 0)], size, b"D" * 512)
     )
 
 
