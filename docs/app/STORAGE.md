@@ -365,8 +365,8 @@ decompressed-size cap. The gate runs in a worker thread, off the event loop
 (issue #3801). The CPU of the gate, restore and the probe is not bounded yet:
 empty gzip members and zero padding after the gzip stream add no decompressed
 bytes, so only the stored body's size bounds what they cost, minutes for one
-archive near the 512 MiB body cap (issue #3835). Each
-member is first read without the conventional
+archive near the 512 MiB body cap (issue #3835). Each member is first read
+without the conventional
 tar root prefix that `tar -C dir -cf - .` writes (issue #3574): the root's own `.` /
 `./` directory entry is skipped, and exactly one leading `./` is stripped from
 every other member, so `./world/level.dat` is judged, restored and checked
@@ -1507,8 +1507,8 @@ walked by both. Anything else after a complete member ends the probe's walk
 without a verdict: the member walk that follows it on the spool reads the
 archive as restore does, so it accepts zero padding there and refuses any other
 byte, a second tar after the end-of-archive marker, or a first gzip member that
-holds only part of the tar (issue #3236). The health check and restore
-therefore reach one verdict for the same bytes.
+holds only part of the tar (issue #3236). So the health check and restore
+reach one verdict on whatever follows a complete gzip member.
 
 Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
