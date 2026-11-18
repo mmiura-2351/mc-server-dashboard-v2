@@ -30,6 +30,7 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    HeaderLimitError,
 )
 
 _B_DATA = b"B" * 3000  # six records, the last one padded
@@ -606,7 +607,7 @@ def test_what_the_walk_reads_between_two_members_is_bounded(
     archive = build() + _ZEROS
 
     # The budget's own refusal, not tarfile's reaction to the reads it clamped.
-    with pytest.raises(tarfile.ReadError, match="headers before a member"):
+    with pytest.raises(HeaderLimitError, match="headers before a member"):
         _walk(archive, gzipped=gzipped, data=data, cap=len(archive))
 
 
@@ -618,7 +619,7 @@ def test_the_budget_takes_exactly_one_mib_between_two_members(gzipped: bool) -> 
     over_the_budget = _pax_of(_MIB - 1023) + _A + _ZEROS
 
     assert _walk(at_the_budget, gzipped=gzipped)[0] == ["a.txt"]
-    with pytest.raises(tarfile.ReadError, match="headers before a member"):
+    with pytest.raises(HeaderLimitError, match="headers before a member"):
         _walk(over_the_budget, gzipped=gzipped)
 
 
@@ -628,7 +629,7 @@ def test_an_extended_header_is_read_one_byte_past_the_budget_at_most() -> None:
     source = _Recording(_pax_of(64 * _MIB) + _A + _ZEROS)
     stream = EndCheckedReader(source)
 
-    with pytest.raises(tarfile.ReadError, match="headers before a member"):
+    with pytest.raises(HeaderLimitError, match="headers before a member"):
         with tarfile.open(fileobj=stream, mode="r:") as tar:
             _names(stream, tar)
     assert source.tell() == _MIB + 1
@@ -636,10 +637,10 @@ def test_an_extended_header_is_read_one_byte_past_the_budget_at_most() -> None:
 
 # --- what the members handed out hold (issue #3810) -------------------------
 #
-# ``tarfile`` keeps every member it hands out, each with its own copy of the
-# global PAX records. So a member may hold at most 32 PAX records, global and
-# its own, and the members' names, PAX keys and PAX values together at most
-# 8 Mi characters.
+# ``tarfile`` keeps every member it hands out, with its name, its link name and
+# a copy of the global PAX records dict. So a member may hold at most 32 PAX
+# records, global and its own, and the members' names, link names, PAX keys and
+# PAX values together at most 8 Mi characters.
 _HELD = 8 * _MIB
 
 
@@ -680,7 +681,7 @@ def _records(count: int, prefix: str = "k") -> dict[str, str]:
             True,
             id="33-global",
         ),
-        # The global records are in every later member's own copy.
+        # The global records are in every later member's copy of them.
         pytest.param(
             _pax_tar({"a": _records(17, "m")}, global_records=_records(16)),
             True,
@@ -692,7 +693,7 @@ def test_a_member_holds_at_most_32_pax_records(
     archive: bytes, refused: bool, gzipped: bool
 ) -> None:
     if refused:
-        with pytest.raises(tarfile.ReadError, match="PAX records"):
+        with pytest.raises(HeaderLimitError, match="PAX records"):
             _walk(archive, gzipped=gzipped)
     else:
         assert _walk(archive, gzipped=gzipped)[0]
@@ -724,6 +725,21 @@ def _held_by_a_global_record(members: int) -> bytes:
     )
 
 
+def _held_by_link_names(extra: int) -> bytes:
+    """16 regular members ``00`` to ``15`` whose GNU long links take the rest of
+    1/16 of 8 Mi characters each; ``tarfile`` holds a long link as the member's
+    ``linkname`` whatever its type."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
+        for i in range(16):
+            info = tarfile.TarInfo(name=f"{i:02}")
+            info.size = 1
+            info.linkname = "l" * (_HELD // 16 - 2 + (extra if i == 15 else 0))
+            tar.addfile(info, io.BytesIO(b"x"))
+    return buf.getvalue()
+
+
 def _held_by_names(extra: int) -> bytes:
     """16 members whose GNU long names are 1/16 of 8 Mi characters each."""
 
@@ -748,6 +764,8 @@ def _held_by_names(extra: int) -> bytes:
         pytest.param(lambda: _held_by_a_global_record(17), True, id="global-17-times"),
         pytest.param(lambda: _held_by_names(0), False, id="names-at-the-bound"),
         pytest.param(lambda: _held_by_names(1), True, id="names-one-over"),
+        pytest.param(lambda: _held_by_link_names(0), False, id="links-at-the-bound"),
+        pytest.param(lambda: _held_by_link_names(1), True, id="links-one-over"),
     ],
 )
 def test_the_members_hold_at_most_8_mi_characters_of_names_and_pax_records(
@@ -755,7 +773,35 @@ def test_the_members_hold_at_most_8_mi_characters_of_names_and_pax_records(
 ) -> None:
     archive = build()
     if refused:
-        with pytest.raises(tarfile.ReadError, match="characters of names"):
+        with pytest.raises(HeaderLimitError, match="characters of names"):
             _walk(archive, gzipped=gzipped)
     else:
         assert len(_walk(archive, gzipped=gzipped)[0]) >= 16
+
+
+@pytest.mark.parametrize(
+    ("build", "handed_out"),
+    [
+        pytest.param(
+            lambda: _pax_tar({"a": {}, "b": _records(33)}), ["a"], id="records"
+        ),
+        pytest.param(
+            lambda: _held_by_values(1),
+            [f"m{i:02}" for i in range(15)],
+            id="characters",
+        ),
+    ],
+)
+def test_a_member_is_checked_before_it_is_handed_out(
+    build: Callable[[], bytes], handed_out: list[str]
+) -> None:
+    # The member over a bound is refused before the caller gets it, so the
+    # caller never reads its data.
+    stream = EndCheckedReader(io.BytesIO(build()))
+    names: list[str] = []
+
+    with pytest.raises(HeaderLimitError):
+        with tarfile.open(fileobj=stream, mode="r:") as tar:
+            for member in stream.members(tar):
+                names.append(member.name)
+    assert names == handed_out

@@ -53,6 +53,7 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    HeaderLimitError,
 )
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
@@ -173,9 +174,12 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # header; ``ValueError`` for a GNU sparse PAX field that is not a number, which it
 # converts with a bare ``int()``), and ``EndCheckedReader`` adds a ``ReadError``
 # for a walk that did not stop at the end-of-archive marker or anything but zeros
-# past it, more than 1 MiB of headers between two members or members that hold
-# too much (more than 32 PAX records each, or 8 Mi characters of names and PAX
-# records in all), ``CappedReader`` one for a walk that seeks back (#3810).
+# past it, and ``CappedReader`` one for a walk that seeks back (#3810). A walk
+# over the header limits is a ``ReadError`` too, ``HeaderLimitError``, which the
+# doors catch first to name it. ``tarfile`` reads a chain of extended headers
+# recursively, so a few hundred of them before a member are a ``RecursionError``
+# (#3810): it unwinds before it is caught, and the readers do not recurse
+# otherwise.
 # ``zipfile`` raises far more than ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
@@ -191,6 +195,7 @@ _TAR_GZ_READ_ERRORS: tuple[type[Exception], ...] = (
     zlib.error,
     gzip.BadGzipFile,
     ValueError,
+    RecursionError,
 )
 _ZIP_READ_ERRORS: tuple[type[Exception], ...] = (
     zipfile.BadZipFile,
@@ -883,10 +888,11 @@ def _archive_entries(
     materialized in memory before the guard trips. A tar.gz is read through
     :class:`~mc_server_dashboard_api.archive_member.CappedReader` too, so every
     byte it decompresses counts toward ``max_bytes``, headers and skipped data
-    included. A walk that seeks back, reads more than 1 MiB of headers between
-    two members, or hands out members holding more than 32 PAX records each or
-    8 Mi characters of names and PAX records in all is
-    :class:`UnreadableArchiveError` (issue #3810).
+    included. A walk that seeks back, or reads a chain of extended headers too
+    long for ``tarfile``, is :class:`UnreadableArchiveError` (issue #3810). So is
+    one over the header limits, named in its ``detail``: more than 1 MiB of
+    headers between two members, or members holding more than 32 PAX records
+    each or 8 Mi characters of names, link names and PAX records in all.
 
     This is the SAME generator both the validate pass and the write pass run over,
     so the per-entry checks are defined once (no duplication). The validate pass
@@ -903,6 +909,8 @@ def _archive_entries(
         raise InvalidFilePathError(filename)
     try:
         yield from entries(content, max_bytes=max_bytes, max_entries=max_entries)
+    except HeaderLimitError as exc:
+        raise UnreadableArchiveError(filename, detail=str(exc)) from exc
     except read_errors as exc:
         raise UnreadableArchiveError(filename) from exc
     except CapExceededError as exc:

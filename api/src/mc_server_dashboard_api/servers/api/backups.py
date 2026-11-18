@@ -1005,10 +1005,12 @@ async def upload_backup(
     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
     that does not match, or bytes after the gzip stream that are neither another
     gzip member nor zero padding. So are a sparse member whose map reaches past
-    its stored data, which would make the reader seek back, more than 1 MiB of
-    headers before a member, extended headers included, and members that hold
-    more than 32 PAX records each, global ones included, or more than 8 Mi
-    characters of names and PAX records in all (issue #3810).
+    its stored data, which would make the reader seek back, a chain of extended
+    headers too long for the reader, and a walk over the header limits, whose
+    ``detail`` names the limit: more than 1 MiB of headers before a member,
+    extended headers included, or members that hold more than 32 PAX records
+    each, global ones included, or more than 8 Mi characters of names, link
+    names and PAX records in all (issue #3810).
 
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A restore republishes the archive's members verbatim as the working
