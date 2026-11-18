@@ -36,7 +36,10 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   different one. The reconciler never places a started server on a different Worker
   until a stop's release clears the assignment (a Worker disconnect does not clear
   it) — otherwise the Worker's per-process double-start guard would not catch a
-  second live instance on another Worker.
+  second live instance on another Worker. For the same reason it keeps the
+  assignment, sends no start and records observed=running when the placed Worker
+  refuses the hydrate ``INVALID_STATE``, because it already runs the server (issue
+  #3865); that counts as success, not toward the backoff.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final

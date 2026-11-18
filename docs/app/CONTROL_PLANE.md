@@ -712,6 +712,21 @@ Notes:
   the stop finds no intent to place. The reconciler counts neither toward its
   backoff (CONFIGURATION.md Section 5.6). A user start needs the server
   `desired=stopped`, so it can place the server only once the stop has landed.
+- **A hydrate refused `INVALID_STATE` keeps the server on that Worker.** A
+  Worker answers a `HydrateTrigger` `INVALID_STATE` only when it already runs an
+  instance of the server (Section 7). Placement cannot know that: it ranks
+  Workers by load and does not see an instance the server's record does not
+  name. So the API does not give that Worker back, although it sent no
+  `StartServer`; giving it back would let the next placement start the same
+  world on a second host (issue #3865). The server stays `desired=running` on
+  that Worker, the API records `observed=running`, and the Worker's reports
+  about it are accepted again, so a stop of it stops that instance. A user start
+  answers `409 invalid_transition`, as a start of a running server does: it
+  launched nothing, and the instance may run an older working set than the
+  store's. The reconciler's placement of a server with no Worker counts it as
+  done, not as a failure. A hydrate refused for any other reason still gives
+  the Worker back. If placement picks a Worker that does not run the server, no
+  hydrate is refused and nothing reveals the instance (issue #3740).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
@@ -1064,10 +1079,10 @@ and equally the writes the API makes without one, whose frames carry an empty
 - `unknown` for each server of a Worker whose session drops (Section 4.4), and
   for each assigned server still in a non-terminal state at API startup;
 - the state a lifecycle operation converges from a command's outcome —
-  `running` when a start is refused `INVALID_STATE` (the instance is already
-  live, so no `StatusChange` will follow), `stopped` when a stop is confirmed
-  or answered `SERVER_NOT_FOUND`, and `unknown` when a stop left at `stopping`
-  under a disconnected Worker is released.
+  `running` when a start or its hydrate is refused `INVALID_STATE` (the
+  instance is already live, so no `StatusChange` will follow), `stopped` when a
+  stop is confirmed or answered `SERVER_NOT_FOUND`, and `unknown` when a stop
+  left at `stopping` under a disconnected Worker is released.
 
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —

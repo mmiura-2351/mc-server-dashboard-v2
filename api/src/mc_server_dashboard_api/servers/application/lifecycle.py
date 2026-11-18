@@ -42,18 +42,18 @@ refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
 Worker refusing because another mutating command is already in flight, or because a
 failed-stop orphan it is still converging holds the id — either way the outcome is
-unknown), and an ``INVALID_STATE`` outcome (the Worker refusing because an instance
-is already live there), do NOT compensate — see the assignment-stickiness note
-below.
+unknown), and an ``INVALID_STATE`` outcome of the start or of its hydrate (the Worker
+refusing because an instance is already live there), do NOT compensate — see the
+assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from
 Storage (a server with no published working set yet hydrates to an empty dir, the
 data-plane endpoint being 204), then dispatches the launch; a failure before the
-start command is sent (a failed hydrate, or a pre-dispatch
-``WorkerUnavailableError``) compensates the committed intent. The launch carries a
-conventional ``server.jar`` relpath and the server's recorded MC version
-(FR-EXE-5: the Worker picks the Java runtime).
+start command is sent (a failed hydrate, unless refused ``INVALID_STATE`` as below,
+or a pre-dispatch ``WorkerUnavailableError``) compensates the committed intent. The
+launch carries a conventional ``server.jar`` relpath and the server's recorded MC
+version (FR-EXE-5: the Worker picks the Java runtime).
 
 Assignment stickiness after dispatch (the orphan-placement invariant, issue #101).
 ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES IT ON
@@ -72,6 +72,14 @@ assignment and ``desired=running`` and records observed=running rather than
 compensating. The Worker's double-start guard is per-process, so reverting a
 possibly-started or definitely-running server — and letting a later start place it
 elsewhere — would spawn a second live instance (issue #773/#774).
+
+A hydrate the placed Worker refuses ``INVALID_STATE`` is therefore not a failure
+before dispatch in the sense above, though no start was sent: it proves an instance
+already live on that Worker, one the row did not name, which placement cannot see
+(issue #3865). Both ``__call__`` and ``place_and_start`` keep the assignment and
+record observed=running. ``place_and_start`` then returns, as nothing failed;
+``__call__`` answers ``InvalidLifecycleTransitionError``, since its start launched
+nothing and the instance may run an older working set than the store's.
 
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
 and that is what makes both convergence sites sound. Until issue #2476 the Worker
@@ -599,28 +607,39 @@ class StartServer:
             raise
         if outcome.success:
             return server
-        if dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
-            # The Worker refused the START because an instance for this server is
-            # ALREADY live on the assigned Worker. That is the code's ONLY meaning on
-            # a start or a hydrate (instancemanager's reserve()): a pending
-            # failed-stop orphan — the other state that gate refuses — answers BUSY
-            # since issue #2476, precisely because it is NOT evidence of a live
-            # instance, and no other condition reaches INVALID_STATE here. So
+        if outcome.status is CommandStatus.INVALID_STATE:
+            # The Worker refused the START, or its HYDRATE, because an instance for
+            # this server is ALREADY live on the assigned Worker. That is the code's
+            # ONLY meaning on a start or a hydrate (instancemanager's reserve()): a
+            # pending failed-stop orphan — the other state that gate refuses —
+            # answers BUSY since issue #2476, precisely because it is NOT evidence of
+            # a live instance, and no other condition reaches INVALID_STATE here. So
             # converging observed=running off this code is unconditionally sound;
             # before that split it was not, and a dead orphan's refusal wedged the row
-            # at a false running (issue #2467). (Gate on ``dispatch.attempted`` so a
-            # PRE-dispatch INVALID_STATE — a hydrate refused over a running instance —
-            # still compensates: that one never reached the start.)
+            # at a false running (issue #2467).
             # Compensating here (desired=stopped + unassign) would orphan that live
             # instance: its StatusChange(running) is dropped at the ownership guard
             # once unassigned, the row wedges at
             # desired=stopped/observed=running/unassigned (which the reconciler skips
             # forever), and a later start would place a SECOND instance on a different
-            # Worker (issue #773/#774). So converge exactly as redispatch_start does
-            # (#213): record observed=running and KEEP desired=running + the
-            # assignment — the user's start IS satisfied.
+            # Worker (issue #773/#774, and #3865 for the refused hydrate). So converge
+            # exactly as redispatch_start does (#213): record observed=running and
+            # KEEP desired=running + the assignment.
             await self._record_running(server, worker_id)
-            return server
+            if dispatch.attempted:
+                # The user's start IS satisfied.
+                return server
+            # A refused hydrate means this start launched nothing: the instance was
+            # there before it, on whatever working set it had, which may be older
+            # than the store's. So the start did not happen as asked, and the user
+            # gets the start verb's "already running" conflict instead of a success.
+            _LOG.warning(
+                "worker %s refused the hydrate for server %s because it already "
+                "runs an instance of it; keeping the server on that Worker",
+                worker_id.value,
+                server_id.value,
+            )
+            raise InvalidLifecycleTransitionError(str(server_id.value))
         failure = _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
         )
@@ -672,10 +691,14 @@ class StartServer:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
-          ever reached a Worker, so re-placing elsewhere cannot double-start. The
-          one exception is the re-read just before the send raising (a database
-          error, issue #3741): the hydrate succeeded, so the assignment is kept
-          for a re-send to the same Worker (see ``_launch``).
+          ever reached a Worker, so re-placing elsewhere cannot double-start. Two
+          exceptions keep the assignment. The re-read just before the send raising
+          (a database error, issue #3741): the hydrate succeeded, so the
+          assignment is kept for a re-send to the same Worker (see ``_launch``).
+          And a hydrate refused ``INVALID_STATE`` (issue #3865): the Worker
+          already runs an instance of the server, so re-placing elsewhere WOULD
+          double-start. That one records observed=running, as
+          ``redispatch_start`` does, and returns.
         - After the start was dispatched (a failed outcome, or a timeout/lost-response
           ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
           assignment. Subsequent ticks then take the ``redispatch_start`` path to the
@@ -791,6 +814,23 @@ class StartServer:
                 )
             raise
         if not outcome.success:
+            if not dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
+                # The placed Worker refused the HYDRATE because it already runs an
+                # instance of this server (issue #3865): the code's only meaning on
+                # a hydrate, as ``__call__``'s arm explains. Placement cannot know
+                # that, so unassigning would let a later tick place the server on
+                # another Worker while this instance runs. Keep this Worker and
+                # converge as redispatch_start does. Nothing failed, so this
+                # returns, and the reconciler counts no failure.
+                await self._record_running(server, worker_id)
+                _LOG.warning(
+                    "worker %s refused the hydrate for server %s because it "
+                    "already runs an instance of it; keeping the server on that "
+                    "Worker",
+                    worker_id.value,
+                    server_id.value,
+                )
+                return server
             failure = _dispatch_failure(
                 server_id=server_id, kind="StartServer", outcome=outcome
             )
@@ -1411,7 +1451,8 @@ class StartServer:
         """Undo only the assignment after a failed PRE-DISPATCH orphan placement.
 
         Called by ``place_and_start`` only when the failure happened BEFORE the start
-        command was sent (a failed hydrate): no start ever reached a Worker, so
+        command was sent (a failed hydrate, but not one refused ``INVALID_STATE``,
+        which proves a live instance): no start ever reached a Worker, so
         clearing the assignment to let a later tick re-place elsewhere cannot
         double-start (issue #101's stickiness invariant). A post-dispatch failure
         does NOT call this — the assignment must stick for a same-Worker redispatch.
