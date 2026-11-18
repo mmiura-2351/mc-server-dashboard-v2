@@ -241,6 +241,51 @@ func TestHydrateRejectsPathEscape(t *testing.T) {
 	}
 }
 
+// An absolute member name must be refused before anything is created. The
+// hydrate names members relative to its staging directory's descriptor, and a
+// *at system call ignores the descriptor for an absolute path, so this refusal is
+// the one thing that keeps such a member out of the rest of the host. Root runs
+// the hydrate in the shipped topology.
+func TestHydrateRejectsAbsoluteMember(t *testing.T) {
+	for name, typeflag := range map[string]byte{"file": tar.TypeReg, "directory": tar.TypeDir} {
+		t.Run(name, func(t *testing.T) {
+			outside := filepath.Join(t.TempDir(), "abs-target")
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			hdr := &tar.Header{Name: outside, Typeflag: typeflag, Mode: 0o640}
+			if typeflag == tar.TypeDir {
+				hdr.Name += "/"
+			} else {
+				hdr.Size = int64(len("pwned"))
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				t.Fatal(err)
+			}
+			if typeflag == tar.TypeReg {
+				if _, err := tw.Write([]byte("pwned")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(buf.Bytes())
+			}))
+			defer srv.Close()
+
+			dest := filepath.Join(t.TempDir(), "working")
+			_, err := New(srv.Client()).Hydrate(context.Background(), srv.URL, "tok", dest)
+			if err == nil || !strings.Contains(err.Error(), "refusing absolute member") {
+				t.Fatalf("Hydrate = %v, want the absolute member refused", err)
+			}
+			if _, err := os.Lstat(outside); !os.IsNotExist(err) {
+				t.Fatalf("the absolute member was created outside the staging dir: %v", err)
+			}
+		})
+	}
+}
+
 func TestHydrateRejectsSymlinkMember(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
