@@ -1247,6 +1247,26 @@ container was replaced, so the existing stamp still describes what is running.
 > (fs deployments set `COMPOSE_PROFILES=` empty instead — see the caveat box
 > above.)
 
+> **Caveat — the store owner marker.** The API records which database owns its
+> store in `mcsd-owner.json`, at the bucket root or the fs root, and runs its
+> GCs and storage sweeps only on a store whose marker names its database
+> ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). At the first start
+> after the upgrade that introduced it, the API writes the marker itself if the
+> store is empty or the database has a server or resource-pack row, which
+> covers an existing deployment. A store that holds objects while the database
+> has no such row is left unclaimed: the API logs an ERROR that names the store,
+> serves as usual, and reclaims nothing. If this database does own that store,
+> claim it once and restart the API:
+>
+> ```sh
+> docker compose exec api python -m mc_server_dashboard_api.store_claim_cli
+> docker compose restart api
+> ```
+>
+> The command refuses if a marker already exists and deletes nothing, but once
+> the store is claimed the GCs reclaim every object no row of this database
+> names, so never run it against a store another deployment uses.
+
 > **Caveat — Bedrock is opt-in on the relay.** The relay's
 > Bedrock QUIC/UDP tunnel listener is gated on `bedrock.enabled` (`relay.toml`) /
 > `MCD_RELAY_BEDROCK_ENABLED` (env), default **false** — `compose.yaml` feeds it
