@@ -14,6 +14,7 @@ import functools
 import gzip
 import hashlib
 import io
+import os
 import tarfile
 import threading
 import tracemalloc
@@ -2000,16 +2001,17 @@ async def test_backup_within_the_storage_header_limits_is_healthy_and_restores(
     )
 
 
-# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(10 * 10 + 30)
 async def test_a_member_1100_directories_deep_is_healthy_and_restores(
-    harness: StorageHarness,
+    harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A file 1,100 directories deep, with no directory members, is healthy and
     restores on BOTH backends (issue #3859). The fs restore creates a member's
     directories one level at a time: ``Path.mkdir(parents=True)`` recursed once
     for each and raised ``RecursionError``."""
 
+    # The fs publish syncs each of the 1,100 directories, which this does not
+    # pin, and which would hold a gate under I/O load (issue #3651).
+    monkeypatch.setattr(os, "fsync", lambda fd: None)
     name = "/".join(["d"] * 1100) + "/f"
     community, server = new_scope()
     key = await harness.storage.put_backup(
@@ -2315,6 +2317,8 @@ async def test_prune_after_restore_still_drops_working_set(
     assert await harness.storage.list_backups(community, server) == [key]
 
 
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
 async def test_prune_packs_a_final_archive_past_the_cap(
     backend: str, tmp_path: Path
 ) -> None:
