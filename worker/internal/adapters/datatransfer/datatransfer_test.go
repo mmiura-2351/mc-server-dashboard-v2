@@ -286,6 +286,63 @@ func TestHydrateRejectsAbsoluteMember(t *testing.T) {
 	}
 }
 
+// The member file is created without following a link at its own name: one in
+// the unpack directory fails the unpack and its target is left untouched.
+func TestUnpackDoesNotWriteThroughALinkAtAMembersName(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside-secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(base, "dest")
+	if err := os.Mkdir(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dest, "server.properties")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := unpackTar(bytes.NewReader(tarOf(map[string]string{"server.properties": "from-tar"})), openDirFd(t, dest))
+	if !errors.Is(err, unix.ELOOP) {
+		t.Fatalf("unpackTar = %v, want ELOOP from the link at the member's name", err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "secret" {
+		t.Fatalf("the link's target reads %q, %v; want it untouched", got, err)
+	}
+}
+
+// Directories the unpack creates, named by a member or implied by a file's path,
+// get mode 0750 (under a 022 umask).
+func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
+	old := unix.Umask(0o022)
+	t.Cleanup(func() { unix.Umask(old) })
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "logs/latest.log", Typeflag: tar.TypeReg, Mode: 0o640}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+
+	if err := unpackTar(&buf, openDirFd(t, dest)); err != nil {
+		t.Fatalf("unpackTar: %v", err)
+	}
+	for _, dir := range []string{"world", "logs"} {
+		info, err := os.Stat(filepath.Join(dest, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o750 {
+			t.Errorf("%s has mode %o, want 750", dir, got)
+		}
+	}
+}
+
 func TestHydrateRejectsSymlinkMember(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
