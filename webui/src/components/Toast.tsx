@@ -1,14 +1,17 @@
 import {
   createContext,
+  type FocusEvent,
   type ReactNode,
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { t } from "../i18n/index.ts";
+import { setToastZone, topmostDialog } from "./Modal.tsx";
 
 // Self-built toast primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
 // API errors and success notices surface here; variants tint the left edge.
@@ -44,6 +47,21 @@ const AUTO_DISMISS_MAX_MS = 12000;
 const MAX_ERROR_TOASTS = 3;
 const MAX_TIMED_TOASTS = 2;
 
+// `main` takes no focus on its own: it is made focusable just to take this
+// focus, and stops being so once focus leaves it, so a later click in the page
+// does not land on it.
+function focusMain() {
+  const main = document.querySelector("main");
+  if (main === null) {
+    return;
+  }
+  main.tabIndex = -1;
+  main.addEventListener("blur", () => main.removeAttribute("tabindex"), {
+    once: true,
+  });
+  main.focus();
+}
+
 function autoDismissMs(message: string): number {
   const scaled =
     AUTO_DISMISS_BASE_MS + AUTO_DISMISS_PER_CHAR_MS * message.length;
@@ -72,6 +90,33 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // toast closes, or slides, out from under the one being read.
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  // The element focus came into the stack from, to hand it back to.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+
+  // An open modal's focus trap runs on through the stack (WEBUI_SPEC.md 7.4).
+  useLayoutEffect(() => {
+    setToastZone(zoneRef.current);
+    return () => setToastZone(null);
+  }, []);
+
+  // WEBUI_SPEC.md 7.4: a toast removed while it holds focus, dismissed or
+  // dropped by the cap, hands focus on to the next toast, else the one before,
+  // else back where focus came from, else to the open modal or `main`. Never
+  // to the page body.
+  const handOffFocus = useCallback((node: HTMLElement) => {
+    const neighbour = (
+      node.nextElementSibling ?? node.previousElementSibling
+    )?.querySelector("button");
+    for (const target of [neighbour, returnFocusRef.current, topmostDialog()]) {
+      if (target) {
+        target.focus();
+        if (document.activeElement === target) {
+          return;
+        }
+      }
+    }
+    focusMain();
+  }, []);
 
   // A toast removed while it holds focus or sits under the pointer takes them
   // out of the zone without a blur or mouseleave reaching it. Re-read focus
@@ -127,8 +172,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         // the finger lifts.
         onPointerEnter={() => setHovered(true)}
         onPointerLeave={() => setHovered(false)}
-        onFocus={() => setFocused(true)}
-        onBlur={() => setFocused(false)}
+        onFocus={(event) => {
+          setFocused(true);
+          if (relatedIsOutside(event)) {
+            returnFocusRef.current = event.relatedTarget;
+          }
+        }}
+        // Focus gone to another element has left the stack, so a later visit
+        // that comes from nothing, as after a click on the page, returns to
+        // the fallback. Gone to nothing, as the window loses focus, it has not.
+        onBlur={(event) => {
+          setFocused(false);
+          if (relatedIsOutside(event)) {
+            returnFocusRef.current = null;
+          }
+        }}
       >
         {toasts.map((toast) => (
           <ToastItem
@@ -136,10 +194,22 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             toast={toast}
             paused={hovered || focused}
             onDismiss={dismiss}
+            onRemoveFocused={handOffFocus}
           />
         ))}
       </div>
     </ToastContext.Provider>
+  );
+}
+
+// Whether the other end of a focus move within the zone is an element outside
+// it: where focus came from on focus, where it went on blur.
+function relatedIsOutside(
+  event: FocusEvent<HTMLElement>,
+): event is FocusEvent<HTMLElement> & { relatedTarget: HTMLElement } {
+  return (
+    event.relatedTarget instanceof HTMLElement &&
+    !event.currentTarget.contains(event.relatedTarget)
   );
 }
 
@@ -150,14 +220,27 @@ function ToastItem({
   toast,
   paused,
   onDismiss,
+  onRemoveFocused,
 }: {
   toast: Toast;
   paused: boolean;
   onDismiss: (id: number) => void;
+  onRemoveFocused: (node: HTMLElement) => void;
 }) {
   const isError = toast.variant === "error";
   const remainingRef = useRef(autoDismissMs(toast.message));
   const ref = useRef<HTMLDivElement>(null);
+
+  // A layout effect's cleanup runs while the node is still in the document,
+  // so focus is handed on before the browser would drop it to the body.
+  useLayoutEffect(() => {
+    const node = ref.current;
+    return () => {
+      if (node?.contains(document.activeElement)) {
+        onRemoveFocused(node);
+      }
+    };
+  }, [onRemoveFocused]);
 
   // A toast raised, or raised again, comes into view in case the stack
   // overflows and scrolls; not while focus is in the stack, so a focused

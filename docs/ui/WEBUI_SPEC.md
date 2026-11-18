@@ -1104,6 +1104,18 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   repeating it double-announces in VoiceOver. The dismiss button is in the tab
   order and at least 24×24 px, and Escape dismisses the toast whose button has
   focus.
+- **Toast focus.** While a modal is open, its focus trap runs on through the
+  toast stack, so an error raised over it is reachable by keyboard: Tab past
+  the dialog's last control reaches the first toast, Tab past the last toast
+  wraps to the dialog's first control, and Shift+Tab runs the same cycle
+  backwards. The stack stays outside the dialog, so a toast is never moved and
+  announced again. Escape on a toast dismisses only that toast; Escape anywhere
+  else in the modal closes the modal. When a toast holding focus goes,
+  dismissed or dropped by the stack cap, focus moves to the next toast's
+  dismiss button, or the one before when it was the last. With no toast left,
+  focus returns to the element it came into the stack from; failing that, to
+  the open modal, or else to the page's `main` region. It never drops to the
+  page body while any of these exists.
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while
