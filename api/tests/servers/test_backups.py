@@ -1277,6 +1277,17 @@ def test_validate_refuses_extended_headers_over_the_budget(
         _validate_backup_archive(build(), max_entries=10)
 
 
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_WHAT_MEMBERS_HOLD)
+def test_validate_refuses_members_that_hold_too_much(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile keeps every member, each with its own copy of the global PAX
+    # records, so what they hold is bounded (issue #3810). The cap is the
+    # production one: only that bound can refuse this archive.
+    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar"):
+        _validate_backup_archive(build(), max_entries=10_000)
+
+
 @pytest.mark.parametrize("slack", [0, -1], ids=["at-the-cap", "one-byte-under"])
 def test_validate_holds_an_archive_to_its_cap_to_the_byte(slack: int) -> None:
     # The cap is the stream's own length: header, data and padding.

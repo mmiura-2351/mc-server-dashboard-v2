@@ -1513,10 +1513,13 @@ def _validate_backup_archive(
     extended-header data, skipped member data, padding and the read past the
     end-of-archive marker count as member data does, and a walk that seeks back,
     which would decompress the stream again, is refused. So is one that reads
-    more than 1 MiB of headers between two members: ``tarfile`` holds
-    extended-header data whole. Each file member's body
-    is drained too, and what it holds counts toward the same cap on its own: for a
-    sparse member that includes holes restore writes but nothing decompresses.
+    more than 1 MiB of headers between two members, since ``tarfile`` holds
+    extended-header data whole, and one whose members hold more than 32 PAX
+    records each or 8 Mi characters of names and PAX records in all, since
+    ``tarfile`` keeps every member with its own copy of the global records. Each
+    file member's body is drained too, and what it holds counts toward the same
+    cap on its own: for a sparse member that includes holes restore writes but
+    nothing decompresses.
     Raises :class:`InvalidBackupArchiveError` (422) on any violation.
 
     The archive must also read to its end (issue #3778). The tar is walked
@@ -1605,7 +1608,8 @@ def _validate_backup_archive(
         # ``ReadError`` for anything but zeros there, and the gzip layer's own
         # errors for its trailer. So do ``CappedReader`` for a seek back and
         # ``EndCheckedReader`` for more than 1 MiB of headers between two members
-        # (#3810); the cap is ``CapExceededError``, not one of them.
+        # and for members that hold too much (#3810); the cap is
+        # ``CapExceededError``, not one of them.
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 

@@ -3,7 +3,8 @@
 Both tar.gz upload doors, the file extract and the backup upload, are tested
 against each shape. Each one is a ``tar.gz`` that decompresses past :data:`CAP`
 while handing out next to no member data, holds more extended-header data than
-the walk may read between two members (1 MiB), or whose walk seeks back.
+the walk may read between two members (1 MiB), has its members hold more PAX
+records or characters than the walk keeps, or whose walk seeks back.
 Building one costs up to a fraction of a second, so each is built once, on
 first use.
 """
@@ -109,6 +110,38 @@ def sparse_maps_past_stored_data() -> bytes:
     return gzip.compress(b"".join(parts) + bytes(1024))
 
 
+def _global_pax(records: dict[str, str], members: int) -> bytes:
+    """``members`` one-byte members after a global PAX header of ``records``."""
+
+    buf = io.BytesIO()
+    with tarfile.open(
+        fileobj=buf, mode="w", format=tarfile.PAX_FORMAT, pax_headers=records
+    ) as tar:
+        for i in range(members):
+            info = tarfile.TarInfo(name=f"m{i:05}")
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+    return gzip.compress(buf.getvalue(), compresslevel=1)
+
+
+@functools.cache
+def global_pax_records() -> bytes:
+    """A global PAX header of 33 records: every member holds a copy of each."""
+
+    return _global_pax({f"k{i:02}": "" for i in range(33)}, members=2)
+
+
+@functools.cache
+def global_pax_held_by_many_members() -> bytes:
+    """A global record of 768 KiB, under the 1 MiB budget, then 11 members.
+
+    Each member holds its own copy, so together they hold more than the 8 Mi
+    characters the walk keeps.
+    """
+
+    return _global_pax({"comment": "c" * (768 * 1024)}, members=11)
+
+
 def directories(count: int) -> bytes:
     """``count`` directory members, then one file."""
 
@@ -131,6 +164,14 @@ OVER_CAP = [
     pytest.param(
         functools.partial(gnu_longname_data, _UNDER_THE_BUDGET), id="gnu-longname"
     ),
+]
+
+# The shapes whose members hold more than the walk keeps, under the production
+# caps: more than 32 PAX records in a member, or more than 8 Mi characters of
+# names and PAX records in all.
+OVER_WHAT_MEMBERS_HOLD = [
+    pytest.param(global_pax_records, id="33-global-pax-records"),
+    pytest.param(global_pax_held_by_many_members, id="global-record-held-11-times"),
 ]
 
 # The shapes the 1 MiB budget refuses under the production caps.

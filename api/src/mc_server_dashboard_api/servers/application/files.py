@@ -173,8 +173,9 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # header; ``ValueError`` for a GNU sparse PAX field that is not a number, which it
 # converts with a bare ``int()``), and ``EndCheckedReader`` adds a ``ReadError``
 # for a walk that did not stop at the end-of-archive marker or anything but zeros
-# past it or more than 1 MiB of headers between two members, ``CappedReader``
-# one for a walk that seeks back (issue #3810).
+# past it, more than 1 MiB of headers between two members or members that hold
+# too much (more than 32 PAX records each, or 8 Mi characters of names and PAX
+# records in all), ``CappedReader`` one for a walk that seeks back (#3810).
 # ``zipfile`` raises far more than ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
@@ -882,8 +883,10 @@ def _archive_entries(
     materialized in memory before the guard trips. A tar.gz is read through
     :class:`~mc_server_dashboard_api.archive_member.CappedReader` too, so every
     byte it decompresses counts toward ``max_bytes``, headers and skipped data
-    included, and a walk that seeks back, or reads more than 1 MiB of headers
-    between two members, is :class:`UnreadableArchiveError` (issue #3810).
+    included. A walk that seeks back, reads more than 1 MiB of headers between
+    two members, or hands out members holding more than 32 PAX records each or
+    8 Mi characters of names and PAX records in all is
+    :class:`UnreadableArchiveError` (issue #3810).
 
     This is the SAME generator both the validate pass and the write pass run over,
     so the per-entry checks are defined once (no duplication). The validate pass

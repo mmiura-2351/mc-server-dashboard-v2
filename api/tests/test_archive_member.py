@@ -632,3 +632,130 @@ def test_an_extended_header_is_read_one_byte_past_the_budget_at_most() -> None:
         with tarfile.open(fileobj=stream, mode="r:") as tar:
             _names(stream, tar)
     assert source.tell() == _MIB + 1
+
+
+# --- what the members handed out hold (issue #3810) -------------------------
+#
+# ``tarfile`` keeps every member it hands out, each with its own copy of the
+# global PAX records. So a member may hold at most 32 PAX records, global and
+# its own, and the members' names, PAX keys and PAX values together at most
+# 8 Mi characters.
+_HELD = 8 * _MIB
+
+
+def _pax_tar(
+    members: dict[str, dict[str, str]], *, global_records: dict[str, str] | None = None
+) -> bytes:
+    """A PAX tar of one-byte members, each with its own PAX records."""
+
+    buf = io.BytesIO()
+    with tarfile.open(
+        fileobj=buf, mode="w", format=tarfile.PAX_FORMAT, pax_headers=global_records
+    ) as tar:
+        for name, records in members.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = 1
+            info.pax_headers = records
+            tar.addfile(info, io.BytesIO(b"x"))
+    return buf.getvalue()
+
+
+def _records(count: int, prefix: str = "k") -> dict[str, str]:
+    return {f"{prefix}{i:02}": "" for i in range(count)}
+
+
+@_both
+@pytest.mark.parametrize(
+    ("archive", "refused"),
+    [
+        pytest.param(_pax_tar({"a": _records(32)}), False, id="32-own"),
+        pytest.param(_pax_tar({"a": _records(33)}), True, id="33-own"),
+        pytest.param(
+            _pax_tar({"a": {}, "b": {}}, global_records=_records(32)),
+            False,
+            id="32-global",
+        ),
+        pytest.param(
+            _pax_tar({"a": {}, "b": {}}, global_records=_records(33)),
+            True,
+            id="33-global",
+        ),
+        # The global records are in every later member's own copy.
+        pytest.param(
+            _pax_tar({"a": _records(17, "m")}, global_records=_records(16)),
+            True,
+            id="16-global-and-17-own",
+        ),
+    ],
+)
+def test_a_member_holds_at_most_32_pax_records(
+    archive: bytes, refused: bool, gzipped: bool
+) -> None:
+    if refused:
+        with pytest.raises(tarfile.ReadError, match="PAX records"):
+            _walk(archive, gzipped=gzipped)
+    else:
+        assert _walk(archive, gzipped=gzipped)[0]
+
+
+def _held_by_values(extra: int) -> bytes:
+    """16 members named ``m00`` to ``m15``, each holding 1/16 of 8 Mi characters.
+
+    A member holds its name, 3 characters, and one ``comment`` record. ``extra``
+    more characters go into the last value.
+    """
+
+    value = _HELD // 16 - len("m00") - len("comment")
+    return _pax_tar(
+        {
+            f"m{i:02}": {"comment": "c" * (value + (extra if i == 15 else 0))}
+            for i in range(16)
+        }
+    )
+
+
+def _held_by_a_global_record(members: int) -> bytes:
+    """A global record of 1/16 of 8 Mi characters, held by each of ``members``."""
+
+    value = _HELD // 16 - len("m00") - len("comment")
+    return _pax_tar(
+        {f"m{i:02}": {} for i in range(members)},
+        global_records={"comment": "c" * value},
+    )
+
+
+def _held_by_names(extra: int) -> bytes:
+    """16 members whose GNU long names are 1/16 of 8 Mi characters each."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
+        for i in range(16):
+            info = tarfile.TarInfo(
+                name=f"{i:02}".ljust(_HELD // 16 + (extra if i == 15 else 0), "n")
+            )
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+    return buf.getvalue()
+
+
+@_both
+@pytest.mark.parametrize(
+    ("build", "refused"),
+    [
+        pytest.param(lambda: _held_by_values(0), False, id="values-at-the-bound"),
+        pytest.param(lambda: _held_by_values(1), True, id="values-one-over"),
+        pytest.param(lambda: _held_by_a_global_record(16), False, id="global-16-times"),
+        pytest.param(lambda: _held_by_a_global_record(17), True, id="global-17-times"),
+        pytest.param(lambda: _held_by_names(0), False, id="names-at-the-bound"),
+        pytest.param(lambda: _held_by_names(1), True, id="names-one-over"),
+    ],
+)
+def test_the_members_hold_at_most_8_mi_characters_of_names_and_pax_records(
+    build: Callable[[], bytes], refused: bool, gzipped: bool
+) -> None:
+    archive = build()
+    if refused:
+        with pytest.raises(tarfile.ReadError, match="characters of names"):
+            _walk(archive, gzipped=gzipped)
+    else:
+        assert len(_walk(archive, gzipped=gzipped)[0]) >= 16

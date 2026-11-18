@@ -3800,6 +3800,29 @@ async def test_upload_extract_refuses_extended_headers_over_the_budget(
     assert store.writes == []
 
 
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_WHAT_MEMBERS_HOLD)
+async def test_upload_extract_refuses_members_that_hold_too_much(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile keeps every member, each with its own copy of the global PAX
+    # records, so what they hold is bounded (issue #3810). The caps are the
+    # production ones: only that bound can refuse this archive.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=build(),
+            extract=True,
+        )
+    assert store.writes == []
+
+
 @pytest.mark.parametrize("slack", [0, -1], ids=["at-the-cap", "one-byte-under"])
 async def test_upload_extract_holds_a_tar_gz_to_its_cap_to_the_byte(
     slack: int,

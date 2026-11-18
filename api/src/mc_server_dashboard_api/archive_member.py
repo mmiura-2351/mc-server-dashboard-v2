@@ -41,6 +41,16 @@ _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 # names, xattrs and ACLs: kilobytes.
 _BETWEEN_MEMBERS_BYTES = 1024 * 1024
 
+# What the members a walk hands out may hold (issue #3810). tarfile keeps every
+# member, each with its own copy of the global PAX records, so a global header
+# under the budget above is held once per member. A member may hold at most this
+# many PAX records, global and its own...
+_PAX_RECORDS_PER_MEMBER = 32
+# ...and the members' names, PAX keys and PAX values together at most this many
+# characters, a name read from a PAX record counted twice. Real archives hold
+# dozens of records and a few hundred characters a member.
+_HELD_CHARACTERS = 8 * 1024 * 1024
+
 # How much of the stream past the end-of-archive marker to read at a time, so a
 # long run of zeros cannot be materialized whole. Read through a CappedReader,
 # each chunk counts toward the cap before the next one is read.
@@ -143,6 +153,11 @@ class EndCheckedReader(io.RawIOBase):
     headers, which ``tarfile`` holds whole. A read then asks the stream for at
     most one byte past that, and going past it is a ``ReadError``. The caller's
     reads of member data are not held to it.
+
+    ``tarfile`` also keeps every member it hands out, each with its own copy of
+    the global PAX records, so :meth:`members` bounds what they hold, also as a
+    ``ReadError``: at most 32 PAX records in a member, global and its own, and at
+    most 8 Mi characters of names, PAX keys and PAX values in all.
     """
 
     def __init__(self, stream: io.BufferedIOBase) -> None:
@@ -199,9 +214,22 @@ class EndCheckedReader(io.RawIOBase):
         The count of what the walk reads starts over each time the walk resumes
         after a member, which is after the caller has read that member's data.
         Only the walk's own reads are held to the budget between two members.
+        Each member is held to what members may hold before it is handed out.
         """
 
+        held = 0
         for member in tar:
+            if len(member.pax_headers) > _PAX_RECORDS_PER_MEMBER:
+                raise tarfile.ReadError(
+                    f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
+                )
+            held += len(member.name) + sum(
+                len(key) + len(value) for key, value in member.pax_headers.items()
+            )
+            if held > _HELD_CHARACTERS:
+                raise tarfile.ReadError(
+                    f"more than {_HELD_CHARACTERS} characters of names and PAX records"
+                )
             self._walking = False
             yield member
             self._read_since_member = 0
