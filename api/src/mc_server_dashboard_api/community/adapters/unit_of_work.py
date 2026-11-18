@@ -15,8 +15,8 @@ other context (ARCHITECTURE.md Section 2.1).
 The :class:`UserExistenceChecker` Port is bound the same way, to a query of the
 identity ``user`` table on the same session, so a community write on a user -- a
 conferral of community ownership, an insert referencing the user -- validates it
-inside its own transaction, under the lock an account deletion waits for (issues
-#3217, #3856).
+inside its own transaction, under the account write lock an account deletion
+waits for (issues #3217, #3856).
 """
 
 from __future__ import annotations
@@ -46,8 +46,8 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     UserId,
 )
-from mc_server_dashboard_api.core.adapters.ownership_lock import (
-    lock_community_ownership,
+from mc_server_dashboard_api.core.adapters.account_write_lock import (
+    take_account_write_lock,
 )
 from mc_server_dashboard_api.identity.adapters.models import UserModel
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
@@ -85,7 +85,7 @@ class SqlAlchemyResourceExistenceChecker(ResourceExistenceChecker):
 
 
 class SqlAlchemyUserExistenceChecker(UserExistenceChecker):
-    """Check a user exists, under its community-ownership lock (issue #3217)."""
+    """Check a user exists, under its account write lock (#3217, #3856)."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -94,7 +94,7 @@ class SqlAlchemyUserExistenceChecker(UserExistenceChecker):
         # Shared: an account deletion holds the lock exclusively from before its
         # ownership check until it commits, so this waits for one in flight,
         # and the read below, a new snapshot, sees whether it deleted the user.
-        await lock_community_ownership(self._session, user_id.value, shared=True)
+        await take_account_write_lock(self._session, user_id.value, shared=True)
         stmt = select(UserModel.id).where(UserModel.id == user_id.value)
         return (await self._session.execute(stmt)).first() is not None
 
