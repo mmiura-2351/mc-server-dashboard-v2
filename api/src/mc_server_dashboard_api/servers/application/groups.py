@@ -471,7 +471,7 @@ async def _sync_server_file(
     ``StartServer`` cannot flip desired=running between the check and the write.
     """
 
-    async with lifecycle_lock.hold(server_id):
+    async with lifecycle_lock.hold(server_id) as lock:
         async with uow:
             server = await uow.servers.get_by_id(server_id)
             if server is None or server.community_id != community_id:
@@ -481,6 +481,8 @@ async def _sync_server_file(
         if not at_rest:
             return
         players = merge_players(groups)
+        # The at-rest write relies on the lifecycle lock (issue #3927).
+        await lock.ensure_held()
         await file_store.write_file(
             community_id=community_id,
             server_id=server_id,

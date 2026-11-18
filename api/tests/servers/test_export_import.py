@@ -46,6 +46,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    LifecycleLockLostError,
     PortAlreadyTakenError,
     ServerFilesUnsettledError,
     UnreadableArchiveError,
@@ -1091,6 +1092,33 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
     assert (
         ev.index((server.id, "acquire")) < insert_at < ev.index((server.id, "release"))
     )
+
+
+async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> None:
+    # The plugin rows (and a Geyser's port) are committed under the lifecycle
+    # lock, which can be lost before the commit (issue #3927).
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
+
+    async def _import(dst_uow: FakeUnitOfWork, lock: FakeLifecycleLock) -> None:
+        dst_store = FakeFileStore()
+        await ImportServer(
+            create_server=_create_server(dst_uow, dst_store),
+            file_store=dst_store,
+            bedrock_port_range=_BEDROCK_RANGE,
+            lifecycle_lock=lock,
+        )(community_id=CommunityId(community), name="imported", content=archive)
+
+    held_uow = FakeUnitOfWork()
+    await _import(held_uow, FakeLifecycleLock())
+    lost_uow = FakeUnitOfWork()
+    lost = FakeLifecycleLock()
+    lost.checks_before_loss = 0
+    with pytest.raises(LifecycleLockLostError):
+        await _import(lost_uow, lost)
+
+    # The import's last commit, the plugin rows', is the one the loss stops.
+    assert lost_uow.commits == held_uow.commits - 1
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------

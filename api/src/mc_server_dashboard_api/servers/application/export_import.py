@@ -504,7 +504,7 @@ class ImportServer:
             return server
         uow = self.create_server.uow
         try:
-            async with self.lifecycle_lock.hold(server.id):
+            async with self.lifecycle_lock.hold(server.id) as lock:
                 async with uow:
                     # Re-fetch the current row so the whole-entity write-back in
                     # allocate_bedrock_port_if_geyser does not clobber a concurrent
@@ -522,6 +522,8 @@ class ImportServer:
                             port_range=self.bedrock_port_range,
                             now=now,
                         )
+                    # The rows rely on the lifecycle lock (issue #3927).
+                    await lock.ensure_held()
                     await uow.commit()
             return fresh
         except (PortAlreadyTakenError, PortRangeExhaustedError) as exc:
