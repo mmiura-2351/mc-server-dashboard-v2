@@ -1226,6 +1226,24 @@ async def test_check_backup_health_rejects_decompression_bomb(
         await harness.storage.check_backup_health(community, server, key)
 
 
+async def test_zeros_past_the_marker_count_toward_the_restore_cap(
+    backend: str, tmp_path: Path
+) -> None:
+    """Restore and the health probe read on past the end-of-archive marker to the
+    gzip end (issue #3798), so the zeros there are decompressed bytes like any
+    member's and count toward the cap, on BOTH backends."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=64 * 1024)
+    community, server = new_scope()
+    archive = gzip.compress(tar_bytes({"server.properties": b"k=v"}) + bytes(1 << 20))
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(10 * 10 + 30)
 async def test_restore_corrupt_backup_without_force_is_refused(
