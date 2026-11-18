@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -625,7 +625,6 @@ function SortableHeader({
 function useLifecycle(server: ServerResponse, communityId: string) {
   const showServerToast = useServerToast();
   const onForbidden = useOnForbidden();
-  const queryClient = useQueryClient();
   const [eulaOpen, setEulaOpen] = useState(false);
 
   const mutation = useLifecycleMutation({
@@ -653,26 +652,10 @@ function useLifecycle(server: ServerResponse, communityId: string) {
     },
   });
 
-  const acceptEulaAndStart = useCallback(async () => {
+  const acceptEulaAndStart = () => {
     setEulaOpen(false);
-    const path = apiPath(
-      "/api/communities/{community_id}/servers/{server_id}/start",
-      { community_id: communityId, server_id: server.id },
-    );
-    try {
-      await api.post(`${path}?accept_eula=true` as never);
-      queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-    } catch (error: unknown) {
-      if (onForbidden(error, { server })) {
-        return;
-      }
-      showServerToast(
-        server,
-        t(lifecycleErrorMessage(error, "start")),
-        "error",
-      );
-    }
-  }, [communityId, server, queryClient, onForbidden, showServerToast]);
+    mutation.mutate({ action: "start", query: "accept_eula=true" });
+  };
 
   const state = normalizeState(server.observed_state);
   // While a request is in flight, show the transition it requests so the pill
