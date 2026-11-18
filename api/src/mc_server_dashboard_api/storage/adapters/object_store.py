@@ -237,6 +237,15 @@ class MultipartUploadsUnsupportedError(Exception):
     """
 
 
+class ConditionalPutUnsupportedError(Exception):
+    """The store rejects a conditional (If-None-Match) PutObject (issue #3870).
+
+    Raised by :meth:`S3Client.put_object_if_absent` when the backend refuses the
+    condition as unsupported. The owner-marker claim falls back to a plain put and
+    reads the marker back.
+    """
+
+
 class S3Client(Protocol):
     """The handful of S3 operations the object adapter uses (Section 7.3).
 
@@ -260,6 +269,15 @@ class S3Client(Protocol):
 
     async def put_object(self, key: str, body: bytes) -> None:
         """Write a whole object atomically (single PUT, last-writer-wins)."""
+        ...
+
+    async def put_object_if_absent(self, key: str, body: bytes) -> bool:
+        """Write a whole object only if none exists at ``key`` (If-None-Match: *).
+
+        Returns ``False``, writing nothing, when an object is already there. Raises
+        :class:`ConditionalPutUnsupportedError` if the backend rejects the
+        condition (issue #3870).
+        """
         ...
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:

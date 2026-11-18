@@ -124,6 +124,14 @@ class FakeS3Client:
         self._store.objects[key] = bytes(body)
         self._store.mtimes[key] = self._store._clock()
 
+    async def put_object_if_absent(self, key: str, body: bytes) -> bool:
+        # Check and write with no await between them, so the check-then-write is
+        # atomic on the event loop, as the store's If-None-Match is (issue #3870).
+        if key in self._store.objects:
+            return False
+        await self.put_object(key, body)
+        return True
+
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
         # Consume part-by-part (never a single whole-body read) and tally the parts,
         # so a client that buffers the stream whole — collapsing to one part — is

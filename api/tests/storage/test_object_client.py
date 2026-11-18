@@ -29,6 +29,9 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
     _iter_body,
     make_s3_client_factory,
 )
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    ConditionalPutUnsupportedError,
+)
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
@@ -690,6 +693,73 @@ async def test_delete_object_translates_transport_errors(error: BaseException) -
 
     with pytest.raises(ObjectStoreUnavailableError) as excinfo:
         await client.delete_object("communities/k/x")
+
+    assert excinfo.value.__cause__ is error
+
+
+# --- put_object_if_absent: the owner-marker claim (issue #3870) -----------
+
+
+class _ConditionalPutClient:
+    """A client double recording put_object kwargs, raising a set error if any."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self._error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def put_object(self, **kwargs: object) -> None:
+        self.calls.append(kwargs)
+        if self._error is not None:
+            raise self._error
+
+
+async def test_put_object_if_absent_sends_if_none_match() -> None:
+    inner = _ConditionalPutClient()
+    client = _Aioboto3S3Client(inner, "bucket")
+
+    assert await client.put_object_if_absent("mcsd-owner.json", b"{}") is True
+
+    assert inner.calls == [
+        {
+            "Bucket": "bucket",
+            "Key": "mcsd-owner.json",
+            "Body": b"{}",
+            "IfNoneMatch": "*",
+        }
+    ]
+
+
+async def test_put_object_if_absent_reports_an_existing_object() -> None:
+    # S3 answers a failed If-None-Match with 412 PreconditionFailed.
+    error = ClientError(
+        {
+            "Error": {"Code": "PreconditionFailed"},
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+        },
+        "PutObject",
+    )
+    client = _Aioboto3S3Client(_ConditionalPutClient(error), "bucket")
+
+    assert await client.put_object_if_absent("mcsd-owner.json", b"{}") is False
+
+
+@pytest.mark.parametrize("code", ["NotImplemented", "501"])
+async def test_put_object_if_absent_flags_a_store_without_conditional_writes(
+    code: str,
+) -> None:
+    error = ClientError({"Error": {"Code": code}}, "PutObject")
+    client = _Aioboto3S3Client(_ConditionalPutClient(error), "bucket")
+
+    with pytest.raises(ConditionalPutUnsupportedError):
+        await client.put_object_if_absent("mcsd-owner.json", b"{}")
+
+
+async def test_put_object_if_absent_translates_backend_failures() -> None:
+    error = ClientError({"Error": {"Code": "InternalError"}}, "PutObject")
+    client = _Aioboto3S3Client(_ConditionalPutClient(error), "bucket")
+
+    with pytest.raises(ObjectStoreUnavailableError) as excinfo:
+        await client.put_object_if_absent("mcsd-owner.json", b"{}")
 
     assert excinfo.value.__cause__ is error
 
