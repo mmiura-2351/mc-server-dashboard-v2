@@ -88,7 +88,7 @@ dependencies = [
     # and provides the Counter/Histogram/Gauge primitives and the custom-collector
     # protocol the servers-by-state gauge uses. 0.25.0 (2026-04-09) is well outside
     # the 7-day cooldown (Section 3); cap the next minor (0.x, Section 1).
-    "prometheus-client>=0.25.0,<0.27",  # 2026-04-09
+    "prometheus-client>=0.26.0,<0.27",  # 2026-04-09
     # OpenTelemetry SDK meter provider and its Prometheus reader behind FastAPI's
     # native HTTP request metrics (#3563): the reader renders the OTel
     # instruments into the same process-owned registry as the metrics above.
