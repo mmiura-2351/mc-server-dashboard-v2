@@ -1887,6 +1887,8 @@ export const ja: Record<TranslationKey, string> = {
     "ファイルサイズが256 MiBのアップロード上限を超えています。",
   "resourcePacks.error.uploadFailed":
     "リソースパックをアップロードできませんでした。",
+  "resourcePacks.error.invalidFilename":
+    "このファイル名はリソースパックに使用できません。制御文字や / \\ を含まない255バイト以内の名前に変更して、再度アップロードしてください。",
   "resourcePacks.error.deleteFailed": "リソースパックを削除できませんでした。",
   "resourcePacks.error.inUse":
     "このリソースパックは1つ以上のサーバーに割り当てられているため、削除できません。",

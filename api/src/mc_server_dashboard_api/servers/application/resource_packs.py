@@ -47,6 +47,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackAssignment,
     ResourcePackId,
+    is_valid_pack_filename,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ByteStream,
@@ -99,6 +100,8 @@ class UploadResourcePack:
         content: bytes,
         uploaded_by: uuid.UUID,
     ) -> ResourcePack:
+        if not is_valid_pack_filename(filename):
+            raise ValueError("filename cannot name a resource pack")
         if not filename.lower().endswith(".zip"):
             raise ValueError("filename must end with .zip")
         if len(content) > MAX_RESOURCE_PACK_BYTES:

@@ -1730,6 +1730,11 @@ class ObjectStorage(Storage):
                         await self._bump_generation(
                             client, server_prefix, RESTORE_PUBLISHER
                         )
+                        # Unlike a commit, nothing is re-checked before the flip
+                        # (issue #3904). A server delete's prune, which deletes
+                        # ``snapshots/`` and ``incoming/``, cannot land after the
+                        # copy above: RestoreBackup and DeleteServer hold the
+                        # per-server lifecycle lock across their whole storage call.
                         old_prefix = await self._read_pointer(client, server_prefix)
                         try:
                             await self._write_pointer(client, server_prefix, new_prefix)

@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.logging import TextFormatter
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
 )
@@ -94,7 +95,7 @@ class _Bucket:
             uploaded_by=uuid.uuid4(),
         )
 
-    async def orphans(self, count: int) -> list[str]:
+    async def orphans(self, count: int, filename: str = _FILENAME) -> list[str]:
         """Store *count* blobs no row names; their keys, in the order a pass meets
         them."""
 
@@ -102,7 +103,7 @@ class _Bucket:
             yield _pack_zip()
 
         for _ in range(count):
-            await self.store.put(ResourcePackId(uuid.uuid4()), _FILENAME, _body())
+            await self.store.put(ResourcePackId(uuid.uuid4()), filename, _body())
         return sorted(self.blob_keys())
 
     async def gc(
@@ -257,6 +258,50 @@ async def test_a_pass_whose_every_delete_failed_logs_its_summary_at_info(
     assert (result.deleted, result.failed) == (0, 1)
     (summary,) = [r for r in caplog.records if r.levelno == logging.INFO]
     assert "1 failed" in summary.getMessage()
+
+
+# A pack stored before the upload refused such a name (issue #3907): logged raw,
+# its newline would start a line that reads as a record of its own, and its
+# escape sequence would clear the terminal tailing the log.
+_FORGED_FILENAME = "x\nINFO mc_server_dashboard_api forged\x1b[2J.zip"
+
+
+def _forged(rendered: str) -> bool:
+    return "\x1b" in rendered or any(
+        line.startswith("INFO mc_server_dashboard_api forged")
+        for line in rendered.splitlines()
+    )
+
+
+async def test_logs_a_reclaimed_key_escaped(caplog: pytest.LogCaptureFixture) -> None:
+    bucket = _Bucket()
+    (key,) = await bucket.orphans(1, filename=_FORGED_FILENAME)
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        await bucket.gc()
+
+    assert bucket.blob_keys() == []
+    rendered = [TextFormatter().format(record) for record in caplog.records]
+    (reclaimed,) = [line for line in rendered if "reclaimed pack" in line]
+    assert repr(key) in reclaimed
+    assert not any(_forged(line) for line in rendered)
+
+
+async def test_logs_a_failed_delete_key_escaped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bucket = _Bucket()
+    (key,) = await bucket.orphans(1, filename=_FORGED_FILENAME)
+    bucket.faults.when = lambda op, k: op == "delete_object"
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        await bucket.gc()
+
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    # Rendered whole, traceback included: the record is the text an operator reads.
+    rendered = TextFormatter().format(warning)
+    assert repr(key) in rendered.partition("\n")[0]
+    assert not _forged(rendered)
 
 
 @pytest.mark.parametrize("operation", ["list_objects", "delete_object"])
