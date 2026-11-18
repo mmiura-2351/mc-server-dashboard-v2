@@ -82,7 +82,7 @@ record observed=running. ``place_and_start`` then returns, as nothing failed;
 nothing and the instance may run an older working set than the store's.
 
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
-and that is what makes both convergence sites sound. Until issue #2476 the Worker
+and that is what makes every convergence site sound. Until issue #2476 the Worker
 answered the same code for a pending failed-stop orphan — an instance it could not
 confirm dead, which is as likely to be a corpse as a live process — so the
 convergence could manufacture ``observed=running`` for a server that was down, with
@@ -1203,9 +1203,9 @@ class StartServer:
     async def _record_running(self, server: Server, worker_id: WorkerId) -> None:
         """Record observed=running for an instance found live on ``worker_id``.
 
-        The convergence an ``INVALID_STATE`` start outcome is owed (#213): the
-        Worker performed no transition, so no ``StatusChange`` will come to record
-        it. The write asserts the row is still on ``worker_id``.
+        The convergence an ``INVALID_STATE`` start or hydrate outcome is owed
+        (#213): the Worker performed no transition, so no ``StatusChange`` will
+        come to record it. The write asserts the row is still on ``worker_id``.
         """
 
         observed_at = self.clock.now()
