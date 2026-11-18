@@ -103,17 +103,19 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  // Restore the real clock for tests that pin it with fake timers (#614); a
-  // no-op for the cases that never enabled them.
+  // Restore the real clock for tests that pin it with setSystemTime (#614); a
+  // no-op for the cases that never pinned it.
   vi.useRealTimers();
 });
 
 describe("admin workers page", () => {
   it("renders the fleet with humanized bytes and heartbeat age", async () => {
-    // Pin the clock to NOW so heartbeatAge sees a deterministic now and the
-    // relative-time assertions below stay stable (#614). shouldAdvanceTime
-    // keeps async polling (findBy*, react-query) progressing under fake timers.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+    // Freeze the clock at NOW so heartbeatAge sees a deterministic now and the
+    // relative-time assertions below stay stable (#614). Without fake timers,
+    // setSystemTime fakes only Date: it never advances, while setTimeout stays
+    // real so findBy* and react-query still progress. A clock that follows
+    // real time (shouldAdvanceTime) rendered "6s ago" once the render ran
+    // ≥500 ms late on a loaded host (#3880).
     vi.setSystemTime(NOW);
 
     signedIn();
