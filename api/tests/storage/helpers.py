@@ -7,6 +7,7 @@ directory tree so a snapshot/backup can be staged from in-memory content.
 from __future__ import annotations
 
 import asyncio
+import functools
 import gzip
 import io
 import os
@@ -519,6 +520,40 @@ TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT: dict[str, bytes] = {
         ),
     }.items()
 }
+
+
+# Files whose tar is over each header limit the upload doors hold a walk to, and
+# which the storage walks take (issue #3810): the storage walks have no entry
+# cap, so a large working set reaches the character limit (131,072 files with
+# 64-character names do). Their PAX ``comment`` records are what is held.
+_KIB = 1024
+OVER_THE_UPLOAD_HEADER_LIMITS_FILES = {
+    "server.properties": b"k=v",
+    "world/level.dat": b"w",
+    **{f"world/data/d{i}.dat": b"r" for i in range(9)},
+}
+
+
+@functools.cache
+def over_the_upload_header_limits_tar() -> bytes:
+    """The tar of :data:`OVER_THE_UPLOAD_HEADER_LIMITS_FILES`, 10.5 MiB, built on
+    first use."""
+
+    return _tar_of(
+        # 2 MiB of extended headers before one member, over the 1 MiB budget.
+        _member("server.properties", b"k=v", {"comment": "c" * (2048 * _KIB)}),
+        # 33 PAX records in one member, over the 32 a member may hold.
+        _member(
+            "world/level.dat",
+            b"w",
+            {f"SCHILY.xattr.user.a{i:02}": "v" for i in range(33)},
+        ),
+        # 9 x 960 KiB of PAX values, over the 8 Mi characters the members may hold.
+        *(
+            _member(f"world/data/d{i}.dat", b"r", {"comment": "c" * (960 * _KIB)})
+            for i in range(9)
+        ),
+    )
 
 
 def _stored_byte_flipped() -> bytes:

@@ -401,7 +401,15 @@ class UnreadableArchiveError(ServerError):
     whose size breaches a cap (:class:`FileTooLargeError`), and resending the same
     bytes cannot succeed. The edge maps this to 422 ``invalid_archive``, the reason
     a backup upload gives a body that does not read as its archive.
+
+    ``refusal``, when set, names the refusal for the edge to render as the
+    problem's ``detail``, built from fixed text only: a walk over the reader's
+    header limits (issue #3810).
     """
+
+    def __init__(self, message: str = "", *, refusal: str | None = None) -> None:
+        super().__init__(message)
+        self.refusal = refusal
 
 
 class FileAlreadyExistsError(ServerError):

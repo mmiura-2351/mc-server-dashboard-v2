@@ -23,9 +23,8 @@ Adding the account as a member, or creating a grant for it, is held the same way
 references the account. Unheld, a deletion committing after the write's check
 fails that insert's foreign key, and a grant creation, which holds the account's
 membership before its insert, deadlocks with the deletion's cascade. Run through
-the same four interleavings (the community side is the "conferral" of their
-names), the losing write finds no such user, and no interleaving ends in an
-error the routes do not map.
+the same four interleavings, the losing write finds no such user, and no
+interleaving ends in an error the routes do not map.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5).
@@ -238,7 +237,7 @@ async def _provision_community(
 
 
 _Deletion = Callable[[_World, IdentityUnitOfWork], Coroutine[Any, Any, None]]
-_Conferral = Callable[[_World, CommunityUnitOfWork], Coroutine[Any, Any, None]]
+_Write = Callable[[_World, CommunityUnitOfWork], Coroutine[Any, Any, None]]
 
 
 async def _admin_delete(world: _World, uow: IdentityUnitOfWork) -> None:
@@ -371,17 +370,17 @@ async def _grant_world(engine: AsyncEngine) -> _World:
 
 
 _Interleaving = Literal[
-    "deletion-first", "conferral-first", "deletion-holds", "conferral-holds"
+    "deletion-first", "write-first", "deletion-holds", "write-holds"
 ]
 _INTERLEAVINGS: list[_Interleaving] = [
     "deletion-first",
-    "conferral-first",
+    "write-first",
     "deletion-holds",
-    "conferral-holds",
+    "write-holds",
 ]
 
-# A step of the race: the deletion, or one write of the conferral. It runs on a
-# unit of work that reports its backend pid and, given a pause, holds there.
+# A step of the race: the deletion, or one community write. It runs on a unit
+# of work that reports its backend pid and, given a pause, holds there.
 _Step = Callable[[_Backend, _Pause | None], Coroutine[Any, Any, None]]
 
 
@@ -392,9 +391,9 @@ def _deleting(world: _World, deletion: _Deletion) -> _Step:
     return step
 
 
-def _conferring(world: _World, conferral: _Conferral) -> _Step:
+def _writing(world: _World, write: _Write) -> _Step:
     async def step(backend: _Backend, pause: _Pause | None) -> None:
-        await conferral(world, _CommunityUnitOfWork(world.factory, backend, pause))
+        await write(world, _CommunityUnitOfWork(world.factory, backend, pause))
 
     return step
 
@@ -402,15 +401,15 @@ def _conferring(world: _World, conferral: _Conferral) -> _Step:
 async def _race(
     engine: AsyncEngine, steps: list[_Step], interleaving: _Interleaving
 ) -> list[BaseException | None]:
-    """Run the deletion (``steps[0]``) and the conferral in ``interleaving``.
+    """Run the deletion (``steps[0]``) and the community writes in ``interleaving``.
 
     Returns each step's outcome (``None`` or the exception it raised), in the
     order of ``steps``.
     """
 
-    if interleaving in ("deletion-first", "conferral-first"):
+    if interleaving in ("deletion-first", "write-first"):
         order = list(range(len(steps)))
-        if interleaving == "conferral-first":
+        if interleaving == "write-first":
             order = [*order[1:], 0]
         sequential: dict[int, BaseException | None] = {}
         for index in order:
@@ -422,7 +421,7 @@ async def _race(
                 sequential[index] = None
         return [sequential[index] for index in range(len(steps))]
 
-    # Pause the deletion, or the conferral's first write, before it writes.
+    # Pause the deletion, or the first community write, before it writes.
     paused = 0 if interleaving == "deletion-holds" else 1
     pause = _Pause()
     tasks = {paused: asyncio.create_task(steps[paused](_Backend(), pause))}
@@ -485,7 +484,7 @@ async def test_deletion_racing_provisioning_never_orphans_the_community(
 
     outcomes = await _race(
         engine,
-        [_deleting(world, _DELETIONS[deletion]), _conferring(world, _provision)],
+        [_deleting(world, _DELETIONS[deletion]), _writing(world, _provision)],
         interleaving,
     )
 
@@ -509,16 +508,16 @@ _TRANSFER_OUTCOMES: dict[_Interleaving, list[type[BaseException] | None]] = {
     "deletion-first": [None, MembershipNotFoundError, LastOwnerRemovalError],
     "deletion-holds": [None, MembershipNotFoundError, LastOwnerRemovalError],
     # The assignment committed first: the account owns the community.
-    "conferral-first": [CommunityOwnedError, None, None],
+    "write-first": [CommunityOwnedError, None, None],
     # As above; the step-down started while the assignment was not yet visible
     # and waited for its locks, so it still counts one Owner and is refused.
-    "conferral-holds": [CommunityOwnedError, None, LastOwnerRemovalError],
+    "write-holds": [CommunityOwnedError, None, LastOwnerRemovalError],
 }
 _TRANSFER_OWNERS: dict[_Interleaving, str] = {
     "deletion-first": "previous",
     "deletion-holds": "previous",
-    "conferral-first": "target",
-    "conferral-holds": "both",
+    "write-first": "target",
+    "write-holds": "both",
 }
 
 
@@ -534,8 +533,8 @@ async def test_deletion_racing_an_ownership_transfer_never_orphans_the_community
         engine,
         [
             _deleting(world, _DELETIONS[deletion]),
-            _conferring(world, _assign_owner),
-            _conferring(world, _step_down),
+            _writing(world, _assign_owner),
+            _writing(world, _step_down),
         ],
         interleaving,
     )
@@ -570,7 +569,7 @@ async def test_deletion_racing_an_insert_referencing_the_account_fails_cleanly(
 
     outcomes = await _race(
         engine,
-        [_deleting(world, _DELETIONS[deletion]), _conferring(world, write)],
+        [_deleting(world, _DELETIONS[deletion]), _writing(world, write)],
         interleaving,
     )
 
@@ -585,14 +584,14 @@ async def test_deletion_racing_an_insert_referencing_the_account_fails_cleanly(
 async def test_conferrals_on_one_account_do_not_wait_for_each_other(
     engine: AsyncEngine,
 ) -> None:
-    # Conferrals share the ownership lock: a second one on the same account
+    # Conferrals share the account write lock: a second one on the same account
     # commits while the first, paused before its Owner write, still holds it.
     world = await _provisioning_world(engine)
     pause = _Pause()
-    first = asyncio.create_task(_conferring(world, _provision)(_Backend(), pause))
+    first = asyncio.create_task(_writing(world, _provision)(_Backend(), pause))
     await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
     backend = _Backend()
-    second = asyncio.create_task(_conferring(world, _provision_other)(backend, None))
+    second = asyncio.create_task(_writing(world, _provision_other)(backend, None))
     await await_settled(engine, second, lambda: backend.pid)
     waited = not second.done()
     pause.resume.set()

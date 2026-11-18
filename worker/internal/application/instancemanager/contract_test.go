@@ -268,16 +268,13 @@ func driveRow(t *testing.T, row contractRow) session.CommandResult {
 		// A failed first Stop records the server as a failed-stop orphan; the row
 		// command then runs against that pending orphan (issue #251/#253).
 		//
-		// stopAfter is how many Stops the driver fails before confirming. StopServer
-		// takes 1 so the row's own command is the RETRY that terminates the orphan —
-		// the contract statement for that cell is that a stop is not refused over an
-		// orphan, it IS the path that resolves it. Every other kind keeps the orphan
-		// immovable, so nothing can retire it mid-row.
-		stopAfter := 1000
-		if row.Kind == "StopServer" {
-			stopAfter = 1
-		}
-		m := newContractManager(t, &orphanDriver{stopAfter: stopAfter})
+		// StopServer fails only the seed Stop, so the row's own command is the RETRY
+		// that terminates the orphan — the contract statement for that cell is that a
+		// stop is not refused over an orphan, it IS the path that resolves it. Every
+		// other kind keeps the orphan immovable (the driver never confirms), so
+		// nothing can retire it mid-row.
+		d := &orphanDriver{stopAfter: 1, neverConfirms: row.Kind != "StopServer"}
+		m := newContractManager(t, d)
 		startRunning(t, m)
 		if res := m.Handle(ctx, session.Command{CommandID: "stop1", ServerID: serverID, Kind: "StopServer"}); res.Success {
 			t.Fatalf("seed orphan: first stop unexpectedly succeeded: %+v", res)

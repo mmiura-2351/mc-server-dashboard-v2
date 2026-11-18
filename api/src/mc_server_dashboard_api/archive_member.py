@@ -13,6 +13,11 @@ How a member walk ends lives here too (issue #3778): :class:`EndCheckedReader`
 checks that a walk stopped at the end-of-archive marker and reads the stream on
 from there to its end. The servers upload gates read an uploaded ``tar.gz``
 through it.
+
+So does what a walk may decompress (issue #3810): :class:`CappedReader`, beneath
+:class:`EndCheckedReader`, counts every byte the walk takes from the stream
+toward a cap, and :class:`EndCheckedReader` holds the upload gates' walks to
+header limits.
 """
 
 from __future__ import annotations
@@ -29,10 +34,46 @@ _END_BLOCK = bytes(512)
 # or first the one byte tarfile reads where it seeks to the next header.
 _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 
-# How much of the stream past the end-of-archive marker to read at a time. The
-# caller counts each chunk toward its decompressed-size cap before the next one
-# is read, so a long run of zeros cannot be materialized whole.
+# The header limits, for a walk that opts in (issue #3810). How much the walk may
+# read between handing out one member and the next: that member's header blocks
+# and extended headers (PAX records, GNU long names and links, sparse maps).
+# tarfile holds extended-header data whole, so this bounds what it holds of it at
+# a time. Real extended headers are long names, xattrs and ACLs: kilobytes.
+_BETWEEN_MEMBERS_BYTES = 1024 * 1024
+
+# What the members a walk hands out may hold. tarfile keeps every member, most
+# of them with a copy of the global PAX records dict, and the TarFile keeps the
+# global records too, so a member may hold at most this many PAX records, global
+# and its own...
+_PAX_RECORDS_PER_MEMBER = 32
+# ...and the members' names, link names, PAX keys and PAX values together at most
+# this many characters. The count over-states some of it, which errs safe: a
+# global record is one string the members share but counts once a member, and a
+# name or link name read from a PAX record counts twice. Real archives hold a
+# dozen records and a few hundred characters a member.
+_HELD_CHARACTERS = 8 * 1024 * 1024
+
+# How much of the stream past the end-of-archive marker to read at a time, so a
+# long run of zeros cannot be materialized whole. Read through a CappedReader,
+# each chunk counts toward the cap before the next one is read.
 _TAIL_CHUNK_BYTES = 1024 * 1024
+
+# How much a CappedReader reads at a time to skip forward. Each chunk counts
+# toward the cap before the next one is read.
+_SKIP_CHUNK_BYTES = 1024 * 1024
+
+
+class HeaderLimitError(tarfile.ReadError):
+    """A walk read or kept more header than its header limits allow.
+
+    The limits hold only a walk whose :class:`EndCheckedReader` opts in.
+
+    More than 1 MiB of headers between two members, a member with more than 32
+    PAX records, or more than 8 Mi characters held by the members handed out
+    (issue #3810). A ``ReadError``, so a caller that refuses unreadable archives
+    refuses it too; its own class lets a caller name the refusal. The message is
+    built from fixed text and the limits only.
+    """
 
 
 def without_tar_root_prefix(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -115,19 +156,49 @@ class EndCheckedReader(io.RawIOBase):
       the header after it) makes the count too large;
     - a stream that ends where a header should start, or partway through one.
 
+    The walk is forward only (issue #3798): a seek back, or one other than from
+    the start of the stream, is a ``ReadError`` (see :meth:`seek`).
+
     One zero block is enough, though the format writes two: nothing is lost after
     it. The check relies on ``tarfile`` reading the block it stops at with one
     512-byte ``read``. Read any other way, the count or the last read differs and
     the archive is refused rather than accepted. Only ``r:`` is supported: in
     ``r|`` ``tarfile`` reads the file in whole records, so where its walk stopped
     cannot be seen from here.
+
+    With ``header_limits`` the walk is also held to header limits (issue #3810).
+    The upload gates set it; their entry cap is what keeps the character limit
+    below out of a real archive's reach. The storage walks leave it off: they
+    have no entry cap, and a large working set would reach that limit.
+
+    - The same count bounds what the walk reads between handing out one member
+      and the next to 1 MiB: the next member's header blocks and extended
+      headers, which ``tarfile`` holds whole. A read then asks the stream for at
+      most one byte past that. The caller's reads of member data are not held to
+      it.
+    - ``tarfile`` also keeps every member it hands out, with its name, its link
+      name and its PAX records, and the ``TarFile`` keeps the global ones
+      (``TarFile.pax_headers``). It copies them into a member's own records for
+      most member types, but not into an old-GNU sparse one, so each member
+      counts as holding all of them. :meth:`members` bounds what the members
+      hold: at most 32 PAX records in a member, global and its own, and at most
+      8 Mi characters of names, link names, PAX keys and PAX values in all.
+      Neither bound sees a sparse member's map (issue #3869).
+
+    Going past any of them is :class:`HeaderLimitError`.
     """
 
-    def __init__(self, stream: io.BufferedIOBase) -> None:
+    def __init__(
+        self, stream: io.BufferedIOBase, *, header_limits: bool = False
+    ) -> None:
         super().__init__()
         self._stream = stream
+        self._header_limits = header_limits
         self._last_read = b""
         self._read_since_member = 0
+        # Whether the walk, rather than the caller, is reading: from the start
+        # until a member is handed out, and from each resume until the next.
+        self._walking = True
 
     def readable(self) -> bool:
         return True
@@ -135,15 +206,24 @@ class EndCheckedReader(io.RawIOBase):
     def seekable(self) -> bool:
         """``True`` whatever the stream: ``tarfile`` seeks in ``r:``.
 
-        Not a promise about the stream. ``gzip.GzipFile`` seeks forward over any
-        source by decompressing on, and seeks back by starting over.
+        Forward only, from the start of the stream (:meth:`seek`). Not a promise
+        about the stream: ``gzip.GzipFile`` seeks forward over any source by
+        decompressing on.
         """
 
         return True
 
     def read(self, size: int = -1, /) -> bytes:
+        budgeted = self._header_limits and self._walking
+        if budgeted:
+            allowed = _BETWEEN_MEMBERS_BYTES + 1 - self._read_since_member
+            size = allowed if size < 0 else min(size, allowed)
         self._last_read = self._stream.read(size)
         self._read_since_member += len(self._last_read)
+        if budgeted and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
+            raise HeaderLimitError(
+                f"more than {_BETWEEN_MEMBERS_BYTES} bytes of headers before a member"
+            )
         return self._last_read
 
     def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
@@ -151,10 +231,13 @@ class EndCheckedReader(io.RawIOBase):
 
         ``tarfile`` seeks back only when a member's data read ran on past where
         the next header starts, such as a GNU sparse map that takes more data than
-        the member stores. It seeks with ``SEEK_SET`` only.
+        the member stores. It seeks with ``SEEK_SET`` only, so any other ``whence``
+        is a ``ReadError`` too.
         """
 
-        if whence != io.SEEK_SET or offset < self._stream.tell():
+        if whence != io.SEEK_SET:
+            raise tarfile.ReadError("a seek other than from the start of the stream")
+        if offset < self._stream.tell():
             raise tarfile.ReadError("a member's data runs past the member")
         return self._stream.seek(offset)
 
@@ -166,11 +249,33 @@ class EndCheckedReader(io.RawIOBase):
 
         The count of what the walk reads starts over each time the walk resumes
         after a member, which is after the caller has read that member's data.
+        With header limits, only the walk's own reads are held to the budget
+        between two members, and each member is held to what members may hold
+        before it is handed out.
         """
 
+        held = 0
         for member in tar:
+            if self._header_limits:
+                records = {**tar.pax_headers, **member.pax_headers}
+                if len(records) > _PAX_RECORDS_PER_MEMBER:
+                    raise HeaderLimitError(
+                        f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
+                    )
+                held += (
+                    len(member.name)
+                    + len(member.linkname)
+                    + sum(len(key) + len(value) for key, value in records.items())
+                )
+                if held > _HELD_CHARACTERS:
+                    raise HeaderLimitError(
+                        f"more than {_HELD_CHARACTERS} characters of names, link"
+                        " names and PAX records"
+                    )
+            self._walking = False
             yield member
             self._read_since_member = 0
+            self._walking = True
 
     def read_past_end_marker(self) -> Iterator[bytes]:
         """Read on from the end-of-archive marker to the end of the stream.
@@ -185,8 +290,8 @@ class EndCheckedReader(io.RawIOBase):
         are bytes after the gzip stream that are neither another gzip member nor
         zero padding.
 
-        The chunks are yielded so the caller counts them toward its
-        decompressed-size cap, under its own refusal.
+        The chunks are yielded as they are read. Read through a
+        :class:`CappedReader`, each counts toward the cap.
         """
 
         if self._last_read != _END_BLOCK or self._read_since_member not in _END_READS:
@@ -197,3 +302,73 @@ class EndCheckedReader(io.RawIOBase):
             if chunk.count(0) != len(chunk):
                 raise tarfile.ReadError("data past the end-of-archive marker")
             yield chunk
+
+
+class CapExceededError(Exception):
+    """A :class:`CappedReader` was asked for more than its cap (issue #3810).
+
+    Deliberately none of the errors a reader raises for a damaged archive, so a
+    caller can refuse it as too large rather than as unreadable.
+    """
+
+
+class CappedReader(io.BufferedIOBase):
+    """The decompressed stream beneath :class:`EndCheckedReader`, bounded (#3810).
+
+    Pass it as ``EndCheckedReader(CappedReader(stream, max_bytes))``. Every byte
+    the walk takes from the stream counts toward ``max_bytes``: headers,
+    extended-header data (PAX records, GNU long names), member data whether read
+    or skipped, the stored data of a sparse member, padding and the read past
+    the end-of-archive marker. A read past the cap raises
+    :class:`CapExceededError`, having taken at most one byte more than the cap
+    from the stream. The stream may decompress more than it hands over:
+    ``gzip.GzipFile`` reads ahead by ``io.DEFAULT_BUFFER_SIZE``, 8 KiB on 3.13
+    and 128 KiB on 3.14.
+
+    A seek forward reads on and drops what it read, so what ``tarfile`` skips is
+    counted as it is decompressed. The stream itself is never seeked. A seek back
+    is a ``ReadError``: it cannot take back what it counted. Under
+    :class:`EndCheckedReader`, which refuses a seek back first (issue #3798), a
+    walk never asks for one. ``tarfile`` in ``r:`` made none walking any of 43
+    producers' archives (GNU tar, BusyBox, Go, ``git archive``, Python
+    ``tarfile``), with member data read, skipped or partly read. A sparse
+    member whose map reaches past its stored data makes one.
+
+    A hole in a sparse member is not in the stream, so this does not count it.
+    """
+
+    def __init__(self, stream: io.BufferedIOBase, max_bytes: int) -> None:
+        super().__init__()
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._position = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        allowed = self._max_bytes + 1 - self._position
+        data = self._stream.read(
+            allowed if size is None or size < 0 else min(size, allowed)
+        )
+        self._position += len(data)
+        if self._position > self._max_bytes:
+            raise CapExceededError(f"more than {self._max_bytes} bytes")
+        return data
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
+        if whence != io.SEEK_SET:
+            raise io.UnsupportedOperation("only a seek from the start")
+        if offset < self._position:
+            raise tarfile.ReadError("the archive seeks back in its stream")
+        while self._position < offset and self.read(
+            min(offset - self._position, _SKIP_CHUNK_BYTES)
+        ):
+            pass
+        return self._position
+
+    def tell(self) -> int:
+        return self._position

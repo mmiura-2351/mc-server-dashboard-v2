@@ -22,7 +22,10 @@ from mc_server_dashboard_api.identity.application.change_password import ChangeP
 from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
 from mc_server_dashboard_api.identity.application.login import DummyPasswordHash, Login
 from mc_server_dashboard_api.identity.application.register_user import RegisterUser
-from mc_server_dashboard_api.identity.domain.errors import InvalidCredentialsError
+from mc_server_dashboard_api.identity.domain.errors import (
+    InvalidCredentialsError,
+    PasswordPolicyError,
+)
 from mc_server_dashboard_api.identity.domain.password_policy import PasswordPolicy
 from tests.identity.fakes import (
     FakeClock,
@@ -75,15 +78,21 @@ def _policy() -> PasswordPolicy:
 
 
 @pytest.mark.parametrize(
-    "password", [_PASSWORD, "not-the-password"], ids=["right", "wrong"]
+    ("password", "refused"),
+    [(_PASSWORD, False), ("not-the-password", True)],
+    ids=["right", "wrong"],
 )
-async def test_delete_account_verifies_outside_the_unit_of_work(password: str) -> None:
+async def test_delete_account_verifies_outside_the_unit_of_work(
+    password: str, refused: bool
+) -> None:
     user = make_user(password=_PASSWORD, now=_NOW)
     uow = FakeUnitOfWork()
     uow.users.seed(user)
     hasher = _WatchingHasher(uow)
 
-    with contextlib.suppress(InvalidCredentialsError):
+    with (
+        pytest.raises(InvalidCredentialsError) if refused else contextlib.nullcontext()
+    ):
         await DeleteAccount(uow=uow, hasher=hasher, clock=FakeClock(_NOW))(
             user_id=user.id, password=password
         )
@@ -104,13 +113,33 @@ async def test_change_password_verifies_and_hashes_outside_the_unit_of_work() ->
     assert hasher.calls == [("verify", "outside"), ("hash", "outside")]
 
 
+async def test_change_password_rejects_a_policy_violation_before_hashing() -> None:
+    # The policy refuses the new password before the hasher runs: a rejected
+    # password costs no KDF and answers 422, never the hasher's 503.
+    user = make_user(password=_PASSWORD, now=_NOW)
+    uow = FakeUnitOfWork()
+    uow.users.seed(user)
+    hasher = _WatchingHasher(uow)
+
+    with pytest.raises(PasswordPolicyError):
+        await ChangePassword(
+            uow=uow, hasher=hasher, clock=FakeClock(_NOW), policy=_policy()
+        )(user_id=user.id, current_password=_PASSWORD, new_password="short")
+
+    assert hasher.calls == [("verify", "outside")]
+
+
 @pytest.mark.parametrize(
-    ("username", "password"),
-    [("alice", _PASSWORD), ("alice", "not-the-password"), ("nobody", _PASSWORD)],
+    ("username", "password", "refused"),
+    [
+        ("alice", _PASSWORD, False),
+        ("alice", "not-the-password", True),
+        ("nobody", _PASSWORD, True),
+    ],
     ids=["right-password", "wrong-password", "unknown-user"],
 )
 async def test_login_hashes_and_verifies_outside_the_unit_of_work(
-    username: str, password: str
+    username: str, password: str, refused: bool
 ) -> None:
     # The same hasher builds the unknown-user dummy hash, so its first build is
     # watched too.
@@ -129,7 +158,9 @@ async def test_login_hashes_and_verifies_outside_the_unit_of_work(
         refresh_ttl=dt.timedelta(days=14),
     )
 
-    with contextlib.suppress(InvalidCredentialsError):
+    with (
+        pytest.raises(InvalidCredentialsError) if refused else contextlib.nullcontext()
+    ):
         await login(username=username, password=password)
 
     assert hasher.calls == [("hash", "outside"), ("verify", "outside")]
