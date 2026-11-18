@@ -1,4 +1,4 @@
-"""Round-trip for the 0045 server last-crash migration (issue #3281).
+"""Round-trip for the 0046 server last-crash migration (issue #3281).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5). Verifies that:
@@ -29,8 +29,8 @@ pytestmark = pytest.mark.skipif(
     _DB_URL is None, reason="MCD_TEST_DATABASE_URL not set (no real database)"
 )
 
-_PRE_MIGRATION = "0044_schedule_run_unknown"
-_MIGRATION = "0045_server_last_crash"
+_PRE_MIGRATION = "0045_installation"
+_MIGRATION = "0046_server_last_crash"
 
 _COLUMNS = text(
     "SELECT column_name FROM information_schema.columns "

@@ -17,8 +17,8 @@ NULL in both until its next crash.
 
 Downgrade drops both columns, their CHECK with them.
 
-Revision ID: 0045_server_last_crash
-Revises: 0044_schedule_run_unknown
+Revision ID: 0046_server_last_crash
+Revises: 0045_installation
 Create Date: 2026-11-18
 """
 
@@ -29,8 +29,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0045_server_last_crash"
-down_revision: str | None = "0044_schedule_run_unknown"
+revision: str = "0046_server_last_crash"
+down_revision: str | None = "0045_installation"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
