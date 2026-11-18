@@ -969,6 +969,21 @@ func (m *Manager) skipAbandonedTail(cmd session.Command) session.CommandResult {
 		"instancemanager: snapshot published after its command was abandoned")
 }
 
+// snapshotCancelled ends a snapshot whose session ended before it finished
+// (issue #3340): the stream dropped or the Worker is shutting down. That is a
+// cancellation, not a failed snapshot, and not a deadline either. Its answer
+// reaches no caller: a session sends nothing once it has ended, and the API
+// failed the command when the stream went and recovers from that loss on its
+// own. So it is logged as the cancellation it is, with what the work had
+// reported in detail, and answered as such. The failure code is only what a
+// result needs; no caller reads it.
+func (m *Manager) snapshotCancelled(cmd session.Command, detail string) session.CommandResult {
+	m.logger.Info("snapshot cancelled: its session ended before it finished",
+		"server_id", cmd.ServerID, "detail", detail)
+	return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+		"instancemanager: snapshot cancelled: its session ended before it finished")
+}
+
 // finishAttempt is the handler's last duty to an attempt (issue #3511): it
 // restores save-on if one is owed, then drops the handler's share of the claim.
 //
@@ -1553,6 +1568,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 	if finished {
 		m.finishAttempt(cmd.ServerID, att)
+		if !res.Success && ctx.Err() != nil {
+			return m.snapshotCancelled(cmd, res.ErrorMessage)
+		}
 		return res
 	}
 	if att.abandon() {
@@ -1567,6 +1585,9 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		return session.CommandResult{CommandID: cmd.CommandID, Success: true}
 	}
 	m.finishAttempt(cmd.ServerID, att)
+	if ctx.Err() != nil {
+		return m.snapshotCancelled(cmd, "the attempt keeps the server's claim until its blocked call returns")
+	}
 	m.logger.Warn("snapshot abandoned at its deadline; the attempt keeps the server's claim until its blocked call returns",
 		"server_id", cmd.ServerID, "error", cmdCtx.Err())
 	return fail(cmd.CommandID, session.CommandErrorTransferFailed,
