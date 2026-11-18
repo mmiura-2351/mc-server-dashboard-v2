@@ -157,7 +157,9 @@ export function statePill(state: ObservedState): PillSpec {
  * restart to an unknown one. Restart does not apply to a crashed one: the
  * Worker holds no live instance, so the API refuses it (409
  * `server_not_running`) and the reconciler restarts the server on its own
- * (issue #3419).
+ * (issue #3419). With no Worker `assigned` (a start the reconciler has yet to
+ * place) stop applies whatever the observed state: the API withdraws the
+ * intent, with no Worker to tell (issue #3815).
  *
  * Under a stopped intent, stop applies exactly while a Worker is still
  * `assigned`: the API then runs the convergence the reconciler would (a drain
@@ -183,6 +185,9 @@ export function actionApplies(
   }
   if (action === "stop" && desired === "stopped") {
     return assigned === true;
+  }
+  if (action === "stop" && desired === "running" && assigned === false) {
+    return true;
   }
   if (action === "restart" && (desired === "stopped" || assigned === false)) {
     return false;
