@@ -134,10 +134,10 @@ MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 # archive inflates on extraction (a gzip bomb). 8 GiB bounds that amplification
 # while comfortably covering a real Minecraft world (restores of large worlds are
 # expected; the point is bounding the blow-up ratio, not blocking big worlds). The
-# bound counts ACTUAL decompressed bytes, every one of them: headers,
-# extended-header data and skipped member data as well as member data as it is
-# drained (issue #3810). A constant is intentional (no config knob requested);
-# document if it ever needs tuning.
+# bound counts ACTUAL decompressed bytes. At upload that is every one of them:
+# headers, extended-header data and skipped member data as well as member data as
+# it is drained (issue #3810). A constant is intentional (no config knob
+# requested); document if it ever needs tuning.
 MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 
 # The archive-entry-count cap. The cumulative-size cap alone does not bound a
