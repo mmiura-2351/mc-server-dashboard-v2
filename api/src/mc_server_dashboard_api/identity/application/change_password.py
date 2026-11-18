@@ -5,7 +5,9 @@ full registration password policy on the new password (SECURITY.md Section 1,
 same reason codes), re-hashes, and revokes *all* of the user's refresh tokens so
 every outstanding session is invalidated — the in-flight access token may ride
 out its short TTL (documented at the route). All writes happen atomically through
-the :class:`UnitOfWork`.
+the :class:`UnitOfWork`. The verify and the re-hash run between the read and the
+write transactions, never inside one (#3861), and the write replaces the hash
+only if it is still the one verified.
 
 A wrong current password raises :class:`InvalidCredentialsError`, the same error
 login raises, so the edge maps it to the same uniform 401 and a caller cannot use
@@ -43,22 +45,26 @@ class ChangePassword:
     async def __call__(
         self, *, user_id: UserId, current_password: str, new_password: str
     ) -> None:
+        # The KDF runs outside any transaction: it is slow and memory-hard, and
+        # no pooled connection or lock may wait on it (#3861).
         async with self.uow:
             user = await self.uow.users.get_by_id(user_id)
-            if user is None:
-                raise UserNotFoundError(str(user_id.value))
-            if not await self.hasher.verify(current_password, user.password_hash):
-                raise InvalidCredentialsError
-            self.policy.validate(new_password, username=user.username, email=user.email)
+        if user is None:
+            raise UserNotFoundError(str(user_id.value))
+        if not await self.hasher.verify(current_password, user.password_hash):
+            raise InvalidCredentialsError
+        self.policy.validate(new_password, username=user.username, email=user.email)
+        new_hash = await self.hasher.hash(new_password)
 
-            now = self.clock.now()
+        now = self.clock.now()
+        async with self.uow:
             # Compare against the hash just verified (#3214): a password changed
             # concurrently since the read makes ``current_password`` stale, so
             # the change is refused like a wrong current password.
             if not await self.uow.users.change_password_hash(
                 user.id,
                 expected_hash=user.password_hash,
-                new_hash=await self.hasher.hash(new_password),
+                new_hash=new_hash,
                 updated_at=now,
             ):
                 raise InvalidCredentialsError

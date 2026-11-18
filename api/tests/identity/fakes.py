@@ -384,11 +384,16 @@ class FakeUnitOfWork(UnitOfWork):
         self.refresh_tokens = refresh_tokens or FakeRefreshTokenRepository()
         self.ownership = ownership or FakeCommunityOwnership()
         self.commits = 0
+        # How many ``async with`` blocks are open now, so a test can tell whether
+        # slow work ran inside a transaction (#3861).
+        self.open_blocks = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":
+        self.open_blocks += 1
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.open_blocks -= 1
         return None
 
     async def commit(self) -> None:

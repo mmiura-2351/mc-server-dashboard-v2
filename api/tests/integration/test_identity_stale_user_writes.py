@@ -9,8 +9,10 @@ cannot reactivate an account deactivated after it read it. (A deactivation reads
 its target under lock, #3239, so a grant cannot commit between its read and its
 write.) The password change additionally
 compares the hash it verified against, so a stale change cannot replace a password
-that changed since. A grant or reactivation whose target is deleted after its
-read matches no row and reports the user missing instead of success (#3247).
+that changed since, and an account deletion does the same, so a stale deletion
+cannot remove an account whose password changed since (#3861). A grant or
+reactivation whose target is deleted after its read matches no row and reports
+the user missing instead of success (#3247).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5), mirroring ``test_identity_repositories.py``.
@@ -39,6 +41,7 @@ from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork,
 )
 from mc_server_dashboard_api.identity.application.change_password import ChangePassword
+from mc_server_dashboard_api.identity.application.delete_account import DeleteAccount
 from mc_server_dashboard_api.identity.application.set_platform_admin import (
     SetPlatformAdmin,
 )
@@ -286,6 +289,35 @@ async def test_stale_password_change_is_refused_after_a_concurrent_change(
             user_id=target.id, current_password=_CURRENT, new_password=_OTHER
         )
     )
+    await pause.read_done.wait()
+    await _change_password(SqlAlchemyUnitOfWork(factory))(
+        user_id=target.id, current_password=_CURRENT, new_password=_NEW
+    )
+    pause.resume.set()
+    with pytest.raises(InvalidCredentialsError):
+        await stale
+
+    persisted = await _load(factory, target.id)
+    assert persisted.password_hash == f"hashed::{_NEW}"
+
+
+async def test_stale_account_deletion_is_refused_after_a_password_change(
+    engine: AsyncEngine,
+) -> None:
+    # The deletion verifies the password against the hash it read before it
+    # locks the account (#3861); a change committed in between makes that verify
+    # stale, so the account must survive with its new password.
+    factory = create_session_factory(engine)
+    target = make_user(username="target", email="target@example.com", password=_CURRENT)
+    await _seed(factory, target)
+
+    pause = _Pause()
+    delete = DeleteAccount(
+        uow=_PausingUnitOfWork(factory, pause),
+        hasher=StubHasher(),
+        clock=FakeClock(_NOW),
+    )
+    stale = asyncio.create_task(delete(user_id=target.id, password=_CURRENT))
     await pause.read_done.wait()
     await _change_password(SqlAlchemyUnitOfWork(factory))(
         user_id=target.id, current_password=_CURRENT, new_password=_NEW
