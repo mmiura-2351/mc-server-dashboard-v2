@@ -195,7 +195,9 @@ export type StartRefusal = "invalid_transition" | "transition_conflict";
  * - `null`: a stopped intent with no Worker assigned. Start is offered whatever
  *   the server reads. A `starting`, `running`, `stopping` or `restarting` there
  *   is one no Worker reports on any more and nothing else converges, so Start
- *   is the way out.
+ *   is the way out. If the server is in fact still live on a Worker the row no
+ *   longer names, the start can place a second instance on another Worker
+ *   (issue #3740).
  *
  * `startGuard.json` lists the API's answer for every (desired, observed,
  * assigned) row; this function and the API's start route are both tested

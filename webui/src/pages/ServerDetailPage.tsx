@@ -492,8 +492,8 @@ function Controls({
   const desired = normalizeState(server.desired_state);
   const assigned = server.assigned_worker_id !== null;
   // Start follows the API's start guard, whatever the server reads (#3860).
-  // While the previous stop still holds its Worker, show it disabled, with the
-  // reason (#3818).
+  // While the stop still holds its Worker, show it disabled, with the reason
+  // (#3818).
   const startRefused = startRefusal(desired, assigned);
   const startHeld = startRefused === "transition_conflict";
   const startHeldId = useId();

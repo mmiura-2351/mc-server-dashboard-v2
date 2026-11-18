@@ -757,7 +757,8 @@ def test_a_start_whose_hydrate_finds_the_server_live_is_409_invalid_transition()
 
 # The answer to a start in every (desired, observed, assigned) row, which the
 # Web UI's ``startRefusal`` (serverState.ts) is tested against too: a guard that
-# starts reading another input, or answers a row differently, fails here.
+# starts reading the observed state, or answers a row differently, fails here.
+# An input the rows do not vary is not caught.
 _START_GUARD: list[dict[str, Any]] = json.loads(
     (
         Path(__file__).resolve().parents[3]

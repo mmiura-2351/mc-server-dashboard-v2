@@ -414,7 +414,7 @@ export const ja: Record<TranslationKey, string> = {
   // Lifecycle controls.
   "serverDetail.start": "起動",
   "serverDetail.startAwaitsRelease":
-    "前回の停止でサーバーが切り離されるのを待っています…",
+    "停止が完了してサーバーが切り離されるのを待っています…",
   "serverDetail.startCrashed": "再起動",
   "serverDetail.stop": "停止",
   "serverDetail.stopGraceful": "停止（通常）",

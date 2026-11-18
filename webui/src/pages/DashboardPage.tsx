@@ -964,8 +964,8 @@ interface ActionProps {
 // One lifecycle button. Rendered only when permitted (controls render from
 // permissions, WEBUI_SPEC.md 7.3); disabled while a request is in flight or the
 // action does not apply to the current state. Start follows the API's start
-// guard, whatever the server reads (#3860), and a Start held by the Worker the
-// previous stop still holds says so (#3818).
+// guard, whatever the server reads (#3860), and a Start held by the Worker a
+// stop still holds says so (#3818).
 function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   if (!can(`server:${action}`, { serverId: server.id })) {
     return null;

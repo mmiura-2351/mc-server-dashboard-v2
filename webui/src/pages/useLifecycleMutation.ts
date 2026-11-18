@@ -131,7 +131,10 @@ export function useLifecycleMutation({
       // A success stays pending until the refetch answers: until then the
       // cache holds the transitional state beside the intent from before the
       // request, and Start gates on the intent alone (#3860). A failure has
-      // rolled its state back, so it releases the controls at once.
+      // rolled its state back, so it releases the controls at once. Accepted
+      // residual: a refetch that fails, or is paused while offline or in a
+      // background tab, ends the hold too, and Start reads as offered until
+      // the next read; the API refuses that start (409 invalid_transition).
       return error ? undefined : refetched;
     },
   });
