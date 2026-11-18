@@ -5,8 +5,9 @@ caller (non-member -> 404, member-without-permission -> 403; Section 6.4), so th
 assume an authorized member and only do the data work.
 
 - :class:`AddMember` manually adds an *existing* user to the community (FR-MEM-1).
-  The user is validated against the :class:`UserDirectory` Port first (so an
-  unknown user fails cleanly rather than tripping the FK); a duplicate membership
+  The user is checked in the add's own transaction, held against account
+  deletion until it commits (issue #3856), so an unknown or concurrently deleted
+  user fails cleanly rather than tripping the FK; a duplicate membership
   surfaces as :class:`MembershipAlreadyExistsError`.
 - :class:`RemoveMember` deletes the membership; its ``membership_role`` rows and
   the member's resource grants in *this* community go with it by DB cascade
@@ -116,6 +117,12 @@ class AddMember:
     routes funnel into the same :class:`MemberUserNotFoundError` when the user
     does not exist, so a username that matches nobody is rejected exactly like an
     unknown id — no existence differential to enumerate against.
+
+    The user is checked, and held against account deletion, in the transaction
+    that inserts the membership (issue #3856): a deletion either committed first,
+    and the user is not found, or waits for this commit and cascades the
+    membership. A check outside it would let a deletion commit in between and
+    the insert violate its foreign key.
     """
 
     uow: UnitOfWork
@@ -134,8 +141,8 @@ class AddMember:
             if resolved is None:
                 raise MemberUserNotFoundError(username)
             user_id = resolved
-        elif user_id is None or not await self.users.exists(user_id):
-            raise MemberUserNotFoundError(str(user_id.value) if user_id else "")
+        elif user_id is None:
+            raise MemberUserNotFoundError("")
 
         membership = Membership(
             id=MembershipId.new(),
@@ -144,6 +151,10 @@ class AddMember:
             created_at=self.clock.now(),
         )
         async with self.uow:
+            # First, before any other lock: the user is held against account
+            # deletion until this commits (issue #3856).
+            if not await self.uow.users.lock_and_check_exists(user_id):
+                raise MemberUserNotFoundError(str(user_id.value))
             await self.uow.memberships.add(membership)
             await self.uow.commit()
         return membership

@@ -17,9 +17,12 @@ confers is the one it commits.
 
 Lock order, the same for every transaction that locks through here:
 
-0. a role assignment's recipient, held against account deletion by its
-   community-ownership lock (``UnitOfWork.users``, issue #3217), before any
-   lock of this context;
+0. the recipient of a role assignment or a grant creation, held against account
+   deletion by its community-ownership lock (``UnitOfWork.users``, issues
+   #3217, #3856), before any lock of this context. A grant creation that held
+   the recipient's membership first would deadlock with the deletion: the
+   deletion's cascade waits for that membership, and the grant's foreign-key
+   check waits for the user row the deletion is deleting;
 1. memberships: the actor's, and the recipient's a role assignment or grant
    creation inserts its row under (``FOR KEY SHARE``, one statement in
    ascending id order, taken by the use case before anything else but step 0);

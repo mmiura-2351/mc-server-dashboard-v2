@@ -210,8 +210,8 @@ def _inject_eio(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
         def _failing_read(self: Any, size: int) -> bytes:
             raise OSError(errno.EIO, "injected read fault")
 
-        # The low-level file ``tarfile`` stream mode reads a named archive through.
-        monkeypatch.setattr("tarfile._LowLevelFile.read", _failing_read)
+        # The member walk reads the spool through ``gzip.GzipFile`` (issue #3798).
+        monkeypatch.setattr(gzip.GzipFile, "read", _failing_read)
 
 
 @pytest.mark.parametrize("stage", ["create", "write", "read"])

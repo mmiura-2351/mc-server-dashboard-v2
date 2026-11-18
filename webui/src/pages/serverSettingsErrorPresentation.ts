@@ -22,6 +22,9 @@ export interface SettingsErrorPresentation {
 const SETTINGS_ERROR_KEY: Record<string, TranslationKey> = {
   server_not_stopped: "serverDetail.error.notStopped",
   server_unsettled: "serverDetail.error.unsettled",
+  // A delete a Worker still holds (#3852): the cache showed the server
+  // released, so the button was not held. Same words as the held button.
+  server_assigned: "serverDetail.danger.deleteAwaitsRelease",
   port_taken: "serverDetail.error.portTaken",
   port_out_of_range: "serverDetail.error.portOutOfRange",
   invalid_snapshot_interval: "serverDetail.error.invalidSnapshotInterval",
