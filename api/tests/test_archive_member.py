@@ -375,6 +375,18 @@ def test_an_archive_that_does_not_end_at_its_marker_is_refused(
 
 
 @_both
+def test_a_walk_that_seeks_back_is_refused(gzipped: bool) -> None:
+    # A GNU sparse map that takes more data than its member stores: reading the
+    # data runs on into the next member, and tarfile then seeks back to that
+    # member's header (issue #3798).
+    sparse = {"GNU.sparse.size": "2048", "GNU.sparse.map": "0,2048"}
+    archive = _tar({"s.bin": b"S", "b.txt": _B_DATA}, pax={"s.bin": sparse})
+
+    with pytest.raises(tarfile.ReadError, match="runs past the member"):
+        _walk(archive, gzipped=gzipped)
+
+
+@_both
 def test_the_zeros_past_the_marker_are_yielded_to_the_caller(gzipped: bool) -> None:
     # tarfile pads to a 20-record block; the walk stops after the marker's first
     # zero block, and every byte after it is read and yielded for the cap.

@@ -3916,16 +3916,18 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
     The spool is read forward, one member at a time, so the whole archive is
     never held in memory at once. A snapshot is a plain tar, so a compressed one
     does not read as a tar at all (issue #3786). :func:`_plain_member_filter`
-    refuses unsafe and link members before any is extracted, so no link is
-    looked up by name.
+    judges each member as the walk reaches it, before that member is extracted,
+    and refuses an unsafe or link member, so no link is looked up by name.
 
     The walk must end at the end-of-archive marker, with only zeros after it, or
     the extraction raises ``ReadError`` (issue #3798): ``tarfile`` takes a header
     it cannot read, past the first, for the end of the archive, which would
     publish the members before it alone. :class:`EndCheckedReader` tells where
     the walk stopped only in ``r:``, since in ``r|`` ``tarfile`` reads whole
-    records. The spool is a file, so ``r:`` can read it, and extracting every
-    member in order never seeks back.
+    records. The spool is a file, so ``r:`` can read it. Extracting every member
+    in order seeks back only when a member's data runs past the member, a GNU
+    sparse map that takes more than the member stores, and the reader refuses
+    that seek as ``ReadError`` too.
     """
 
     with (

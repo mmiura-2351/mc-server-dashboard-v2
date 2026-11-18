@@ -495,6 +495,31 @@ TARS_NOT_ENDING_AT_THEIR_MARKER: dict[str, bytes] = {
 # A sound plain tar of :data:`END_CHECK_FILES`.
 END_CHECK_TAR = _tar_of(_PROPERTIES, _LEVEL, _AFTER)
 
+# A plain tar whose GNU sparse member takes 2048 bytes of data where it stores
+# one, so a read of its data runs on into the next member, and ``tarfile`` then
+# seeks back to that member's header (issue #3798). One shape per sparse format,
+# and a real size with no map.
+_OVER_READ = 2048
+TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT: dict[str, bytes] = {
+    name: _tar_of(_PROPERTIES, member, _LEVEL)
+    for name, member in {
+        "0.1-map": _member(
+            _SPARSE_NAME,
+            b"A",
+            {"GNU.sparse.size": str(_OVER_READ), "GNU.sparse.map": f"0,{_OVER_READ}"},
+        ),
+        "S-map": _old_gnu_sparse_member(
+            _SPARSE_NAME, [(0, _OVER_READ)], _OVER_READ, b"A"
+        ),
+        "1.0-map": _sparse_1_0_member(
+            _SPARSE_NAME, [(0, _OVER_READ)], _OVER_READ, b"A"
+        ),
+        "realsize-without-a-map": _member(
+            _SPARSE_NAME, b"A", {"GNU.sparse.realsize": str(_OVER_READ)}
+        ),
+    }.items()
+}
+
 
 def _stored_byte_flipped() -> bytes:
     """:data:`END_CHECK_TAR` gzipped uncompressed, one stored data byte flipped:
@@ -529,6 +554,12 @@ def two_gzip_members(split: str) -> bytes:
     return gzip.compress(END_CHECK_TAR[:at]) + gzip.compress(END_CHECK_TAR[at:])
 
 
+def reserved_member_over(size: int) -> bytes:
+    """A tar whose reserved root member holds ``size`` zero bytes (issue #3798)."""
+
+    return _tar_of(_PROPERTIES, _member(".mcsd_generation-cache", bytes(size)))
+
+
 def reserved_member_with_unreadable_data() -> bytes:
     """A tar whose reserved root member's data does not read (issue #3798).
 
@@ -552,9 +583,18 @@ def _gnu_tar_on_path() -> bool:
     return "GNU tar" in version.stdout
 
 
-needs_gnu_tar = pytest.mark.skipif(not _gnu_tar_on_path(), reason="no GNU tar")
-needs_pigz = pytest.mark.skipif(shutil.which("pigz") is None, reason="no pigz")
-needs_go = pytest.mark.skipif(shutil.which("go") is None, reason="no Go toolchain")
+needs_gnu_tar = pytest.mark.skipif(
+    not _gnu_tar_on_path(),
+    reason="GNU tar is not on PATH: its archives are not checked here",
+)
+needs_pigz = pytest.mark.skipif(
+    shutil.which("pigz") is None,
+    reason="pigz is not on PATH: its archives are not checked here",
+)
+needs_go = pytest.mark.skipif(
+    shutil.which("go") is None,
+    reason="go is not on PATH: Go archive/tar snapshots are not checked here",
+)
 
 
 def _end_check_tree(root: Path) -> Path:

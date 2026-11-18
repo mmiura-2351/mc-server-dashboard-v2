@@ -58,6 +58,7 @@ from tests.storage.helpers import (
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
+    TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT,
     bomb_targz,
     corrupt_region_bytes,
     drain,
@@ -72,6 +73,7 @@ from tests.storage.helpers import (
     pigz,
     read_tar,
     region_targz,
+    reserved_member_over,
     reserved_member_with_unreadable_data,
     stream_of,
     tar_bytes,
@@ -1226,6 +1228,24 @@ async def test_check_backup_health_rejects_decompression_bomb(
         await harness.storage.check_backup_health(community, server, key)
 
 
+async def test_a_left_out_reserved_member_counts_toward_the_restore_cap(
+    backend: str, tmp_path: Path
+) -> None:
+    """Restore and the health probe read a reserved root member's data before
+    they leave it out (issue #3798), so its bytes count toward the decompressed
+    size cap like any member's, on BOTH backends."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=64 * 1024)
+    community, server = new_scope()
+    archive = gzip.compress(reserved_member_over(1 << 20))
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
 async def test_zeros_past_the_marker_count_toward_the_restore_cap(
     backend: str, tmp_path: Path
 ) -> None:
@@ -1749,6 +1769,23 @@ async def test_backup_whose_gzip_stream_does_not_end_soundly_is_unreadable(
     read the trailer, so a flipped stored byte restored as different data."""
 
     await _restore_and_health_refuse(harness, DAMAGED_GZIP_STREAMS[shape])
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("shape", list(TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT))
+async def test_backup_whose_member_data_runs_past_it_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """A GNU sparse member that takes more data than it stores makes ``tarfile``
+    seek back to the next header once its data is read. Restore and the health
+    probe refuse that seek, so the backup is ``ArchiveUnreadableError`` on BOTH
+    backends (issue #3798), where it restored the member padded with the next
+    member's bytes."""
+
+    archive = gzip.compress(TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT[shape])
+
+    await _restore_and_health_refuse(harness, archive)
 
 
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
