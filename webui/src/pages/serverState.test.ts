@@ -152,6 +152,18 @@ describe("actionApplies", () => {
     expect(actionApplies("restart", "running", "running", true)).toBe(true);
   });
 
+  // Under a running intent no Worker holds yet (the reconciler still owes its
+  // placement), the API withdraws the intent on a stop whatever the server was
+  // last observed as (#3815). Nothing applies while transitional, as elsewhere.
+  it("stop under desired=running applies while no worker is assigned", () => {
+    for (const state of ["running", "stopped", "crashed", "unknown"] as const) {
+      expect(actionApplies("stop", state, "running", false)).toBe(true);
+    }
+    expect(actionApplies("stop", "stopped", "running", true)).toBe(false);
+    expect(actionApplies("stop", "stopped", "running")).toBe(false);
+    expect(actionApplies("stop", "starting", "running", false)).toBe(false);
+  });
+
   // The API also refuses a restart of a row no Worker is assigned to, under a
   // running intent too (409 invalid_transition, #3502).
   it("restart under desired=running applies only while a worker is assigned", () => {

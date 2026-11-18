@@ -1863,6 +1863,45 @@ async def test_placed_start_overtaken_by_a_stop_intent_is_skipped_quietly(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
+class _StopLandsAfterListing(FakeServerRepository):
+    """Withdraws each listed intent, as a stop does, once the tick has listed it.
+
+    The tick still holds the candidate as listed, desired running and unassigned.
+    """
+
+    async def list_reconcilable(self) -> list[Server]:
+        listed = await super().list_reconcilable()
+        for server in listed:
+            self.by_id[server.id].desired_state = DesiredState.STOPPED
+        return listed
+
+
+async def test_placement_of_an_intent_stopped_after_listing_is_skipped_quietly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An operator stop withdraws an unplaced start intent (issue #3815) after the
+    # tick listed the row and before the placement reads it, so the placement's
+    # entry guard finds no running intent and sends nothing. Nothing failed: the
+    # stop owns the row, so the tick neither counts a failure nor warns.
+    uow = FakeUnitOfWork(servers=_StopLandsAfterListing())
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(place_to=_WORKER)
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert cp.dispatched == []
+    assert cp.reserved == []
+    assert server.id not in reconciler._attempts
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
 async def test_backoff_grows_exponentially() -> None:
     uow = FakeUnitOfWork()
     server = _server(
