@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     ServerBusyError,
 )
@@ -2135,6 +2136,43 @@ async def test_a_stop_run_behind_the_start_leaves_a_later_release_plain(
     assert world.cp.live == set()
     assert world.kinds() == ["hydrate", "start", "stop", "snapshot", "snapshot"]
     assert world.stored() == (DesiredState.STOPPED, None)
+
+
+@pytest.mark.parametrize(
+    ("observed", "convergence"),
+    [
+        (ObservedState.STOPPED, "clear_stale_assignment"),
+        (ObservedState.UNKNOWN, "redispatch_stop"),
+    ],
+    ids=["clear", "redispatch-stop"],
+)
+async def test_a_convergence_that_finds_the_row_started_again_withdraws_nothing(
+    observed: ObservedState, convergence: str
+) -> None:
+    # A reconciler tick listed the stopped, still-assigned row as owed this
+    # convergence. Before it acts, the user's stop releases the row and the user
+    # starts the server again. The tick reads the row desired running and gives
+    # up. Its bump comes only after that check, so the user's start, hydrating
+    # meanwhile, still finds the count it read and is sent, not answered 409.
+    world = _World(assigned=True, observed=observed)
+    await world.stop()
+    assert world.stored() == (DesiredState.STOPPED, None)
+    released = world.kinds()
+    count = world.intents.current(world.server_id)
+
+    async def tick() -> None:
+        converge = getattr(world.stop_server(), convergence)
+        with pytest.raises(InvalidLifecycleTransitionError):
+            await converge(community_id=world.community, server_id=world.server_id)
+
+    world.after_hydrate(tick)
+
+    await world.start()
+
+    assert world.kinds() == [*released, "hydrate", "start"]
+    assert world.cp.live == {world.server_id}
+    assert world.stored() == (DesiredState.RUNNING, world.worker)
+    assert world.intents.current(world.server_id) == count
 
 
 async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends() -> (
