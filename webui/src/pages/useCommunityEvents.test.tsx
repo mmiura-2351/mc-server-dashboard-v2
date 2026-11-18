@@ -407,7 +407,7 @@ describe("useCommunityEvents", () => {
         notificationFrame("s1", "Scheduled stop failed", "worker_unavailable"),
       );
     });
-    const toast = screen.getByRole("status");
+    const toast = screen.getByRole("alert");
     expect(toast).toHaveTextContent("Scheduled stop failed");
     expect(toast).toHaveTextContent("worker_unavailable");
     expect(toast.className).toContain("error");

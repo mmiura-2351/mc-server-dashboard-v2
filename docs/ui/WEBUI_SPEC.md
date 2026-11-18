@@ -1047,6 +1047,15 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` and `worker_state` members are enumerated in
   [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
+- An error toast stays until it is dismissed, since many errors name a remedy
+  to act on. Any other toast closes on its own after 2 s plus 100 ms per
+  character of its message, clamped to 3.2–12 s. It counts characters, not
+  words, because Japanese has no word breaks; about 10 characters a second
+  suits Japanese and leaves English time to spare. Hovering a toast or focusing
+  its dismiss button pauses the countdown, which then resumes with the time
+  left. An error toast is a `role="alert"` with `aria-live="assertive"`, any
+  other a `role="status"` with `aria-live="polite"`. The dismiss button is in
+  the tab order, and Escape dismisses the toast whose button has focus.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.
