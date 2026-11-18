@@ -240,6 +240,24 @@ async def test_a_failing_delete_skips_that_pack_and_the_pass_reclaims_the_rest(
     assert "1 failed" in summary.getMessage()
 
 
+async def test_a_pass_whose_every_delete_failed_logs_its_summary_at_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Nothing was reclaimed, but the pass is not empty: the summary is the one
+    # line that counts the failures, so it stays visible (issue #3871).
+    bucket = _Bucket()
+    (failing,) = await bucket.orphans(1)
+    bucket.faults.when = lambda op, key: op == "delete_object"
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        result = await bucket.gc()
+
+    assert bucket.blob_keys() == [failing]
+    assert (result.deleted, result.failed) == (0, 1)
+    (summary,) = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert "1 failed" in summary.getMessage()
+
+
 @pytest.mark.parametrize("operation", ["list_objects", "delete_object"])
 async def test_a_store_that_gives_no_answer_ends_the_pass(operation: str) -> None:
     # A delete the store never answered says nothing about this pack: every later
