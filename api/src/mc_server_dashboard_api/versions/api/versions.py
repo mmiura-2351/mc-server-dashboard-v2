@@ -56,6 +56,7 @@ from mc_server_dashboard_api.versions.application.list_versions import (
 )
 from mc_server_dashboard_api.versions.domain.errors import (
     CatalogUnavailableError,
+    StoreNotOwnedError,
     UnknownServerTypeError,
     UnknownVersionError,
 )
@@ -159,10 +160,14 @@ async def jar_pool_gc(
 
     A bounded scan diffing the pool against the live reference set, skipping JARs
     inside the safety window; returns what it scanned and freed. Audited like the
-    catalog refresh.
+    catalog refresh. Refused with 409 ``store_not_owned`` when the store's owner
+    marker names another database (STORAGE.md Section 4.3, issue #3870).
     """
 
-    result = await use_case()
+    try:
+        result = await use_case()
+    except StoreNotOwnedError as exc:
+        raise problem(status.HTTP_409_CONFLICT, "store_not_owned") from exc
     await recorder.record(
         AuditEvent(
             operation=ops.VERSION_JAR_GC,

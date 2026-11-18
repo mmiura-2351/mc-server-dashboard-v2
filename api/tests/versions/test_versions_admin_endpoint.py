@@ -31,7 +31,10 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.domain.port import JarPoolStats
 from mc_server_dashboard_api.versions.application.jar_gc import JarGcResult
-from mc_server_dashboard_api.versions.domain.errors import UnknownServerTypeError
+from mc_server_dashboard_api.versions.domain.errors import (
+    StoreNotOwnedError,
+    UnknownServerTypeError,
+)
 from mc_server_dashboard_api.versions.domain.value_objects import ServerType
 
 
@@ -63,6 +66,11 @@ class _FakeGc:
     async def __call__(self) -> JarGcResult:
         self.calls += 1
         return JarGcResult(scanned=5, deleted=2, freed_bytes=2048)
+
+
+class _RefusedGc:
+    async def __call__(self) -> JarGcResult:
+        raise StoreNotOwnedError("jar-pool GC refused: the store belongs elsewhere")
 
 
 class _RecordingRecorder:
@@ -203,3 +211,15 @@ def test_jar_pool_gc_is_audited() -> None:
     assert len(recorder.events) == 1
     event = recorder.events[0]
     assert event.operation == ops.VERSION_JAR_GC  # type: ignore[attr-defined]
+
+
+def test_jar_pool_gc_refused_on_a_store_another_database_owns_is_409() -> None:
+    # A refused pass deleted nothing, so the admin must not read a result as if
+    # the pool had been collected, and nothing is audited as done (issue #3870).
+    recorder = _RecordingRecorder()
+    client = _client(gc=_RefusedGc(), recorder=recorder)
+    with client:
+        resp = client.post("/api/versions/jar-pool/gc")
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "store_not_owned"
+    assert recorder.events == []

@@ -2695,7 +2695,8 @@ export interface paths {
          *
          *     A bounded scan diffing the pool against the live reference set, skipping JARs
          *     inside the safety window; returns what it scanned and freed. Audited like the
-         *     catalog refresh.
+         *     catalog refresh. Refused with 409 ``store_not_owned`` when the store's owner
+         *     marker names another database (STORAGE.md Section 4.3, issue #3870).
          */
         post: operations["jar_pool_gc_api_versions_jar_pool_gc_post"];
         delete?: never;

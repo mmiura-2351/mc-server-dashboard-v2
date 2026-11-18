@@ -548,7 +548,8 @@ def get_jar_pool_gc(request: Request) -> RunJarPoolGc:
 
     The pool seam over storage's ``JarStore`` (list + delete) plus the live
     reference set read from server rows (the ``ServerJarReferences`` adapter over
-    the servers repository). The same use case the periodic loop drives.
+    the servers repository). The same use case the periodic loop drives, gated on
+    the same store owner marker the lifespan claimed (issue #3870).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -556,6 +557,7 @@ def get_jar_pool_gc(request: Request) -> RunJarPoolGc:
         pool=StorageJarPool(jars=get_storage(request)),
         references=ServerJarReferences(uow=ServersUnitOfWork(session_factory)),
         clock=VersionsSystemClock(),
+        ownership=request.app.state.store_ownership,
     )
 
 

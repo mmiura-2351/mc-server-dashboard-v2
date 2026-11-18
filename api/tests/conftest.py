@@ -29,6 +29,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 from tests.argon2_diagnostics import RECENT_NODE_IDS
 from tests.client_utils import bind_exit_stack
 from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
+from tests.store_ownership import FakeStoreOwnership
 
 # ``--run-order-log``, which the gate's api run passes (issue #3750).
 pytest_plugins = ["tests.run_order_log"]
@@ -188,6 +189,29 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # the route-walking tests see the docs mount. The gating tests set this
     # explicitly.
     monkeypatch.setenv("MCD_API_DOCS__ENABLED", "true")
+    # Stand in for the store owner marker (issue #3870). The real claim reads the
+    # database's installation id and writes a marker at the store, and the suite
+    # gives the app neither: the dummy database is never dialed, and the default
+    # fs root is ``./data`` in the working tree. The stand-in lets every sweep
+    # and GC run, as before; tests/test_store_ownership_wiring.py puts the real
+    # marker back.
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership", _standin_ownership
+    )
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.ObjectStoreOwnership", _standin_ownership
+    )
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.read_installation_id", _no_installation_id
+    )
+
+
+def _standin_ownership(*_args: object, **_kwargs: object) -> FakeStoreOwnership:
+    return FakeStoreOwnership()
+
+
+async def _no_installation_id(_session_factory: object) -> uuid.UUID:
+    return uuid.UUID(int=0)
 
 
 @pytest.fixture(autouse=True)

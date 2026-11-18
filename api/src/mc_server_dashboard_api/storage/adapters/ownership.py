@@ -8,7 +8,7 @@ bucket, or an fs root) must therefore belong to exactly one database, and this
 module records which one.
 
 At startup the API **claims** its store with its database's installation id
-(DATABASE.md Section 2.1): it writes an owner marker naming that id when none
+(DATABASE.md Section 1.1): it writes an owner marker naming that id when none
 exists, and keeps one that does. The write is conditional (``If-None-Match: *``
 on the object store, a hard link on fs), so of two APIs starting together on an
 unmarked store exactly one takes it. A store that rejects conditional writes gets

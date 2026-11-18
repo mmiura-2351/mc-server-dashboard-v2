@@ -76,6 +76,27 @@ Port shape does not assume small scale (REQUIREMENTS.md Section 1.1).
 The concrete migration toolchain is **Alembic**, with the migrations under
 `api/migrations/`.
 
+### 1.1 The installation id
+
+The `installation` table holds the database's own identity: one row, minted by
+the migration that creates the table (`0045_installation`) and never changed
+afterwards.
+
+| Column | Type | Notes |
+|---|---|---|
+| `singleton` | boolean PK | always `true` (CHECK), so the table holds at most one row |
+| `id` | uuid | the installation id, `gen_random_uuid()` at migration time |
+| `created_at` | timestamptz | when it was minted |
+
+*Rationale.* The API's GCs delete what no row of this database names, so the
+store they sweep must belong to this database alone. The store's owner marker
+records the installation id of the database that claimed it, and every GC and
+destructive sweep runs only while the marker names this one
+([`STORAGE.md`](STORAGE.md) Section 4.3, issue #3870). The id travels with the
+data: a dump restored elsewhere, or a restore to an earlier point, keeps it.
+Downgrading past `0045_installation` drops it, and upgrading again mints a new
+one, which an existing marker no longer names.
+
 ---
 
 ## 2. Conventions

@@ -1,4 +1,4 @@
-"""The database's installation id (DATABASE.md Section 2.1, issue #3870).
+"""The database's installation id (DATABASE.md Section 1.1, issue #3870).
 
 One row, minted by the 0045 migration and never changed afterwards. The store
 owner marker records it, so an API can tell whether the bucket (or fs root) it is
