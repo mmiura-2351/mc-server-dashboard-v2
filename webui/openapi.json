@@ -3523,6 +3523,10 @@
             ],
             "title": "Crash Detail"
           },
+          "crash_not_restarted": {
+            "title": "Crash Not Restarted",
+            "type": "boolean"
+          },
           "crash_reason": {
             "anyOf": [
               {
@@ -3632,7 +3636,8 @@
           "observed_at",
           "assigned_worker_id",
           "crash_reason",
-          "crash_detail"
+          "crash_detail",
+          "crash_not_restarted"
         ],
         "title": "ServerResponse",
         "type": "object"

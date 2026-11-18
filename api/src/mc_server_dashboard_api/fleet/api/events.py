@@ -801,10 +801,11 @@ async def _server_snapshot(
     """Encode the per-server status snapshot frame, or ``None`` if the server is gone.
 
     ``{stream: "snapshot", ts, payload: {state, desired_state,
-    assigned_worker_id, crash_reason, crash_detail}}`` — the persisted observed
-    and desired states, the assigned Worker (or ``null``) and the last crash
-    (``null`` unless crashed) the REST server read reports, read from the one row
-    (#3428, #3818, #3281). The live ``detail`` of a state other than ``crashed``
+    assigned_worker_id, crash_reason, crash_detail, crash_not_restarted}}`` —
+    the persisted observed and desired states, the assigned Worker (or
+    ``null``) and the last crash (``null`` unless crashed, and whether the
+    reconciler leaves it alone) the REST server read reports, read from the one
+    row (#3428, #3818, #3281). The live ``detail`` of a state other than ``crashed``
     is not persisted, so it has no counterpart here.
     """
 
@@ -824,10 +825,10 @@ async def _community_snapshot(
     """Encode the community status snapshot frame: every server's states and Worker.
 
     ``{stream: "snapshot", ts, payload: {servers: [{server_id, state,
-    desired_state, assigned_worker_id, crash_reason, crash_detail}]},
-    server_id: null}`` — each server's observed and desired states, assigned
-    Worker and last crash, read by the one list query (#3428, #3818, #3281) —
-    the community frame shape,
+    desired_state, assigned_worker_id, crash_reason, crash_detail,
+    crash_not_restarted}]}, server_id: null}`` — each server's observed and
+    desired states, assigned Worker and last crash, read by the one list query
+    (#3428, #3818, #3281) — the community frame shape,
     server-agnostic like the GAP marker. The
     list is the community's whole server set, exactly what the stream's
     community-level ``server:read`` gate already lets the subscriber see (the
@@ -860,6 +861,7 @@ def _snapshot_states(server: Server) -> dict[str, object]:
             None if server.crash_reason is None else server.crash_reason.value
         ),
         "crash_detail": server.crash_detail,
+        "crash_not_restarted": server.crash_not_restarted(),
     }
 
 

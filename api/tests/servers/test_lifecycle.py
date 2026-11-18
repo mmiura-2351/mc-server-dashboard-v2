@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
     JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -5291,6 +5292,39 @@ async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
     assert stored.assigned_worker_id == WorkerId(worker)
     assert result.observed_state is ObservedState.RUNNING
     assert result.observed_at == _NOW
+
+
+async def test_convergence_off_crashed_returns_an_entity_without_the_crash() -> None:
+    # Issue #3281: the convergence write clears the stored crash, and the
+    # returned entity reads like the row it wrote, so a lifecycle response never
+    # pairs observed=running with the crash's reason and detail.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    crashed = _server(
+        community_id=community,
+        server_id=server_id,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker_id=worker,
+    )
+    crashed.crash_reason = CrashReason.FORGE_INSTALL_FAILED
+    crashed.crash_detail = "forge install failed after 3 attempts"
+    uow.servers.seed(crashed)
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="running")
+    )
+
+    result = await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    for entity in (stored, result):
+        assert (entity.observed_state, entity.crash_reason, entity.crash_detail) == (
+            ObservedState.RUNNING,
+            None,
+            None,
+        )
 
 
 async def test_redispatch_start_invalid_state_returned_entity_honest_when_dropped() -> (

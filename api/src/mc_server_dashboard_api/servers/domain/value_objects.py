@@ -145,6 +145,21 @@ class CrashReason(enum.Enum):
     FORGE_INSTALL_JAVA_INCOMPATIBLE = "forge_install_java_incompatible"
 
 
+# The crash reasons the reconciler does not restart (issue #3281): the ones the
+# Worker reports at once instead of retrying the install, because the next
+# attempt fails the same way (CONTROL_PLANE.md Section 6). The same memory limit
+# exhausts the installer again, and the same Java runtime refuses the same
+# classes. ``FORGE_INSTALL_FAILED`` is not among them: the Worker retries that
+# failure itself (a failed download is the usual cause) and gives the reason to
+# every install crash it cannot attribute, so a restart may still succeed.
+NOT_RESTARTED_CRASH_REASONS = frozenset(
+    {
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+    }
+)
+
+
 # The bound on a Worker report's free-text ``detail`` (issue #3281), in UTF-8
 # bytes, marker included. The last crash's detail is stored with the observed
 # state; a Worker's detail is a sentence or an error chain, so 4 KiB keeps all of

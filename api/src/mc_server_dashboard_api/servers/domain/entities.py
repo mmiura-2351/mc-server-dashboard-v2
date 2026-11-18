@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    NOT_RESTARTED_CRASH_REASONS,
     CommunityId,
     CrashReason,
     DesiredState,
@@ -76,6 +77,43 @@ class Server:
     # crash too; ``crash_detail`` is bounded (``bound_status_detail``).
     crash_reason: CrashReason | None = None
     crash_detail: str | None = None
+
+    def observe(self, state: ObservedState, at: dt.datetime) -> None:
+        """Reflect an observed-state write that landed (issues #292, #3281).
+
+        The state and its stamp, and the stored last crash the write keeps for
+        ``crashed`` and clears for any other state, so the entity a use case
+        returns reads like the row it wrote.
+        """
+
+        self.observed_state = state
+        self.observed_at = at
+        if state is not ObservedState.CRASHED:
+            self.crash_reason = None
+            self.crash_detail = None
+
+    def crash_not_restarted(self) -> bool:
+        """Whether the reconciler leaves this crash alone (issue #3281).
+
+        The crash's reason is one the next attempt fails the same way
+        (:data:`NOT_RESTARTED_CRASH_REASONS`), and it was reported after the
+        last write to the row (``observed_at > updated_at``). ``updated_at`` is
+        bumped by every row write, not only an intent commit: an operator start,
+        and also an edit, a rename, a Geyser install or removal that moves the
+        Bedrock port, the Bedrock gate-flip sweep, and a restart the Worker then
+        refuses. Each such write re-arms one restart, which fails the same way
+        and is reported again, so it costs one more attempt, never a loop. The
+        start case is what this protects: after a stop and start the row reads
+        ``crashed`` with the old reason until the Worker reports the new launch,
+        and a start whose answer was lost there is owed a replay.
+        """
+
+        return (
+            self.observed_state is ObservedState.CRASHED
+            and self.crash_reason in NOT_RESTARTED_CRASH_REASONS
+            and self.observed_at is not None
+            and self.observed_at > self.updated_at
+        )
 
     def is_at_rest(self) -> bool:
         """Return whether the server is fully stopped for edits/deletion.

@@ -1337,15 +1337,28 @@ def test_read_server_backup_retention_null_when_unconfigured() -> None:
     assert resp.json()["backup_retention"] is None
 
 
-def test_read_server_carries_the_last_crash() -> None:
+@pytest.mark.parametrize(
+    ("crashed_at", "not_restarted"),
+    [
+        (_NOW + dt.timedelta(minutes=1), True),
+        # The row was written after the crash: the reconciler restarts it once.
+        (_NOW - dt.timedelta(minutes=1), False),
+    ],
+    ids=["crash-newest", "row-written-since"],
+)
+def test_read_server_carries_the_last_crash(
+    crashed_at: dt.datetime, not_restarted: bool
+) -> None:
     # The last crash's reason and detail are readable on the server read path
-    # (issue #3281), so a page loaded after the crash can explain it.
+    # (issue #3281), so a page loaded after the crash can explain it, and so is
+    # whether the reconciler leaves it crashed.
     community = uuid.uuid4()
     server = _server_entity(
         community_id=community,
         desired=DesiredState.RUNNING,
         observed=ObservedState.CRASHED,
     )
+    server.observed_at = crashed_at
     server.crash_reason = CrashReason.FORGE_INSTALL_OUT_OF_MEMORY
     server.crash_detail = "installer ran out of memory"
     app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
@@ -1353,10 +1366,11 @@ def test_read_server_carries_the_last_crash() -> None:
     resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
     assert resp.status_code == 200
     body = resp.json()
-    assert (body["crash_reason"], body["crash_detail"]) == (
-        "forge_install_out_of_memory",
-        "installer ran out of memory",
-    )
+    assert (
+        body["crash_reason"],
+        body["crash_detail"],
+        body["crash_not_restarted"],
+    ) == ("forge_install_out_of_memory", "installer ran out of memory", not_restarted)
 
 
 def test_read_server_last_crash_null_without_one() -> None:
@@ -1367,7 +1381,11 @@ def test_read_server_last_crash_null_without_one() -> None:
     resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
     assert resp.status_code == 200
     body = resp.json()
-    assert (body["crash_reason"], body["crash_detail"]) == (None, None)
+    assert (
+        body["crash_reason"],
+        body["crash_detail"],
+        body["crash_not_restarted"],
+    ) == (None, None, False)
 
 
 # --- config payload bounds (issue #94) -------------------------------------

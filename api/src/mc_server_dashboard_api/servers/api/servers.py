@@ -351,9 +351,12 @@ class ServerResponse(BaseModel):
     # ``forge_install_out_of_memory`` / ``forge_install_java_incompatible``)
     # and the Worker's detail (issue #3281). Both are ``None`` unless the
     # server reads ``crashed``; the reason is ``None`` for an unclassified
-    # crash too.
+    # crash too. ``crash_not_restarted`` says the reconciler leaves the crash
+    # alone, as the next attempt fails the same way
+    # (``Server.crash_not_restarted``).
     crash_reason: str | None
     crash_detail: str | None
+    crash_not_restarted: bool
     # The scheduled-backup retention policy (issue #1841): the raw stored shape
     # (``{"keep_last": N}`` or ``{"daily": D, "weekly": W, "monthly": M}``), or
     # ``None`` while unconfigured. Written via the backups retention endpoints
@@ -400,6 +403,7 @@ class ServerResponse(BaseModel):
                 None if server.crash_reason is None else server.crash_reason.value
             ),
             crash_detail=server.crash_detail,
+            crash_not_restarted=server.crash_not_restarted(),
             backup_retention=server.backup_retention,
         )
 

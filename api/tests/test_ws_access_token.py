@@ -159,6 +159,9 @@ def _events_app() -> FastAPI:
         crash_reason = None
         crash_detail = None
 
+        def crash_not_restarted(self) -> bool:
+            return False
+
     class _Found:
         async def __call__(self, **_kw: object) -> object:
             return _FoundServer()

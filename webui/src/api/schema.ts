@@ -4177,6 +4177,8 @@ export interface components {
             cpu_millis: number | null;
             /** Crash Detail */
             crash_detail: string | null;
+            /** Crash Not Restarted */
+            crash_not_restarted: boolean;
             /** Crash Reason */
             crash_reason: string | null;
             /** Desired State */
