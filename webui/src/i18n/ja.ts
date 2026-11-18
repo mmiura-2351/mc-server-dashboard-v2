@@ -287,7 +287,13 @@ export const ja: Record<TranslationKey, string> = {
   "dashboard.lifecycle.stopUnconfirmed":
     "サーバーホストと通信できず、停止を確認できませんでした。すでに停止処理が進んでいる可能性があります。停止の指示は有効なままで、システムが試行を続けます。",
   "dashboard.lifecycle.restartUnconfirmed":
-    "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、システムが自動的に起動します。",
+    "サーバーホストと通信できず、再起動を確認できませんでした。すでに復帰している可能性があります。停止したままの場合は、ホストとの接続が続いている限り、システムが自動的に起動します。",
+  // 503 worker_unavailable on stop / restart from a Worker that is not
+  // connected (issue #3820); nothing recovers the server on its own.
+  "dashboard.lifecycle.stopWorkerOffline":
+    "サーバーホストがオフラインです。停止の指示は有効なままで、しばらくするとサーバーはこのホストから切り離されます。それまでにホストが戻れば、サーバーはそこで停止されます。ホストがこのまま戻らない場合は、もう一度停止してすぐに切り離し、そのあと起動すると別のホストへ移せます。ただし、元のホストが確実に停止していると分かってから行ってください。そうでないと、同じワールドが2つのホストで同時に動く恐れがあります。",
+  "dashboard.lifecycle.restartWorkerOffline":
+    "サーバーホストがオフラインのため、システムはこのサーバーを再起動できません。ホストが戻ったら、もう一度再起動してください。別のホストへ移す場合は、停止を2回行ってから起動してください。ただし、元のホストが確実に停止していると分かってから行ってください。そうでないと、同じワールドが2つのホストで同時に動く恐れがあります。",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "再接続中 — 表示の更新が遅れることがあります",
   // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the

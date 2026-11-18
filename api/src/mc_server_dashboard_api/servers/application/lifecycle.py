@@ -57,9 +57,10 @@ conventional ``server.jar`` relpath and the server's recorded MC version
 
 Assignment stickiness after dispatch (the orphan-placement invariant, issue #101).
 ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES IT ON
-A DIFFERENT WORKER until the assignment is cleared by an authoritative path (a stop,
-or worker-disconnect handling). Both the normal start (``__call__``) and the
-reconciler's ``place_and_start`` therefore distinguish WHERE a launch failed: a
+A DIFFERENT WORKER until the assignment is cleared by an authoritative path, a
+stop's release (a Worker disconnect does not clear it). Both the normal start
+(``__call__``) and the reconciler's ``place_and_start`` therefore distinguish
+WHERE a launch failed: a
 pre-dispatch failure (placement, jar provisioning, a failed hydrate) is safe to
 revert, but a post-dispatch timeout/lost-response ``WorkerUnavailableError`` whose
 command MAY have been applied KEEPS the assignment and ``desired=running`` so the
@@ -129,6 +130,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    UnavailableWorkerState,
     WorkerUnavailableError,
     console_line_bytes,
 )
@@ -689,8 +691,8 @@ class StartServer:
         Assignment stickiness after dispatch (the invariant this path guarantees):
         ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES
         IT ON A DIFFERENT WORKER until the assignment is cleared by an authoritative
-        path (a stop, or worker-disconnect handling). So the failure handling keys on
-        WHERE the launch failed:
+        path, a stop's release (a Worker disconnect does not clear it). So the
+        failure handling keys on WHERE the launch failed:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
@@ -2302,8 +2304,11 @@ class StopServer:
                 server_id=server_id,
             )
             if upload_may_be_live:
+                # The connected Worker has not answered the snapshot yet.
                 raise WorkerUnavailableError(
-                    str(worker_id.value), upload_may_be_live=True
+                    str(worker_id.value),
+                    upload_may_be_live=True,
+                    worker_state=UnavailableWorkerState.NO_ANSWER,
                 )
 
         # --- Step C: clear the assignment ---------------------------------

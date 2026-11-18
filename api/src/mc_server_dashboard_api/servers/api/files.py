@@ -701,9 +701,12 @@ async def upload_file(
     the zip / tar.gz reader fails on (not an archive at all, cut short, damage the
     reader detects, an encrypted member or an unsupported compression method) is
     422 ``invalid_archive``. The whole archive is read before the first write, so
-    nothing is written. A tar.gz is read only up to its end-of-archive marker and
-    its gzip CRC is not checked, so damage the reader never reaches goes
-    undetected and the archive extracts (issue #3778).
+    nothing is written. A tar.gz is read to its gzip end (issue #3778), so these
+    are ``invalid_archive`` too: a header past the first that does not read, no
+    end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
+    that does not match, and bytes after the gzip stream that are neither
+    another gzip member nor zero padding. The zeros past the marker count toward
+    the extracted-size cap.
 
     **Platform-managed keys (issue #2809).** An upload landing on the root
     ``server.properties`` — directly, or as an archive member — may not change

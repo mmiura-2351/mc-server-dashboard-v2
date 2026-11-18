@@ -75,6 +75,11 @@ class WorkerUnavailableError(ServerError):
     not connected at dispatch, so nothing was queued, or the cause was a timeout.
     Its upload, if any, died with the session either way, so ``upload_may_be_live``
     stays ``False`` for it.
+
+    ``worker_state`` is what the lifecycle routes tell the client about the
+    Worker (issue #3820), set by whoever knows the cause: never inferred from the
+    two flags above, which are about transfers. ``None`` says nothing about the
+    Worker, for example a data-plane setting the API lacks.
     """
 
     def __init__(
@@ -82,10 +87,28 @@ class WorkerUnavailableError(ServerError):
         *args: object,
         upload_may_be_live: bool = False,
         session_ended_in_flight: bool = False,
+        worker_state: UnavailableWorkerState | None = None,
     ) -> None:
         super().__init__(*args)
         self.upload_may_be_live = upload_may_be_live
         self.session_ended_in_flight = session_ended_in_flight
+        self.worker_state = worker_state
+
+
+class UnavailableWorkerState(enum.Enum):
+    """What the API knows about a Worker that gave no answer (issue #3820).
+
+    The value is the ``worker_state`` member of a lifecycle route's 503
+    ``worker_unavailable`` (AUTH_API.md Section 2). The two need different
+    recovery: the reconciler skips the servers of a Worker that is not
+    connected until it returns, while one that did not answer in time is
+    connected and may still finish the command.
+    """
+
+    # Not connected at dispatch, or its session ended while the command waited.
+    NOT_CONNECTED = "not_connected"
+    # Connected, but the command was not answered within its deadline.
+    NO_ANSWER = "no_answer"
 
 
 class CommandStatus(enum.Enum):

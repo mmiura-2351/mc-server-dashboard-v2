@@ -105,21 +105,21 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
-| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. |
+| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. A `PUT` to a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), running or at rest; a `DELETE` of such an entry stays allowed, so one planted before the guard can be removed while the server is stopped. |
 | POST | `…/{sid}/files/directories?path=` | mkdir. The root `server.properties` path — and anything under it, whose missing parents are created — is a `422` (`platform_managed_path`): the platform's own writes publish a file there, so no directory may stand in its place. A root name starting `.mcsd_generation`, or a path under one, is a `422` (`reserved_name`). |
 | GET / HEAD | `…/{sid}/files/download?path=` | Raw download (file bytes, or a streamed ZIP for a directory). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB directory straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — a file's `Content-Length` when it is known, none for the incrementally built directory ZIP — and it neither opens the download stream (no directory ZIP is built, no file bytes are streamed) nor records a `file:download` audit event. The file/directory dispatch itself is the `GET`'s, unchanged: resolving which branch a path takes reads the parent listing and, for a file, pulls one chunk to confirm it is readable. The `GET` then begins its stream **before** the response headers, so a path that went away after that dispatch is a `404` and a storage outage a `503` (`storage_unavailable`) rather than a `200` whose body never arrives; only a failure once the body is flowing still aborts the transfer. |
 | POST | `…/{sid}/files/download-grant?path=` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the download, and the same pre-flight — missing path 404, traversal 422 `invalid_path`, running server 409 `server_unsettled`. `path` is a **query** parameter so mint and redemption bind the identical string; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
-| POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. An upload landing on the root `server.properties` — directly or as an archive member — that changes a platform-managed key is a `422` (`platform_managed_key`); an offending archive member is caught before any write, so the whole extract is refused with nothing written. An upload landing **under** that name — `path` naming it, or a member named `server.properties/…` — is a `422` (`platform_managed_path`), caught in the same pre-write scan; the check is on the resulting path, so the same member under a subdirectory is ordinary user data. An upload or member landing at a root name starting `.mcsd_generation`, or under one, is a `422` (`reserved_name`), caught in the same scan. With `extract=true`, a body the zip / tar.gz reader fails on — not an archive at all, cut short, damage the reader detects, an encrypted member or an unsupported compression method — is a `422` (`invalid_archive`); the whole archive is read before the first write, so nothing is written. A tar.gz is read only up to its end-of-archive marker and its gzip CRC is not checked, so damage the reader never reaches goes undetected and the archive extracts (#3778). |
+| POST | `…/{sid}/files/upload?path=&extract=` | Multipart upload, optional ZIP extract. An upload landing on the root `server.properties` — directly or as an archive member — that changes a platform-managed key is a `422` (`platform_managed_key`); an offending archive member is caught before any write, so the whole extract is refused with nothing written. An upload landing **under** that name — `path` naming it, or a member named `server.properties/…` — is a `422` (`platform_managed_path`), caught in the same pre-write scan; the check is on the resulting path, so the same member under a subdirectory is ordinary user data. An upload or member landing at a root name starting `.mcsd_generation`, or under one, is a `422` (`reserved_name`), caught in the same scan. With `extract=true`, a body the zip / tar.gz reader fails on — not an archive at all, cut short, damage the reader detects, an encrypted member or an unsupported compression method — is a `422` (`invalid_archive`); the whole archive is read before the first write, so nothing is written. A tar.gz is read to its gzip end, so a header past the first that does not read, no end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE that does not match, and bytes after the gzip stream that are neither another gzip member nor zero padding are a `422` (`invalid_archive`) too; the zeros past the marker count toward the extracted-size cap (#3778). |
 | POST | `…/{sid}/files/rename` | `{from, to}`. Both ends are guarded against the root `server.properties`: renaming it away is refused when it holds a platform-managed key, and renaming another file onto that name is refused when that file carries one — either is a `422` (`platform_managed_key`) naming the key. A rename **onto** that name whose source exceeds the edit cap is a `413`, since the guard compares the source bytes rather than scanning an unbounded body. Renaming a **directory** onto that name, or anything — a file included — to a path **under** it, is a `422` (`platform_managed_path`) — a directory there breaks the platform's writes; moving one already standing there away still works. A destination at a root name starting `.mcsd_generation`, or under one, is a `422` (`reserved_name`); the source is not guarded, so such an entry can still be renamed away. |
 | POST | `…/{sid}/files/search` | `{query, by, max_results}` → matching paths. |
 | GET | `…/{sid}/files/history?path=` | Retained version ids. |
 | POST | `…/{sid}/files/rollback?path=` | `{version_id}`. Rolling the root `server.properties` back to a version whose platform-managed keys differ from the file's current ones — a stale `server-port` or `rcon.password` — is a `422` (`platform_managed_key`); a version differing only in the user's own keys rolls back normally. A path at a root name starting `.mcsd_generation`, or under one, is a `422` (`reserved_name`), even for a version retained before the name was reserved. |
 | GET / POST | `…/{sid}/backups` | List / create on-demand backup. |
 | GET | `…/{sid}/backups/statistics` | count / total bytes / newest / oldest. |
-| POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. A restore republishes the archive's members verbatim as the working set, so a member named `server.properties/…` — or a directory member named `server.properties` — is a `422` (`platform_managed_path`), refused before the archive is stored; a nested `backups/server.properties/…` member is ordinary user data. A member at a root name starting `.mcsd_generation`, or under one, is a `422` (`reserved_name`), refused before the archive is stored. A non-archive or otherwise unsafe member stays a `422` (`invalid_archive`), whose `detail` names the refusal (for a member, its name and the reason; a name over 256 characters is cut to its first 256 and marked `…(truncated, N chars)`). The archive is published under the server's lifecycle lock, so while another lifecycle operation holds that lock past its acquire budget the upload is a `409` (`server_busy`), refused without being stored; the operator retries. |
+| POST | `…/{sid}/backups/upload` | Upload an off-host backup archive. A restore republishes the archive's members verbatim as the working set, so a member named `server.properties/…` — or a directory member named `server.properties` — is a `422` (`platform_managed_path`), refused before the archive is stored; a nested `backups/server.properties/…` member is ordinary user data. A member at a root name starting `.mcsd_generation`, or under one, is a `422` (`reserved_name`), refused before the archive is stored. A non-archive or otherwise unsafe member stays a `422` (`invalid_archive`), whose `detail` names the refusal (for a member, its name and the reason; a name over 256 characters is cut to its first 256 and marked `…(truncated, N chars)`). The archive is read to its gzip end, so a header past the first that does not read, no end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE that does not match, or bytes after the gzip stream that are neither another gzip member nor zero padding is a `422` (`invalid_archive`) too (#3778). The archive is published under the server's lifecycle lock, so while another lifecycle operation holds that lock past its acquire budget the upload is a `409` (`server_busy`), refused without being stored; the operator retries. |
 | GET / HEAD | `…/{sid}/backups/{bid}/download` | Download archive. Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB archive straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. **Resumable**: the response declares `Accept-Ranges: bytes` and a strong `ETag`, and a single `Range` request is served `206` with `Content-Range` over a ranged read (`416` + `Content-Range: bytes */<size>` when unsatisfiable; a malformed or multi-range `Range` is ignored and the whole archive served). `If-Range` is honoured, so a resumed request that names a stale representation gets the current archive whole. The browser's own retry of an interrupted transfer authenticates with the `HttpOnly` download cookie a grant redemption sets, since the `?grant=` in the retried URL has expired by then (AUTH_API.md Section 3). The response declares `Cache-Control: no-store` on both the `200` and the `206`, under every credential. `HEAD` is the metadata probe a resumable client sends first: the same gate and the same headers with no body, so `Content-Length`, `Accept-Ranges` and the `ETag` are learned without starting a transfer. It never opens the archive stream and records no `backup:download` audit event; `Range` is not honoured on it (RFC 9110 Section 14.2 defines range handling for `GET` only), so a probe always reports the whole archive. |
 | POST | `…/{sid}/backups/{bid}/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `backup:read` gate as the download; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | POST | `…/{sid}/backups/{bid}/restore[?force=true]` | **Server must be stopped.** `?force=true` overrides the quarantine gate. |
@@ -307,7 +307,7 @@ Execution backend: `container` (the only backend provided).
 | GET | `/versions/jar-pool/stats` `[A]` · POST `/versions/jar-pool/gc` `[A]` | JAR pool size / garbage collection. |
 | GET | `/ports/available?count=` · `/ports/check/{port}` | Free-port discovery / conflict check. |
 | GET | `/workers` `[A]` | Fleet list: status, capabilities (drivers, max_servers, cpu/mem), assigned_count, heartbeat. |
-| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot ASYNCHRONOUSLY (on the first reconciler tick once [`reconciler.grace_seconds`](../app/CONFIGURATION.md#56-divergence-reconciler) has elapsed since the drain (or since a later worker report for that server), so 660–720 s after the drain at the stock 660 s grace and 60 s `reconciler.interval_seconds`) and only while the worker stays connected — keep the worker up until convergence, or stops+snapshots defer to a reconnect that never happens in a decommission. Confirm convergence PER SERVER (each reaching `observed=stopped` and unassigned), NOT by assigned load: drain decrements the load synchronously, so it drops to 0 before any stop runs. An operator stop of such a server skips the wait and stops it at once (`…/{sid}/stop`). Clear only re-enables placement (does not restart them; un-draining before convergence transiently oversubscribes the worker). Drain is persisted: it survives an API restart as well as a worker reconnect, and a drained worker re-registers `draining` until cleared. |
+| PUT / DELETE | `/workers/{wid}/drain` `[A]` | Set / clear drain. Set MARKS the worker's running servers `desired=stopped` and returns `servers_stopped` (the count marked, not yet stopped); the reconciler then stops each + takes the final snapshot ASYNCHRONOUSLY (on the first reconciler tick once [`reconciler.grace_seconds`](../app/CONFIGURATION.md#56-divergence-reconciler) has elapsed since the drain (or since a later worker report for that server), so 660–720 s after the drain at the stock 660 s grace and 60 s `reconciler.interval_seconds`) and only while the worker stays connected — keep the worker up until convergence. If the worker disconnects first and stays gone, the reconciler releases each server `reconciler.grace_seconds` after the disconnect (the disconnect restarts the wait) without its final snapshot: the snapshot is skipped, not deferred, so a later start on another worker begins from the server's last published snapshot. If the drained worker comes back, is un-drained and is given the server again, the start reuses the scratch that worker kept, when it is at least as new as the store, instead of hydrating. Confirm convergence PER SERVER (each reaching unassigned, at `observed=stopped`, or `unknown` when its worker went away first), NOT by assigned load: drain decrements the load synchronously, so it drops to 0 before any stop runs. An operator stop of such a server skips the wait and stops it at once (`…/{sid}/stop`). Clear only re-enables placement (does not restart them; un-draining before convergence transiently oversubscribes the worker). Drain is persisted: it survives an API restart as well as a worker reconnect, and a drained worker re-registers `draining` until cleared. Set and clear answer `404` for a worker that has not registered with the running API, so a worker that went away before an API restart can no longer be drained; move its servers with a stop and a start instead ([CONFIGURATION.md](../app/CONFIGURATION.md#56-divergence-reconciler) Section 5.6, "A Worker that never reconnects"). |
 | GET | `/audit` `[A]` | Global audit (`community`, `operation`, `actor`, `since`, `until`, `limit`, `offset`). |
 | GET | `/communities/{cid}/audit` | Community-scoped audit (same filters minus `community`). |
 | GET | `/backups/statistics` `[A]` | Global backup statistics. |
@@ -649,8 +649,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
-  category), desired-vs-observed mismatch hint ("starting…" spinner while
-  reconciler converges), worker id, port.
+  category), desired-vs-observed mismatch hint ("applying…" while the
+  reconciler converges), worker id, port. No hint shows for a server at rest
+  under a stopped intent (observed stopped, crashed or unknown), whether or not
+  a Worker is still assigned; the dashboard rows mark drift by the same rule.
 - Crash banner: while crashed, the `detail`, a guidance line with a link to the
   Console tab, and — keyed on the status event's `reason` — the Forge install
   diagnostics. The guidance line follows the desired state. Under a running
@@ -662,7 +664,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   `forge_install_out_of_memory` and `forge_install_java_incompatible` each add
   a specific, localised explanation of what to change. Any `forge_install_*` reason adds a **View install log**
   toggle (hidden without `file:read`) that reads `logs/forge-install.log`
-  through the files API on demand and shows its last 200 lines. The files API
+  through the files API on demand and shows its last 200 lines, opened at the end. The files API
   serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
   under a running intent is neither, so until it is stopped the viewer says to
   stop it first (409 `server_unsettled`); a log that was never written (404)
@@ -716,9 +718,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   | 422 | `not_a_directory` | List targeted a regular file. |
   | 422 | `symlink_refused` | Path contains or resolves to a symlink (escape-vector defence). |
   | 422 | `reserved_name` | A mutation's destination is, or lies under, a root name starting `.mcsd_generation`, the Worker's generation marker (Section 2.3). |
-  | 422 | `invalid_archive` | The archive reader failed on an extract upload (not an archive, cut short, damage it detects, an encrypted member); nothing was written. A tar.gz damaged where the reader never reaches is not detected (#3778). |
+  | 422 | `invalid_archive` | The archive reader failed on an extract upload (not an archive, cut short, damage it detects, an encrypted member); nothing was written. A tar.gz is read to its gzip end, so a header that does not read, data past its end-of-archive marker and a bad gzip trailer are caught too (#3778). |
   | 413 | `file_too_large` | Read result or edit payload exceeds the file size cap. |
-  | 503 | `worker_unavailable` | The Worker hosting a running server did not answer. |
+  | 503 | `worker_unavailable` | The Worker hosting a running server is not connected or did not answer in time. |
   | 503 | `storage_unavailable` | The store holding the server's files did not answer (Section 2.3). Shown as its own message, distinct from the Worker one: retrying is the remedy, and nothing about the server's Worker is wrong. |
 
 ### 6.7 Server detail — Backups
@@ -1039,10 +1041,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   in an `errors` extension member. A 403 permission denial keeps
   `reason: "forbidden"` and carries the required permission code in a
   `permission` extension member, which the client names in the denial toast
-  (7.3). The client branches on exactly this shape — one body, one machine
-  code, on every endpoint. The auth endpoints' reason codes and the
-  `permission` member are enumerated in [`AUTH_API.md`](../app/AUTH_API.md)
-  Section 2.
+  (7.3). A lifecycle 503 `worker_unavailable` may carry a `worker_state`
+  member (below). The client branches on exactly this shape — one body, one
+  machine code, on every endpoint. The auth endpoints' reason codes and the
+  `permission` and `worker_state` members are enumerated in
+  [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
@@ -1111,10 +1114,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   longer offer restart for a server observed crashed under a running intent,
   since the API always refuses it there.
 - The same verb-specific treatment extends to the **503 `worker_unavailable`** —
-  the API's rendering of a dispatch that timed out or lost the Worker session,
-  and of a Worker that answered that its container runtime did not (a start or a
-  restart's relaunch whose container calls timed out, or a container a failed
-  start left behind that it could not end) — where the generic "wait a moment
+  the API's rendering of a dispatch to a Worker that is not connected or lost
+  its session, of one that timed out, and of a Worker that answered that its
+  container runtime did not (a start or a restart's relaunch whose container
+  calls timed out, or a container a failed start left behind that it could not
+  end) — where the generic "wait a moment
   and try again" invites a retry of an intent that already stands. On stop it is unambiguous: `StopServer` can only
   raise it from a dispatch, which runs *after* `desired_state=stopped`
   is committed and the placement load decremented, and nothing is compensated —
@@ -1125,9 +1129,33 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   a host that answered, so those messages can say what the server did, while a
   timeout answers nothing — a graceful stop merely outliving the API's dispatch
   deadline is the commonest case, and it usually succeeds — so the 503 messages
-  say the outcome is **unconfirmed** and the intent stands. `no_eligible_worker`
+  say the outcome is **unconfirmed** and the intent stands. The restart message
+  promises a restart only as long as the host stays connected: the reconciler
+  starts a server that stays down only on a connected Worker. `no_eligible_worker`
   and `jar_unavailable` stay verb-agnostic: both are raised before any intent is
   committed.
+- **A Worker the API names `not_connected`** (the `worker_state` member of a
+  lifecycle 503, [`AUTH_API.md`](../app/AUTH_API.md) Section 2) gets its own
+  stop and restart messages. The unconfirmed ones fit a Worker that is
+  connected and may still finish the command. A Worker that is not connected
+  gets no automatic recovery: the reconciler skips its servers until it
+  returns, and nothing moves them on its own
+  ([CONFIGURATION.md](../app/CONFIGURATION.md#56-divergence-reconciler)
+  Section 5.6, "A Worker that never reconnects"). The stop message says the
+  host is offline and the stop still stands: the server is released from the
+  host after a while, and stopped there only if the host comes back before
+  then. A host back after the release keeps its instance, and nothing stops
+  it. A second stop releases the server at once, and a start then moves it to
+  another host. The restart message says the system cannot restart the server
+  and the restart is not sent again, so the operator restarts it once the host
+  is back, or moves it: stop, stop again, start. Both say to move it only once
+  the old host is known to be down: the release stops nothing there, and
+  nothing fences an instance still alive on it, so the same world could run on
+  two hosts. The messages carry these steps and that precondition themselves
+  rather than pointing to that section, since not every member can read the
+  repository docs. `no_answer`, and a 503 with no member (the Worker's own
+  UNAVAILABLE answer), keep the unconfirmed messages. Start keeps its
+  verb-agnostic message whatever the member says (next bullet).
 - On **start**, `worker_busy` gets its own message, but a *hedged* one, because
   the reason is ambiguous at the edge. A **post-dispatch** `worker_busy`
   keeps `desired_state=running` and the assignment so `redispatch_start` can
@@ -1151,6 +1179,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   answered it could not carry out because its container runtime did not. This is the identical pre/post ambiguity as `worker_busy`
   above, but a timeout answers *nothing*, so there is no honest thing to say
   beyond "could not reach the server host" — hence the verb-agnostic message.
+  The `worker_state` member does not resolve it: each state arises both before
+  and after the dispatch.
 - Destructive operations (delete server/community/user/backup-restore) use
   typed-confirm dialogs.
 
