@@ -890,7 +890,7 @@ def _archive_entries(
     byte it decompresses counts toward ``max_bytes``, headers and skipped data
     included. A walk that seeks back, or reads a chain of extended headers too
     long for ``tarfile``, is :class:`UnreadableArchiveError` (issue #3810). So is
-    one over the header limits, named in its ``detail``: more than 1 MiB of
+    one over the header limits, named in its ``refusal``: more than 1 MiB of
     headers between two members, or members holding more than 32 PAX records
     each or 8 Mi characters of names, link names and PAX records in all.
 
@@ -910,7 +910,7 @@ def _archive_entries(
     try:
         yield from entries(content, max_bytes=max_bytes, max_entries=max_entries)
     except HeaderLimitError as exc:
-        raise UnreadableArchiveError(filename, detail=str(exc)) from exc
+        raise UnreadableArchiveError(filename, refusal=str(exc)) from exc
     except read_errors as exc:
         raise UnreadableArchiveError(filename) from exc
     except CapExceededError as exc:

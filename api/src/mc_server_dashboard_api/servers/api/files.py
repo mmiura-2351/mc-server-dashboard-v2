@@ -763,7 +763,7 @@ async def upload_file(
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "invalid_archive",
-            extensions=None if exc.detail is None else {"detail": exc.detail},
+            extensions=None if exc.refusal is None else {"detail": exc.refusal},
         ) from exc
     except PlatformManagedKeyError as exc:
         raise _platform_managed_key(exc) from exc

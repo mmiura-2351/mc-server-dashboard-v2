@@ -3797,7 +3797,7 @@ async def test_upload_extract_refuses_extended_headers_over_the_budget(
             content=build(),
             extract=True,
         )
-    assert refused.value.detail == archive_cap_shapes.OVER_THE_BUDGET_DETAIL
+    assert refused.value.refusal == archive_cap_shapes.OVER_THE_BUDGET_DETAIL
     assert store.writes == []
 
 
@@ -3821,7 +3821,7 @@ async def test_upload_extract_refuses_members_that_hold_too_much(
             content=build(),
             extract=True,
         )
-    assert refused.value.detail == detail
+    assert refused.value.refusal == detail
     assert store.writes == []
 
 
@@ -3844,7 +3844,7 @@ async def test_upload_extract_refuses_a_chain_of_extended_headers(
             content=build(),
             extract=True,
         )
-    assert refused.value.detail is None
+    assert refused.value.refusal is None
     assert store.writes == []
 
 
