@@ -25,7 +25,10 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
-from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
@@ -597,5 +600,111 @@ async def test_a_start_kept_on_a_busy_worker_leaves_the_owed_player_files_owed(
     )
 
     assert owed_once_kept == [GroupKind.OP]
+    assert json.loads(store.files["ops.json"]) == []
+    assert await uow.groups.list_sync_pending(server.id) == []
+
+
+@pytest.mark.parametrize("entry", ["start", "place_and_start"])
+@pytest.mark.parametrize(
+    ("attached", "owed"), [(True, [GroupKind.OP]), (False, [])], ids=["op", "none"]
+)
+async def test_a_start_kept_on_a_busy_worker_owes_every_group_managed_file(
+    entry: str, attached: bool, owed: list[GroupKind]
+) -> None:
+    # Issue #3890, review r1 finding 2. Nothing is owed when this start runs, yet
+    # the instance a BUSY Worker may turn out to run is the one #3888's adoption
+    # owes every group-managed file for: an earlier start that never launched on
+    # this Worker may have cleared a mark the instance never applied. The keep owes
+    # them as the adoption does. A file no group manages stays as the game left it.
+    uow = FakeUnitOfWork()
+    server = _server()
+    if entry == "place_and_start":
+        server.desired_state = DesiredState.RUNNING
+    uow.servers.seed(server)
+    if attached:
+        await _with_op_group_attached(uow, server)
+    store = _VersionedFileStore()
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "command_in_flight"),
+                message="instancemanager: a lifecycle command is already in flight",
+            )
+        },
+    )
+    use_case = _start(uow, store, cp)
+
+    with pytest.raises(CommandDispatchError):
+        if entry == "start":
+            await use_case(community_id=_COMMUNITY, server_id=server.id)
+        else:
+            await use_case.place_and_start(community_id=_COMMUNITY, server_id=server.id)
+
+    assert [p.kind for p in await uow.groups.list_sync_pending(server.id)] == owed
+
+
+class _FailsThenInFlightThenLive(_LaunchInFlightThenLive):
+    """Worker A fails the first hydrate's transfer, then acts as its parent.
+
+    The first start that reached it regenerated the owed file and cleared its
+    mark, and was undone. The next one finds an earlier launch in flight.
+    """
+
+    def __init__(self, store: _VersionedFileStore) -> None:
+        super().__init__(store)
+        self._transfer_fails = True
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        if not self._transfer_fails:
+            return await super().hydrate(
+                worker_id=worker_id, community_id=community_id, server_id=server_id
+            )
+        self._transfer_fails = False
+        await FakeControlPlane.hydrate(
+            self, worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        return CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED, message="hydrate download failed"
+        )
+
+
+async def test_a_kept_start_after_an_undone_one_leaves_no_stale_operator() -> None:
+    # Issue #3890, review r1 finding 2, the reviewer's probe. The operator is
+    # removed while the server runs, and the op group stays attached.
+    # 1. A start regenerates ops.json and clears the mark; its hydrate transfer
+    #    fails and the start is undone. The mark stays cleared.
+    # 2. The next start owes nothing, and Worker A refuses its hydrate BUSY: an
+    #    earlier launch holds the id. The start keeps A.
+    # 3. That launch turns out live with the stale file. The re-sent start adopts
+    #    it, a stop publishes its ops.json, and the server is started again.
+    # The keep owes the attached group's file, so the last start removes the
+    # operator again.
+    uow = FakeUnitOfWork()
+    server = _server()
+    await _operator_removed_while_running(uow, server)
+    store = _VersionedFileStore()
+    cp = _FailsThenInFlightThenLive(store)
+    clock = FakeClock(_NOW + dt.timedelta(minutes=1))
+    use_case = _start(uow, store, cp, clock=clock)
+
+    with pytest.raises(CommandDispatchError):
+        await use_case(community_id=_COMMUNITY, server_id=server.id)
+    assert await uow.groups.list_sync_pending(server.id) == []
+    clock.set(_NOW + dt.timedelta(minutes=2))
+    with pytest.raises(CommandDispatchError):
+        await use_case(community_id=_COMMUNITY, server_id=server.id)
+    clock.set(_NOW + dt.timedelta(minutes=20))
+    await use_case.redispatch_start(community_id=_COMMUNITY, server_id=server.id)
+    await StopServer(uow=uow, control_plane=cp, clock=clock)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+    assert json.loads(store.files["ops.json"]) != []
+    await _start(uow, store, cp, clock=clock)(
+        community_id=_COMMUNITY, server_id=server.id
+    )
+
     assert json.loads(store.files["ops.json"]) == []
     assert await uow.groups.list_sync_pending(server.id) == []
