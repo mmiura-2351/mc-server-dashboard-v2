@@ -21,6 +21,7 @@ import logging
 
 import pytest
 
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnreachableError
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
@@ -98,12 +99,14 @@ def _gc(
     pool: JarPool,
     refs: _FakeReferences,
     ownership: FakeStoreOwnership | None = None,
+    resume_point: ResumePoint | None = None,
 ) -> RunJarPoolGc:
     return RunJarPoolGc(
         pool=pool,
         references=refs,
         clock=_FixedClock(_NOW),
         ownership=ownership or FakeStoreOwnership(),
+        resume_point=resume_point or ResumePoint(),
     )
 
 

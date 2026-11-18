@@ -17,3 +17,17 @@ from __future__ import annotations
 MAX_CONSECUTIVE_FAILED_DELETES = 5
 
 STOPPED_AFTER_CONSECUTIVE_FAILURES = "stopped_after_consecutive_failures"
+
+
+class ResumePoint:
+    """Where a GC's next pass starts (issue #3934).
+
+    ``key`` is the listing key of the object whose delete ended the last pass on
+    a whole-store failure, or ``None``. It lives in process memory only: each GC
+    is wired with one instance, which every use case object that runs that GC
+    shares (the JAR-pool loop and its manual trigger), and an API restart starts
+    it empty.
+    """
+
+    def __init__(self) -> None:
+        self.key: str | None = None

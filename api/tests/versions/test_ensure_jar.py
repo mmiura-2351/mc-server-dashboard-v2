@@ -204,6 +204,7 @@ async def test_ensure_after_gc_re_downloads_cleanly() -> None:
     # leaving the pool restored (#293).
     import datetime as dt
 
+    from mc_server_dashboard_api.gc_pass import ResumePoint
     from mc_server_dashboard_api.versions.application.jar_gc import (
         GC_SAFETY_WINDOW,
         RunJarPoolGc,
@@ -231,6 +232,7 @@ async def test_ensure_after_gc_re_downloads_cleanly() -> None:
         references=_NoReferences(),
         clock=_PastClock(),
         ownership=FakeStoreOwnership(),
+        resume_point=ResumePoint(),
     )
     gc_result = await gc()
     assert gc_result.deleted == 1

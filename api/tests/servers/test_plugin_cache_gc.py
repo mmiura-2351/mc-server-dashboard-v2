@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
@@ -101,12 +102,14 @@ def _gc(
     cache: PluginCacheStore,
     refs: _FakeReferences,
     ownership: FakeStoreOwnership | None = None,
+    resume_point: ResumePoint | None = None,
 ) -> RunPluginCacheGc:
     return RunPluginCacheGc(
         cache=cache,
         references=refs,
         clock=_FixedClock(_NOW),
         ownership=ownership or FakeStoreOwnership(),
+        resume_point=resume_point or ResumePoint(),
     )
 
 
