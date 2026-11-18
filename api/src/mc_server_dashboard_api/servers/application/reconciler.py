@@ -17,7 +17,13 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   double-start with ``INVALID_STATE``; we only replay when the Worker is not
   already running it. ``restarting`` is in the wire and DB set of observed states
   but has no producer today (no Worker driver emits it and no API path writes it),
-  so a row in that state is treated as not running.
+  so a row in that state is treated as not running. One ``crashed`` row is
+  skipped instead (issue #3281): a crash whose stored reason the Worker reports
+  without retrying (the Forge installer out of memory, or unable to run on the
+  selected Java), reported after the last intent commit. The next attempt fails
+  the same way, so the server stays crashed until an operator stops it and
+  starts it again. A crash older than the intent (that stop and start, still
+  unanswered) does not hold the start back.
 - ``desired=running``, no assigned Worker (compensation-failure orphan) -> run
   the normal placement + dispatch path. Assignment stickiness invariant (issue
   #101): once ``place_and_start`` has SENT a start command for this server it KEEPS
@@ -331,6 +337,7 @@ from mc_server_dashboard_api.servers.domain.store_generation import (
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -348,6 +355,38 @@ _NOT_RUNNING = (
     ObservedState.CRASHED,
     ObservedState.UNKNOWN,
 )
+
+
+# The crash reasons the reconciler does not restart (issue #3281): the ones the
+# Worker reports at once instead of retrying the install, because the next
+# attempt fails the same way (CONTROL_PLANE.md Section 6). The same memory limit
+# exhausts the installer again, and the same Java runtime refuses the same
+# classes. ``FORGE_INSTALL_FAILED`` is not among them: the Worker retries that
+# failure itself (a failed download is the usual cause) and gives the reason to
+# every install crash it cannot attribute, so a restart may still succeed.
+_NOT_RESTARTED_CRASH_REASONS = frozenset(
+    {
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+    }
+)
+
+
+def _crash_not_restarted(server: Server) -> bool:
+    """Whether the server's crash answers its current start intent and recurs.
+
+    The crash must be newer than the last intent commit: after an operator stop
+    and start the row still reads ``crashed``, with the old reason, until the
+    Worker reports the new launch, and a start whose answer was lost there is
+    owed a replay like any other.
+    """
+
+    return (
+        server.observed_state is ObservedState.CRASHED
+        and server.crash_reason in _NOT_RESTARTED_CRASH_REASONS
+        and server.observed_at is not None
+        and server.observed_at > server.updated_at
+    )
 
 
 def _is_settled(server: Server) -> bool:
@@ -662,6 +701,9 @@ class RunReconcilerTick:
                 return "place_and_start"
             if server.observed_state not in _NOT_RUNNING:
                 return None  # already running/starting: not actionable
+            if _crash_not_restarted(server):
+                # Restarting would run the failing install again (issue #3281).
+                return None
             if not self.control_plane.is_worker_connected(
                 worker_id=server.assigned_worker_id
             ):

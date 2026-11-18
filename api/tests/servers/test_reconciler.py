@@ -103,6 +103,7 @@ def _server(
     worker: WorkerId | None,
     observed_at: dt.datetime | None = _PAST_GRACE,
     updated_at: dt.datetime = _PAST_GRACE,
+    crash_reason: CrashReason | None = None,
 ) -> Server:
     return Server(
         id=ServerId.new(),
@@ -118,6 +119,7 @@ def _server(
         assigned_worker_id=worker,
         created_at=_PAST_GRACE,
         updated_at=updated_at,
+        crash_reason=crash_reason,
     )
 
 
@@ -2086,6 +2088,101 @@ async def test_first_crash_restart_logs_info_and_repeat_logs_crash_looping_warni
         "reconcile action redispatch_start dispatched for crash-looping server "
         f"{server.id.value}; backing off"
     )
+
+
+# --- the crash's reason (issue #3281) -----------------------------------------
+
+# The start intent, then the crash the Worker reported for it.
+_INTENT_AT = _PAST_GRACE - dt.timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+    ],
+    ids=lambda reason: reason.value,
+)
+async def test_crash_the_worker_does_not_retry_is_not_restarted(
+    reason: CrashReason,
+) -> None:
+    # The Worker reports these at once instead of retrying the install: the same
+    # memory limit or Java runtime fails the next attempt the same way. A restart
+    # would only run the failing install again, so the server stays crashed
+    # until the operator stops it, fixes the cause and starts it.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        updated_at=_INTENT_AT,
+        crash_reason=reason,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    # Past any grace and backoff: still not restarted.
+    clock.set(_NOW + dt.timedelta(hours=2))
+    await reconciler.tick()
+
+    assert cp.dispatched == []
+    assert server.id not in reconciler._attempts
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [None, CrashReason.FORGE_INSTALL_FAILED],
+    ids=["unclassified", "forge_install_failed"],
+)
+async def test_crash_the_worker_may_retry_is_restarted(
+    reason: CrashReason | None,
+) -> None:
+    # An unclassified crash, and an install failure the Worker could not
+    # attribute (it retries a failed installer itself, since a failed download
+    # passes), keep the restart and its backoff.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        updated_at=_INTENT_AT,
+        crash_reason=reason,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert reconciler._attempts[server.id].failures == 1
+
+
+async def test_start_intent_newer_than_a_crash_not_retried_is_replayed() -> None:
+    # The operator stopped the server after that crash and started it again. The
+    # row reads crashed, with the old reason, until the Worker reports the new
+    # launch, and a start whose answer was lost keeps the intent for the
+    # reconciler to send again. That crash answered an earlier intent, so it
+    # holds nothing back.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=_INTENT_AT,
+        crash_reason=CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
 async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> None:
