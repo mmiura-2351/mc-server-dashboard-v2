@@ -1047,21 +1047,27 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` and `worker_state` members are enumerated in
   [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
-- An error toast stays until it is dismissed, since many errors name a remedy
-  to act on. Any other toast closes on its own after 2 s plus 100 ms per
-  character of its message, clamped to 3.2–12 s. It counts characters, not
-  words, because Japanese has no word breaks; about 10 characters a second
-  suits Japanese and leaves English time to spare. Hovering a toast or focusing
-  its dismiss button pauses the countdown, which then resumes with the time
-  left. An error toast is a `role="alert"` with `aria-live="assertive"`, any
-  other a `role="status"` with `aria-live="polite"`. The dismiss button is in
-  the tab order, and Escape dismisses the toast whose button has focus.
-  At most five toasts show at once. A new toast past that drops the oldest
-  timed toast, or the oldest error once only errors are showing. An error
-  raised again while its toast still shows does not stack a copy: that toast
-  shows a count (×2, ×3, …) and counts as the newest for the drop order. A
-  toast is at most 32rem wide, never wider than the screen less 2rem, and its
-  message wraps anywhere, so a long one stays readable on a phone.
+- **Toast timing.** An error toast stays until it is dismissed, since many
+  errors name a remedy to act on. Any other toast closes on its own after 2 s
+  plus 100 ms per character of its message, clamped to 3.2–12 s. It counts
+  characters, not words, because Japanese has no word breaks; about 10
+  characters a second suits Japanese and leaves English time to spare. The
+  pointer or focus anywhere in the toast stack pauses every countdown, so no
+  toast closes or slides out from under the one being read; each resumes with
+  the time it had left.
+- **Toast accessibility.** An error toast is a `role="alert"`, any other a
+  `role="status"`, with no explicit `aria-live`: the role already sets it, and
+  repeating it double-announces in VoiceOver. The dismiss button is in the tab
+  order and at least 24×24 px, and Escape dismisses the toast whose button has
+  focus.
+- **Toast stack.** At most three errors and two timed toasts show at once. A
+  new toast past that drops the oldest of its own kind, so a timed toast never
+  pushes out an error, nor an error a timed toast. An error raised again while
+  its toast still shows does not stack a copy: that toast shows a count badge
+  and counts as the newest for the drop order. A toast is at most 32rem wide,
+  never wider than the screen less 2rem, and its message wraps anywhere; the
+  stack is at most the screen's height less 2rem and scrolls beyond that, so
+  every toast stays reachable on a phone.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.

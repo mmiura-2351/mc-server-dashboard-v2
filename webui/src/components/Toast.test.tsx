@@ -1,5 +1,6 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { t } from "../i18n/index.ts";
 import { ToastProvider, type ToastVariant, useToast } from "./Toast.tsx";
 
 function Harness() {
@@ -144,23 +145,25 @@ describe("Toast", () => {
     expect(screen.queryByText("Failed")).not.toBeInTheDocument();
   });
 
-  it("announces an error toast assertively as an alert", () => {
+  // The role alone sets the live region: an explicit aria-live on top of it
+  // double-announces in VoiceOver.
+  it("marks an error toast as an alert", () => {
     renderToasts();
     show("Failed", "error");
 
     const toast = screen.getByRole("alert");
     expect(toast).toHaveTextContent("Failed");
-    expect(toast).toHaveAttribute("aria-live", "assertive");
+    expect(toast).not.toHaveAttribute("aria-live");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("announces a success toast politely as a status", () => {
+  it("marks a success toast as a status", () => {
     renderToasts();
     show("Saved", "success");
 
     const toast = screen.getByRole("status");
     expect(toast).toHaveTextContent("Saved");
-    expect(toast).toHaveAttribute("aria-live", "polite");
+    expect(toast).not.toHaveAttribute("aria-live");
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -216,6 +219,91 @@ describe("Toast", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("resumes with the time left after pausing twice", () => {
+    renderToasts();
+    show("x".repeat(50), "success"); // 7 s
+
+    advance(1000);
+    fireEvent.mouseEnter(screen.getByRole("status"));
+    advance(10_000);
+    fireEvent.mouseLeave(screen.getByRole("status"));
+    advance(2000);
+    fireEvent.mouseEnter(screen.getByRole("status"));
+    advance(10_000);
+    fireEvent.mouseLeave(screen.getByRole("status"));
+
+    advance(3999);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("pauses every toast while the pointer is over any of them", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("x".repeat(50), "success"); // 7 s
+
+    advance(1000);
+    fireEvent.mouseEnter(screen.getByText("x".repeat(50)));
+    advance(60_000);
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+
+    fireEvent.mouseLeave(screen.getByText("x".repeat(50)));
+    advance(2199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    advance(3799);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("pauses every toast while focus is in any of them", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+    const close = within(screen.getByRole("alert")).getByRole("button");
+
+    advance(1000);
+    act(() => close.focus());
+    advance(60_000);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+
+    act(() => close.blur());
+    advance(2199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("resumes the others once the focused toast is dismissed", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+    const close = within(screen.getByRole("alert")).getByRole("button");
+
+    advance(1000);
+    act(() => close.focus());
+    fireEvent.keyDown(close, { key: "Escape" });
+
+    advance(2199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("resumes once the last toast goes from under the pointer", () => {
+    renderToasts();
+    show("Failed", "error");
+    fireEvent.mouseEnter(screen.getByRole("alert"));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    show("Saved", "success");
+    advance(3200);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
   it("dismisses only the focused toast on Escape", () => {
     renderToasts();
     show("First", "error");
@@ -248,41 +336,54 @@ describe("Toast", () => {
     }
   });
 
-  it("shows at most five toasts, dropping the oldest", () => {
-    renderToasts();
-    for (const n of [1, 2, 3, 4, 5, 6]) show(`Saved ${n}`, "success");
+  it("leaves the toast up and passes on a key other than Escape", () => {
+    const onDocumentKeyDown = vi.fn();
+    document.addEventListener("keydown", onDocumentKeyDown);
+    try {
+      renderToasts();
+      show("Failed", "error");
+      const close = screen.getByRole("button", { name: "Close" });
 
-    expect(screen.getAllByRole("status")).toHaveLength(5);
-    expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
-    expect(screen.getByText("Saved 6")).toBeInTheDocument();
+      act(() => close.focus());
+      fireEvent.keyDown(close, { key: "Tab" });
+
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(onDocumentKeyDown).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    }
   });
 
-  it("drops the oldest timed toast before any error", () => {
+  it("shows at most two timed toasts, dropping the oldest", () => {
     renderToasts();
-    show("Failed 1", "error");
-    show("Saved 1", "success");
-    show("Failed 2", "error");
-    show("Saved 2", "success");
-    show("Failed 3", "error");
+    for (const n of [1, 2, 3]) show(`Saved ${n}`, "success");
 
-    show("Failed 4", "error");
-
+    expect(screen.getAllByRole("status")).toHaveLength(2);
     expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
-    for (const text of ["Failed 1", "Failed 2", "Saved 2", "Failed 3"]) {
-      expect(screen.getByText(text)).toBeInTheDocument();
-    }
+    expect(screen.getByText("Saved 3")).toBeInTheDocument();
+  });
+
+  it("shows at most three errors, dropping the oldest", () => {
+    renderToasts();
+    for (const n of [1, 2, 3, 4]) show(`Failed ${n}`, "error");
+
+    expect(screen.getAllByRole("alert")).toHaveLength(3);
+    expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
     expect(screen.getByText("Failed 4")).toBeInTheDocument();
   });
 
-  it("drops the oldest error once only errors are showing", () => {
+  it("drops a toast only for a newer toast of its own kind", () => {
     renderToasts();
-    for (const n of [1, 2, 3, 4, 5]) show(`Failed ${n}`, "error");
+    for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
+    for (const n of [1, 2]) show(`Saved ${n}`, "success");
 
-    show("Saved", "success");
+    show("Saved 3", "success");
+    expect(screen.getAllByRole("alert")).toHaveLength(3);
+    expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
 
+    show("Failed 4", "error");
+    expect(screen.getAllByRole("status")).toHaveLength(2);
     expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("alert")).toHaveLength(4);
-    expect(screen.getByText("Saved")).toBeInTheDocument();
   });
 
   it("collapses a repeated error into the one showing, with a count", () => {
@@ -294,18 +395,41 @@ describe("Toast", () => {
     const [toast] = screen.getAllByRole("alert");
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(toast).toHaveTextContent("Failed");
-    expect(toast).toHaveTextContent("×3");
+    expect(
+      within(toast).getByText(t("common.toastRepeated", { count: 3 })),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no count on an error raised once", () => {
+    renderToasts();
+    show("Failed", "error");
+
+    expect(
+      within(screen.getByRole("alert")).queryByText(
+        t("common.toastRepeated", { count: 1 }),
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("counts a repeated error as the newest when dropping", () => {
     renderToasts();
-    for (const n of [1, 2, 3, 4, 5]) show(`Failed ${n}`, "error");
+    for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
     show("Failed 1", "error");
 
-    show("Failed 6", "error");
+    show("Failed 4", "error");
 
     expect(screen.getByText("Failed 1")).toBeInTheDocument();
     expect(screen.queryByText("Failed 2")).not.toBeInTheDocument();
+  });
+
+  it("keeps a success and an error with the same text apart", () => {
+    renderToasts();
+    show("Done", "success");
+    show("Done", "error");
+    show("Done", "success");
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
   });
 
   it("does not collapse a repeated timed toast", () => {
