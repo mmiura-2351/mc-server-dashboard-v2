@@ -10,8 +10,10 @@ actually serves, then proven closed after lifespan exit.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import threading
+import time
 import weakref
 
 import grpc
@@ -136,10 +138,17 @@ async def test_lifespan_exit_releases_the_stopped_grpc_server(
     app = create_app()
     async with app.router.lifespan_context(app):
         server = weakref.ref(app.state.grpc_server)
+        pollers_started = _grpc_pollers() - pollers_before
     gc.collect()
 
     assert server() is None
-    assert _grpc_pollers() <= pollers_before
+    # The collection releases the poller, but its thread can still be exiting
+    # when gc.collect() returns. Wait a bounded time for the pollers this test
+    # started to stop; one that never stops still fails (issue #3813).
+    deadline = time.monotonic() + 10
+    while any(t.is_alive() for t in pollers_started) and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert not [t for t in pollers_started if t.is_alive()]
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
