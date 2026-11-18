@@ -147,7 +147,16 @@ class EndCheckedReader(io.RawIOBase):
         return self._last_read
 
     def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
-        return self._stream.seek(offset, whence)
+        """Forward only: a seek back is a ``ReadError`` (issue #3798).
+
+        ``tarfile`` seeks back only when a member's data read ran on past where
+        the next header starts, such as a GNU sparse map that takes more data than
+        the member stores. It seeks with ``SEEK_SET`` only.
+        """
+
+        if whence != io.SEEK_SET or offset < self._stream.tell():
+            raise tarfile.ReadError("a member's data runs past the member")
+        return self._stream.seek(offset)
 
     def tell(self) -> int:
         return self._stream.tell()

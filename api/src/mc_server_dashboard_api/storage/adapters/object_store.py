@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import gzip
 import hashlib
 import io
 import json
@@ -60,11 +61,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import TracebackType
-from typing import Any, Literal, NoReturn, Protocol
+from typing import Any, NoReturn, Protocol
 
 import anyio
 
 from mc_server_dashboard_api.archive_member import (
+    EndCheckedReader,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -874,19 +876,15 @@ class ObjectStorage(Storage):
             raise SnapshotHandleError("snapshot handle already committed or aborted")
         incoming = self._incoming_prefix(h.community_id, h.server_id, h.transfer_id)
         # Spool the incoming tar to local scratch (bounded disk, like the fs
-        # adapter), then upload each member as its own object via multipart so no
-        # whole member is held in RAM. ``..``/absolute members are refused, the
-        # tar-side traversal defence.
+        # adapter), then walk it once, uploading each member as its own object via
+        # multipart so no whole member is held in RAM. ``..``/absolute members are
+        # refused, the tar-side traversal defence.
         async with self._client_factory() as client:
             spool = await _spool_stream(stream, ".snapshot.", ".tar")
             try:
-                for member_name, name in await asyncio.to_thread(
-                    _safe_archive_members, spool, "r:"
-                ):
-                    await client.upload_multipart(
-                        incoming + name,
-                        _archive_member_parts(spool, member_name, "r:"),
-                    )
+                async with aclosing(_snapshot_file_members(spool)) as members:
+                    async for name, parts in members:
+                        await client.upload_multipart(incoming + name, parts)
             finally:
                 await _discard_spool(spool, raise_fault=False)
 
@@ -1578,7 +1576,7 @@ class ObjectStorage(Storage):
                             f"declared bytes of {backup_key}"
                         )
                     # Single sequential pass (#1945): open the gzip spool
-                    # ONCE in stream mode and upload each member as it is
+                    # ONCE, read it forward, and upload each member as it is
                     # encountered. The old per-member approach re-opened the
                     # archive for every member, re-decompressing the entire
                     # gzip stream each time — O(n * total_decompressed_bytes).
@@ -1587,12 +1585,11 @@ class ObjectStorage(Storage):
                     # reserved can carry root members at it; they are left out
                     # rather than refused, so it stays restorable (issue #3433).
                     dropped: list[str] = []
-                    async for name, parts in _archive_file_member_streams(
-                        spool, "r|gz", dropped=dropped
-                    ):
-                        await client.upload_multipart(
-                            incoming + name, budget.count(parts)
-                        )
+                    async with aclosing(
+                        _archive_file_member_streams(spool, budget, dropped=dropped)
+                    ) as members:
+                        async for name, parts in members:
+                            await client.upload_multipart(incoming + name, parts)
                     if dropped:
                         _LOG.warning(
                             "restore of backup %s dropped %d archive member(s) at "
@@ -1692,10 +1689,11 @@ class ObjectStorage(Storage):
         # which is a verdict about the bytes, not about the world inside them.
         #
         # Bytes the store can produce can still hold nothing a restore can stage
-        # (issue #3237): a member escaping the prefix, or members inflating past
-        # the decompressed-size cap. So the read that proves the archive is
-        # spooled, and the spool is walked the way restore walks it, discarding
-        # the bytes — ArchiveUnreadableError / ArchiveTooLargeError, as restore.
+        # (issue #3237): a member escaping the prefix, members inflating past the
+        # decompressed-size cap, or an archive that does not read to its end
+        # (issue #3798). So the read that proves the archive is spooled, and the
+        # spool is walked the way restore walks it, discarding the bytes —
+        # ArchiveUnreadableError / ArchiveTooLargeError, as restore.
         # The spool is local disk, not the store: a transient fault on it is the
         # fs errno policy's StorageUnavailableError, raised past the short-body
         # classifier so it can never condemn the archive.
@@ -2650,19 +2648,79 @@ async def _tar_stream_from_objects(
     yield b"\0" * (blocksize * 2)
 
 
-def _safe_archive_members(
-    spool: Path, mode: Literal["r:", "r:gz"]
-) -> list[tuple[str, str]]:
-    """List the regular-file members of the spooled (tar / tar.gz) archive as
-    ``(member name, key name)`` pairs, refusing ``..``/absolute names (the tar-side
-    traversal defence, matching the fs adapter's ``filter="data"`` posture) so a
-    hostile archive cannot place objects outside the server's key prefix, and any
-    member at a non-canonical name (issue #3574). The key name is the member's
-    without the tar root prefix (:func:`without_tar_root_prefix`)."""
+class _EndCheckedTar:
+    """A tar walked through :class:`EndCheckedReader` over ``source`` (#3798).
 
-    names: list[tuple[str, str]] = []
-    with tarfile.open(str(spool), mode=mode, tarinfo=HeaderCheckedTarInfo) as tar:
-        for read in tar.getmembers():
+    ``source`` is the archive's decompressed bytes: our own ``gzip.GzipFile``
+    for a backup, the spool itself for a snapshot. Walk the members with
+    :meth:`next_member`, then read :meth:`past_end_marker` to the end. Closing it
+    closes the tar and ``source``, which ``tarfile`` leaves open when handed a
+    file object.
+    """
+
+    def __init__(self, source: io.BufferedIOBase) -> None:
+        self._source = source
+        try:
+            self._reader = EndCheckedReader(source)
+            self.tar = tarfile.open(
+                fileobj=self._reader, mode="r:", tarinfo=HeaderCheckedTarInfo
+            )
+        except BaseException:
+            source.close()
+            raise
+        self._members = self._reader.members(self.tar)
+
+    def next_member(self) -> tarfile.TarInfo | None:
+        """The next member, or ``None`` once the walk has ended."""
+
+        return next(self._members, None)
+
+    async def past_end_marker(self, jobs: _HandleJobs) -> AsyncIterator[bytes]:
+        """The zeros past the end-of-archive marker, each read a job of ``jobs``.
+
+        ``ReadError`` unless the walk stopped at the marker and only zeros follow
+        it (:meth:`EndCheckedReader.read_past_end_marker`).
+        """
+
+        zeros = self._reader.read_past_end_marker()
+        while (chunk := await jobs.run(next, zeros, None)) is not None:
+            yield chunk
+
+    def close(self) -> None:
+        try:
+            self.tar.close()
+        finally:
+            self._source.close()
+
+
+async def _snapshot_file_members(
+    spool: Path,
+) -> AsyncGenerator[tuple[str, AsyncIterator[bytes]], None]:
+    """Walk the spooled plain-tar snapshot once, yielding its file members.
+
+    Yields ``(key name, chunk stream)`` for each regular-file member, the key
+    name the member's without the tar root prefix (:func:`without_tar_root_prefix`).
+    The caller MUST fully consume each chunk stream before advancing. A file
+    member at an absolute or ``..`` name is refused (the tar-side traversal
+    defence, matching the fs adapter's ``filter="data"`` posture) so a hostile
+    archive cannot place objects outside the server's key prefix, and so is any
+    member at a non-canonical name (issue #3574): :class:`PathTraversalError`. A
+    link or other special member is left out, its target never looked up.
+
+    The walk must end at the end-of-archive marker, with only zeros after it, or
+    it raises ``ReadError`` (issue #3798): ``tarfile`` takes a header it cannot
+    read, past the first, for the end of the archive, which would publish the
+    members before it alone. Each member is judged as the walk reaches it, so a
+    refusal can follow uploads of earlier members; the caller's abort removes
+    them with the rest of the staging.
+    """
+
+    archive = await _acquire_off_loop(
+        _close_abandoned, lambda: _EndCheckedTar(open(spool, "rb"))
+    )
+    jobs = _HandleJobs()
+    try:
+        while (read := await jobs.run(archive.next_member)) is not None:
             member = without_tar_root_prefix(read)
             if member is None:
                 continue
@@ -2679,8 +2737,11 @@ def _safe_archive_members(
                     f"tar member name is not canonical: {member.name!r}"
                 )
             if member.isfile():
-                names.append((read.name, member.name))
-    return names
+                yield member.name, _member_parts(archive.tar.extractfile(read), jobs)
+        async for _zeros in archive.past_end_marker(jobs):
+            pass
+    finally:
+        await jobs.close(archive)
 
 
 class _RestoreBudget:
@@ -2709,12 +2770,6 @@ class _RestoreBudget:
 def _retrieve_fault(job: asyncio.Future[Any]) -> None:
     if not job.cancelled():
         job.exception()
-
-
-def _close_orphaned_member(opened: tuple[tarfile.TarFile, Any]) -> None:
-    """Close a member's archive whose opener was cancelled before owning it."""
-
-    _close_abandoned(opened[0])
 
 
 class _HandleJobs:
@@ -2753,7 +2808,9 @@ class _HandleJobs:
             job.add_done_callback(_retrieve_fault)
             raise
 
-    async def close(self, handle: tarfile.TarFile | io.BufferedReader) -> None:
+    async def close(
+        self, handle: tarfile.TarFile | io.BufferedReader | _EndCheckedTar
+    ) -> None:
         if self._closed:
             return
         self._closed = True
@@ -2764,46 +2821,26 @@ class _HandleJobs:
             await _close_off_loop(handle)
 
 
-async def _archive_member_parts(
-    spool: Path, name: str, mode: Literal["r:", "r:gz"]
-) -> AsyncIterator[bytes]:
-    """Stream one archive member's bytes in part-sized chunks (bounded memory)."""
+async def _member_parts(member_file: Any, jobs: _HandleJobs) -> AsyncIterator[bytes]:
+    """Stream a snapshot's tar member in part-sized chunks (bounded memory).
 
-    tar, member_file = await _acquire_off_loop(
-        _close_orphaned_member, _open_member, spool, name, mode
-    )
-    jobs = _HandleJobs()
-    try:
-        while True:
-            chunk = await jobs.run(member_file.read, _PART)
-            if not chunk:
-                return
-            yield chunk
-    finally:
-        await jobs.close(tar)
+    ``jobs`` are its archive's, so the archive's close follows a cancelled read.
+    """
 
-
-def _open_member(
-    spool: Path, name: str, mode: Literal["r:", "r:gz"]
-) -> tuple[tarfile.TarFile, Any]:
-    tar = tarfile.open(str(spool), mode=mode, tarinfo=HeaderCheckedTarInfo)
-    member_file = tar.extractfile(name)
-    if member_file is None:  # pragma: no cover - members are pre-filtered to files
-        tar.close()
-        raise NotFoundError(f"tar member not found: {name!r}")
-    return tar, member_file
+    while chunk := await jobs.run(member_file.read, _PART):
+        yield chunk
 
 
 async def _archive_file_member_streams(
-    spool: Path, mode: Literal["r|*", "r|gz"], *, dropped: list[str] | None = None
-) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
-    """Single-pass streaming extraction of an archive's file members (#1945).
+    spool: Path, budget: _RestoreBudget, *, dropped: list[str] | None = None
+) -> AsyncGenerator[tuple[str, AsyncIterator[bytes]], None]:
+    """Single-pass streaming extraction of a backup archive's file members (#1945).
 
-    Opens the spooled archive ONCE in tar stream mode (``r|gz`` / ``r|*``),
-    iterates members with ``tar.next()``, judges each inline, and yields
-    ``(name, chunk_stream)`` pairs for its file members. The caller MUST fully
-    consume each chunk stream before advancing to the next member (stream mode
-    reads sequentially).
+    Opens the spooled ``tar.gz`` ONCE, decompressed by our own ``gzip.GzipFile``,
+    walks its members in order, judges each inline, and yields
+    ``(name, chunk_stream)`` pairs for its file members, every chunk counted
+    against ``budget``. The caller MUST fully consume each chunk stream before
+    advancing to the next member (the walk reads sequentially).
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230), from the
@@ -2812,24 +2849,31 @@ async def _archive_file_member_streams(
     ``..`` member, by the rule the fs extraction shares (issue #3550): it reads,
     but nothing can be restored from it, override or not.
 
+    The archive is read to its end, as the upload gate reads it (issue #3798):
+    the walk goes through :class:`EndCheckedReader` and must stop at the
+    end-of-archive marker, only zeros may follow it (counted against ``budget``
+    too), the gzip CRC32 and ISIZE must match, and only another gzip member or
+    zero padding may follow a gzip member. ``GzipFile`` reads every gzip member,
+    so a ``tar.gz`` of several restores whole.
+
     With ``dropped``, a member landing at or under the reserved generation-marker
-    root name is not yielded but its name appended (issue #3433). Every member is
-    judged first, so only a file or directory at a relative, ``..``-free name
-    reaches that decision.
+    root name is not yielded but its name appended (issue #3433); its data is read
+    and counted all the same, so data that does not read is refused as any
+    member's is (issue #3798). Every member is judged first, so only a file or
+    directory at a relative, ``..``-free name reaches that decision.
     """
 
     with archive_read_errors_as_unreadable():
-        tar = await _acquire_off_loop(
-            _close_abandoned,
-            lambda: tarfile.open(str(spool), mode, tarinfo=HeaderCheckedTarInfo),
+        archive = await _acquire_off_loop(
+            _close_abandoned, lambda: _EndCheckedTar(gzip.GzipFile(spool))
         )
     jobs = _HandleJobs()
     try:
         while True:
             with archive_read_errors_as_unreadable():
-                read = await jobs.run(tar.next)
+                read = await jobs.run(archive.next_member)
             if read is None:
-                return
+                break
             # Read without the tar root prefix (issue #3574), then judged before
             # the reserved decision, so an unrestorable member at the reserved
             # name is refused, not dropped.
@@ -2837,17 +2881,23 @@ async def _archive_file_member_streams(
             if member is None:
                 continue
             refuse_unrestorable_member(member)
+            parts = None
+            if member.isfile():
+                member_file = archive.tar.extractfile(read)
+                parts = budget.count(_fileobj_parts(member_file, jobs))
             if dropped is not None and is_reserved_root_member(member.name):
                 dropped.append(member.name)
+                if parts is not None:
+                    async for _chunk in parts:
+                        pass
                 continue
-            if not member.isfile():
-                continue
-            member_file = tar.extractfile(read)
-            if member_file is None:
-                continue
-            yield member.name, _fileobj_parts(member_file, jobs)
+            if parts is not None:
+                yield member.name, parts
+        with archive_read_errors_as_unreadable():
+            async for _zeros in budget.count(archive.past_end_marker(jobs)):
+                pass
     finally:
-        await jobs.close(tar)
+        await jobs.close(archive)
 
 
 async def _drain_restorable_members(spool: Path, max_bytes: int) -> None:
@@ -2855,13 +2905,17 @@ async def _drain_restorable_members(spool: Path, max_bytes: int) -> None:
 
     The same member stream and decompressed-size budget as ``restore_backup``, so
     the health check refuses exactly what a restore would: an unsafe or unreadable
-    member (:class:`ArchiveUnreadableError`), or a bomb (:class:`ArchiveTooLargeError`).
+    member, an archive that does not read to its end (:class:`ArchiveUnreadableError`),
+    or a bomb (:class:`ArchiveTooLargeError`).
     """
 
     budget = _RestoreBudget(max_bytes)
-    async for _name, parts in _archive_file_member_streams(spool, "r|gz", dropped=[]):
-        async for _chunk in budget.count(parts):
-            pass
+    async with aclosing(
+        _archive_file_member_streams(spool, budget, dropped=[])
+    ) as members:
+        async for _name, parts in members:
+            async for _chunk in parts:
+                pass
 
 
 async def _fileobj_parts(member_file: Any, jobs: _HandleJobs) -> AsyncIterator[bytes]:
