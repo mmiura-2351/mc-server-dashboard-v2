@@ -32,9 +32,10 @@ nothing for this id, so nothing was lost and it is logged as such (issue #2480).
 Nor is it retried: no trigger goes to that server again until the Worker reports
 it again (issue #3387), since only a start puts a working set back.
 
-The one skip that does not advance next-due is the pre-dispatch connectivity gate:
-nothing is dispatched and nothing is logged there, so retrying it every tick costs
-nothing and the snapshot is taken as soon as the Worker reconnects.
+Two skips do not advance next-due, the pre-dispatch connectivity gate and a
+Worker that has not hydrated its server (issue #3890): nothing is dispatched and
+nothing is logged there, so retrying them every tick costs nothing, and the
+snapshot is taken as soon as the Worker reconnects or the hydrate lands.
 
 Considering one server is isolated from considering the next (issue #2752): an
 exception that no branch below handles is logged with its traceback and advances
@@ -113,6 +114,13 @@ class RunSnapshotCadenceTick:
     hydrate whose start is then refused is the one exception, and it is harmless:
     that scratch is a copy of the store.
 
+    An assigned Worker's scratch is a copy of the store, or newer, only once that
+    Worker has hydrated the server or holds a set at least as fresh. A start keeps
+    its Worker when the hydrate is refused (issue #3890), and that Worker's scratch
+    may then be a leftover older than the store. Its row carries
+    ``awaiting_hydrate`` until the hydrate lands, and the tick asks that Worker for
+    nothing meanwhile.
+
     Not frozen: it owns the in-memory next-due map mutated across ticks. A single
     instance is reused for the lifetime of the lifespan loop.
     """
@@ -178,6 +186,11 @@ class RunSnapshotCadenceTick:
                 return
             del self._nothing_held[server.id]
         assert server.assigned_worker_id is not None  # desired-running-assigned
+        if server.awaiting_hydrate:
+            # The Worker's scratch may be older than the store (issue #3890), so
+            # capturing it would replace the newer working set. Skip without
+            # advancing next-due, so the snapshot follows the hydrate at once.
+            return
         if not self.control_plane.is_worker_connected(
             worker_id=server.assigned_worker_id
         ):
