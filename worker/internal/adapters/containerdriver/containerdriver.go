@@ -2157,8 +2157,8 @@ func (i *instance) followInstallOutput(installID string, log *installLog) *insta
 // open and its reads (issue #3667). The follow's write to forge-install.log does
 // not watch the context, but openInstallLog only hands back a regular file with a
 // single name, so that write blocks only if the filesystem under the working dir
-// stalls. Bounding the wait instead would leave a goroutine holding the log open
-// while the next attempt appends to it.
+// stalls. Bounding the wait instead would leave a goroutine writing the log while
+// the next attempt writes to it (installLog).
 func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 	timer := time.NewTimer(drain)
 	defer timer.Stop()
