@@ -37,7 +37,7 @@ import {
   type ObservedState,
   STATE_BUCKETS,
   type StateBucket,
-  startAwaitsRelease,
+  startRefusal,
   statePill,
   statesForBucket,
 } from "./serverState.ts";
@@ -963,17 +963,22 @@ interface ActionProps {
 
 // One lifecycle button. Rendered only when permitted (controls render from
 // permissions, WEBUI_SPEC.md 7.3); disabled while a request is in flight or the
-// action does not apply to the current state. A Start held only by the Worker
-// the previous stop still holds says so (#3818).
+// action does not apply to the current state. Start follows the API's start
+// guard, whatever the server reads (#3860), and a Start held by the Worker the
+// previous stop still holds says so (#3818).
 function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   if (!can(`server:${action}`, { serverId: server.id })) {
     return null;
   }
   const desired = normalizeState(server.desired_state);
   const assigned = server.assigned_worker_id !== null;
-  const disabled = pending || !actionApplies(action, state, desired, assigned);
-  const held =
-    action === "start" && startAwaitsRelease(state, desired, assigned);
+  const refusal = action === "start" ? startRefusal(desired, assigned) : null;
+  const applies =
+    action === "start"
+      ? refusal === null
+      : actionApplies(action, state, desired, assigned);
+  const disabled = pending || !applies;
+  const held = refusal === "transition_conflict";
   return (
     <button
       type="button"

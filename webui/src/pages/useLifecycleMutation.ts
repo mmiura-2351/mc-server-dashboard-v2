@@ -121,10 +121,17 @@ export function useLifecycleMutation({
       }
       onError(error, action);
     },
-    onSettled: () => {
-      for (const queryKey of invalidateKeys) {
-        queryClient.invalidateQueries({ queryKey });
-      }
+    onSettled: (_data, error) => {
+      const refetched = Promise.all(
+        invalidateKeys.map((queryKey) =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
+      );
+      // A success stays pending until the refetch answers: until then the
+      // cache holds the transitional state beside the intent from before the
+      // request, and Start gates on the intent alone (#3860). A failure has
+      // rolled its state back, so it releases the controls at once.
+      return error ? undefined : refetched;
     },
   });
 }

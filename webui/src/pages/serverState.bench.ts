@@ -11,6 +11,7 @@ import {
   actionApplies,
   isTransitional,
   normalizeState,
+  startRefusal,
   statePill,
 } from "./serverState.ts";
 
@@ -34,7 +35,7 @@ describe("serverState", () => {
     await bench("isTransitional + actionApplies", () => {
       isTransitional("starting");
       isTransitional("running");
-      actionApplies("start", "stopped");
+      startRefusal("stopped", false);
       actionApplies("stop", "running");
       actionApplies("restart", "starting");
     }).run();

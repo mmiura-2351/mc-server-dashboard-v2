@@ -39,6 +39,7 @@ import {
   serverKey,
   sparklinePoints,
 } from "./ServerDetailPage.tsx";
+import { KNOWN } from "./serverState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
@@ -543,10 +544,42 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  // The API's start guard reads the intent and the assignment, never the
+  // observed state: under a stopped intent with no Worker assigned it accepts
+  // a start whatever the server reads (#3860).
+  it.each(KNOWN)(
+    "offers Start under a stopped intent with no Worker assigned at %s (#3860)",
+    async (observed) => {
+      mockApi.get.mockResolvedValue(
+        server({
+          observed_state: observed,
+          desired_state: "stopped",
+          assigned_worker_id: null,
+        }),
+      );
+      renderPage();
+
+      await screen.findByText("survival");
+      expect(
+        screen.getByRole("button", {
+          name: t(
+            observed === "crashed"
+              ? "serverDetail.startCrashed"
+              : "serverDetail.start",
+          ),
+        }),
+      ).toBeEnabled();
+      expect(
+        screen.queryByText(t("serverDetail.startAwaitsRelease")),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   // The previous stop still holds its Worker for the final snapshot, and the
-  // API refuses a start until the release (409 transition_conflict, #3818):
-  // Start is shown disabled, with the reason.
-  it.each(["stopped", "crashed", "unknown"])(
+  // API refuses a start until the release (409 transition_conflict, #3818),
+  // whatever the server reads (#3860): Start is shown disabled, with the
+  // reason.
+  it.each(KNOWN)(
     "holds Start with the reason while the stop still holds the Worker at %s (#3818)",
     async (observed) => {
       mockApi.get.mockResolvedValue(
@@ -1080,6 +1113,65 @@ describe("ServerDetailPage lifecycle controls", () => {
           serverKey(CID, SID),
         )?.observed_state,
       ).toBe("starting");
+    });
+
+    it("offers no Start again after a start succeeds, until the refetch answers (#3860)", async () => {
+      // Start does not read the observed state, so the optimistic `starting`
+      // does not hide it. With no status frame, the cache still holds the
+      // stopped intent until the settle refetch answers.
+      const serverPath = `/api/communities/${CID}/servers/${SID}`;
+      mockApi.get.mockResolvedValue(
+        server({
+          observed_state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: null,
+        }),
+      );
+      mockApi.post.mockResolvedValue(
+        server({
+          observed_state: "stopped",
+          desired_state: "running",
+          assigned_worker_id: "worker-a",
+        }),
+      );
+      renderPage();
+      const enabledStarts = () =>
+        screen
+          .queryAllByRole("button", { name: t("serverDetail.start") })
+          .filter((button) => !(button as HTMLButtonElement).disabled);
+
+      await screen.findByText("survival");
+      let answerRefetch!: (value: unknown) => void;
+      mockApi.get.mockReturnValue(
+        new Promise((resolve) => {
+          answerRefetch = resolve;
+        }),
+      );
+      const reads = mockApi.get.mock.calls.length;
+      fireEvent.click(
+        screen.getByRole("button", { name: t("serverDetail.start") }),
+      );
+
+      await waitFor(() =>
+        expect(
+          mockApi.get.mock.calls.slice(reads).map(([path]) => path),
+        ).toContain(serverPath),
+      );
+      expect(enabledStarts()).toEqual([]);
+
+      act(() =>
+        answerRefetch(
+          server({
+            observed_state: "starting",
+            desired_state: "running",
+            assigned_worker_id: "worker-a",
+          }),
+        ),
+      );
+      expect(
+        await screen.findByText(`${t("serverDetail.worker")}: worker`),
+      ).toBeInTheDocument();
+      expect(enabledStarts()).toEqual([]);
     });
   });
 });

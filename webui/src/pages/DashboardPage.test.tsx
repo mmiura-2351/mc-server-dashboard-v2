@@ -16,6 +16,7 @@ import { setLanguage, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { DashboardPage } from "./DashboardPage.tsx";
+import { KNOWN } from "./serverState.ts";
 import { serversKey } from "./useCommunityEvents.ts";
 
 const CID = "c1";
@@ -309,6 +310,62 @@ describe("DashboardPage lifecycle actions", () => {
     // The list refetches after the action settles.
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
   });
+
+  // The success-styled button: a crashed server's Start reads "Restart", the
+  // label the restart button carries too.
+  const startButton = (observed: string) =>
+    screen
+      .getAllByRole("button", {
+        name: t(
+          observed === "crashed" ? "dashboard.startCrashed" : "dashboard.start",
+        ),
+      })
+      .find((button) => button.className.includes("success"));
+
+  // The API's start guard reads the intent and the assignment, never the
+  // observed state: under a stopped intent it accepts a start while no Worker
+  // is assigned, and refuses it until the release while one is (#3860).
+  it.each(KNOWN)(
+    "offers Start under a stopped intent with no Worker assigned at %s (#3860)",
+    async (observed) => {
+      mockApi.get.mockResolvedValue([
+        server({
+          observed_state: observed,
+          desired_state: "stopped",
+          assigned_worker_id: null,
+        }),
+      ]);
+      renderPage();
+
+      await screen.findByText("survival");
+      const start = startButton(observed);
+      expect(start).toBeEnabled();
+      expect(start).not.toHaveAccessibleDescription(
+        t("serverDetail.startAwaitsRelease"),
+      );
+    },
+  );
+
+  it.each(KNOWN)(
+    "holds Start with the reason while a stopped intent's Worker is assigned at %s (#3860)",
+    async (observed) => {
+      mockApi.get.mockResolvedValue([
+        server({
+          observed_state: observed,
+          desired_state: "stopped",
+          assigned_worker_id: "worker-a",
+        }),
+      ]);
+      renderPage();
+
+      await screen.findByText("survival");
+      const start = startButton(observed);
+      expect(start).toBeDisabled();
+      expect(start).toHaveAccessibleDescription(
+        t("serverDetail.startAwaitsRelease"),
+      );
+    },
+  );
 
   it("routes a 403 through the permission glue, not a generic toast", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
