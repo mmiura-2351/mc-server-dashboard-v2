@@ -27,6 +27,12 @@ re-reading that one row immediately before the delete (the #1404 pattern). That
 narrows the race to the gap between the re-read and the delete without closing
 it; losing it would take an upload whose commit lands more than the safety
 window after its blob was stored.
+
+**Ownership.** The reference model holds only if the bucket belongs to this
+database: in a bucket another database also uses, that database's packs are named
+by no row here, and each is the only copy of a user upload. Each pass therefore
+asks the bucket's owner marker first and is refused, with an ERROR, unless it
+names this installation (STORAGE.md Section 4.3, issue #3870).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
+from mc_server_dashboard_api.servers.domain.store_ownership import StoreOwnership
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 
 _LOG = logging.getLogger(__name__)
@@ -54,8 +61,13 @@ class RunResourcePackGc:
     uow: UnitOfWork
     store: ResourcePackStore
     clock: Clock
+    ownership: StoreOwnership
 
     async def __call__(self) -> None:
+        refusal = await self.ownership.refusal()
+        if refusal is not None:
+            _LOG.error("resource-pack GC refused: %s", refusal)
+            return
         entries = await self.store.list_entries()
         async with self.uow:
             live = {pack.id for pack in await self.uow.resource_packs.list_all()}

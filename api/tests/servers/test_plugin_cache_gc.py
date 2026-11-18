@@ -13,6 +13,9 @@ behaviour on its own (issue #2347).
 from __future__ import annotations
 
 import datetime as dt
+import logging
+
+import pytest
 
 from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     GC_SAFETY_WINDOW,
@@ -21,6 +24,7 @@ from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from tests.servers.fakes import FakePluginCacheStore
+from tests.store_ownership import FakeStoreOwnership
 
 _NOW = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.UTC)
 
@@ -69,8 +73,17 @@ def _seed(
     cache.modified_at[sha] = age or _old()
 
 
-def _gc(cache: FakePluginCacheStore, refs: _FakeReferences) -> RunPluginCacheGc:
-    return RunPluginCacheGc(cache=cache, references=refs, clock=_FixedClock(_NOW))
+def _gc(
+    cache: FakePluginCacheStore,
+    refs: _FakeReferences,
+    ownership: FakeStoreOwnership | None = None,
+) -> RunPluginCacheGc:
+    return RunPluginCacheGc(
+        cache=cache,
+        references=refs,
+        clock=_FixedClock(_NOW),
+        ownership=ownership or FakeStoreOwnership(),
+    )
 
 
 async def test_deletes_unreferenced_old_blob() -> None:
@@ -168,3 +181,25 @@ async def test_recheck_before_delete_spares_newly_referenced_blob() -> None:
     assert cache.deleted == []
     assert result.scanned == 1
     assert result.deleted == 0
+
+
+async def test_refuses_a_cache_whose_store_another_database_owns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Every blob in a bucket shared with another database looks unreferenced to
+    # this one; the pass must refuse before it deletes any (issue #3870).
+    cache = FakePluginCacheStore()
+    _seed(cache, "a" * 64)
+    ownership = FakeStoreOwnership.foreign()
+
+    with caplog.at_level(logging.ERROR):
+        result = await _gc(cache, _FakeReferences(set()), ownership)()
+
+    assert "a" * 64 in cache.blobs
+    assert result.deleted == 0
+    assert any(
+        rec.levelno == logging.ERROR
+        and "plugin-cache GC refused" in rec.getMessage()
+        and str(ownership.refusal_reason) in rec.getMessage()
+        for rec in caplog.records
+    )

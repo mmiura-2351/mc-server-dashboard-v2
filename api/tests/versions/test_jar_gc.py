@@ -14,12 +14,16 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from mc_server_dashboard_api.versions.application.jar_gc import (
     GC_SAFETY_WINDOW,
     RunJarPoolGc,
 )
 from mc_server_dashboard_api.versions.domain.clock import Clock
+from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
 from mc_server_dashboard_api.versions.domain.jar_references import LiveJarReferences
+from tests.store_ownership import FakeStoreOwnership
 from tests.versions.fakes import FakeJarPool
 
 _NOW = dt.datetime(2026, 6, 5, 12, 0, 0, tzinfo=dt.UTC)
@@ -69,8 +73,17 @@ def _seed(
     pool.modified_at[sha] = age or _old()
 
 
-def _gc(pool: FakeJarPool, refs: _FakeReferences) -> RunJarPoolGc:
-    return RunJarPoolGc(pool=pool, references=refs, clock=_FixedClock(_NOW))
+def _gc(
+    pool: FakeJarPool,
+    refs: _FakeReferences,
+    ownership: FakeStoreOwnership | None = None,
+) -> RunJarPoolGc:
+    return RunJarPoolGc(
+        pool=pool,
+        references=refs,
+        clock=_FixedClock(_NOW),
+        ownership=ownership or FakeStoreOwnership(),
+    )
 
 
 async def test_deletes_unreferenced_old_jar() -> None:
@@ -159,3 +172,18 @@ async def test_recheck_before_delete_spares_newly_referenced_jar() -> None:
     assert pool.deleted == []
     assert result.scanned == 1
     assert result.deleted == 0
+
+
+async def test_refuses_a_pool_whose_store_another_database_owns() -> None:
+    # Every JAR in a store shared with another database looks unreferenced to
+    # this one; the pass must refuse before it deletes any (issue #3870).
+    pool = FakeJarPool()
+    _seed(pool, "a" * 64)
+    ownership = FakeStoreOwnership.foreign()
+
+    with pytest.raises(StoreNotOwnedError) as excinfo:
+        await _gc(pool, _FakeReferences(set()), ownership)()
+
+    assert ownership.refusal_reason is not None
+    assert ownership.refusal_reason in str(excinfo.value)
+    assert "a" * 64 in pool.stored

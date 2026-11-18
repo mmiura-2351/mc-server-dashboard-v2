@@ -46,6 +46,10 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
     ObjectStorage,
     S3ClientFactory,
 )
+from mc_server_dashboard_api.storage.adapters.ownership import (
+    OWNER_MARKER,
+    ObjectStoreOwnership,
+)
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveUnreadableError,
     NotFoundError,
@@ -327,8 +331,16 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
             with pytest.raises(NotFoundError):
                 await _read(client, "communities/missing")
 
-            # A write auto-creates the bucket; the just-written object is then
-            # visible.
+        # On a fresh deployment the first write is the claim's conditional put of
+        # the store owner marker (issue #3870), so it is what creates the bucket.
+        ownership = ObjectStoreOwnership(factory, bucket=_FRESH_BUCKET)
+        await ownership.claim(uuid.UUID(int=1))
+        assert await ownership.refusal() is None
+
+        async with factory() as client:
+            await client.delete_object(OWNER_MARKER)
+            # A plain write to the bucket the claim created; the just-written
+            # object is then visible.
             key = "communities/probe.json"
             await client.put_object(key, b"{}")
             assert await client.head_object(key) == 2

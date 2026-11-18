@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
 import uuid
@@ -132,3 +133,34 @@ async def test_missing_and_deleted_objects_are_absent(
 
     assert await client.head_object(key) is None
     assert await client.list_objects(prefix) == []
+
+
+async def test_put_if_absent_never_replaces_an_existing_object(
+    s3: tuple[S3Client, str, StoreClock, bool],
+) -> None:
+    # The store owner marker is claimed with this write (issue #3870): a second
+    # writer must be refused, and the first writer's body must stay.
+    client, prefix, _, _ = s3
+    key = prefix + "claimed"
+
+    assert await client.put_object_if_absent(key, b"first") is True
+    assert await client.put_object_if_absent(key, b"second") is False
+
+    assert await _read(client, key) == b"first"
+
+
+async def test_put_if_absent_admits_one_of_many_concurrent_writers(
+    s3: tuple[S3Client, str, StoreClock, bool],
+) -> None:
+    # Two APIs starting together on an unmarked bucket race the same create: the
+    # store must let exactly one of them through (issue #3870).
+    client, prefix, _, _ = s3
+    key = prefix + "raced"
+    bodies = [f"writer-{i}".encode() for i in range(8)]
+
+    created = await asyncio.gather(
+        *(client.put_object_if_absent(key, body) for body in bodies)
+    )
+
+    assert created.count(True) == 1
+    assert await _read(client, key) == bodies[created.index(True)]

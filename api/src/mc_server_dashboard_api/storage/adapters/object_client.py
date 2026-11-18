@@ -26,6 +26,7 @@ import botocore.exceptions
 from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
+    ConditionalPutUnsupportedError,
     MultipartUploadsUnsupportedError,
     S3Client,
     S3ClientFactory,
@@ -162,6 +163,30 @@ class _Aioboto3S3Client:
             raise ObjectStoreUnavailableError(
                 f"object store put failed for {key}"
             ) from exc
+
+    async def put_object_if_absent(self, key: str, body: bytes) -> bool:
+        # S3 conditional write (issue #3870): ``If-None-Match: *`` makes the store
+        # refuse the PUT with 412 when the key exists, atomically, so of two racing
+        # writers exactly one creates the object.
+        try:
+            await self._client.put_object(
+                Bucket=self._bucket, Key=key, Body=body, IfNoneMatch="*"
+            )
+        except ClientError as exc:
+            if _is_precondition_failed(exc):
+                return False
+            if _is_unsupported(exc):
+                raise ConditionalPutUnsupportedError(
+                    f"object store rejected a conditional put for {key}"
+                ) from exc
+            raise ObjectStoreUnavailableError(
+                f"object store put failed for {key}"
+            ) from exc
+        except _UPLOAD_FAILURE_ERRORS as exc:
+            raise ObjectStoreUnavailableError(
+                f"object store put failed for {key}"
+            ) from exc
+        return True
 
     async def upload_multipart(self, key: str, parts: AsyncIterator[bytes]) -> None:
         # Accumulate into >= _PART buffers so each uploaded part respects the S3
@@ -418,6 +443,13 @@ def _is_no_such_upload(exc: ClientError) -> bool:
     # no-op in that case, matching the Port's idempotent-abort contract.
     code = exc.response.get("Error", {}).get("Code")
     return code in ("NoSuchUpload",)
+
+
+def _is_precondition_failed(exc: ClientError) -> bool:
+    # The conditional put's refusal (issue #3870): an object already exists.
+    status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    code = exc.response.get("Error", {}).get("Code")
+    return status == 412 or code in ("PreconditionFailed", "412")
 
 
 def _is_unsupported(exc: ClientError) -> bool:

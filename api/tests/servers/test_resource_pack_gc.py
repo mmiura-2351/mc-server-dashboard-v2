@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
 from tests.servers.fakes import FakeClock, FakeResourcePackRepository, FakeUnitOfWork
 from tests.storage.fake_s3 import FakeS3Store
 from tests.storage.faulty_s3 import Faults, faulty_s3_factory
+from tests.store_ownership import FakeStoreOwnership
 
 _T0 = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.UTC)
 _FILENAME = "pack.zip"
@@ -86,7 +87,7 @@ class _Bucket:
             uploaded_by=uuid.uuid4(),
         )
 
-    async def gc(self) -> None:
+    async def gc(self, ownership: FakeStoreOwnership | None = None) -> None:
         """Run one pass once every blob stored so far is past the safety window."""
 
         self.clock.set(self.clock.now() + GC_SAFETY_WINDOW + dt.timedelta(minutes=1))
@@ -94,6 +95,7 @@ class _Bucket:
             uow=FakeUnitOfWork(resource_packs=self.rows),
             store=self.store,
             clock=self.clock,
+            ownership=ownership or FakeStoreOwnership(),
         )()
 
 
@@ -199,6 +201,7 @@ async def test_spares_the_blob_of_an_upload_in_flight() -> None:
         uow=FakeUnitOfWork(resource_packs=bucket.rows),
         store=bucket.store,
         clock=bucket.clock,
+        ownership=FakeStoreOwnership(),
     )()
 
     assert bucket.blob_keys() == [f"resource-packs/{pack_id.value}/{_FILENAME}"]
@@ -228,3 +231,29 @@ async def test_keeps_the_blob_of_a_row_committed_after_the_rows_were_read() -> N
     await bucket.gc()
 
     assert bucket.blob_keys() == [f"resource-packs/{pack.id.value}/{_FILENAME}"]
+
+
+async def test_refuses_a_bucket_another_database_owns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A pack another database uploaded has no row here, so it looks orphaned:
+    # the pass must refuse before it deletes the only copy (issue #3870).
+    bucket = _Bucket()
+    pack_id = ResourcePackId(uuid.uuid4())
+
+    async def _body() -> AsyncIterator[bytes]:
+        yield _pack_zip()
+
+    await bucket.store.put(pack_id, _FILENAME, _body())
+    ownership = FakeStoreOwnership.foreign()
+
+    with caplog.at_level(logging.ERROR):
+        await bucket.gc(ownership)
+
+    assert bucket.blob_keys() == [f"resource-packs/{pack_id.value}/{_FILENAME}"]
+    assert any(
+        rec.levelno == logging.ERROR
+        and "resource-pack GC refused" in rec.getMessage()
+        and str(ownership.refusal_reason) in rec.getMessage()
+        for rec in caplog.records
+    )
