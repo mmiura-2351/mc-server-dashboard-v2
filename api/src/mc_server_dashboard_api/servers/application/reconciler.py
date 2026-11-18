@@ -729,22 +729,19 @@ class RunReconcilerTick:
                     server.id.value,
                 )
                 return
-            if (
-                action in ("place_and_start", "redispatch_start")
-                and isinstance(exc, LifecycleTransitionConflictError)
-            ) or (
-                action == "place_and_start"
-                and isinstance(exc, InvalidLifecycleTransitionError)
+            if action in ("place_and_start", "redispatch_start") and isinstance(
+                exc, (LifecycleTransitionConflictError, InvalidLifecycleTransitionError)
             ):
                 # The row moved under the start: a stop intent committed, or the
                 # server was placed on another Worker, before the start was sent
                 # (issue #3737), a stop withdrew the intent the start was sending
                 # (issue #3739), or a concurrent placement won the assignment. A
-                # stop can also withdraw an unplaced intent after this tick listed
-                # it, so the placement's entry guard finds no intent to place
-                # (issue #3815). The newer transition owns the row, so nothing
-                # failed here: no backoff and no WARNING, and the next tick acts on
-                # the row as it now is.
+                # stop can also withdraw the intent after this tick listed the row,
+                # so the action's entry guard finds no intent to start (issue
+                # #3815). The newer transition owns the row, so nothing failed
+                # here: no backoff and no WARNING, and the next tick acts on the
+                # row as it now is. A stop-side action refused by its own guard is
+                # not covered: it still counts as a failure below.
                 _LOG.info(
                     "reconcile action %s skipped for server %s: the server's "
                     "intent or assignment changed before the start was sent",
