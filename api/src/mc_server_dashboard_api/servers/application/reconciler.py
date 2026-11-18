@@ -17,7 +17,17 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   double-start with ``INVALID_STATE``; we only replay when the Worker is not
   already running it. ``restarting`` is in the wire and DB set of observed states
   but has no producer today (no Worker driver emits it and no API path writes it),
-  so a row in that state is treated as not running.
+  so a row in that state is treated as not running. One ``crashed`` row is
+  skipped instead (issue #3281, ``Server.crash_not_restarted``): a crash whose
+  stored reason the Worker reports without retrying (the Forge installer out of
+  memory, or unable to run on the selected Java), reported after the row's
+  ``updated_at``. The next attempt fails the same way, so the server stays
+  crashed until an operator stops it and starts it again. ``updated_at`` is
+  bumped by every row write, so besides that start (whose replay, if its answer
+  was lost, must not be held back) an edit, a rename, a Geyser install or
+  removal that moves the Bedrock port, the Bedrock gate-flip sweep and a
+  refused restart each re-arm one restart: one more failing attempt, never a
+  loop.
 - ``desired=running``, no assigned Worker (compensation-failure orphan) -> run
   the normal placement + dispatch path. Assignment stickiness invariant (issue
   #101): once ``place_and_start`` has SENT a start command for this server it KEEPS
@@ -26,7 +36,10 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   different one. The reconciler never places a started server on a different Worker
   until a stop's release clears the assignment (a Worker disconnect does not clear
   it) — otherwise the Worker's per-process double-start guard would not catch a
-  second live instance on another Worker.
+  second live instance on another Worker. For the same reason it keeps the
+  assignment, sends no start and records observed=running when the placed Worker
+  refuses the hydrate ``INVALID_STATE``, because it already runs the server (issue
+  #3865); that counts as success, not toward the backoff.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final
@@ -662,6 +675,9 @@ class RunReconcilerTick:
                 return "place_and_start"
             if server.observed_state not in _NOT_RUNNING:
                 return None  # already running/starting: not actionable
+            if server.crash_not_restarted():
+                # Restarting would run the failing install again (issue #3281).
+                return None
             if not self.control_plane.is_worker_connected(
                 worker_id=server.assigned_worker_id
             ):

@@ -1914,10 +1914,14 @@
         "type": "object"
       },
       "JarPoolGcResponse": {
-        "description": "What a JAR-pool GC pass scanned and reclaimed (issue #293).",
+        "description": "What a JAR-pool GC pass scanned and reclaimed (issue #293).\n\n``failed`` counts the JARs whose delete failed: the pass skipped them and went\non, so a 200 alone does not say every orphan went (issue #3871).",
         "properties": {
           "deleted": {
             "title": "Deleted",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
             "type": "integer"
           },
           "freed_bytes": {
@@ -1932,7 +1936,8 @@
         "required": [
           "scanned",
           "deleted",
-          "freed_bytes"
+          "freed_bytes",
+          "failed"
         ],
         "title": "JarPoolGcResponse",
         "type": "object"
@@ -3512,6 +3517,32 @@
             ],
             "title": "Cpu Millis"
           },
+          "crash_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crash Detail"
+          },
+          "crash_not_restarted": {
+            "title": "Crash Not Restarted",
+            "type": "boolean"
+          },
+          "crash_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crash Reason"
+          },
           "desired_state": {
             "title": "Desired State",
             "type": "string"
@@ -3608,7 +3639,10 @@
           "desired_state",
           "observed_state",
           "observed_at",
-          "assigned_worker_id"
+          "assigned_worker_id",
+          "crash_reason",
+          "crash_detail",
+          "crash_not_restarted"
         ],
         "title": "ServerResponse",
         "type": "object"
@@ -11801,7 +11835,7 @@
     },
     "/api/versions/jar-pool/gc": {
       "post": {
-        "description": "Reclaim pooled JARs no live server row references (platform admin, #293).\n\nA bounded scan diffing the pool against the live reference set, skipping JARs\ninside the safety window; returns what it scanned and freed. Audited like the\ncatalog refresh. Refused with 409 ``store_not_owned`` when the store's owner\nmarker names another database (STORAGE.md Section 4.3, issue #3870); the\n``detail`` names the marker and both installations, and the refusal is logged.",
+        "description": "Reclaim pooled JARs no live server row references (platform admin, #293).\n\nA bounded scan diffing the pool against the live reference set, skipping JARs\ninside the safety window; returns what it scanned and freed, and how many JARs\nit skipped because their delete failed (issue #3871). Audited like the\ncatalog refresh. Refused with 409 ``store_not_owned`` when the store's owner\nmarker names another database (STORAGE.md Section 4.3, issue #3870); the\n``detail`` names the marker and both installations, and the refusal is logged.",
         "operationId": "jar_pool_gc_api_versions_jar_pool_gc_post",
         "responses": {
           "200": {

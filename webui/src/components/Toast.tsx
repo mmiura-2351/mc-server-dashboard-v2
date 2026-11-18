@@ -24,6 +24,9 @@ interface Toast {
   id: number;
   message: string;
   variant: ToastVariant;
+  // What the toast is about, such as a server's id; a repeat collapses only
+  // into a toast with the same scope.
+  scope: string | undefined;
   // Times this error was raised while showing; a repeat collapses into it.
   count: number;
   // Order of the last raise, newest highest; the stack cap drops the lowest.
@@ -31,7 +34,7 @@ interface Toast {
 }
 
 interface ToastContextValue {
-  showToast: (message: string, variant: ToastVariant) => void;
+  showToast: (message: string, variant: ToastVariant, scope?: string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -152,31 +155,38 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
 
-  const showToast = useCallback((message: string, variant: ToastVariant) => {
-    const id = Date.now() + Math.random();
-    raisesRef.current += 1;
-    const raisedAt = raisesRef.current;
-    setToasts((prev) => {
-      const same =
-        variant === "error"
-          ? prev.find(
-              (toast) => toast.variant === "error" && toast.message === message,
-            )
-          : undefined;
-      if (same !== undefined) {
-        // Updated in place, not moved, so a focused dismiss button keeps focus.
-        return prev.map((toast) =>
-          toast === same
-            ? { ...toast, count: toast.count + 1, raisedAt }
-            : toast,
-        );
-      }
-      return [
-        ...makeRoom(prev, variant),
-        { id, message, variant, count: 1, raisedAt },
-      ];
-    });
-  }, []);
+  const showToast = useCallback(
+    (message: string, variant: ToastVariant, scope?: string) => {
+      const id = Date.now() + Math.random();
+      raisesRef.current += 1;
+      const raisedAt = raisesRef.current;
+      setToasts((prev) => {
+        const same =
+          variant === "error"
+            ? prev.find(
+                (toast) =>
+                  toast.variant === "error" &&
+                  toast.message === message &&
+                  toast.scope === scope,
+              )
+            : undefined;
+        if (same !== undefined) {
+          // Updated in place, not moved, so a focused dismiss button keeps
+          // focus.
+          return prev.map((toast) =>
+            toast === same
+              ? { ...toast, count: toast.count + 1, raisedAt }
+              : toast,
+          );
+        }
+        return [
+          ...makeRoom(prev, variant),
+          { id, message, variant, scope, count: 1, raisedAt },
+        ];
+      });
+    },
+    [],
+  );
 
   const value = useMemo<ToastContextValue>(() => ({ showToast }), [showToast]);
 

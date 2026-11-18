@@ -67,6 +67,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
 )
 from mc_server_dashboard_api.identity.domain.entities import User
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -113,6 +114,12 @@ class _FakeServer:
     observed_state: ObservedState
     desired_state: DesiredState = DesiredState.RUNNING
     assigned_worker_id: WorkerId | None = None
+    crash_reason: CrashReason | None = None
+    crash_detail: str | None = None
+    not_restarted: bool = False
+
+    def crash_not_restarted(self) -> bool:
+        return self.not_restarted
 
 
 class _FakeListServers:
@@ -459,9 +466,9 @@ def test_community_frame_wire_text_is_the_exact_compact_json() -> None:
 
 
 def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
-    # Each entry carries the desired state (#3428) and the assigned Worker
-    # (#3818) beside the observed state, so a client that missed an intent
-    # change or a release converges on it too.
+    # Each entry carries the desired state (#3428), the assigned Worker
+    # (#3818) and the last crash (#3281) beside the observed state, so a client
+    # that missed an intent change, a release or a crash converges on it too.
     bus = InProcessRealTimeEvents()
     community = uuid.uuid4()
     server_a, server_b, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -473,6 +480,9 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 observed_state=ObservedState.CRASHED,
                 desired_state=DesiredState.STOPPED,
                 assigned_worker_id=WorkerId(worker),
+                crash_reason=CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+                crash_detail="java.lang.UnsupportedClassVersionError",
+                not_restarted=True,
             ),
         ]
     )
@@ -489,12 +499,18 @@ def test_stream_opens_with_a_snapshot_of_every_community_server() -> None:
                 "state": "running",
                 "desired_state": "running",
                 "assigned_worker_id": None,
+                "crash_reason": None,
+                "crash_detail": None,
+                "crash_not_restarted": False,
             },
             {
                 "server_id": str(server_b),
                 "state": "crashed",
                 "desired_state": "stopped",
                 "assigned_worker_id": str(worker),
+                "crash_reason": "forge_install_java_incompatible",
+                "crash_detail": "java.lang.UnsupportedClassVersionError",
+                "crash_not_restarted": True,
             },
         ]
     }
@@ -515,7 +531,9 @@ def test_snapshot_wire_text_is_the_compact_community_frame_shape() -> None:
     assert text == (
         f'{{"stream":"snapshot","ts":"{ts}",'
         f'"payload":{{"servers":[{{"server_id":"{server}","state":"running",'
-        '"desired_state":"running","assigned_worker_id":null}]},"server_id":null}'
+        '"desired_state":"running","assigned_worker_id":null,'
+        '"crash_reason":null,"crash_detail":null,"crash_not_restarted":false}]},'
+        '"server_id":null}'
     )
 
 
@@ -561,6 +579,9 @@ def test_gap_is_followed_by_a_fresh_snapshot() -> None:
                 "state": "running",
                 "desired_state": "running",
                 "assigned_worker_id": None,
+                "crash_reason": None,
+                "crash_detail": None,
+                "crash_not_restarted": False,
             }
         ]
     }

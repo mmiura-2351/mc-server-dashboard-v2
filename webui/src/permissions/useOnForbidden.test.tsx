@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
+import { t } from "../i18n/index.ts";
 import { useOnForbidden } from "./useOnForbidden.ts";
 
 const showToast = vi.fn();
@@ -49,6 +50,25 @@ describe("useOnForbidden", () => {
     expect(showToast).toHaveBeenCalledWith(
       expect.not.stringContaining("forbidden"),
       "error",
+    );
+  });
+
+  // A denied lifecycle action names its server, as its other toasts do, and
+  // stays apart from the same denial on another server (#3862).
+  it("names the server the denied action was about, scoped to its id", () => {
+    showToast.mockReset();
+    const { result } = renderHook(() => useOnForbidden(), { wrapper });
+
+    const handled = result.current(
+      new ApiError(403, { reason: "forbidden", permission: "server:stop" }),
+      { server: { id: "s1", name: "alpha" } },
+    );
+
+    expect(handled).toBe(true);
+    expect(showToast).toHaveBeenCalledWith(
+      `alpha: ${t("permissions.deniedNamed", { permission: "server:stop" })}`,
+      "error",
+      "s1",
     );
   });
 

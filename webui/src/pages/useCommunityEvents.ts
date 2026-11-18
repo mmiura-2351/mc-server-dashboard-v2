@@ -31,6 +31,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import type { components } from "../api/schema";
 import { useToast } from "../components/Toast.tsx";
+import { useServerToast } from "../components/useServerToast.ts";
 import {
   CommunityEventsClient,
   type NotificationEvent,
@@ -38,6 +39,7 @@ import {
   type StatusEvent,
 } from "./communityEvents.ts";
 import { observeRestResponses, stamp } from "./restReads.ts";
+import { NOT_RESTARTED_CRASH_REASONS } from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -48,7 +50,10 @@ type Stamped<T = string> = { value: T; at: number };
 type Fields = Partial<
   Pick<
     ServerResponse,
-    "observed_state" | "desired_state" | "assigned_worker_id"
+    | "observed_state"
+    | "desired_state"
+    | "assigned_worker_id"
+    | "crash_not_restarted"
   >
 >;
 
@@ -67,6 +72,7 @@ export function serversKey(communityId: string) {
 export function useCommunityEvents(communityId: string): boolean {
   const queryClient = useQueryClient();
   const { showToast } = useToast();
+  const showServerToast = useServerToast();
   const [degraded, setDegraded] = useState(false);
 
   useEffect(() => {
@@ -74,13 +80,15 @@ export function useCommunityEvents(communityId: string): boolean {
     const key = serversKey(communityId);
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    // The live observed and desired states and assignments not yet
-    // superseded by a REST read, each stamped with when it was received
-    // (#3213). They are stamped apart, as different frames carry them (#3428,
-    // #3818): a read can supersede one and not another.
+    // The live observed and desired states, assignments and whether the
+    // reconciler leaves each crash alone, not yet superseded by a REST read,
+    // each stamped with when it was received (#3213). They are stamped apart,
+    // as different frames carry them (#3428, #3818, #3281): a read can
+    // supersede one and not another.
     const observed = new Map<string, Stamped>();
     const desired = new Map<string, Stamped>();
     const assigned = new Map<string, Stamped<string | null>>();
+    const notRestarted = new Map<string, Stamped<boolean>>();
     // The latest snapshot's server set, until a REST read supersedes it.
     let members: { ids: Set<string>; at: number } | null = null;
 
@@ -93,13 +101,20 @@ export function useCommunityEvents(communityId: string): boolean {
       const state = observed.get(id);
       const intent = desired.get(id);
       const worker = assigned.get(id);
-      if (state === undefined && intent === undefined && worker === undefined) {
+      const held = notRestarted.get(id);
+      if (
+        state === undefined &&
+        intent === undefined &&
+        worker === undefined &&
+        held === undefined
+      ) {
         return null;
       }
       return {
         ...(state !== undefined && { observed_state: state.value }),
         ...(intent !== undefined && { desired_state: intent.value }),
         ...(worker !== undefined && { assigned_worker_id: worker.value }),
+        ...(held !== undefined && { crash_not_restarted: held.value }),
       };
     };
 
@@ -142,7 +157,7 @@ export function useCommunityEvents(communityId: string): boolean {
       queryClient,
       key,
       (readStartedAt) => {
-        for (const live of [observed, desired, assigned]) {
+        for (const live of [observed, desired, assigned, notRestarted]) {
           for (const [id, entry] of live) {
             if (entry.at < readStartedAt) {
               live.delete(id);
@@ -173,9 +188,23 @@ export function useCommunityEvents(communityId: string): boolean {
 
     // A status frame sets the states it carries: an observed transition, a
     // change of the server's intent (#3428), or a placement or release
-    // (#3818).
+    // (#3818). Whether the reconciler leaves a crash alone is the API's rule,
+    // a crash newer than every write to the row with a reason that recurs,
+    // whose running-intent term `crashNotRestarted` checks (#3281): a crashed
+    // frame is the newest thing about the row, so its reason decides, and an
+    // intent frame is a newer write, which clears it.
     const applyStatus = (event: StatusEvent) => {
       const at = stamp();
+      let held: boolean | undefined;
+      if (event.desiredState !== undefined) {
+        held = false;
+      }
+      if (event.crashReason !== undefined) {
+        held = NOT_RESTARTED_CRASH_REASONS.has(event.crashReason);
+      }
+      if (held !== undefined) {
+        notRestarted.set(event.serverId, { value: held, at });
+      }
       if (event.state !== undefined) {
         observed.set(event.serverId, { value: event.state, at });
       }
@@ -193,6 +222,7 @@ export function useCommunityEvents(communityId: string): boolean {
         ...(event.assignedWorkerId !== undefined && {
           assigned_worker_id: event.assignedWorkerId,
         }),
+        ...(held !== undefined && { crash_not_restarted: held }),
       };
       reconcile((id) => (id === event.serverId ? carried : null));
     };
@@ -204,6 +234,7 @@ export function useCommunityEvents(communityId: string): boolean {
       observed.clear();
       desired.clear();
       assigned.clear();
+      notRestarted.clear();
       for (const s of servers) {
         observed.set(s.serverId, { value: s.state, at });
         if (s.desiredState !== undefined) {
@@ -211,6 +242,9 @@ export function useCommunityEvents(communityId: string): boolean {
         }
         if (s.assignedWorkerId !== undefined) {
           assigned.set(s.serverId, { value: s.assignedWorkerId, at });
+        }
+        if (s.crashNotRestarted !== undefined) {
+          notRestarted.set(s.serverId, { value: s.crashNotRestarted, at });
         }
       }
       members = { ids: new Set(observed.keys()), at };
@@ -227,10 +261,20 @@ export function useCommunityEvents(communityId: string): boolean {
     // An operator notice (today only `schedule_failed`, #1838) is a failure
     // toast: the payload's title/detail are the human-readable message the API
     // already localized to English, surfaced verbatim like an API error string.
+    // A notice about a server names it and collapses only with the same notice
+    // about that server, as a lifecycle toast does (#3862). For a server the
+    // list does not hold yet, it shows unnamed, still kept apart by the id.
     const notify = (event: NotificationEvent) => {
       const message =
         event.detail !== "" ? `${event.title} — ${event.detail}` : event.title;
-      showToast(message, "error");
+      const server = queryClient
+        .getQueryData<ServerResponse[]>(key)
+        ?.find((s) => s.id === event.serverId);
+      if (server !== undefined) {
+        showServerToast(server, message, "error");
+      } else {
+        showToast(message, "error", event.serverId ?? undefined);
+      }
     };
 
     const client = new CommunityEventsClient(communityId, {
@@ -281,7 +325,7 @@ export function useCommunityEvents(communityId: string): boolean {
       stopPolling();
       unobserve();
     };
-  }, [communityId, queryClient, showToast]);
+  }, [communityId, queryClient, showToast, showServerToast]);
 
   return degraded;
 }

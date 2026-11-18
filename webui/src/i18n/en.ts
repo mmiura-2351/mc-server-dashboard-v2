@@ -112,6 +112,9 @@ export const en = {
   "common.cancel": "Cancel",
   "common.close": "Close",
   "common.toastRepeated": "Raised {count} times",
+  // A toast about one server, such as a lifecycle action's (#3862): it names
+  // the server, since the dashboard acts on several at once.
+  "common.toastAboutServer": "{server}: {message}",
   "common.showPassword": "Show password",
   "common.hidePassword": "Hide password",
   "common.resizeColumn": "Drag to resize, double-click to reset",
@@ -374,6 +377,10 @@ export const en = {
   // is named, since the grace length may change (#3401).
   "serverDetail.crashBanner.autoRestart":
     "The server has crashed. The system will restart it automatically, or you can stop it instead. Check the console for details.",
+  // A crash the next attempt would repeat (issue #3281): the reconciler does
+  // not restart it, so the operator stops, fixes and starts the server.
+  "serverDetail.crashBanner.noAutoRestart":
+    "The server has crashed and will not be restarted automatically, because the next attempt would fail the same way. Stop it, fix the cause, then start it again. Check the console for details.",
   "serverDetail.crashBanner.viewConsole": "View Console",
   // Forge install diagnostics (#1093): the explanation of a crash the Worker
   // classified, and the install-log viewer the crash banner offers for it.

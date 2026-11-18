@@ -13,7 +13,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 import pytest
 
@@ -70,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     JAR_KEY_CONFIG_FIELD,
     JAR_SOURCE_CONFIG_FIELD,
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -87,6 +88,7 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    PlacementSequenceControlPlane,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -946,8 +948,8 @@ async def test_start_hydrate_failure_compensates_without_dispatching_start() -> 
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     # The hydrate dispatch fails; the launch must never be attempted (FR-DATA-4:
     # the working set must be in place before the process starts).
-    busy = CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy")
-    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": busy})
+    failed = CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom")
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"hydrate": failed})
     use_case = StartServer(
         uow=uow,
         control_plane=cp,
@@ -1246,8 +1248,8 @@ async def test_start_busy_outcome_keeps_assignment_without_converging() -> None:
 async def test_start_pre_dispatch_busy_compensates() -> None:
     # A BUSY on the HYDRATE (the same reservation race, before the start is sent):
     # the start never reached the Worker, so __call__ must compensate normally
-    # (desired->stopped + unassign + decrement), exactly as a pre-dispatch
-    # INVALID_STATE does. The post-dispatch keep-assignment arm is gated on
+    # (desired->stopped + unassign + decrement), exactly as a failed hydrate
+    # does. The post-dispatch keep-assignment arm is gated on
     # ``dispatch.attempted`` so this pre-dispatch case falls through to compensation.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
@@ -1279,6 +1281,134 @@ async def test_start_pre_dispatch_busy_compensates() -> None:
     assert reverted.assigned_worker_id is None
     assert cp.incremented == [WorkerId(worker)]
     assert cp.decremented == [WorkerId(worker)]
+
+
+# The Worker's answer to a hydrate of a server it already runs (issue #3865): the
+# code is the contract row's, so these tests track what the Worker really emits.
+_HYDRATE_OVER_LIVE_INSTANCE = CommandOutcome(
+    status=worker_status("HydrateTrigger", "instance_running"),
+    message="instancemanager: server already running",
+)
+
+
+async def test_start_whose_hydrate_finds_the_server_live_keeps_it_there() -> None:
+    # Issue #3865. The placed Worker refused the hydrate because it already runs
+    # an instance of this server. That instance is live, so the start must not
+    # revert to (stopped, unassigned): the row keeps desired=running and this
+    # Worker, records observed=running, and the user gets the start verb's
+    # "already running" conflict. No start is sent, the placement load stands, and
+    # the tunnel follows the instance.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(community_id=community, server_id=server_id, bedrock_port=19132)
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker), outcomes={"hydrate": _HYDRATE_OVER_LIVE_INSTANCE}
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.observed_at == _NOW
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+    # Nothing withdrew the intent, so a re-sent start of it is not held back.
+    assert use_case.stop_intents.current(ServerId(server_id)) == 0
+    assert tunnel_sync.calls == [(ServerId(server_id), WorkerId(worker), 19132, True)]
+
+
+async def test_a_stop_after_the_start_kept_the_server_stops_that_instance() -> None:
+    # Issue #3865. Once the start kept the server on the Worker that already runs
+    # it, a stop is an ordinary stop of that Worker's instance: it is sent there,
+    # the final snapshot follows, and the server is released.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker), outcomes={"hydrate": _HYDRATE_OVER_LIVE_INSTANCE}
+    )
+    clock = FakeClock(_NOW)
+    start = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await start(community_id=CommunityId(community), server_id=ServerId(server_id))
+    clock.set(_NOW + dt.timedelta(minutes=1))
+
+    await StopServer(uow=uow, control_plane=cp, clock=clock)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.dispatched == [
+        ("hydrate", WorkerId(worker), ServerId(server_id)),
+        ("stop", WorkerId(worker), ServerId(server_id)),
+        ("snapshot", WorkerId(worker), ServerId(server_id)),
+    ]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
+async def test_start_after_a_hydrate_found_the_server_live_places_no_second() -> None:
+    # Issue #3865. Placement does not know which Worker runs an instance the row
+    # does not name, so a second start may be placed on another Worker. Once the
+    # first start found the server live on worker A, the second must be refused
+    # and must send nothing to worker B: a start there would run the same world
+    # on two hosts.
+    community, server_id, worker_a, worker_b = (*_ids(), uuid.uuid4())
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = PlacementSequenceControlPlane(
+        places=[WorkerId(worker_a), WorkerId(worker_b)],
+        hydrate_outcomes={WorkerId(worker_a): _HYDRATE_OVER_LIVE_INSTANCE},
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    # The first start's own answer is pinned by the test above.
+    with pytest.raises((InvalidLifecycleTransitionError, CommandDispatchError)):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == [("hydrate", WorkerId(worker_a), ServerId(server_id))]
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(
+        worker_a
+    )
 
 
 async def test_start_refused_over_failed_stop_orphan_never_converges_running() -> None:
@@ -1791,7 +1921,7 @@ async def test_start_compensation_failure_preserves_both_errors(
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     cp = FakeControlPlane(
         place_to=WorkerId(worker),
-        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="busy"),
+        outcome=CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="boom"),
     )
     use_case = StartServer(
         uow=uow,
@@ -1818,7 +1948,7 @@ async def test_start_compensation_failure_preserves_both_errors(
     record = next(r for r in caplog.records if r.levelno == logging.ERROR)
     assert record.exc_info is not None
     assert isinstance(record.exc_info[1], RuntimeError)
-    assert "busy" in record.getMessage()
+    assert "boom" in record.getMessage()
 
 
 async def test_start_missing_server_is_not_found() -> None:
@@ -4442,6 +4572,116 @@ async def test_place_and_start_pre_dispatch_failure_unassigns() -> None:
     assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
 
 
+async def test_place_and_start_whose_hydrate_finds_the_server_live_keeps_it() -> None:
+    # Issue #3865. The placed Worker refused the hydrate because it already runs
+    # an instance of this server. Unassigning would let a later tick place the
+    # server on another Worker while that instance runs. So the placement keeps
+    # the Worker, sends no start, records observed=running as redispatch_start
+    # does, and returns: nothing failed, and the tunnel follows the instance.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+            bedrock_port=19132,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker), outcomes={"hydrate": _HYDRATE_OVER_LIVE_INSTANCE}
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    result = await use_case.place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.observed_state is ObservedState.RUNNING
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.observed_state is ObservedState.RUNNING
+    assert stored.observed_at == _NOW
+    assert cp.incremented == [WorkerId(worker)]
+    assert cp.decremented == []
+    assert use_case.stop_intents.current(ServerId(server_id)) == 0
+    assert tunnel_sync.calls == [(ServerId(server_id), WorkerId(worker), 19132, True)]
+
+
+class _ReleasedWhileHydrating(FakeControlPlane):
+    """A stop releases the row while the Worker answers the hydrate refused.
+
+    The Worker already runs the server; the release lands between its answer and
+    the placement's write of ``observed=running``.
+    """
+
+    def __init__(self, uow: FakeUnitOfWork, *, place_to: WorkerId) -> None:
+        super().__init__(place_to=place_to)
+        self._uow = uow
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        released = self._uow.servers.by_id[server_id]
+        released.desired_state = DesiredState.STOPPED
+        released.assigned_worker_id = None
+        return _HYDRATE_OVER_LIVE_INSTANCE
+
+
+async def test_place_and_start_records_no_running_on_a_row_released_meanwhile() -> None:
+    # Issue #3865. The write of observed=running asserts the Worker it is about:
+    # once a stop released the row, that row names no Worker, and running must not
+    # be recorded on it.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+            bedrock_port=19132,
+        )
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=_ReleasedWhileHydrating(uow, place_to=WorkerId(worker)),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    result = await use_case.place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.observed_state is ObservedState.UNKNOWN
+    assert uow.servers.by_id[ServerId(server_id)].observed_state is (
+        ObservedState.UNKNOWN
+    )
+    assert tunnel_sync.calls == []
+
+
 async def test_place_and_start_lost_response_keeps_assignment() -> None:
     # The lost-response case (#101): hydrate succeeds, then the start command is
     # SENT but its response is lost (WorkerUnavailableError, i.e. CommandTimedOut).
@@ -4506,11 +4746,13 @@ async def test_place_and_start_failed_start_outcome_keeps_assignment() -> None:
 async def test_place_and_start_invalid_state_outcome_keeps_assignment_and_raises() -> (
     None
 ):
-    # place_and_start has NO INVALID_STATE convergence arm (verified during #2476,
-    # pinned here per issue #2496): unlike __call__ and redispatch_start it never
-    # reads an INVALID_STATE start outcome as "already running" and manufactures
-    # observed=running. It treats it as a plain post-dispatch failure -- keep the
-    # assignment for a same-Worker redispatch (#101) and RAISE. Convergence to
+    # place_and_start has NO INVALID_STATE convergence arm for the START leg
+    # (verified during #2476, pinned here per issue #2496; a refused HYDRATE is
+    # converged since issue #3865, see the test above): unlike __call__ and
+    # redispatch_start it never reads an INVALID_STATE start outcome as "already
+    # running" and manufactures observed=running. It treats it as a plain
+    # post-dispatch failure -- keep the assignment for a same-Worker redispatch
+    # (#101) and RAISE. Convergence to
     # observed=running is deferred to the NEXT reconcile tick's redispatch_start
     # path; adding a convergence arm here would spread the #2467 wedge class to a
     # third site. Drive the outcome off the contract row so the pin tracks the code
@@ -5291,6 +5533,240 @@ async def test_redispatch_start_invalid_state_is_treated_as_running() -> None:
     assert stored.assigned_worker_id == WorkerId(worker)
     assert result.observed_state is ObservedState.RUNNING
     assert result.observed_at == _NOW
+
+
+_CRASH = (CrashReason.FORGE_INSTALL_OUT_OF_MEMORY, "java.lang.OutOfMemoryError")
+
+# One way a lifecycle use case converges ``observed`` off a crashed entity:
+# given (community, server, worker) ids, seed the row and return the unit of
+# work and the entity the use case returned.
+_Converge = Callable[
+    [uuid.UUID, uuid.UUID, uuid.UUID], Awaitable[tuple[FakeUnitOfWork, Server]]
+]
+
+
+def _seed_crashed(uow: FakeUnitOfWork, server: Server) -> None:
+    server.crash_reason, server.crash_detail = _CRASH
+    uow.servers.seed(server)
+
+
+async def _start_answered_invalid_state(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # An operator's start of a crashed server the Worker still runs.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=ObservedState.CRASHED,
+        ),
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={
+            "start": CommandOutcome(
+                status=CommandStatus.INVALID_STATE, message="already running"
+            )
+        },
+    )
+    result = await _start_server(uow, cp)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _redispatch_start_answered_invalid_state(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # The reconciler's restart of a crashed server the Worker still runs.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        ),
+    )
+    cp = FakeControlPlane(
+        outcome=CommandOutcome(status=CommandStatus.INVALID_STATE, message="running")
+    )
+    result = await _start_server(uow, cp).redispatch_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _stop_confirmed(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # A stop the Worker confirms.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        ),
+    )
+    cp = FakeControlPlane()
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _stop_released_after_a_reconnect(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # A stop answered SERVER_NOT_FOUND once the row has left crashed: the
+    # Worker reconnected after the stop loaded the server, and its disconnect
+    # recorded ``unknown``, which cleared the stored crash.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.CRASHED,
+            worker_id=worker,
+        ),
+    )
+
+    class _Reconnected(FakeControlPlane):
+        async def stop(
+            self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+        ) -> CommandOutcome:
+            row = uow.servers.by_id[server_id]
+            row.observed_state = ObservedState.UNKNOWN
+            row.observed_at = _NOW - dt.timedelta(minutes=1)
+            row.crash_reason = row.crash_detail = None
+            return await super().stop(
+                worker_id=worker_id, server_id=server_id, force=force
+            )
+
+    cp = _Reconnected(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+async def _stale_stopping_released(
+    community: uuid.UUID, server_id: uuid.UUID, worker: uuid.UUID
+) -> tuple[FakeUnitOfWork, Server]:
+    # The reconciler's release of a stop wedged at ``stopping`` (#2452). A
+    # stored ``stopping`` row never holds a crash, as every write of another
+    # state clears it, so this seed is one the repository cannot produce: it
+    # pins that this site reflects its write like the others.
+    uow = FakeUnitOfWork()
+    _seed_crashed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=ObservedState.STOPPING,
+            worker_id=worker,
+        ),
+    )
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    result = await StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW)
+    ).clear_stale_assignment(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+    return uow, result
+
+
+@pytest.mark.parametrize(
+    ("converge", "observed"),
+    [
+        (_start_answered_invalid_state, ObservedState.RUNNING),
+        (_redispatch_start_answered_invalid_state, ObservedState.RUNNING),
+        (_stop_confirmed, ObservedState.STOPPED),
+        (_stop_released_after_a_reconnect, ObservedState.STOPPED),
+        (_stale_stopping_released, ObservedState.UNKNOWN),
+    ],
+    ids=[
+        "start",
+        "redispatch-start",
+        "stop",
+        "stop-release",
+        "stale-stopping-release",
+    ],
+)
+async def test_convergence_off_crashed_returns_an_entity_without_the_crash(
+    converge: _Converge, observed: ObservedState
+) -> None:
+    # Issue #3281: the convergence write clears the stored crash, and the
+    # returned entity reads like the row it wrote, so a lifecycle response never
+    # pairs a state other than crashed with the crash's reason and detail.
+    community, server_id, worker = _ids()
+
+    uow, result = await converge(community, server_id, worker)
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    for entity in (stored, result):
+        assert (entity.observed_state, entity.crash_reason, entity.crash_detail) == (
+            observed,
+            None,
+            None,
+        )
+
+
+async def test_stop_of_a_crash_landed_in_flight_returns_the_crash() -> None:
+    # Issue #3281: a crash that lands after the stop loaded a running server is
+    # left standing by the SERVER_NOT_FOUND release (#2448), and the response
+    # carries it as the row holds it, reason and detail included.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    crashed_at = _NOW - dt.timedelta(minutes=1)
+
+    class _CrashesInFlight(FakeControlPlane):
+        async def stop(
+            self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+        ) -> CommandOutcome:
+            row = uow.servers.by_id[server_id]
+            row.observed_state = ObservedState.CRASHED
+            row.observed_at = crashed_at
+            row.crash_reason, row.crash_detail = _CRASH
+            return await super().stop(
+                worker_id=worker_id, server_id=server_id, force=force
+            )
+
+    cp = _CrashesInFlight(
+        outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+    )
+
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert (
+        result.observed_state,
+        result.observed_at,
+        result.crash_reason,
+        result.crash_detail,
+    ) == (ObservedState.CRASHED, crashed_at, *_CRASH)
 
 
 async def test_redispatch_start_invalid_state_returned_entity_honest_when_dropped() -> (

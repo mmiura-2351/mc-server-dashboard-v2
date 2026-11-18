@@ -19,15 +19,16 @@ ByteStream = AsyncIterator[bytes]
 
 @dataclass(frozen=True)
 class StoredBlob:
-    """One stored blob: its pack, its key and its store time (issue #3277).
+    """One stored blob: its pack, its key, its size and its store time (issue #3277).
 
-    ``key`` is the store's name for the blob, which the orphan GC logs a reclaim
-    by. ``modified_at`` (UTC, timezone-aware) is what its safety window compares
+    ``key`` and ``size_bytes`` are what the orphan GC logs a reclaim by (issue
+    #3871). ``modified_at`` (UTC, timezone-aware) is what its safety window compares
     against ``now``.
     """
 
     pack_id: ResourcePackId
     key: str
+    size_bytes: int
     modified_at: dt.datetime
 
 
@@ -65,7 +66,8 @@ class ResourcePackStore(abc.ABC):
         Idempotent: a pack with nothing stored is a no-op. Raises
         ``ResourcePackStorageUnavailableError`` when the store could not finish
         (issue #2458), possibly after removing part of the data; calling again
-        removes the rest.
+        removes the rest. Raises ``ResourcePackStorageUnreachableError``, the
+        narrower type, when the store gave no answer at all (issue #3871).
         """
 
     @abc.abstractmethod
@@ -80,7 +82,7 @@ class ResourcePackStore(abc.ABC):
 
     @abc.abstractmethod
     async def list_entries(self) -> list[StoredBlob]:
-        """Enumerate every stored blob with its pack id, key and store time.
+        """Enumerate every stored blob with its pack id, key, size and store time.
 
         The orphan GC's input (issue #3277): it diffs the pack ids against the
         pack rows. Raises ``ResourcePackStorageUnavailableError`` when the store

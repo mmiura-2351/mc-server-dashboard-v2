@@ -85,10 +85,13 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    MAX_STATUS_DETAIL_BYTES,
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     WorkerId,
+    bound_status_detail,
 )
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.integration.test_lifecycle_scenarios import (
@@ -198,8 +201,11 @@ class _World:
         return server
 
     async def report(self, server: Server, worker: uuid.UUID, state: str) -> bool:
+        return await self.report_from(server, str(worker), state)
+
+    async def report_from(self, server: Server, worker_id: str, state: str) -> bool:
         return await self.sink().record_observed_state(
-            server_id=str(server.id.value), worker_id=str(worker), state=state
+            server_id=str(server.id.value), worker_id=worker_id, state=state
         )
 
     async def observed(self, server: Server) -> ObservedState:
@@ -402,6 +408,112 @@ async def test_worker_report_repeating_the_state_publishes_only_what_is_new(
     assert [event.payload for event in await _received(watching)] == [
         _status("unknown", detail="cannot confirm")
     ]
+
+
+# --- The last crash: stored with the observed state (issue #3281) -------------
+
+
+async def _crash(
+    world: _World, server: Server
+) -> tuple[CrashReason | None, str | None]:
+    row = await _load(world.engine, server.id)
+    assert row is not None
+    return row.crash_reason, row.crash_detail
+
+
+async def test_worker_crash_report_stores_the_crash_its_frame_carries(
+    world: _World,
+) -> None:
+    """The row and the live frame explain the crash with the same bounded text,
+    so a page loaded later shows what an open page was told."""
+
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker)
+    detail = "installer ran out of memory " + "x" * MAX_STATUS_DETAIL_BYTES
+    watching = world.watch(server)
+
+    assert await world.sink().record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=str(worker),
+        state="crashed",
+        detail=detail,
+        reason="forge_install_out_of_memory",
+    )
+
+    assert await _crash(world, server) == (
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        bound_status_detail(detail),
+    )
+    assert [event.payload for event in await _received(watching)] == [
+        _status(
+            "crashed",
+            detail=bound_status_detail(detail),
+            reason="forge_install_out_of_memory",
+        )
+    ]
+
+
+async def test_non_owning_worker_report_neither_stores_nor_clears_a_crash(
+    world: _World,
+) -> None:
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker)
+    stranger = str(uuid.uuid4())
+
+    assert not await world.sink().record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=stranger,
+        state="crashed",
+        detail="not this server's crash",
+        reason="forge_install_java_incompatible",
+    )
+    assert await _crash(world, server) == (None, None)
+
+    assert await world.sink().record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=str(worker),
+        state="crashed",
+        detail="java.lang.UnsupportedClassVersionError",
+        reason="forge_install_java_incompatible",
+    )
+    assert not await world.report_from(server, stranger, "running")
+    assert await _crash(world, server) == (
+        CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+        "java.lang.UnsupportedClassVersionError",
+    )
+
+
+async def test_operator_restart_of_a_crash_clears_it_once_the_worker_reports_starting(
+    world: _World,
+) -> None:
+    """Stop then Start after a crash: the crash stays recorded while the server
+    still reads crashed, and goes with the first report of the new launch."""
+
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker)
+    assert await world.sink().record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=str(worker),
+        state="crashed",
+        detail="installer ran out of memory",
+        reason="forge_install_out_of_memory",
+    )
+    await world.stop_server(
+        FakeControlPlane(
+            outcomes={"stop": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)}
+        )
+    )(community_id=world.community, server_id=server.id)
+    await world.start_server(FakeControlPlane(place_to=WorkerId(worker)))(
+        community_id=world.community, server_id=server.id
+    )
+    assert await _crash(world, server) == (
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        "installer ran out of memory",
+    )
+
+    assert await world.report(server, worker, "starting")
+
+    assert await _crash(world, server) == (None, None)
 
 
 # --- The Worker disconnect: the bulk unknown write ---------------------------

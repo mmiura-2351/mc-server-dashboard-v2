@@ -41,9 +41,17 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import type { components } from "../api/schema";
 import { stripMinecraftCodes } from "./mcFormat.ts";
 import { observeRestResponses, stamp } from "./restReads.ts";
-import { ServerEventsClient, type ServerFrame } from "./serverEvents.ts";
+import {
+  type Crash,
+  ServerEventsClient,
+  type ServerFrame,
+} from "./serverEvents.ts";
 import { serverKey } from "./serverKey.ts";
-import { atRest, normalizeState } from "./serverState.ts";
+import {
+  atRest,
+  NOT_RESTARTED_CRASH_REASONS,
+  normalizeState,
+} from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -179,10 +187,12 @@ export interface ServerEventsState {
   logStore: LogStore;
   metrics: MetricsSample[];
   degraded: boolean;
-  /** The detail string from the latest status frame (crash reason, etc.). */
+  /**
+   * The detail string from the latest status frame. A crash's detail is also
+   * stored with the server (#3281) and patched into the detail query as
+   * `crash_detail`; this is the live one, for the states whose detail is not.
+   */
   statusDetail: string;
-  /** The crash reason name that frame carried; kept and dropped with the detail. */
-  statusReason: string;
   /** Append locally-echoed RCON lines (command + output) into the stream. */
   appendLocal: (entries: LocalEcho[]) => void;
 }
@@ -204,7 +214,6 @@ export function useServerEvents(
   const [metrics, setMetrics] = useState<MetricsSample[]>([]);
   const [degraded, setDegraded] = useState(false);
   const [statusDetail, setStatusDetail] = useState("");
-  const [statusReason, setStatusReason] = useState("");
 
   const appendLocal = useCallback(
     (entries: LocalEcho[]) => {
@@ -218,16 +227,17 @@ export function useServerEvents(
     setMetrics([]);
     setDegraded(false);
     setStatusDetail("");
-    setStatusReason("");
     const key = serverKey(communityId, serverId);
 
-    // The live observed and desired states and assignment not yet
-    // superseded by a REST read, each stamped with when it was received
-    // (#3213). They are stamped apart, as different frames carry them (#3428,
-    // #3818).
+    // The live observed and desired states, assignment, last crash and
+    // whether the reconciler leaves it alone, not yet superseded by a REST
+    // read, each stamped with when it was received (#3213). They are stamped
+    // apart, as different frames carry them (#3428, #3818, #3281).
     let observed: { value: string; at: number } | null = null;
     let desired: { value: string; at: number } | null = null;
     let assigned: { value: string | null; at: number } | null = null;
+    let crash: { value: Crash; at: number } | null = null;
+    let notRestarted: { value: boolean; at: number } | null = null;
 
     // Patch `fields` into the detail query so the header pill and controls
     // update live (no refetch). A frame patches only the field it carries, so
@@ -238,7 +248,12 @@ export function useServerEvents(
       fields: Partial<
         Pick<
           ServerResponse,
-          "observed_state" | "desired_state" | "assigned_worker_id"
+          | "observed_state"
+          | "desired_state"
+          | "assigned_worker_id"
+          | "crash_reason"
+          | "crash_detail"
+          | "crash_not_restarted"
         >
       >,
     ) => {
@@ -267,10 +282,20 @@ export function useServerEvents(
         if (assigned !== null && assigned.at < readStartedAt) {
           assigned = null;
         }
+        if (crash !== null && crash.at < readStartedAt) {
+          crash = null;
+        }
+        if (notRestarted !== null && notRestarted.at < readStartedAt) {
+          notRestarted = null;
+        }
         patch({
           ...(observed !== null && { observed_state: observed.value }),
           ...(desired !== null && { desired_state: desired.value }),
           ...(assigned !== null && { assigned_worker_id: assigned.value }),
+          ...(crash !== null && crashFields(crash.value)),
+          ...(notRestarted !== null && {
+            crash_not_restarted: notRestarted.value,
+          }),
         });
       },
     );
@@ -287,6 +312,24 @@ export function useServerEvents(
       patch({ assigned_worker_id: workerId });
     };
 
+    // The last crash (#3281), which the crash banner explains: a crashed
+    // status frame carries it as its detail and reason, and a snapshot as the
+    // stored fields.
+    const applyCrash = (value: Crash) => {
+      crash = { value, at: stamp() };
+      patch(crashFields(value));
+    };
+
+    // Whether the reconciler leaves the crash alone (#3281): the API's rule,
+    // a crash newer than every write to the row with a reason that recurs,
+    // whose running-intent term `crashNotRestarted` checks. A crashed frame is
+    // the newest thing about the row, so its reason decides; an intent frame
+    // is a newer write, which clears it.
+    const applyNotRestarted = (value: boolean) => {
+      notRestarted = { value, at: stamp() };
+      patch({ crash_not_restarted: value });
+    };
+
     const applyState = (state: string) => {
       observed = { value: state, at: stamp() };
       patch({ observed_state: state });
@@ -299,8 +342,8 @@ export function useServerEvents(
     };
 
     // The state whose live transition carried the current status detail. A
-    // snapshot carries no detail (it is not persisted), so it keeps the detail
-    // only while it still reports that same state (#1795).
+    // snapshot carries no live detail (only a crash's is stored, #3281), so it
+    // keeps the detail only while it still reports that same state (#1795).
     let detailState: string | null = null;
 
     const onFrame = (frame: ServerFrame) => {
@@ -309,14 +352,23 @@ export function useServerEvents(
         // observed state, so the crash detail stands.
         if (frame.desiredState !== undefined) {
           applyDesired(frame.desiredState);
+          applyNotRestarted(false);
         }
         if (frame.assignedWorkerId !== undefined) {
           applyAssigned(frame.assignedWorkerId);
         }
         if (frame.state !== undefined) {
           applyState(frame.state);
+          // The API stores this report's reason and detail as the last
+          // crash, "" as none (#3281).
+          if (frame.state === "crashed") {
+            applyCrash({
+              reason: frame.reason === "" ? null : frame.reason,
+              detail: frame.detail === "" ? null : frame.detail,
+            });
+            applyNotRestarted(NOT_RESTARTED_CRASH_REASONS.has(frame.reason));
+          }
           setStatusDetail(frame.detail);
-          setStatusReason(frame.reason);
           detailState = frame.state;
         }
         return;
@@ -329,9 +381,14 @@ export function useServerEvents(
           applyAssigned(frame.assignedWorkerId);
         }
         applyState(frame.state);
+        if (frame.crash !== undefined) {
+          applyCrash(frame.crash);
+        }
+        if (frame.crashNotRestarted !== undefined) {
+          applyNotRestarted(frame.crashNotRestarted);
+        }
         if (frame.state !== detailState) {
           setStatusDetail("");
-          setStatusReason("");
           detailState = frame.state;
         }
         return;
@@ -418,7 +475,13 @@ export function useServerEvents(
     metrics,
     degraded,
     statusDetail,
-    statusReason,
     appendLocal,
   };
+}
+
+/** A {@link Crash} as the detail query's fields. */
+function crashFields(
+  value: Crash,
+): Pick<ServerResponse, "crash_reason" | "crash_detail"> {
+  return { crash_reason: value.reason, crash_detail: value.detail };
 }

@@ -288,8 +288,12 @@ non-null only while the deployment's Bedrock gate is on AND the server carries
 at least one *enabled* Geyser plugin copy — see `BEDROCK.md`; the end-to-end
 Bedrock join is verified on Paper only, BEDROCK.md Section 1),
 `desired_state`, `observed_state`, `observed_at`,
-`assigned_worker_id`, `backup_retention` (the scheduled-backup retention
-policy; null while unconfigured).
+`assigned_worker_id`, `crash_reason` and `crash_detail` (the last crash's
+reason and the Worker's detail, both null unless the server is crashed;
+DATABASE.md Section 7), `crash_not_restarted` (whether the reconciler leaves
+that crash alone, false under a stopped intent; CONFIGURATION.md Section 5.6),
+`backup_retention` (the scheduled-backup retention policy; null while
+unconfigured).
 
 Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
@@ -333,8 +337,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -342,12 +346,21 @@ right after a `gap` frame when status frames were dropped since the previous
 such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
-them): the persisted observed and desired states and the assigned Worker
-(`assigned_worker_id`, `null` when none) of the stream's scope, read
-together from each server's row — the server for the per-server stream (only when `status` is among the
+them): the persisted observed and desired states, the assigned Worker
+(`assigned_worker_id`, `null` when none) and the last crash (`crash_reason` and
+`crash_detail`, both `null` unless the server is crashed, and
+`crash_not_restarted`) of the stream's scope, read together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
-Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
-only a live `status` transition carries. A client applies it like status frames, and
+Its `ts` is the time the snapshot was read. Its `crash_reason` and `crash_detail`
+are the stored `reason` and `detail` of the crashed `status` frame. The live
+`detail` of any other state is not stored, so the snapshot has no counterpart
+for it. No status frame carries `crash_not_restarted`. A client derives it as
+the API does, except that it checks the running intent where it uses the flag:
+a crashed frame sets it from the reason, since the crash is then the newest
+write to the row, and a `{desired_state}` frame clears it, since an intent
+commit is a newer write. Other writes that bump the row's `updated_at`
+publish no frame (CONFIGURATION.md Section 5.6), so after one of them a client
+keeps the old value until its next read or snapshot. A client applies it like status frames, and
 on the community stream it is the complete server set, so a server missing from
 the client's list (or absent from the snapshot) means the set changed. A
 server deleted before its per-server snapshot can be read closes the socket
@@ -651,7 +664,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Live updates over `WS /communities/{cid}/events` (status stream); on WS
   loss fall back to 10s polling of `GET …/servers` with a "live degraded"
   indicator.
-- Quick actions on card: start / stop / restart (permission-scoped).
+- Quick actions on card: start / stop / restart (permission-scoped). Several
+  rows can fail at once, so each action's toast names its server (7.4).
 - Empty state → CTA to the create wizard.
 
 ### 6.3 Server create wizard
@@ -668,19 +682,30 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("applying…" while the
-  reconciler converges), worker id, port. A stopped intent is reached at rest
+  reconciler converges; not shown for a crash it does not restart, see the
+  crash banner), worker id, port. A stopped intent is reached at rest
   (observed stopped, crashed or unknown) once no Worker is assigned: while one
   still is, the stop is still finishing (its final snapshot and the release,
   or for `unknown` the stop itself) and the hint shows. Every release
   publishes a status frame (Section 2.6), so the hint clears with it. The
   dashboard rows mark drift by the same rule.
-- Crash banner: while crashed, the `detail`, a guidance line with a link to the
-  Console tab, and — keyed on the status event's `reason` — the Forge install
-  diagnostics. The guidance line follows the desired state. Under a running
-  intent the API refuses start and restart (the Worker holds no live
-  instance) and the reconciler restarts the server on its own, so the line says
-  the system will restart it automatically and that the operator can stop it
-  instead; it names no delay. Under a stopped intent the line points to the
+- Crash banner: while crashed, the crash's detail, a guidance line with a link
+  to the Console tab, and — keyed on the crash's reason — the Forge install
+  diagnostics. Both come from the server's stored last crash (`crash_detail`,
+  `crash_reason`: the server read, the snapshot, and the `detail` and `reason`
+  of a crashed status frame), so a page loaded after the crash, or remounted
+  by a language switch, shows the same banner. The guidance line follows the
+  desired state. Under a running intent the API refuses start and restart (the
+  Worker holds no live instance) and the reconciler restarts the server on its
+  own, so the line says the system will restart it automatically and that the
+  operator can stop it instead; it names no delay. While the server reports
+  `crash_not_restarted` (a `forge_install_out_of_memory` or
+  `forge_install_java_incompatible` crash newer than every write to the row,
+  which the reconciler does not restart because the next attempt fails the same
+  way, CONFIGURATION.md Section 5.6), the line says instead that the server will
+  not be restarted automatically, and to stop it, fix the cause and start it
+  again. After that start the line returns to the automatic restart until the
+  Worker reports the new launch. Under a stopped intent the line points to the
   Start button, which reads **Restart** for a crashed server.
   `forge_install_out_of_memory` and `forge_install_java_incompatible` each add
   a specific, localised explanation of what to change. Any `forge_install_*` reason adds a **View install log**
@@ -692,9 +717,7 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   and one past the read cap (413) get their own line too. A refetch that fails
   once the log is shown keeps that log on screen, where the operator scrolled
   it, under a line giving the failure and saying the log is the copy loaded
-  earlier. `detail` and `reason`
-  are not persisted, so the banner's diagnostics exist only on a page that was
-  open when the crash was reported.
+  earlier.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
   Delete — each disabled by state machine (e.g. Start hidden while running)
   and permission. A server crashed under a running intent offers Stop only:
@@ -885,7 +908,10 @@ numbers): the UI for the general scheduler.
   read-only view (run history stays available).
 - Failure surfacing: `schedule_failed` NOTIFICATION frames from the community
   events socket (7.2) render as error toasts (title + sanitized detail) while
-  the dashboard is open. An `unknown` run raises the same frame, titled
+  the dashboard is open. Each names its server and collapses only with the
+  same notice about that server, as lifecycle toasts do (7.4); a notice about
+  a server the dashboard's list does not hold yet shows unnamed, still apart
+  per server. An `unknown` run raises the same frame, titled
   "Scheduled <action>: outcome unknown" rather than "failed".
 
 ### 6.14 Server detail — Plugins
@@ -1130,12 +1156,20 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while
-  its toast still shows does not stack a copy: that toast shows a count badge
-  and counts as the newest for the drop order. A toast is at most 32rem wide,
-  never wider than the screen less 2rem, and its message wraps anywhere; the
-  stack is at most the screen's height less 2rem and scrolls beyond that, so
-  every toast stays reachable on a phone. A toast raised, or raised again,
-  scrolls into view, unless keyboard focus is in the stack.
+  its toast still shows, about the same server when it is about one, does not
+  stack a copy: that toast shows a count badge and counts as the newest for
+  the drop order. A toast is at most 32rem wide, never wider than the screen
+  less 2rem, and its message wraps anywhere; the stack is at most the
+  screen's height less 2rem and scrolls beyond that, so every toast stays
+  reachable on a phone. A toast raised, or raised again, scrolls into view,
+  unless keyboard focus is in the stack.
+- **Lifecycle toasts.** A toast from a start, stop or restart names the
+  server it is about, as "alpha: <message>", with the 403 denial among them:
+  the dashboard rows can act on several servers at once, and the detail
+  page's controls and the restore dialog's stop read the same. Such a toast
+  collapses only into one about the same server, told apart by the server's
+  id, since two servers may share a name. The dashboard's schedule-failure
+  notices follow the same rule (6.13).
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.

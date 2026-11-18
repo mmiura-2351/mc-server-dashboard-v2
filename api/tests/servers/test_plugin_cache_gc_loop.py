@@ -20,7 +20,7 @@ class _SpyGc:
 
     async def __call__(self) -> PluginCacheGcResult:
         self.runs += 1
-        return PluginCacheGcResult(scanned=0, deleted=0, freed_bytes=0)
+        return PluginCacheGcResult(scanned=0, deleted=0, freed_bytes=0, failed=0)
 
 
 async def test_wires_gc_and_interval_to_periodic_runner(

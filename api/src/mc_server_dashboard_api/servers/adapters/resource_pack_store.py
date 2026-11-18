@@ -45,7 +45,7 @@ behind:
   invite a retry that can only find a 404. The same GC reclaims what it leaves.
 
 :meth:`list_entries` feeds that GC: every blob under the namespace, with its key,
-the pack id the key names and its store time.
+the pack id the key names, its size and its store time.
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ from contextlib import aclosing
 from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackNotFoundError,
     ResourcePackStorageUnavailableError,
+    ResourcePackStorageUnreachableError,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
@@ -70,6 +71,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
+    ObjectStoreUnreachableError,
 )
 
 
@@ -154,6 +156,10 @@ class ObjectResourcePackStore(ResourcePackStore):
                 objects = await client.list_objects(prefix)
                 for obj in objects:
                     await client.delete_object(obj.key)
+        except ObjectStoreUnreachableError as exc:
+            # Kept apart from the wider type: the GC ends its pass on this one
+            # (issue #3871).
+            raise ResourcePackStorageUnreachableError(prefix) from exc
         except ObjectStoreUnavailableError as exc:
             # Possibly partway through the prefix. Re-running lists only what is
             # left, so the objects already removed are not an error (issue #2458).
@@ -182,7 +188,12 @@ class ObjectResourcePackStore(ResourcePackStore):
         except ObjectStoreUnavailableError as exc:
             raise ResourcePackStorageUnavailableError(prefix) from exc
         return [
-            StoredBlob(pack_id=pack_id, key=obj.key, modified_at=obj.last_modified)
+            StoredBlob(
+                pack_id=pack_id,
+                key=obj.key,
+                size_bytes=obj.size,
+                modified_at=obj.last_modified,
+            )
             for obj in objects
             if (pack_id := _pack_id_of(obj.key)) is not None
         ]

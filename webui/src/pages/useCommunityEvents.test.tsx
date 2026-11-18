@@ -4,11 +4,12 @@ import {
   type QueryFunction,
   useQuery,
 } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
+import { t } from "../i18n/index.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { stampedQueryFn } from "./restReads.ts";
 import { serversKey, useCommunityEvents } from "./useCommunityEvents.ts";
@@ -165,8 +166,9 @@ describe("useCommunityEvents", () => {
       MockWebSocket.last().open();
       MockWebSocket.last().message(intentFrame("s1", "running"));
     });
+    // An intent is a newer write than any crash, so it clears the flag (#3281).
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
-      serverRow("s1", "stopped", "running"),
+      { ...serverRow("s1", "stopped", "running"), crash_not_restarted: false },
     ]);
   });
 
@@ -205,11 +207,75 @@ describe("useCommunityEvents", () => {
       });
 
       expect(queryClient.getQueryData(serversKey(CID))).toEqual([
-        serverRow("s1", transitionalState(action), intent),
-        serverRow("s2", "crashed", "running"),
+        {
+          ...serverRow("s1", transitionalState(action), intent),
+          crash_not_restarted: false,
+        },
+        {
+          ...serverRow("s2", "crashed", "running"),
+          crash_not_restarted: false,
+        },
       ]);
     },
   );
+
+  it("patches whether the crash a crashed frame reports is restarted (#3281)", () => {
+    const { queryClient } = setup([serverRow("s1", "running", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: {
+            state: "crashed",
+            detail: "installer ran out of memory",
+            reason: "forge_install_out_of_memory",
+          },
+          server_id: "s1",
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...serverRow("s1", "crashed", "running"), crash_not_restarted: true },
+    ]);
+
+    // The operator's start is a newer write than the crash.
+    act(() => {
+      MockWebSocket.last().message(intentFrame("s1", "running"));
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...serverRow("s1", "crashed", "running"), crash_not_restarted: false },
+    ]);
+  });
+
+  it("patches whether every cached server's crash is restarted from a snapshot (#3281)", () => {
+    const { queryClient } = setup([serverRow("s1", "running", "running")]);
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "snapshot",
+          ts: "t",
+          payload: {
+            servers: [
+              {
+                server_id: "s1",
+                state: "crashed",
+                crash_reason: "forge_install_java_incompatible",
+                crash_detail: "java.lang.UnsupportedClassVersionError",
+                crash_not_restarted: true,
+              },
+            ],
+          },
+          server_id: null,
+        }),
+      );
+    });
+    expect(queryClient.getQueryData(serversKey(CID))).toEqual([
+      { ...serverRow("s1", "crashed", "running"), crash_not_restarted: true },
+    ]);
+  });
 
   it("patches the cached server's assigned_worker_id on a release frame (#3818)", () => {
     const { queryClient } = setup([
@@ -464,6 +530,49 @@ describe("useCommunityEvents", () => {
     expect(toast.className).toContain("error");
   });
 
+  // A notice about a server names it, and the same notice about two servers
+  // stays two toasts, as a lifecycle toast does (#3862).
+  it("names the server of a notification, one toast per server", () => {
+    setup([
+      { ...serverRow("s1", "running"), name: "alpha" },
+      { ...serverRow("s2", "running"), name: "bravo" },
+    ]);
+    act(() => {
+      MockWebSocket.last().open();
+      for (const id of ["s1", "s2", "s1"]) {
+        MockWebSocket.last().message(
+          notificationFrame(id, "Scheduled stop failed", "worker_unavailable"),
+        );
+      }
+    });
+
+    const message = "Scheduled stop failed — worker_unavailable";
+    const alpha = screen.getByText(`alpha: ${message}`).closest(".toast");
+    expect(screen.getByText(`bravo: ${message}`)).toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+    expect(
+      within(alpha as HTMLElement).getByText(
+        t("common.toastRepeated", { count: 2 }),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // The list may not hold the server yet, as one created since it loaded: the
+  // notice shows unnamed, but still apart from the same notice about another.
+  it("keeps the notices of servers not loaded apart, unnamed", () => {
+    setup([]);
+    act(() => {
+      MockWebSocket.last().open();
+      for (const id of ["s8", "s9"]) {
+        MockWebSocket.last().message(
+          notificationFrame(id, "Scheduled stop failed", ""),
+        );
+      }
+    });
+
+    expect(screen.getAllByText("Scheduled stop failed")).toHaveLength(2);
+  });
+
   it("does not patch the servers cache for a notification frame", () => {
     const { queryClient } = setup([serverRow("s1", "running")]);
     act(() => {
@@ -543,7 +652,11 @@ describe("useCommunityEvents", () => {
 });
 
 type Row = ReturnType<typeof serverRow> & {
+  name?: string;
   assigned_worker_id?: string | null;
+  crash_reason?: string | null;
+  crash_detail?: string | null;
+  crash_not_restarted?: boolean;
 };
 
 function LiveProbe({ queryFn }: { queryFn: QueryFunction<Row[]> }) {
@@ -722,6 +835,42 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     },
   );
 
+  it("keeps a crash frame's flag over an older REST response (#3281)", async () => {
+    const { respond, cached } = setupDeferred();
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: {
+            state: "crashed",
+            detail: "",
+            reason: "forge_install_out_of_memory",
+          },
+          server_id: "s1",
+        }),
+      );
+    });
+    // The cold read captured the row before the crash.
+    await respond([
+      {
+        ...serverRow("s1", "starting", "running"),
+        crash_reason: null,
+        crash_detail: null,
+        crash_not_restarted: false,
+      },
+    ]);
+    expect(cached()).toEqual([
+      {
+        ...serverRow("s1", "crashed", "running"),
+        crash_reason: null,
+        crash_detail: null,
+        crash_not_restarted: true,
+      },
+    ]);
+  });
+
   it("keeps a release frame that arrives before the cold list load lands (#3818)", async () => {
     const { respond, cached } = setupDeferred();
     act(() => {
@@ -755,7 +904,9 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
       MockWebSocket.last().message(intentFrame("s1", "stopped"));
     });
     await respond([serverRow("s1", "unknown", "running")]);
-    expect(cached()).toEqual([serverRow("s1", "unknown", "stopped")]);
+    expect(cached()).toEqual([
+      { ...serverRow("s1", "unknown", "stopped"), crash_not_restarted: false },
+    ]);
   });
 });
 

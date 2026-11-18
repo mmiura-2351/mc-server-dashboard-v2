@@ -53,12 +53,16 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
+from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
+    InvalidLifecycleTransitionError,
+)
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -78,6 +82,7 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    PlacementSequenceControlPlane,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -102,6 +107,7 @@ def _server(
     worker: WorkerId | None,
     observed_at: dt.datetime | None = _PAST_GRACE,
     updated_at: dt.datetime = _PAST_GRACE,
+    crash_reason: CrashReason | None = None,
 ) -> Server:
     return Server(
         id=ServerId.new(),
@@ -117,6 +123,7 @@ def _server(
         assigned_worker_id=worker,
         created_at=_PAST_GRACE,
         updated_at=updated_at,
+        crash_reason=crash_reason,
     )
 
 
@@ -1204,6 +1211,8 @@ class _OutageServerRepository(FakeServerRepository):
         *,
         unassign: bool = False,
         expected_worker: WorkerId | None = None,
+        detail: str = "",
+        reason: CrashReason | None = None,
     ) -> bool:
         self._fail_if_down("record_observed_state")
         return await super().record_observed_state(
@@ -1212,6 +1221,8 @@ class _OutageServerRepository(FakeServerRepository):
             observed_at,
             unassign=unassign,
             expected_worker=expected_worker,
+            detail=detail,
+            reason=reason,
         )
 
     async def clear_assignment_after_final_snapshot(
@@ -2083,6 +2094,101 @@ async def test_first_crash_restart_logs_info_and_repeat_logs_crash_looping_warni
     )
 
 
+# --- the crash's reason (issue #3281) -----------------------------------------
+
+# The start intent, then the crash the Worker reported for it.
+_INTENT_AT = _PAST_GRACE - dt.timedelta(minutes=5)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+    ],
+    ids=lambda reason: reason.value,
+)
+async def test_crash_the_worker_does_not_retry_is_not_restarted(
+    reason: CrashReason,
+) -> None:
+    # The Worker reports these at once instead of retrying the install: the same
+    # memory limit or Java runtime fails the next attempt the same way. A restart
+    # would only run the failing install again, so the server stays crashed
+    # until the operator stops it, fixes the cause and starts it.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        updated_at=_INTENT_AT,
+        crash_reason=reason,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    # Past any grace and backoff: still not restarted.
+    clock.set(_NOW + dt.timedelta(hours=2))
+    await reconciler.tick()
+
+    assert cp.dispatched == []
+    assert server.id not in reconciler._attempts
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [None, CrashReason.FORGE_INSTALL_FAILED],
+    ids=["unclassified", "forge_install_failed"],
+)
+async def test_crash_the_worker_may_retry_is_restarted(
+    reason: CrashReason | None,
+) -> None:
+    # An unclassified crash, and an install failure the Worker could not
+    # attribute (it retries a failed installer itself, since a failed download
+    # passes), keep the restart and its backoff.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        updated_at=_INTENT_AT,
+        crash_reason=reason,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert reconciler._attempts[server.id].failures == 1
+
+
+async def test_start_intent_newer_than_a_crash_not_retried_is_replayed() -> None:
+    # The operator stopped the server after that crash and started it again. The
+    # row reads crashed, with the old reason, until the Worker reports the new
+    # launch, and a start whose answer was lost keeps the intent for the
+    # reconciler to send again. That crash answered an earlier intent, so it
+    # holds nothing back.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        observed_at=_INTENT_AT,
+        crash_reason=CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+
+
 async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> None:
     # Regression for the flap (#343 review): a boot-crash server cycles
     # observed crashed -> starting -> crashed. While observed=starting it drops out
@@ -2579,6 +2685,86 @@ async def test_invalid_state_convergence_from_crashed_does_not_back_off(
     assert server.id not in reconciler._attempts
     # No spurious crash-looping warning.
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+
+@pytest.mark.parametrize("observed", [ObservedState.UNKNOWN, ObservedState.CRASHED])
+async def test_a_placement_whose_hydrate_finds_the_server_live_is_not_re_placed(
+    observed: ObservedState,
+) -> None:
+    # Issue #3865. An unplaced running intent is placed on worker A, which refuses
+    # the hydrate because it already runs an instance of the server. Placement does
+    # not know that, so releasing A would let the next placement put the server on
+    # worker B and start a second instance of the same world there. The tick keeps
+    # A, converges observed=running, and counts no failure: a row read crashed
+    # before it is not a crash loop. The next tick past grace and any backoff then
+    # has nothing to do.
+    worker_a, worker_b = WorkerId(uuid.uuid4()), WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    server = _server(desired=DesiredState.RUNNING, observed=observed, worker=None)
+    uow.servers.seed(server)
+    cp = PlacementSequenceControlPlane(
+        places=[worker_a, worker_b],
+        hydrate_outcomes={
+            worker_a: CommandOutcome(
+                status=worker_status("HydrateTrigger", "instance_running"),
+                message="instancemanager: server already running",
+            )
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    backed_off = server.id in reconciler._attempts
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+    await reconciler.tick()
+
+    assert cp.dispatched == [("hydrate", worker_a, server.id)]
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id == worker_a
+    assert stored.observed_state is ObservedState.RUNNING
+    assert not backed_off
+
+
+async def test_a_failed_stop_of_a_server_kept_on_its_worker_is_sent_again() -> None:
+    # Issue #3865. A user start found the server already live on its Worker and
+    # kept it there. The operator's stop then fails to dispatch, leaving the stop
+    # intent on that Worker. The reconciler sends the stop again. It must not take
+    # the final snapshot and release the row, as it would for the row's earlier
+    # observed=stopped: no start was sent, so no record of one stands in the way,
+    # and the release would leave the instance running under no Worker.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED, observed=ObservedState.STOPPED, worker=None
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "instance_running"),
+                message="instancemanager: server already running",
+            ),
+            "stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom"),
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await reconciler.make_start_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    with pytest.raises(CommandDispatchError):
+        await reconciler.make_stop_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    cp.dispatched.clear()
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+
+    await reconciler.tick()
+
+    assert cp.dispatched == [("stop", _WORKER, server.id)]
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
 # --- concurrent dispatch (#871) --------------------------------------------

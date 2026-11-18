@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
-import { t } from "../i18n/index.ts";
+import { setLanguage, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { DashboardPage } from "./DashboardPage.tsx";
@@ -63,12 +63,21 @@ function server(overrides: Record<string, unknown> = {}) {
     observed_state: "running",
     observed_at: null,
     assigned_worker_id: "worker-a",
+    crash_reason: null,
+    crash_detail: null,
+    crash_not_restarted: false,
     config: {},
     join_hostname: null,
     bedrock_address: null,
     bedrock_port: null,
     ...overrides,
   };
+}
+
+// A lifecycle toast's text: the message, named for the server it is about, in
+// either language (#3862).
+function aboutServer(name: string, message: string): string {
+  return `${name}: ${message}`;
 }
 
 // The page derives its community from the URL `:cid` (#784), so mount it under a
@@ -313,11 +322,14 @@ describe("DashboardPage lifecycle actions", () => {
 
     expect(
       await screen.findByText(
-        t("permissions.deniedNamed", { permission: "server:stop" }),
+        aboutServer(
+          "survival",
+          t("permissions.deniedNamed", { permission: "server:stop" }),
+        ),
       ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(t("dashboard.actionFailed")),
+      screen.queryByText(aboutServer("survival", t("dashboard.actionFailed"))),
     ).not.toBeInTheDocument();
   });
 
@@ -332,7 +344,9 @@ describe("DashboardPage lifecycle actions", () => {
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
 
     expect(
-      await screen.findByText(t("dashboard.stateChanged")),
+      await screen.findByText(
+        aboutServer("survival", t("dashboard.stateChanged")),
+      ),
     ).toBeInTheDocument();
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
   });
@@ -354,10 +368,12 @@ describe("DashboardPage lifecycle actions", () => {
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
 
     expect(
-      await screen.findByText(t("dashboard.lifecycle.portConflict")),
+      await screen.findByText(
+        aboutServer("survival", t("dashboard.lifecycle.portConflict")),
+      ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(t("dashboard.stateChanged")),
+      screen.queryByText(aboutServer("survival", t("dashboard.stateChanged"))),
     ).not.toBeInTheDocument();
   });
 
@@ -378,7 +394,9 @@ describe("DashboardPage lifecycle actions", () => {
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
 
     expect(
-      await screen.findByText(t("dashboard.lifecycle.imageMissing")),
+      await screen.findByText(
+        aboutServer("survival", t("dashboard.lifecycle.imageMissing")),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -402,11 +420,14 @@ describe("DashboardPage lifecycle actions", () => {
 
     expect(
       await screen.findByText(
-        t("dashboard.lifecycle.serverPropertiesUnreadable"),
+        aboutServer(
+          "survival",
+          t("dashboard.lifecycle.serverPropertiesUnreadable"),
+        ),
       ),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(t("dashboard.stateChanged")),
+      screen.queryByText(aboutServer("survival", t("dashboard.stateChanged"))),
     ).not.toBeInTheDocument();
   });
 
@@ -421,7 +442,9 @@ describe("DashboardPage lifecycle actions", () => {
     fireEvent.click(screen.getByRole("button", { name: t("dashboard.stop") }));
 
     expect(
-      await screen.findByText(t("dashboard.actionFailed")),
+      await screen.findByText(
+        aboutServer("survival", t("dashboard.actionFailed")),
+      ),
     ).toBeInTheDocument();
   });
 
@@ -619,13 +642,183 @@ describe("DashboardPage lifecycle actions", () => {
     act(() => rejectPost(new ApiError(409, { reason: "worker_busy" })));
 
     expect(
-      await screen.findByText(t("dashboard.lifecycle.stopPending")),
+      await screen.findByText(
+        aboutServer("bravo", t("dashboard.lifecycle.stopPending")),
+      ),
     ).toBeInTheDocument();
     // The failed stop does not roll the newer crash back to "running".
     expect(within(bravo).getByText(t("dashboard.state.crashed"))).toBeVisible();
     expect(
       within(bravo).getByRole("button", { name: t("dashboard.stop") }),
     ).toBeEnabled();
+  });
+});
+
+// Several rows can fail at once, so a lifecycle toast names its server, and the
+// same failure collapses only per server (WEBUI_SPEC.md 6.2 / 7.4, #3862).
+describe("DashboardPage lifecycle toasts", () => {
+  afterEach(() => {
+    act(() => setLanguage("en"));
+  });
+
+  function card(name: string): HTMLElement {
+    return screen.getByText(name).closest(".server-card") as HTMLElement;
+  }
+
+  function stopIn(row: HTMLElement): HTMLElement {
+    return within(row).getByRole("button", { name: t("dashboard.stop") });
+  }
+
+  it.each(["en", "ja"] as const)(
+    "gives two servers failing alike a toast each, naming its server (%s)",
+    async (language) => {
+      setLanguage(language);
+      mockApi.get.mockResolvedValue([
+        server({ id: "s1", name: "alpha" }),
+        server({ id: "s2", name: "bravo" }),
+      ]);
+      mockApi.post.mockRejectedValue(
+        new ApiError(500, { reason: "internal_error" }),
+      );
+      renderPage();
+
+      await screen.findByText("alpha");
+      fireEvent.click(stopIn(card("alpha")));
+      fireEvent.click(stopIn(card("bravo")));
+
+      const message = t("dashboard.actionFailed");
+      expect(
+        await screen.findByText(aboutServer("alpha", message)),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByText(aboutServer("bravo", message)),
+      ).toBeInTheDocument();
+      expect(screen.getAllByRole("alert")).toHaveLength(2);
+      expect(
+        screen.queryByText(t("common.toastRepeated", { count: 2 })),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(["en", "ja"] as const)(
+    "collapses the same failure on one server, with a count (%s)",
+    async (language) => {
+      setLanguage(language);
+      mockApi.get.mockResolvedValue([
+        server({ id: "s1", name: "alpha" }),
+        server({ id: "s2", name: "bravo" }),
+      ]);
+      mockApi.post.mockRejectedValue(
+        new ApiError(500, { reason: "internal_error" }),
+      );
+      renderPage();
+
+      await screen.findByText("alpha");
+      const message = aboutServer("alpha", t("dashboard.actionFailed"));
+      fireEvent.click(stopIn(card("alpha")));
+      await screen.findByText(message);
+      await waitFor(() => expect(stopIn(card("alpha"))).toBeEnabled());
+      fireEvent.click(stopIn(card("alpha")));
+
+      const toast = (await screen.findByText(message)).closest(
+        ".toast",
+      ) as HTMLElement;
+      expect(
+        await within(toast).findByText(t("common.toastRepeated", { count: 2 })),
+      ).toBeInTheDocument();
+      expect(screen.getAllByRole("alert")).toHaveLength(1);
+    },
+  );
+
+  // Server names are not unique, so the collapse goes by the server's id, not
+  // by the name in the text.
+  it("keeps the same failure on two servers of the same name apart", async () => {
+    mockApi.get.mockResolvedValue([
+      server({ id: "s1", name: "survival" }),
+      server({ id: "s2", name: "survival" }),
+    ]);
+    mockApi.post.mockRejectedValue(
+      new ApiError(500, { reason: "internal_error" }),
+    );
+    renderPage();
+
+    await screen.findAllByText("survival");
+    for (const button of screen.getAllByRole("button", {
+      name: t("dashboard.stop"),
+    })) {
+      fireEvent.click(button);
+    }
+
+    const message = aboutServer("survival", t("dashboard.actionFailed"));
+    await waitFor(() => expect(screen.getAllByText(message)).toHaveLength(2));
+    expect(
+      screen.queryByText(t("common.toastRepeated", { count: 2 })),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names the server when the start after accepting the EULA fails", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "alpha",
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    ]);
+    mockApi.post
+      .mockRejectedValueOnce(new ApiError(409, { reason: "eula_not_accepted" }))
+      .mockRejectedValueOnce(new ApiError(500, { reason: "internal_error" }));
+    renderPage();
+
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverDetail.eulaDialog.accept"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        aboutServer("alpha", t("dashboard.actionFailed")),
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("names the server when the start after accepting the EULA is denied", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "alpha",
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    ]);
+    mockApi.post
+      .mockRejectedValueOnce(new ApiError(409, { reason: "eula_not_accepted" }))
+      .mockRejectedValueOnce(
+        new ApiError(403, { reason: "forbidden", permission: "server:start" }),
+      );
+    renderPage();
+
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverDetail.eulaDialog.accept"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        aboutServer(
+          "alpha",
+          t("permissions.deniedNamed", { permission: "server:start" }),
+        ),
+      ),
+    ).toBeInTheDocument();
   });
 });
 
@@ -1404,6 +1597,72 @@ describe("DashboardPage desired/observed drift (issue #2443)", () => {
 
     await screen.findByText("survival");
     expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
+
+  // A crash the reconciler leaves alone is not converging: nothing acts on it
+  // until the operator stops and starts it (#3281). The detail header uses the
+  // same rule.
+  it.each([
+    [true, false],
+    [false, true],
+  ])(
+    "with crash_not_restarted %s, marks a crashed row under a running intent: %s",
+    async (notRestarted, marked) => {
+      mockApi.get.mockResolvedValue([
+        server({
+          observed_state: "crashed",
+          crash_reason: "forge_install_out_of_memory",
+          crash_not_restarted: notRestarted,
+        }),
+      ]);
+      renderPage();
+
+      await screen.findByText("survival");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(screen.queryByText(t("serverDetail.converging")) !== null).toBe(
+        marked,
+      );
+    },
+  );
+
+  it("follows a live crash the reconciler leaves alone until an intent comes after it", async () => {
+    mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
+    renderPage();
+    await screen.findByText("survival");
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message({
+        stream: "status",
+        ts: "t",
+        payload: {
+          state: "crashed",
+          detail: "installer ran out of memory",
+          reason: "forge_install_out_of_memory",
+        },
+        server_id: "s1",
+      });
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+
+    act(() => {
+      MockWebSocket.last().message({
+        stream: "status",
+        ts: "t",
+        payload: { desired_state: "running" },
+        server_id: "s1",
+      });
+    });
+    expect(
+      await screen.findByText(t("serverDetail.converging")),
+    ).toBeInTheDocument();
   });
 
   it("marks a drifting row in the table view too", async () => {

@@ -128,3 +128,62 @@ class ObservedState(enum.Enum):
     RESTARTING = "restarting"
     CRASHED = "crashed"
     UNKNOWN = "unknown"
+
+
+class CrashReason(enum.Enum):
+    """Why the Worker says a server crashed (DATABASE.md Section 7 CHECK enum).
+
+    Mirrors the control-plane ``CrashReason`` (CONTROL_PLANE.md Section 6), whose
+    every classified value is a crash of the supervised Forge install. An
+    unclassified crash has no reason (``None``), not a value of its own. Stored
+    with the observed state as the last crash's reason while the server reads
+    ``crashed`` (issue #3281).
+    """
+
+    FORGE_INSTALL_FAILED = "forge_install_failed"
+    FORGE_INSTALL_OUT_OF_MEMORY = "forge_install_out_of_memory"
+    FORGE_INSTALL_JAVA_INCOMPATIBLE = "forge_install_java_incompatible"
+
+
+# The crash reasons the reconciler does not restart (issue #3281): the ones the
+# Worker reports at once instead of retrying the install, because the next
+# attempt fails the same way (CONTROL_PLANE.md Section 6). The same memory limit
+# exhausts the installer again, and the same Java runtime refuses the same
+# classes. ``FORGE_INSTALL_FAILED`` is not among them: the Worker retries that
+# failure itself (a failed download is the usual cause) and gives the reason to
+# every install crash it cannot attribute, so a restart may still succeed. The
+# Web UI keeps a copy (``webui/src/pages/serverState.ts``), which
+# ``tests/servers/test_entities.py`` pins to this one.
+NOT_RESTARTED_CRASH_REASONS = frozenset(
+    {
+        CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+        CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE,
+    }
+)
+
+
+# The bound on a Worker report's free-text ``detail`` (issue #3281), in UTF-8
+# bytes, marker included. The last crash's detail is stored with the observed
+# state; a Worker's detail is a sentence or an error chain, so 4 KiB keeps all of
+# it while the column cannot grow with whatever a Worker sends.
+MAX_STATUS_DETAIL_BYTES = 4 * 1024
+STATUS_DETAIL_TRUNCATION_MARKER = " … [truncated]"
+
+
+def bound_status_detail(detail: str) -> str:
+    """Return ``detail`` as it is stored and relayed (issue #3281).
+
+    NUL is dropped: a PostgreSQL ``text`` column refuses it, and the write that
+    stores the detail also records the observed state. A detail longer than
+    :data:`MAX_STATUS_DETAIL_BYTES` is cut on a character boundary and ends with
+    :data:`STATUS_DETAIL_TRUNCATION_MARKER`.
+    """
+
+    detail = detail.replace("\x00", "")
+    encoded = detail.encode()
+    if len(encoded) <= MAX_STATUS_DETAIL_BYTES:
+        return detail
+    budget = MAX_STATUS_DETAIL_BYTES - len(STATUS_DETAIL_TRUNCATION_MARKER.encode())
+    # A cut inside a multi-byte character leaves an incomplete tail, which the
+    # decode drops.
+    return encoded[:budget].decode(errors="ignore") + STATUS_DETAIL_TRUNCATION_MARKER

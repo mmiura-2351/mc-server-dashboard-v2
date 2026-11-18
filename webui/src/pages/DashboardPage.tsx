@@ -13,7 +13,7 @@ import type { components } from "../api/schema";
 import { Modal } from "../components/Modal.tsx";
 import { Popover } from "../components/Popover.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
-import { useToast } from "../components/Toast.tsx";
+import { useServerToast } from "../components/useServerToast.ts";
 import { shortId } from "../format.ts";
 import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "../permissions/ActiveCommunityProvider.tsx";
@@ -32,6 +32,7 @@ import {
   actionApplies,
   bucketOf,
   converging,
+  crashNotRestarted,
   normalizeState,
   type ObservedState,
   STATE_BUCKETS,
@@ -620,8 +621,9 @@ function SortableHeader({
 // the card and table rows so neither duplicates the start/stop/restart business
 // logic (#541). The optimistic list-cache patch, its #1727-safe rollback and the
 // settle refetch live in useLifecycleMutation, shared with the detail page.
+// Several rows can fail at once, so each toast names its server (#3862).
 function useLifecycle(server: ServerResponse, communityId: string) {
-  const { showToast } = useToast();
+  const showServerToast = useServerToast();
   const onForbidden = useOnForbidden();
   const queryClient = useQueryClient();
   const [eulaOpen, setEulaOpen] = useState(false);
@@ -640,14 +642,14 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       // it on both the 409 and the 503 path: for a few reasons what the failure
       // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
       // #2441).
-      if (onForbidden(error)) {
+      if (onForbidden(error, { server })) {
         return;
       }
       if (isEulaNotAccepted(error)) {
         setEulaOpen(true);
         return;
       }
-      showToast(t(lifecycleErrorMessage(error, action)), "error");
+      showServerToast(server, t(lifecycleErrorMessage(error, action)), "error");
     },
   });
 
@@ -661,12 +663,16 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       await api.post(`${path}?accept_eula=true` as never);
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     } catch (error: unknown) {
-      if (onForbidden(error)) {
+      if (onForbidden(error, { server })) {
         return;
       }
-      showToast(t(lifecycleErrorMessage(error, "start")), "error");
+      showServerToast(
+        server,
+        t(lifecycleErrorMessage(error, "start")),
+        "error",
+      );
     }
-  }, [communityId, server.id, queryClient, onForbidden, showToast]);
+  }, [communityId, server, queryClient, onForbidden, showServerToast]);
 
   const state = normalizeState(server.observed_state);
   // While a request is in flight, show the transition it requests so the pill
@@ -697,19 +703,23 @@ function StatePill({ state }: { state: ObservedState }) {
 
 // The desired/observed drift affordance for a list row (issue #2443). Mirrors
 // the detail page header's rule and string exactly (ServerDetailPage's
-// `Header`, `converging`): until the server converges on the intent, show an
-// "applying…" hint. Without it a pending intent is invisible on the
+// `Header`, `converging` and `crashNotRestarted`): until the server converges
+// on the intent, show an "applying…" hint, except for a crash the reconciler
+// leaves alone (issue #3281), which nothing converges until the operator acts.
+// Without it a pending intent is invisible on the
 // list — e.g. a stop whose dispatch failed leaves desired=stopped while the
 // process keeps running, yet the row would otherwise show only a green pill.
 // The mark rides on the row wherever the observed state's bucket passes the
 // filter; it does not change which rows `filterServers` keeps.
 function DriftPill({ server }: { server: ServerResponse }) {
+  const state = normalizeState(server.observed_state);
   if (
-    !converging(
-      normalizeState(server.observed_state),
+    crashNotRestarted(
+      state,
       server.desired_state,
-      server.assigned_worker_id !== null,
-    )
+      server.crash_not_restarted,
+    ) ||
+    !converging(state, server.desired_state, server.assigned_worker_id !== null)
   ) {
     return null;
   }
