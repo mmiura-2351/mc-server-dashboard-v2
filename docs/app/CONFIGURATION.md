@@ -592,6 +592,20 @@ clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). `text` prints `LEVEL logger message` followed by the same structured fields and correlation ID as `key=value`. |
 
+Both formats also carry uvicorn's own server and access lines, which therefore
+go to stderr with every other line. Neither format writes a control character
+raw, so text a client controls (a crafted URL path, a header, a filename)
+cannot put a terminal escape sequence or a fake record into the log. `json`
+escapes them as JSON does. `text` writes every C0 control (CR, LF and TAB
+included), DEL and C1 control on a record's line, fields included, as a visible
+escape (`\x1b`, `\n`, `\x85`), so each record starts exactly one line. A
+backslash is not escaped, so `\x1b` in a line can also be those four characters
+as sent. A traceback keeps its line breaks and escapes every other control. One
+residual remains in `text`: a line break inside an exception's own message (or
+note) still starts a new line in its traceback, because nothing tells it apart
+from the traceback's own breaks. Use `json`, the default, where one record must
+be one line.
+
 The Prometheus exposition is served on a **separate HTTP listener**, never on
 `server.http_port`: the bundled `cloudflared` service forwards the
 whole public hostname to `api:8000` and path-scopes nothing, so a route on the
