@@ -488,7 +488,7 @@ decoy_waiters=()
 # cannot match under load, and the dead-pid and decoy waiters had none at all.
 entered=$(ls "$waiter_entered" "$dead_pid_entered" "$work"/decoy-entered-* 2> /dev/null)
 if [ -n "$entered" ]; then
-	fail_test "a queued run started work while the first held the lock: $entered"
+	fail_test "a queued run started work while the first held the lock: ${entered//$'\n'/ }"
 else
 	ok "no queued run starts work while another holds the lock"
 fi
