@@ -91,8 +91,6 @@ across servers (FR-VER-3) and contain no Community data.
 │               ├── incoming/                 # staging area for in-flight snapshot/restore transfers (Section 4)
 │               │   ├── <transfer-id>/        # an in-flight snapshot being streamed in
 │               │   └── restore-<backup-id>/  # a backup being extracted before publish (Section 4.1)
-│               ├── inflight/                 # registrations of publishes still filling a new snapshot (Section 4.3)
-│               │   └── <snapshot-id>         # empty marker; exists from before the snapshot is filled until the flip
 │               ├── versions/                 # retained per-file versions for rollback (Section 5)
 │               │   └── <relative-file-path>/
 │               │       ├── <version-id>      # an immutable prior content of that file
@@ -131,10 +129,6 @@ Notes:
 - `incoming/<transfer-id>/` exists only during a snapshot transfer; it is the
   partial copy that must never become authoritative until the transfer is proven
   complete (Section 4).
-- `inflight/<snapshot-id>` exists only while a publish fills
-  `snapshots/<snapshot-id>/` and flips onto it; it tells a sweep that the
-  unreferenced snapshot is not an orphan (Section 4.3). On the object backend it is
-  an object at the same relative key.
 - `backups/` holds whole-working-set archives. A backup is a retained snapshot
   that does **not** depend on a specific Worker (FR-BAK-2); restoring one
   republishes it into `current/`. The archive codec (`<archive-ext>`) is
@@ -233,7 +227,7 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 2. **The current working set, packed as `final.tar.gz`** — mandatory. The live
    `current/` snapshot is packed into a single self-contained `tar.gz` at the server
    root, then the unpacked working-set tree (`snapshots/`, `incoming/`, `versions/`,
-   `inflight/`, and the `current` pointer) is removed and the generation marker is advanced
+   and the `current` pointer) is removed and the generation marker is advanced
    (Section 2, generation marker). Packing is
    **fail-closed**: if it fails, the working set is left intact and the delete fails,
    so a deletion never silently loses the latest state. A server that never published
@@ -246,7 +240,7 @@ state, `DeleteServer` retains **exactly two** artifacts under the server directo
 Everything else for the server is removed; after the prune the server directory
 holds only `backups/<newest-id>.tar.gz` (if any), `final.tar.gz` (if published)
 and the `generation` marker — no `snapshots/`, `incoming/`,
-`versions/`, `inflight/`, or `current` pointer remain. Nothing removes the server directory
+`versions/`, or `current` pointer remain. Nothing removes the server directory
 after a successful delete, so the few-byte marker is retained with the archives
 until an operator reclaims the directory. The retained archives are unreferenced orphans by design (not the bug the
 `delete_backup` ordering guards against).
@@ -642,16 +636,15 @@ the FR-DATA-5 RPO.
 | Crash point | fs / remote-fs | object |
 |---|---|---|
 | During **stage** (writing `incoming/`) | `current` still points at the old snapshot; orphan staging dir is cleaned by `abort_snapshot` or a startup sweep | pointer still references old prefix; orphan data objects under the un-referenced prefix are GC'd |
-| After stage, before the staged copy is **moved into `snapshots/`** | `current` unchanged (old snapshot); the staged dir in `incoming/` is an orphan, cleaned on recovery | pointer still references old prefix; new prefix is orphaned and GC'd once its `inflight/` marker expires (below) |
-| After move into `snapshots/`, before the **symlink flip** | `current` still points at the old snapshot; the freshly moved `snapshots/<snapshot-id>/` is not yet referenced, so it is an orphan, cleaned by the sweep once its `inflight/` marker expires (below; it is unreferenced because no symlink targets it) | (no analogue — object stage writes directly under the new prefix) |
+| After stage, before the staged copy is **moved into `snapshots/`** | `current` unchanged (old snapshot); the staged dir in `incoming/` is an orphan, cleaned on recovery | pointer still references old prefix; new prefix is orphaned and GC'd |
+| After move into `snapshots/`, before the **symlink flip** | `current` still points at the old snapshot; the freshly moved `snapshots/<snapshot-id>/` is not yet referenced, so it is an orphan, cleaned by the startup sweep (it is unreferenced because no symlink targets it, and the crash took the publish's registration with it, below) | (no analogue — object stage writes directly under the new prefix) |
 | During the **symlink flip** | same-directory rename is atomic — `current` resolves to either the old or the new snapshot; it is never absent and never a partial pointer | the pointer PUT is atomic — it either references the old or the new prefix |
 | After the flip, before prior-snapshot reclaim | `current` points at the new snapshot; the prior `snapshots/<snapshot-id>/` is an orphan (unreferenced by `current`), cleaned on recovery | pointer references the new prefix; old prefix is an orphan, GC'd |
 
 The invariant in every row: **`current` (or the object pointer) always resolves
 to one complete snapshot — never absent, never partial.** Recovery is
 idempotent: the startup sweep reclaims any `snapshots/<snapshot-id>/` not
-targeted by `current` (unless a publish registered it, below) and any leftover
-`incoming/` staging dir, and re-running
+targeted by `current` and any leftover `incoming/` staging dir, and re-running
 `abort_snapshot` or the sweep is always safe. The sweep runs at API startup and
 then on a periodic loop (`storage_sweep.interval_seconds`, daily by default;
 CONFIGURATION.md Section 5.15).
@@ -659,19 +652,14 @@ CONFIGURATION.md Section 5.15).
 **The snapshot a publish is still filling** (#3893). Until its flip, a publish's
 new `snapshots/<snapshot-id>/` is named by no pointer, so it looks like an
 orphan. On the object backend that lasts for the whole server-side copy, minutes
-for a big world; on fs, for the move into `snapshots/` plus one directory fsync.
+for a big world, and then for the wait for the per-server lock and the gates
+before the flip; on fs, for the move into `snapshots/` plus one directory fsync.
 A sweep that reclaimed it then would let the publish flip onto a partial or
 missing snapshot and report success. So every whole-working-set publish (a
 snapshot commit, a backup restore, and the first file write to a server that has
-never published) registers the new snapshot before it fills it, and releases it
-only after the flip or once the publish has failed:
-
-- **In memory**, for the sweep of the same process. It holds for as long as the
-  publish runs, however long the copy takes.
-- **As a marker**, `inflight/<snapshot-id>` beside `snapshots/` (Section 2), for
-  a sweep in another process. The object copy writes it before its first object
-  and renews it every 10 minutes. On fs it spans only the move, the fsync and the
-  flip, which run under the per-server lock.
+never published) registers the new snapshot in memory before its first write
+into it, and releases it only after the flip or once the publish has failed. The
+registration holds for as long as the publish runs, however long that is.
 
 The sweep decides about each candidate snapshot when it is about to delete it, not
 from its listing, and it reads the registration before the pointer. A publish
@@ -682,18 +670,13 @@ being filled, whatever the sweep cadence. A hydrate reader's lease is read the
 other way round, after the pointer: it is taken on the live snapshot and outlives
 the flip that supersedes it.
 
-A marker left unrenewed for **1 h** belongs to a publish whose process died. It no
-longer pins its snapshot: the first sweep after that reclaims the snapshot, then
-the marker. So after a crash, the abandoned snapshot is reclaimed by the first
-sweep at least an hour later, either the periodic one or the startup sweep of a
-later restart, rather than by the startup sweep straight after the crash. A
-publish that fails without a crash releases its registration on the way out, and
-the next sweep reclaims what it left.
-
-Only the marker is visible to another process. The `incoming/` staging pin, the
-hydrate reader leases and the per-server lock stay in process (Section 2: the API
-runs as a single process), so the marker does not make two API processes on one
-store safe.
+The registration is in process, like the `incoming/` staging pin, the hydrate
+reader leases and the per-server lock (Section 2), so it assumes the single API
+instance Section 1 targets: **one API process per store**. A sweep in a second
+process would not see it. A crash takes the process's registrations with it, together with the
+publishes they belonged to, so the snapshot an interrupted publish was filling is
+an ordinary orphan. The startup sweep reclaims it before the restarted API serves,
+when no publish can be in flight.
 
 The post-flip reclaim is best-effort on every backend (#3269). On fs, a fault
 reclaiming the prior snapshot is logged and the tree is left to the sweep. On
