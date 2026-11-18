@@ -499,8 +499,8 @@ runs writes one. Until issue #3835 the gate read gzip with `gzip.GzipFile`, so
 it also admitted any number of gzip members, a gzip member header whose CRC
 does not match and one that sets a reserved flag bit. Restore and the probe
 now refuse all three the same way. No producer the platform runs or tests
-writes any of them; a writer that starts a gzip member every 64 KiB, as BGZF
-does, passes 10,000 members at about 640 MiB of tar. Both backup writers use `tarfile`'s `w:gz`, the Worker's pack closes its
+writes any of them. A writer that puts at most 64 KiB of tar in each gzip
+member, as BGZF does, passes 10,000 members at about 620 MiB of tar. Both backup writers use `tarfile`'s `w:gz`, the Worker's pack closes its
 tar writer on every path, and GNU tar, pigz, Go `archive/tar` and Python
 `tarfile` archives read whole.
 
