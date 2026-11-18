@@ -675,6 +675,27 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     ).toBeInTheDocument();
   });
 
+  it("names the server when the restore dialog's stop is denied", async () => {
+    routeGet({ srv: { observed_state: "running" } });
+    mockApi.post.mockRejectedValue(
+      new ApiError(403, { reason: "forbidden", permission: "server:stop" }),
+    );
+    await openBackups();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: t("backups.restoreDialog.stop") }),
+    );
+
+    expect(
+      await screen.findByText(
+        `survival: ${t("permissions.deniedNamed", { permission: "server:stop" })}`,
+      ),
+    ).toBeInTheDocument();
+  });
+
   // The stop is a lifecycle action, and its toasts name the server as the
   // dashboard's and the header's do (#3862).
   it("names the server in the toast of a stop from the restore dialog", async () => {

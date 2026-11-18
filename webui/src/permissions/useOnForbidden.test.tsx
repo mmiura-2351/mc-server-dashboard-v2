@@ -61,7 +61,7 @@ describe("useOnForbidden", () => {
 
     const handled = result.current(
       new ApiError(403, { reason: "forbidden", permission: "server:stop" }),
-      { id: "s1", name: "alpha" },
+      { server: { id: "s1", name: "alpha" } },
     );
 
     expect(handled).toBe(true);

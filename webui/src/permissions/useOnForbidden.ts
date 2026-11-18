@@ -9,7 +9,8 @@
  *      cached set may be stale.
  * Non-403 errors pass through untouched so callers keep their own handling.
  * Given the `server` the action was about, the toast names it, as a lifecycle
- * action's toasts do (WEBUI_SPEC.md 7.4).
+ * action's toasts do (WEBUI_SPEC.md 7.4). It is passed as an option, so a bare
+ * `onError: onForbidden` cannot take a mutation's variables for the server.
  *
  * Returns whether it handled the error, so a caller can skip its own toast for
  * a 403 it already surfaced here.
@@ -27,7 +28,10 @@ import { t } from "../i18n/index.ts";
 import { useActiveCommunity } from "./ActiveCommunityProvider.tsx";
 import { refetchCapabilities } from "./capabilities.ts";
 
-export type OnForbidden = (error: unknown, server?: ToastServer) => boolean;
+export type OnForbidden = (
+  error: unknown,
+  options?: { server?: ToastServer },
+) => boolean;
 
 export function useOnForbidden(): OnForbidden {
   const queryClient = useQueryClient();
@@ -36,7 +40,7 @@ export function useOnForbidden(): OnForbidden {
   const { communityId } = useActiveCommunity();
 
   return useCallback(
-    (error: unknown, server?: ToastServer): boolean => {
+    (error: unknown, options?: { server?: ToastServer }): boolean => {
       if (!(error instanceof ApiError) || error.status !== 403) {
         return false;
       }
@@ -44,10 +48,10 @@ export function useOnForbidden(): OnForbidden {
         error.permission !== undefined
           ? t("permissions.deniedNamed", { permission: error.permission })
           : t("permissions.denied");
-      if (server === undefined) {
+      if (options?.server === undefined) {
         showToast(message, "error");
       } else {
-        showServerToast(server, message, "error");
+        showServerToast(options.server, message, "error");
       }
       if (communityId !== null) {
         void refetchCapabilities(queryClient, communityId);

@@ -630,6 +630,14 @@ describe("Toast", () => {
     expect(screen.getAllByRole("alert")).toHaveLength(2);
   });
 
+  it("keeps an unscoped error apart from a scoped one raised first", () => {
+    renderToasts();
+    show("Failed", "error", "s1");
+    show("Failed", "error");
+
+    expect(screen.getAllByRole("alert")).toHaveLength(2);
+  });
+
   it("does not collapse a repeated timed toast", () => {
     renderToasts();
     show("Saved", "success");

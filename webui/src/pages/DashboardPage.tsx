@@ -642,7 +642,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       // it on both the 409 and the 503 path: for a few reasons what the failure
       // left pending, or left unconfirmed, depends on it (issues #2435/#2440/
       // #2441).
-      if (onForbidden(error, server)) {
+      if (onForbidden(error, { server })) {
         return;
       }
       if (isEulaNotAccepted(error)) {
@@ -663,7 +663,7 @@ function useLifecycle(server: ServerResponse, communityId: string) {
       await api.post(`${path}?accept_eula=true` as never);
       queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
     } catch (error: unknown) {
-      if (onForbidden(error, server)) {
+      if (onForbidden(error, { server })) {
         return;
       }
       showServerToast(

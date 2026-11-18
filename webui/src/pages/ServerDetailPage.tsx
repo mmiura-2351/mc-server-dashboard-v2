@@ -516,7 +516,7 @@ function Controls({
       serversKey(communityId),
     ],
     onError: (error, action) => {
-      if (onForbidden(error, server)) {
+      if (onForbidden(error, { server })) {
         return;
       }
       if (isEulaNotAccepted(error)) {

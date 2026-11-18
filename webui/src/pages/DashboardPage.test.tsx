@@ -785,6 +785,41 @@ describe("DashboardPage lifecycle toasts", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("names the server when the start after accepting the EULA is denied", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        id: "s1",
+        name: "alpha",
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    ]);
+    mockApi.post
+      .mockRejectedValueOnce(new ApiError(409, { reason: "eula_not_accepted" }))
+      .mockRejectedValueOnce(
+        new ApiError(403, { reason: "forbidden", permission: "server:start" }),
+      );
+    renderPage();
+
+    await screen.findByText("alpha");
+    fireEvent.click(screen.getByRole("button", { name: t("dashboard.start") }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("serverDetail.eulaDialog.accept"),
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        aboutServer(
+          "alpha",
+          t("permissions.deniedNamed", { permission: "server:start" }),
+        ),
+      ),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("DashboardPage live status", () => {

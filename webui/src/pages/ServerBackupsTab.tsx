@@ -887,7 +887,7 @@ function RestoreDialog({
       invalidateServer();
     },
     onError: (error) => {
-      if (onForbidden(error, server)) {
+      if (onForbidden(error, { server })) {
         return;
       }
       showServerToast(server, t(backupErrorKey(error)), "error");

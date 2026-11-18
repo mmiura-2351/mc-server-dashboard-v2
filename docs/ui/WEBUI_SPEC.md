@@ -905,7 +905,10 @@ numbers): the UI for the general scheduler.
   read-only view (run history stays available).
 - Failure surfacing: `schedule_failed` NOTIFICATION frames from the community
   events socket (7.2) render as error toasts (title + sanitized detail) while
-  the dashboard is open. An `unknown` run raises the same frame, titled
+  the dashboard is open. Each names its server and collapses only with the
+  same notice about that server, as lifecycle toasts do (7.4); a notice about
+  a server the dashboard's list does not hold yet shows unnamed, still apart
+  per server. An `unknown` run raises the same frame, titled
   "Scheduled <action>: outcome unknown" rather than "failed".
 
 ### 6.14 Server detail — Plugins
@@ -1162,7 +1165,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   the dashboard rows can act on several servers at once, and the detail
   page's controls and the restore dialog's stop read the same. Such a toast
   collapses only into one about the same server, told apart by the server's
-  id, since two servers may share a name.
+  id, since two servers may share a name. The dashboard's schedule-failure
+  notices follow the same rule (6.13).
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.
