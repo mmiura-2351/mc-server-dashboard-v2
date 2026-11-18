@@ -13,7 +13,8 @@ user's memberships and role assignments, so ownership conferred between the
 check and the delete would be deleted with it, leaving its community without an
 Owner. The Port is therefore bound on the unit of work's session, so it is
 answered inside the delete transaction, and the answer is taken under the
-user's *community-ownership lock*, which every conferral of ownership takes too.
+user's *account write lock*, which a conferral of ownership on the user, a
+member addition and a grant creation for them take too.
 """
 
 from __future__ import annotations
@@ -30,14 +31,15 @@ class CommunityOwnership(abc.ABC):
     async def owns_any_community(self, user_id: UserId) -> bool:
         """Return whether ``user_id`` owns (holds the Owner role in) any community.
 
-        First takes ``user_id``'s community-ownership lock, exclusively, held
-        until the transaction ends. Every conferral of ownership on the user --
-        a community provisioned with them as its Owner, the Owner role assigned
-        to them -- takes the same lock, shared, as the first statement of its own
-        transaction and only then checks that the user exists. So a conferral
-        either committed before this call, and the answer counts the ownership it
-        conferred, or it waits until this transaction has ended and then finds
-        the user gone if it deleted them.
+        First takes ``user_id``'s account write lock, exclusively, held until
+        the transaction ends. A conferral of ownership on the user (a community
+        provisioned with them as its Owner, a role assigned to them), and adding
+        them as a member or granting them a resource permission, each take the
+        same lock, shared, as the first statement of their own transaction and
+        only then check that the user exists. So such a write either committed
+        before this call, and the answer counts any ownership it conferred, or
+        it waits until this transaction has ended and then finds the user gone
+        if it deleted them.
 
         A deletion calls this after step 1 of the identity lock order (the
         ``user`` rows, :class:`~...repositories.RefreshTokenRepository`) and

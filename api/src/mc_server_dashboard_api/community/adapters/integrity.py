@@ -42,11 +42,12 @@ contract.)
 
 **Two foreign keys are mapped: the parents of a resource grant** (migration
 0039, issue #3216). ``fk_resource_grant_membership_id_membership`` and
-``fk_resource_grant_resource_id_server`` are the very mechanism that serializes
-``CreateGrant`` with a member removal or server deletion: when the deletion
-commits between the use case's checks and its INSERT, the INSERT fails its FK at
-commit, and that is the ordinary losing side of the race, not a defect. It
-surfaces as the same typed error the use case's own pre-check raises
+``fk_resource_grant_resource_id_server`` are ``CreateGrant``'s backstop against
+a member removal or server deletion. Its checks hold both parents
+``FOR KEY SHARE`` until it commits (#3241), so the removal or deletion either
+commits before them, and the check fails, or waits and cascades to the grant. An
+INSERT whose parent is gone nonetheless fails its FK at commit, and surfaces as
+the same typed error the use case's own check raises
 (:class:`GrantTargetNotMemberError` / :class:`GrantResourceNotFoundError`), which
 the route already maps to 404. The INSERT is staged via ``session.add``, so it
 violates inside the unit of work's ``commit`` wrap.
@@ -84,7 +85,7 @@ the entry to be reached at all (issue #2612).
 
 The two ``user`` keys among them are not left to a concurrent account deletion
 either: every write that inserts under them first checks the user under its
-community-ownership lock, which the deletion takes before it deletes, so the
+account write lock, which the deletion takes before it deletes, so the
 deletion either committed before the check or waits for the insert to commit
 (``UserExistenceChecker``, issues #3217 and #3856).
 """

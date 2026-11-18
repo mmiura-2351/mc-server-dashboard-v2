@@ -1,4 +1,4 @@
-"""The community-ownership lock: account deletion against community writes.
+"""The account write lock: account deletion against community writes on it.
 
 An account deletion refuses an account that owns a community, and its delete
 cascades the account's memberships, role assignments and grants. A conferral of
@@ -14,10 +14,14 @@ until that transaction ends:
 
 - an account deletion takes it **exclusively**, then reads whether the account
   owns a community (identity's ``CommunityOwnership`` adapter);
-- a community write on the account -- a conferral, a member addition, a grant
-  creation -- takes it **shared** as the first statement of its transaction,
-  then reads that the account exists (community's ``UserExistenceChecker``
-  adapter). These writes do not wait for each other.
+- a community write on the account -- a conferral of ownership, a member
+  addition, a grant creation -- takes it **shared** as the first statement of
+  its transaction, then reads that the account exists (community's
+  ``UserExistenceChecker`` adapter). These writes do not wait for each other.
+
+No other write takes it: no other community write confers ownership or
+inserts a row referencing an account, and writes of the ``user`` row itself are
+ordered by its row locks.
 
 Whichever side comes second waits for the first to commit, and every statement
 it runs after the wait takes a new READ COMMITTED snapshot, so it decides from
@@ -42,14 +46,16 @@ deletion that is not refused cascades no Owner assignment: its account owns no
 community.
 
 **Key namespace.** The two-key form ``pg_advisory_xact_lock(int4, int4)``: the
-first key is :data:`OWNERSHIP_LOCK_CLASS`, the second a 32-bit fold of the user
-id. PostgreSQL keeps the two-key space apart from the single ``bigint`` key
+first key is :data:`ACCOUNT_WRITE_LOCK_CLASS`, the second a 32-bit fold of the
+user id. PostgreSQL keeps the two-key space apart from the single ``bigint`` key
 space, which every other advisory lock of this codebase uses (the first-user
 bootstrap lock and the refresh-token session locks in ``identity``, the server
 lifecycle lock in ``servers``), so this lock cannot collide with any of them. A
 new two-key lock must take a different class. Two accounts whose folds collide
 share one lock, which only makes them wait for each other: no transaction takes
-this lock for more than one account, so a collision cannot close a wait cycle.
+this lock for more than one account (a role assignment or a grant creation takes
+its recipient's, never also its actor's), so a collision cannot close a wait
+cycle.
 """
 
 from __future__ import annotations
@@ -60,12 +66,12 @@ import uuid
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# The first key of every community-ownership lock: ``mcsd`` in ASCII, which fits
-# a signed int4.
-OWNERSHIP_LOCK_CLASS = 0x6D63_7364
+# The first key of every account write lock: ``mcsd`` in ASCII, which fits a
+# signed int4.
+ACCOUNT_WRITE_LOCK_CLASS = 0x6D63_7364
 
 
-def _ownership_key(user_id: uuid.UUID) -> int:
+def _lock_key(user_id: uuid.UUID) -> int:
     """Fold a user id into the signed 32-bit second key of its lock.
 
     Hashed rather than truncated: a time-ordered id would share its leading bits
@@ -76,10 +82,10 @@ def _ownership_key(user_id: uuid.UUID) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
-async def lock_community_ownership(
+async def take_account_write_lock(
     session: AsyncSession, user_id: uuid.UUID, *, shared: bool
 ) -> None:
-    """Take ``user_id``'s community-ownership lock until the transaction ends.
+    """Take ``user_id``'s account write lock until the transaction ends.
 
     ``shared`` for a community write on the user, exclusive for the user's
     deletion. Blocks while a conflicting holder's transaction is open.
@@ -90,5 +96,5 @@ async def lock_community_ownership(
         text(
             f"SELECT {function}"
             "(CAST(:lock_class AS integer), CAST(:lock_key AS integer))"
-        ).bindparams(lock_class=OWNERSHIP_LOCK_CLASS, lock_key=_ownership_key(user_id))
+        ).bindparams(lock_class=ACCOUNT_WRITE_LOCK_CLASS, lock_key=_lock_key(user_id))
     )

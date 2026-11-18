@@ -22,8 +22,8 @@ is auditable.
 The ownership check goes through the :class:`CommunityOwnership` seam so the
 identity context never imports the community context. The seam is bound on the
 unit of work's session, so the check runs inside the delete transaction, under
-a lock that a conferral of community ownership on the account waits for
-(#3217).
+the account write lock, which a conferral of community ownership on the account,
+a member addition and a grant creation for it wait for (#3217, #3856).
 """
 
 from __future__ import annotations
@@ -79,9 +79,10 @@ class DeleteAccount:
             # like a wrong password, before any refusal reason (#3861).
             if user.password_hash != actor.password_hash:
                 raise InvalidCredentialsError
-            # Under the account's ownership lock, held until this delete commits:
-            # a conferral of ownership on the account either committed first and
-            # is seen here, or waits and then finds no such user (#3217).
+            # Under the account write lock, held until this delete commits: a
+            # conferral of ownership on the account, a member addition or a
+            # grant creation either committed first and is seen here, or waits
+            # and then finds no such user (#3217, #3856).
             if await self.uow.ownership.owns_any_community(user.id):
                 raise CommunityOwnedError(str(user_id.value))
             if user.is_platform_admin and user.active and active_admins <= 1:
