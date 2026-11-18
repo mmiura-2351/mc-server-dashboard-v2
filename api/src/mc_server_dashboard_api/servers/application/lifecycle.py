@@ -1141,6 +1141,8 @@ class StartServer:
         # carry it as-is on the wire (#723). Unset -> 0, so the Worker driver applies
         # its default weight. No derivation (unlike the memory -> -Xmx path).
         cpu_millis = cpu_allocation_from_config(server.config) or 0
+        # Noted as it is enqueued, for a stop convergence to see (issue #3766).
+        self.stop_intents.start_sent(server_id)
         outcome = await self.control_plane.start(
             worker_id=worker_id,
             server_id=server_id,
@@ -1542,7 +1544,9 @@ class StopServer:
     # call sites (unit tests) that never run two flows at once.
     stop_convergence: StopConvergenceGuard = field(default_factory=StopConvergenceGuard)
     # Bumped when this stop withdraws a start intent (issue #3739,
-    # ``stop_intents.py``). Process-wide in production, shared with every
+    # ``stop_intents.py``), and by a stop convergence before it sends or releases;
+    # that convergence also reads from it whether a start sent here may still be
+    # launching (issue #3766). Process-wide in production, shared with every
     # StartServer; the private default only serves the call sites that never race
     # a start, the late-snapshot sink among them (its release withdraws nothing).
     stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
@@ -1595,9 +1599,10 @@ class StopServer:
                 worker_id = server.assigned_worker_id
                 applied = await _mark_stopped(self.uow, server, at=self.clock.now())
                 if not applied:
-                    # A concurrent transition already moved the row out of running.
-                    # Abort before dispatch or the placement-load decrement so the
-                    # lost race does not double-decrement the count (FR-SRV-2).
+                    # A concurrent transition already moved the row out of running,
+                    # or off the Worker it was read on (issue #3792). Abort before
+                    # dispatch or the placement-load decrement so the lost race
+                    # does not double-decrement the count (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
                 # Withdrawn: bump as the commit returns, before anything else can
                 # await (issue #3739). A start of this intent that has not sent yet
@@ -1620,7 +1625,7 @@ class StopServer:
             )
         if owed == "clear_stale_assignment":
             return await self._clear_stale_assignment(
-                community_id=community_id, server_id=server_id
+                community_id=community_id, server_id=server_id, force=force
             )
 
         # Decrement the placement load symmetrically with StartServer's
@@ -1639,6 +1644,9 @@ class StopServer:
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id, force=force
         )
+        if outcome.success or outcome.status is CommandStatus.SERVER_NOT_FOUND:
+            # The Worker ran it, behind any start sent before it (issue #3766).
+            self.stop_intents.stop_ran(server_id)
         if outcome.status is CommandStatus.SERVER_NOT_FOUND:
             # The Worker has no live instance to stop (e.g. the process crashed on
             # the EULA, issue #197): stopping a not-running server is a no-op, not a
@@ -2124,6 +2132,14 @@ class StopServer:
         a later start can re-place under the unassigned-only CAS (issue #206) without
         racing an in-flight upload (issue #847). A failed dispatch keeps the
         assignment for a same-Worker retry.
+
+        It withdraws the intent again, with a bump, before it sends (issue #3766).
+        The write that stopped the row may not have bumped yet (a drain whose
+        commit has not returned), or may have bumped before its flip was readable
+        (a commit cancelled at its await). A start that compares after this bump is
+        not sent, and one that compared before it is queued ahead of this stop,
+        which then stops it for real. Without it, a newer start could read the
+        count a failed start read, and that start's revert could undo it.
         """
 
         async with self.uow:
@@ -2134,12 +2150,16 @@ class StopServer:
             ):
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             worker_id = server.assigned_worker_id
+            self.stop_intents.bump(server_id)
 
         self.stop_refusals.forget(server_id)
         self.unrecorded_stops.forget(server_id)
         outcome = await self.control_plane.stop(
             worker_id=worker_id, server_id=server_id, force=force
         )
+        if outcome.success or outcome.status is CommandStatus.SERVER_NOT_FOUND:
+            # The Worker ran it, behind any start sent before it (issue #3766).
+            self.stop_intents.stop_ran(server_id)
         if not outcome.success and outcome.status is not CommandStatus.SERVER_NOT_FOUND:
             # Keep the verdict current across the reconciler's own retries (issue
             # #2478): a replay the Worker refuses again is still settled, so the next
@@ -2189,7 +2209,7 @@ class StopServer:
             )
 
     async def _clear_stale_assignment(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
     ) -> Server:
         """Release a stop wedged at (stopped, stopped|unknown|crashed|stopping,
         assigned).
@@ -2257,10 +2277,34 @@ class StopServer:
         the truth about how the process ended and what the operator sees; the row is
         already ``is_at_rest`` and, once unassigned, no longer reconcilable.
 
-        The clear uses the same guard the deferred clear uses
-        (``clear_assignment_after_final_snapshot``): a still desired=stopped row
-        still assigned to that worker. No placement-load decrement (the stop that
-        wedged the row already decremented).
+        The clear is guarded like the deferred clear (a still desired=stopped row
+        still assigned to that worker), and also by the ``observed_at`` Step A read
+        (issue #3766): a Worker report that landed since, during Step B's snapshot
+        say, leaves the row assigned, and the next reconcile acts on that report.
+        The cached ``observed`` is trusted only as long as nothing has replaced it.
+        No placement-load decrement (the stop that wedged the row already
+        decremented).
+
+        A cached ``observed`` of stopped or crashed can also predate a start this
+        process sent, which the Worker has not reported on yet (issue #3766). A
+        withdrawal that sends no stop leaves exactly that: a drain, or a stop whose
+        commit raised, landing after the start compared, or a stop the Worker
+        refused. Releasing then would leave the launching instance under an
+        unassigned row. So while a start sent here has not been followed by a stop
+        the Worker ran (``StopIntentCounter.start_may_be_running``), a connected
+        Worker is sent a stop instead, through :meth:`_redispatch_stop` with the
+        caller's ``force``: queued behind the start, it is a real stop, and if
+        nothing launched it is answered ``SERVER_NOT_FOUND`` and released as here.
+        A disconnected Worker discarded every command still queued when its
+        session ended, so it is released as before, with the exposure the unknown
+        leg already accepts.
+
+        Step A also withdraws the intent again, with a bump, as
+        :meth:`_redispatch_stop` does and for the same reasons: the write that
+        stopped the row may not have bumped yet, or may have bumped before its flip
+        was readable. A start that compares after the bump is not sent, and one
+        that compared before it is noted as sent, which the check above reads in
+        the same step.
         """
 
         # --- Step A: validate the triple ----------------------------------
@@ -2291,6 +2335,20 @@ class StopServer:
             ):
                 if self.control_plane.is_worker_connected(worker_id=worker_id):
                     raise InvalidLifecycleTransitionError(str(server_id.value))
+            # One step, no await: a start compares either before the bump, and is
+            # noted as sent here, or after it, and is not sent (issue #3766).
+            self.stop_intents.bump(server_id)
+            start_may_be_running = self.stop_intents.start_may_be_running(server_id)
+
+        # A connected Worker here means a stopped or crashed row, or an unknown or
+        # stopping one whose Worker reconnected during the unit of work's exit:
+        # the next tick would send that one a stop anyway.
+        if start_may_be_running and self.control_plane.is_worker_connected(
+            worker_id=worker_id
+        ):
+            return await self._redispatch_stop(
+                community_id=community_id, server_id=server_id, force=force
+            )
 
         # --- Step B: re-drive the final snapshot when the process is gone and
         # the worker is still reachable (observed stopped, #1004; crashed, #2439)
@@ -2339,7 +2397,8 @@ class StopServer:
                     unassign=True,
                     # Same ownership guard the clear below carries (issue #1708/#847):
                     # the write lands only while this worker is STILL the assigned
-                    # one, so a row that moved on since Step A is left untouched.
+                    # one, and, as it unassigns, the intent still stopped (issue
+                    # #3766), so a row that moved on since Step A is left untouched.
                     expected_worker=worker_id,
                 )
                 await self.uow.commit()
@@ -2362,10 +2421,8 @@ class StopServer:
                 else nullcontext()
             ):
                 async with self.uow:
-                    cleared = (
-                        await self.uow.servers.clear_assignment_after_final_snapshot(
-                            server_id, worker_id
-                        )
+                    cleared = await self.uow.servers.clear_stale_assignment(
+                        server_id, worker_id, observed_at=server.observed_at
                     )
                     await self.uow.commit()
         if cleared:
@@ -2589,9 +2646,10 @@ class StopServersAssignedToWorker:
     context's domain.
 
     Returns the ids whose compare-and-set APPLIED, in the order they were flipped:
-    a server a concurrent stop already moved out of running is skipped (not an
-    error) and NOT reported, so the caller sheds placement load only for flips this
-    call actually made. The assignment is left intact — the reconciler's
+    a server a concurrent stop already moved out of running, or one that moved off
+    this Worker since it was listed (issue #3792), is skipped (not an error) and NOT
+    reported, so the caller sheds placement load only for flips this call actually
+    made. The assignment is left intact — the reconciler's
     ``redispatch_stop`` clears it on the confirmed stop, which is also what drives
     the actual graceful stop and its final snapshot; this use case only records the
     intent (see the ``SetWorkerDrain`` module docstring for the convergence model).
@@ -2677,6 +2735,9 @@ class RestartServer:
                 raise LifecycleTransitionConflictError(str(server_id.value))
             await self.uow.commit()
 
+        # The relaunch is not noted as a sent start (issue #3766). In-process, the
+        # entry the server's own start left covers it; after an API restart it is
+        # not covered (issue #3854).
         outcome = await self.control_plane.restart(
             worker_id=worker_id, server_id=server_id
         )

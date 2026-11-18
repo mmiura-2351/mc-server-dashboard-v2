@@ -147,6 +147,7 @@ async def test_record_observed_state_unassign_clears_assignment(
 ) -> None:
     # A confirmed stop records observed=stopped and clears the assignment in one
     # write, so a later start can re-place under the unassigned-only CAS (issue #206).
+    # The row is a stopped intent still assigned: a release needs one (issue #3766).
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()
@@ -155,7 +156,7 @@ async def test_record_observed_state_unassign_clears_assignment(
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
-        server.desired_state = DesiredState.RUNNING
+        server.desired_state = DesiredState.STOPPED
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(
@@ -296,7 +297,8 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
     engine: AsyncEngine,
 ) -> None:
     # The guard and the #220 unassign share one UPDATE: when the write is stale its
-    # unassign decision is stale too, so dropping the row keeps the assignment.
+    # unassign decision is stale too, so dropping the row keeps the assignment. The
+    # row is a stopped intent, so only the guard can drop the write (issue #3766).
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()
@@ -305,7 +307,7 @@ async def test_record_observed_state_drops_stale_unassign_in_same_statement(
     async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
         server = await uow.servers.get_by_id(server_id)
         assert server is not None
-        server.desired_state = DesiredState.RUNNING
+        server.desired_state = DesiredState.STOPPED
         server.assigned_worker_id = WorkerId(worker)
         server.updated_at = _NOW
         await uow.servers.update_lifecycle(

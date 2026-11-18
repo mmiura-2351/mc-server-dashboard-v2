@@ -469,6 +469,101 @@ class ServerRepositoryContract:
             assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
             assert parameter.default is inspect.Parameter.empty
 
+    @pytest.mark.parametrize(
+        ("desired", "stored_worker", "stored_at", "read_at", "applies"),
+        [
+            (DesiredState.STOPPED, "w1", _NOW, _NOW, True),
+            (DesiredState.STOPPED, "w1", _LATER, _NOW, False),
+            (DesiredState.STOPPED, "w1", None, None, True),
+            (DesiredState.STOPPED, "w1", _NOW, None, False),
+            (DesiredState.RUNNING, "w1", _NOW, _NOW, False),
+            (DesiredState.STOPPED, "w2", _NOW, _NOW, False),
+        ],
+        ids=[
+            "as-read",
+            "reported-since",
+            "never-observed",
+            "first-report-since",
+            "running",
+            "other-worker",
+        ],
+    )
+    async def test_stale_assignment_clear_needs_the_row_as_it_was_read(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        desired: DesiredState,
+        stored_worker: str,
+        stored_at: dt.datetime | None,
+        read_at: dt.datetime | None,
+        applies: bool,
+    ) -> None:
+        # Issue #3766: the release a stop convergence owes a wedged row matches only
+        # while the row is still desired=stopped on the Worker it read, and no
+        # Worker report has landed since the read, a first report included.
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.desired_state = desired
+        item.observed_state = ObservedState.STOPPED
+        item.observed_at = stored_at
+        item.assigned_worker_id = workers[stored_worker]
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            cleared = await tx.repository.clear_stale_assignment(
+                item.id, workers["w1"], observed_at=read_at
+            )
+            await tx.commit()
+        assert cleared is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.desired_state, row.observed_at, row.assigned_worker_id) == (
+            desired,
+            stored_at,
+            None if applies else item.assigned_worker_id,
+        )
+
+    @pytest.mark.parametrize(
+        ("desired", "applies"),
+        [(DesiredState.STOPPED, True), (DesiredState.RUNNING, False)],
+        ids=["stopped", "running"],
+    )
+    async def test_an_observed_write_releases_only_a_stopped_intent(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        desired: DesiredState,
+        applies: bool,
+    ) -> None:
+        # Issue #3766: an observed write that also clears the assignment is a
+        # release, and like every other release it needs desired=stopped. Otherwise
+        # the whole write is dropped, the observed state with it.
+        item = server(contract_community_id)
+        item.desired_state = desired
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            written = await tx.repository.record_observed_state(
+                item.id,
+                ObservedState.UNKNOWN,
+                _LATER,
+                unassign=True,
+                expected_worker=item.assigned_worker_id,
+            )
+            await tx.commit()
+        assert written is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.observed_at, row.assigned_worker_id) == (
+            (ObservedState.UNKNOWN, _LATER, None)
+            if applies
+            else (ObservedState.CRASHED, _NOW, item.assigned_worker_id)
+        )
+
     async def test_missing_updates_do_not_insert(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],

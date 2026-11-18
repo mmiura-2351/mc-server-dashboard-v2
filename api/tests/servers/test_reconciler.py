@@ -1220,6 +1220,18 @@ class _OutageServerRepository(FakeServerRepository):
         self._fail_if_down("clear_assignment_after_final_snapshot")
         return await super().clear_assignment_after_final_snapshot(server_id, worker_id)
 
+    async def clear_stale_assignment(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        *,
+        observed_at: dt.datetime | None,
+    ) -> bool:
+        self._fail_if_down("clear_stale_assignment")
+        return await super().clear_stale_assignment(
+            server_id, worker_id, observed_at=observed_at
+        )
+
 
 @pytest.mark.parametrize(
     ("stop_status", "failing_write", "observed_after", "owed_dispatches"),
@@ -1363,7 +1375,7 @@ async def test_recovery_whose_release_failed_retries_on_the_short_grace() -> Non
     clock = FakeClock(_NOW)
     reconciler = _reconciler(uow, cp, clock, unrecorded_stops=_unrecorded(server, aged))
 
-    repo.down = {"clear_assignment_after_final_snapshot"}
+    repo.down = {"clear_stale_assignment"}
     await reconciler.tick()
     repo.down = set()
     assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
@@ -1382,11 +1394,11 @@ async def test_recovery_whose_release_failed_retries_on_the_short_grace() -> Non
     [
         # The process is gone and the Worker's session ended, so no upload survives
         # it and no snapshot was dispatched: nothing is in flight.
-        (ObservedState.STOPPED, "clear_assignment_after_final_snapshot", True),
-        (ObservedState.CRASHED, "clear_assignment_after_final_snapshot", True),
+        (ObservedState.STOPPED, "clear_stale_assignment", True),
+        (ObservedState.CRASHED, "clear_stale_assignment", True),
         # The stop was interrupted, not finished, and the Worker may still be
         # driving it, so these legs keep the full grace.
-        (ObservedState.UNKNOWN, "clear_assignment_after_final_snapshot", False),
+        (ObservedState.UNKNOWN, "clear_stale_assignment", False),
         (ObservedState.STOPPING, "record_observed_state", False),
     ],
 )

@@ -30,27 +30,43 @@ request at that await), and then no stop is sent at all. The cost is a commit
 that truly failed: the intent is still running, but an in-flight start of it is
 refused and waits for the reconciler's re-send.
 
-What this does not cover is a withdrawal that sends no stop and lands after a
+What this does not hold back is a withdrawal that sends no stop and lands after a
 start compares: a stop commit that was still in flight and then lands but
-raises, or any drain, including one that begins after the start was sent. The
-start goes out, and nothing follows it. (A stop commit that lands after the
-compare and returns is fine: its stop is sent behind the start and is a real
-stop.) The reconciler sends a stop once the Worker reports the server running.
-A stop retried before that report finds ``observed`` still at rest, so it only
-releases the row, under the instance that is launching (issue #3766). Also open,
-and recorded there: whether a cancelled commit can raise before its flip is
-visible to other sessions. The bump would then come first, the pre-write shape
-argued against above, and a re-send that read the count in that gap would not be
-held back.
+raises, or any drain, including one that begins after the start was sent. Nor a
+re-send that read the count after a withdrawal's bump but the row before its
+flip was readable, as a commit that raises, cancelled, before its flip is
+visible to other sessions would allow: the bump then comes first, the pre-write
+shape argued against above. Either way the start goes out, and nothing follows
+it. (A stop commit that lands after the compare and returns is fine: its stop is
+sent behind the start and is a real stop.) The reconciler sends a stop once the
+Worker reports the server running.
 
-The writes that bump: a stop's and a drain's ``running -> stopped`` flip, and a
+A stop convergence that runs before that report (an operator stop of a stopped
+intent runs one at once, issue #3491) must not release the row under the
+launching instance on the strength of a cached ``observed`` (issue #3766). So
+this also notes each start as it is enqueued, and each stop the Worker ran
+(answered OK or ``SERVER_NOT_FOUND``), which stopped every start queued ahead of
+it. While a start noted here has no such stop behind it, ``clear_stale_assignment``
+sends a stop instead of releasing. A stop the Worker refused does not count: the
+start it queued behind may still be launching. No start can be queued between a
+stop and its answer, because the stop's own bump comes before it.
+
+``redispatch_stop`` and ``clear_stale_assignment`` bump too, before they send or
+release, because the write that stopped the row may not have bumped yet (a drain
+whose commit has not returned) or may have bumped too early (above). A start
+that compares after that bump is not sent. One that compared before it is
+queued ahead of the stop, or noted as sent before the release checks. So no
+release comes before a bump of the intent it releases, and a start of a newer
+intent never reads the count a failed start of the old one read (#3791's
+interaction, issue #3766). How asyncpg orders a cancelled commit's raise and its
+flip then no longer matters to them: their own bump covers both orders.
+
+The writes that bump: a stop's and a drain's ``running -> stopped`` flip, a
 failed start's or placement's revert of its own intent (``_compensate``,
-``_unassign``), which also bumps when its commit raises. A revert sends no stop,
-so a re-sent start of that same intent already enqueued when the revert lands is
-not caught. The later releases of an
-already stopped row (the final-snapshot clears, ``redispatch_stop``,
-``clear_stale_assignment``) do not bump: the flip that made the row stopped
-already did.
+``_unassign``), which also bumps when its commit raises, and the two stop
+convergences above. A revert sends no stop, so a re-sent start of that same
+intent already enqueued when the revert lands is not caught. The final-snapshot
+clears do not bump: the flow that took the snapshot already did.
 
 The value a start reads also identifies its intent: an unchanged count means no
 write in this process has withdrawn the intent since. A failed start's revert
@@ -62,6 +78,13 @@ In-process, deliberately, like ``StopConvergenceGuard``. The API is a single
 instance (REQUIREMENTS.md NFR-SCALE-1), and the stops it orders against are sent
 from this process. The re-read stays in front of it for what the counter cannot
 see: a deleted row, and a write from outside this process.
+
+So the record of sent starts is empty after an API restart. A start the previous
+process sent, whose instance has not reported yet, is not in it, and the clear
+releases as it did before issue #3766. Its compare of ``observed_at`` with the
+row it read is then the only cover, and only for a report that lands before the
+release. A restart's relaunch is not noted either: in-process, the entry the
+server's own start left still covers it. Issue #3854 tracks both.
 """
 
 from __future__ import annotations
@@ -73,12 +96,33 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 @dataclass
 class StopIntentCounter:
-    """How many times each server's start intent has been withdrawn in-process."""
+    """How many times each server's start intent has been withdrawn in-process.
 
+    Also which servers have had a start sent that no stop has stopped yet.
+    """
+
+    # Neither drops a deleted server's entry: each holds at most one per server
+    # this process has seen.
     _counts: dict[ServerId, int] = field(default_factory=dict)
+    _unstopped_starts: set[ServerId] = field(default_factory=set)
 
     def current(self, server_id: ServerId) -> int:
         return self._counts.get(server_id, 0)
 
     def bump(self, server_id: ServerId) -> None:
         self._counts[server_id] = self.current(server_id) + 1
+
+    def start_sent(self, server_id: ServerId) -> None:
+        """Note a start enqueued for ``server_id``, as it is enqueued."""
+
+        self._unstopped_starts.add(server_id)
+
+    def stop_ran(self, server_id: ServerId) -> None:
+        """Note a stop the Worker ran: it stopped every start sent before it."""
+
+        self._unstopped_starts.discard(server_id)
+
+    def start_may_be_running(self, server_id: ServerId) -> bool:
+        """Whether a start was sent for ``server_id`` and no stop has run since."""
+
+        return server_id in self._unstopped_starts

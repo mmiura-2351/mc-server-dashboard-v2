@@ -201,6 +201,8 @@ class ServerRepository(abc.ABC):
         remain: clearing the assignment then lets a later start re-place under
         the unassigned-only CAS (issue #206). Crash/disconnect paths leave the
         assignment intact (the stickiness invariant), so they do not set it.
+        A write that unassigns is a release, so like every other release it lands
+        only while the row is still ``desired_state=stopped`` (issue #3766).
 
         ``expected_worker`` makes the ownership check part of the guarded write
         (issue #1708): when set, the write lands only while the row is STILL
@@ -247,6 +249,27 @@ class ServerRepository(abc.ABC):
         no-op rather than a clobber if the row moved out from under us by any other
         path. Returns ``True`` when the assignment was cleared, ``False`` when the
         guard matched no row.
+        """
+
+    @abc.abstractmethod
+    async def clear_stale_assignment(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        *,
+        observed_at: dt.datetime | None,
+    ) -> bool:
+        """Clear the assignment of a wedged stop, as it was read (issue #3766).
+
+        The release ``StopServer.clear_stale_assignment`` owes a row it read as
+        ``desired_state=stopped``, still assigned, with an at-rest ``observed``.
+        Guarded as :meth:`clear_assignment_after_final_snapshot` is (still
+        stopped, still assigned to ``worker_id``), and also on ``observed_at``
+        still being the one the caller read, ``None`` matching a row never
+        observed only. Every observed-state write stamps a fresh ``observed_at``,
+        so the row's ``observed_state`` has not moved either: no Worker report
+        has landed since the read, a first one included. Returns ``True`` when
+        the assignment was cleared, ``False`` when the guard matched no row.
         """
 
     @abc.abstractmethod

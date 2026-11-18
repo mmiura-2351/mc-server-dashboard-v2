@@ -204,6 +204,26 @@ git -C "$canary_worktree" init -q
 canary_logdir="$canary_worktree/.git/check-logs"
 hits_dir="$canary_worktree/.git/argon2-canary-hits"
 
+# The ceiling of every wait in these runs for something a correct run does --
+# its canary starting, the run reaching api-test, the run ending -- in polls of
+# 0.1 s: 120 s, as in test_check_parallel_lock.sh (#3788), the bound the Worker
+# tests give a wait on filesystem work (#3637). It only keeps a run that never
+# does it from hanging the gate this suite runs in, so it must never be what a
+# slow run loses to (#3833): every step of a run execs from the disk and writes
+# to the suite's temp dir, and under IO load each can take seconds. No wait here
+# asserts how soon. A passing run pays none of it, and a wait stops once its
+# run has ended, so a red pays it only for a run that is still there and never
+# does what is awaited. The stub's waits are part of a run, so they get half
+# the ceiling (stub_ceiling): one that expires does so while the suite still
+# waits for its run, which then ends and reports it. Nothing ends the stub's
+# wait for the canary to start early when the canary never starts, since its
+# run is waiting on it. That red would pay the wait in every run, so it pays it
+# once: the stub records the expiry in $canary_expired and skips the wait from
+# then on, and the record fails the suite.
+ceiling=1200
+stub_ceiling=$((ceiling / 2))
+canary_expired="$canary_stub/canary-start-expired"
+
 # The stand-in canary: it records its pid, its parent, niceness, arguments and
 # whether it holds fd 9 -- the gate lock's descriptor -- then idles until a
 # SIGTERM, which it takes a moment over, as the real one does to write its last
@@ -213,13 +233,18 @@ hits_dir="$canary_worktree/.git/argon2-canary-hits"
 # canary as soon as it reads the record finds both in place. CANARY_HIT adds a
 # MISMATCH line; CANARY_IGNORE_TERM makes it ignore SIGTERM; CANARY_CHECKS sets
 # the checks its stopped line counts (1); CANARY_USAGE_ERROR makes it fail at
-# once, as on a bad command line.
+# once, as on a bad command line, and with no TERM trap. The real one blocks
+# TERM before it parses its arguments, so on a usage error it exits 2 with the
+# TERM pending and the error last in its log. The stand-in cannot block it, so a
+# TERM between its record and its exit kills it instead (143, a status the gate
+# ignores), with the error still last.
 mkdir -p "$canary_worktree/api/.venv/bin"
 cat > "$canary_worktree/api/.venv/bin/python" << 'STUB'
 #!/usr/bin/env bash
 if [ -n "${CANARY_IGNORE_TERM:-}" ]; then
 	trap '' TERM
-else
+elif [ -z "${CANARY_USAGE_ERROR:-}" ]; then
+	# Residual (#3858): starved at nice 19 past the gate's 5 s grace, this loses its stopped line and .stopped.
 	trap 'sleep 0.3
 		echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
 		echo TERM > "$CANARY_RECORD.stopped"
@@ -241,12 +266,19 @@ while :; do sleep 0.1; done
 STUB
 chmod +x "$canary_worktree/api/.venv/bin/python"
 
-# Every target passes at once, except the api chain's: each waits (bounded) for
-# the canary to have started, so the start never races the chain's end;
-# api-test notes whether the canary is running, and then waits for a release
-# file when the run is to be stopped from outside. CANARY_FAIL_API fails
+# Every target passes at once, except the api chain's: each waits for the
+# canary to have started, so the start never races the chain's end; api-test
+# notes whether the canary is running, and if it is, holds until a release file
+# appears when the run is to be stopped from outside. CANARY_FAIL_API fails
 # api-lint. proto-check, the first target after every chain has ended, notes
 # whether the canary is still running.
+#
+# Both waits stand in for a real api chain, which outlasts the canary's start
+# and is still running when the run is stopped. A correct gate never lets either
+# reach its bound, so both take stub_ceiling (CANARY_CEILING), and both stop
+# once the gate (CANARY_GATE) is gone: the stub then has no run to hold, and it
+# has the gate lock's fd 9 open, so a stub that outlived its gate would hold the
+# lock.
 cat > "$canary_stub/make" << 'STUB'
 #!/usr/bin/env bash
 canary_running() {
@@ -254,12 +286,24 @@ canary_running() {
 	pid="$(sed -n 's/^pid=\([0-9]*\) .*/\1/p' "$CANARY_RECORD.started" 2> /dev/null)"
 	[ -n "$pid" ] && kill -0 "$pid" 2> /dev/null
 }
+# hold <command...>: poll until the command succeeds; fail once the gate is gone
+# or at the ceiling.
+hold() {
+	local i=0
+	while [ "$i" -lt "$CANARY_CEILING" ]; do
+		"$@" && return 0
+		kill -0 "$CANARY_GATE" 2> /dev/null || return 1
+		sleep 0.1
+		i=$((i + 1))
+	done
+	return 1
+}
 case "$1" in
 api-lint | api-test)
-	for _ in $(seq 1 100); do
-		[ -e "$CANARY_RECORD.started" ] && break
-		sleep 0.05
-	done
+	if [ ! -e "$CANARY_EXPIRED" ] && ! hold test -e "$CANARY_RECORD.started" &&
+		kill -0 "$CANARY_GATE" 2> /dev/null; then
+		echo "${CANARY_RECORD##*/} $1" >> "$CANARY_EXPIRED"
+	fi
 	;;
 esac
 case "$1" in
@@ -267,12 +311,9 @@ api-lint)
 	[ -z "${CANARY_FAIL_API:-}" ] || exit 1
 	;;
 api-test)
-	canary_running && echo running > "$CANARY_RECORD.during-api-test"
-	if [ -n "${CANARY_HOLD_API:-}" ]; then
-		for _ in $(seq 1 200); do
-			[ -e "$CANARY_RECORD.release" ] && break
-			sleep 0.05
-		done
+	if canary_running; then
+		echo running > "$CANARY_RECORD.during-api-test"
+		[ -z "${CANARY_HOLD_API:-}" ] || hold test -e "$CANARY_RECORD.release"
 	fi
 	;;
 proto-check)
@@ -285,7 +326,8 @@ chmod +x "$canary_stub/make"
 
 # canary_run <name> [VAR=value ...]: one gate run in $canary_dir (the canary
 # worktree unless a run says otherwise), in the background, with its records
-# under $canary_stub/<name>; sets gate_pid.
+# under $canary_stub/<name>; sets gate_pid. The subshell execs into the gate,
+# so its $BASHPID is the gate's pid, which the stub is given as CANARY_GATE.
 canary_dir="$canary_worktree"
 canary_run() {
 	local name=$1
@@ -294,23 +336,25 @@ canary_run() {
 		cd "$canary_dir" &&
 			exec env PATH="$canary_stub:$PATH" \
 				MCSD_CHECK_LOCK_FILE="$canary_stub/lock" \
+				CANARY_GATE="$BASHPID" CANARY_CEILING="$stub_ceiling" \
+				CANARY_EXPIRED="$canary_expired" \
 				CANARY_RECORD="$canary_stub/$name" "$@" \
 				bash "$ROOT/scripts/check_parallel.sh" "$canary_dir"
 	) > "$canary_stub/$name.out" 2>&1 &
 	gate_pid=$!
 }
 
-# await_gate: reap the run into gate_rc, or fail and stop it after ~20 s: a
+# await_gate: reap the run into gate_rc, or fail and stop it at the ceiling: a
 # `wait` on a run that never ends would hang the gate this suite runs in.
 await_gate() {
 	local i
-	for i in $(seq 1 200); do
+	for i in $(seq 1 "$ceiling"); do
 		kill -0 "$gate_pid" 2> /dev/null || break
 		sleep 0.1
 	done
 	if kill -0 "$gate_pid" 2> /dev/null; then
 		kill -KILL "$gate_pid" 2> /dev/null
-		fail_test "the $1 run did not end within 20 s: $(cat "$canary_stub/$1.out")"
+		fail_test "the $1 run did not end within $((ceiling / 10)) s: $(cat "$canary_stub/$1.out")"
 	fi
 	wait "$gate_pid" 2> /dev/null
 	gate_rc=$?
@@ -381,13 +425,26 @@ check_canary() {
 		fail_test "a run whose api chain failed exited 0"
 	fi
 
+	# The SIGTERM goes to a run in api-test with its canary running. A run that
+	# ends, or is still there at the ceiling, without getting there is reported,
+	# and is still sent the SIGTERM, which stops one that is still there.
 	canary_run stopped CANARY_HOLD_API=1
-	for _ in $(seq 1 200); do
+	for _ in $(seq 1 "$ceiling"); do
 		[ -e "$canary_stub/stopped.during-api-test" ] && break
-		sleep 0.05
+		kill -0 "$gate_pid" 2> /dev/null || break
+		sleep 0.1
 	done
+	[ -e "$canary_stub/stopped.during-api-test" ] ||
+		fail_test "stopped: the run never reached api-test with the canary running: $(cat "$canary_stub/stopped.out")"
 	kill -TERM "$gate_pid" 2> /dev/null
 	await_gate stopped
+	# The gate's TERM trap exits 1. A run that exits 0 was not ended by the
+	# SIGTERM: the stub's release hold ran out and the run passed on its own.
+	if [ "$gate_rc" -ne 0 ]; then
+		ok "stopped: the SIGTERM ends the run, and the run fails"
+	else
+		fail_test "stopped: the run exited 0 after its SIGTERM, so the SIGTERM did not end it: $(cat "$canary_stub/stopped.out")"
+	fi
 	check_canary stopped
 	touch "$canary_stub/stopped.release"
 
@@ -471,6 +528,11 @@ check_canary() {
 	else
 		fail_test "a hit from a linked worktree was not kept: $(cat "$canary_stub/linked.out")"
 	fi
+
+	# A stub that gave up waiting for a canary to start fails the suite, so
+	# skipping that wait from then on is never silent (see the ceiling above).
+	[ ! -e "$canary_expired" ] ||
+		fail_test "a canary did not start within $((stub_ceiling / 10)) s (run, target): $(cat "$canary_expired")"
 }
 
 # ---------------------------------------------------------------------------
