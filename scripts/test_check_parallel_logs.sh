@@ -226,8 +226,7 @@ canary_expired="$canary_stub/canary-start-expired"
 
 # The stand-in canary: it records its pid, its parent, niceness, arguments and
 # whether it holds fd 9 -- the gate lock's descriptor -- then idles until a
-# SIGTERM, which it takes a moment over, as the real one does to write its last
-# line: a run that did not wait for it would end with the canary still there.
+# SIGTERM, or until its gate is gone: both are described below.
 # Its log has the real one's start and stopped lines. The trap and the output
 # come before the record, and the record appears whole, so a run that stops the
 # canary as soon as it reads the record finds both in place. CANARY_HIT adds a
@@ -238,16 +237,43 @@ canary_expired="$canary_stub/canary-start-expired"
 # TERM pending and the error last in its log. The stand-in cannot block it, so a
 # TERM between its record and its exit kills it instead (143, a status the gate
 # ignores), with the error still last.
+#
+# Its TERM trap writes the stopped line and .stopped, then exits, and starts no
+# process on the way (#3858). The gate kills a canary 5 s after its SIGTERM, and
+# at nice 19 on a loaded host each process the stand-in starts waits for the
+# CPU, so a trap that started one could lose its writes to that bound on a
+# correct gate. Before the writes there is now only the rest of one idle
+# `sleep 0.1`, which bash finishes before it runs the trap.
+#
+# Like the real one, it stops once the pid it was given as --parent is no
+# longer its parent, so a gate that dies without stopping it -- one killed at
+# the ceiling, say -- leaves nothing idling. A stand-in that finds its gate gone,
+# idle or in its trap, has outlived its run: it records that in .orphaned, which
+# fails the run's check that nothing of the canary is left. That record, not a
+# `kill -0` racing the stand-in's own exit, is what catches a gate that ends
+# without stopping its canary. The trap used to pause 0.3 s before its writes,
+# which also left a canary running past a gate that sent the SIGTERM but did not
+# wait for it. Without the pause such a gate is caught only when it reads the
+# log, or ends, before the stand-in's trap has run: a race, decided by the rest
+# of that idle `sleep 0.1`.
 mkdir -p "$canary_worktree/api/.venv/bin"
 cat > "$canary_worktree/api/.venv/bin/python" << 'STUB'
 #!/usr/bin/env bash
+# gate_gone: the real canary's parent check -- the pid it was given as --parent
+# is no longer its parent -- read from /proc without forking. Its comm is bash,
+# so the fourth field of its stat is its parent's pid.
+parent=$4
+gate_gone() {
+	local ppid
+	read -r _ _ _ ppid _ < "/proc/$$/stat"
+	[ "$ppid" != "$parent" ]
+}
 if [ -n "${CANARY_IGNORE_TERM:-}" ]; then
 	trap '' TERM
 elif [ -z "${CANARY_USAGE_ERROR:-}" ]; then
-	# Residual (#3858): starved at nice 19 past the gate's 5 s grace, this loses its stopped line and .stopped.
-	trap 'sleep 0.3
-		echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
+	trap 'echo "2026-11-17T00:00:01.000+00:00 stopped by SIGTERM: checks=${CANARY_CHECKS:-1} mismatches=0 errors=0 cpu_s=0.1 wall_s=1.0"
 		echo TERM > "$CANARY_RECORD.stopped"
+		gate_gone && echo TERM > "$CANARY_RECORD.orphaned"
 		exit 0' TERM
 fi
 if [ -n "${CANARY_USAGE_ERROR:-}" ]; then
@@ -262,7 +288,8 @@ fd9=closed
 echo "pid=$$ ppid=$PPID nice=$(nice) fd9=$fd9 args=$*" > "$CANARY_RECORD.started.tmp"
 mv "$CANARY_RECORD.started.tmp" "$CANARY_RECORD.started"
 [ -z "${CANARY_USAGE_ERROR:-}" ] || exit 2
-while :; do sleep 0.1; done
+while ! gate_gone; do sleep 0.1; done
+echo idle > "$CANARY_RECORD.orphaned"
 STUB
 chmod +x "$canary_worktree/api/.venv/bin/python"
 
@@ -362,7 +389,9 @@ await_gate() {
 
 # check_canary <name>: the canary of run <name> (the last one started) started
 # as the gate starts it -- the gate's own child, told the gate's pid -- was
-# stopped with a SIGTERM, and is gone.
+# stopped with a SIGTERM, and is gone without having outlived its gate. The pid
+# is tested before the record: a stand-in already gone has written any record
+# it was going to.
 check_canary() {
 	local name=$1 started pid
 	started="$(cat "$canary_stub/$name.started" 2> /dev/null)" || started="<never started>"
@@ -380,6 +409,8 @@ check_canary() {
 	if [ -n "$pid" ] && kill -0 "$pid" 2> /dev/null; then
 		kill -KILL "$pid" 2> /dev/null
 		fail_test "$name: the canary (pid $pid) outlived the run"
+	elif [ -e "$canary_stub/$name.orphaned" ]; then
+		fail_test "$name: the canary outlived the run: it found its gate gone ($(cat "$canary_stub/$name.orphaned"))"
 	else
 		ok "$name: nothing of the canary is left"
 	fi
@@ -478,11 +509,12 @@ check_canary() {
 	started="$(cat "$canary_stub/deaf.started" 2> /dev/null)" || started=""
 	pid="${started#pid=}"
 	pid="${pid%% *}"
-	if [ -n "$pid" ] && ! kill -0 "$pid" 2> /dev/null && [ "$gate_rc" -eq 0 ]; then
+	if [ -n "$pid" ] && ! kill -0 "$pid" 2> /dev/null &&
+		[ ! -e "$canary_stub/deaf.orphaned" ] && [ "$gate_rc" -eq 0 ]; then
 		ok "a canary that ignores SIGTERM is killed, and the run still passes"
 	else
 		[ -z "$pid" ] || kill -KILL "$pid" 2> /dev/null
-		fail_test "a canary that ignores SIGTERM: pid '$pid', run exit $gate_rc"
+		fail_test "a canary that ignores SIGTERM: pid '$pid', run exit $gate_rc, found its gate gone: $(cat "$canary_stub/deaf.orphaned" 2> /dev/null || echo no)"
 	fi
 
 	# A canary that got no check done says so, and the run's verdict stands:
