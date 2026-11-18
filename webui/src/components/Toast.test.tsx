@@ -51,6 +51,7 @@ describe("Toast", () => {
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("shows a toast with its message and variant when triggered", () => {
@@ -172,11 +173,11 @@ describe("Toast", () => {
     show("x".repeat(50), "success"); // 7 s
 
     advance(3000);
-    fireEvent.mouseEnter(screen.getByRole("status"));
+    fireEvent.pointerEnter(screen.getByRole("status"));
     advance(60_000);
     expect(screen.getByRole("status")).toBeInTheDocument();
 
-    fireEvent.mouseLeave(screen.getByRole("status"));
+    fireEvent.pointerLeave(screen.getByRole("status"));
     advance(3999);
     expect(screen.getByRole("status")).toBeInTheDocument();
     advance(1);
@@ -206,9 +207,9 @@ describe("Toast", () => {
     const close = screen.getByRole("button", { name: "Close" });
 
     advance(3000);
-    fireEvent.mouseEnter(screen.getByRole("status"));
+    fireEvent.pointerEnter(screen.getByRole("status"));
     act(() => close.focus());
-    fireEvent.mouseLeave(screen.getByRole("status"));
+    fireEvent.pointerLeave(screen.getByRole("status"));
     advance(60_000);
     expect(screen.getByRole("status")).toBeInTheDocument();
 
@@ -224,13 +225,13 @@ describe("Toast", () => {
     show("x".repeat(50), "success"); // 7 s
 
     advance(1000);
-    fireEvent.mouseEnter(screen.getByRole("status"));
+    fireEvent.pointerEnter(screen.getByRole("status"));
     advance(10_000);
-    fireEvent.mouseLeave(screen.getByRole("status"));
+    fireEvent.pointerLeave(screen.getByRole("status"));
     advance(2000);
-    fireEvent.mouseEnter(screen.getByRole("status"));
+    fireEvent.pointerEnter(screen.getByRole("status"));
     advance(10_000);
-    fireEvent.mouseLeave(screen.getByRole("status"));
+    fireEvent.pointerLeave(screen.getByRole("status"));
 
     advance(3999);
     expect(screen.getByRole("status")).toBeInTheDocument();
@@ -244,11 +245,11 @@ describe("Toast", () => {
     show("x".repeat(50), "success"); // 7 s
 
     advance(1000);
-    fireEvent.mouseEnter(screen.getByText("x".repeat(50)));
+    fireEvent.pointerEnter(screen.getByText("x".repeat(50)));
     advance(60_000);
     expect(screen.getAllByRole("status")).toHaveLength(2);
 
-    fireEvent.mouseLeave(screen.getByText("x".repeat(50)));
+    fireEvent.pointerLeave(screen.getByText("x".repeat(50)));
     advance(2199);
     expect(screen.getByText("Saved")).toBeInTheDocument();
     advance(1);
@@ -296,12 +297,61 @@ describe("Toast", () => {
   it("resumes once the last toast goes from under the pointer", () => {
     renderToasts();
     show("Failed", "error");
-    fireEvent.mouseEnter(screen.getByRole("alert"));
+    fireEvent.pointerEnter(screen.getByRole("alert"));
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
     show("Saved", "success");
     advance(3200);
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("resumes after a tap dismisses one toast while another shows", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+    const error = screen.getByRole("alert");
+
+    // A tap: the pointer enters and leaves as the finger lifts, then the
+    // compatibility mouse events fire with no mouseout to follow.
+    fireEvent.pointerEnter(error);
+    fireEvent.pointerLeave(error);
+    fireEvent.mouseEnter(error);
+    fireEvent.click(within(error).getByRole("button"));
+
+    advance(3199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("scrolls a raised toast into view", () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    renderToasts();
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+
+    expect(scroll).toHaveBeenLastCalledWith({ block: "nearest" });
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      screen.getByText("Failed 2").closest(".toast"),
+    );
+
+    show("Failed 1", "error");
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      screen.getByText("Failed 1").closest(".toast"),
+    );
+  });
+
+  it("does not scroll a raised toast into view while focus is in the stack", () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    renderToasts();
+    show("Failed 1", "error");
+    act(() => screen.getByRole("button", { name: "Close" }).focus());
+    scroll.mockClear();
+
+    show("Failed 2", "error");
+    show("Failed 1", "error");
+
+    expect(scroll).not.toHaveBeenCalled();
   });
 
   it("dismisses only the focused toast on Escape", () => {
@@ -398,6 +448,8 @@ describe("Toast", () => {
     expect(
       within(toast).getByText(t("common.toastRepeated", { count: 3 })),
     ).toBeInTheDocument();
+    // The visible number is for sighted users; screen readers get the text.
+    expect(within(toast).getByText("3")).toHaveAttribute("aria-hidden", "true");
   });
 
   it("shows no count on an error raised once", () => {

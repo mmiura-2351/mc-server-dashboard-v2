@@ -1054,7 +1054,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   characters a second suits Japanese and leaves English time to spare. The
   pointer or focus anywhere in the toast stack pauses every countdown, so no
   toast closes or slides out from under the one being read; each resumes with
-  the time it had left.
+  the time it had left. On a touch screen only a finger held on the stack
+  pauses it, since a touch pointer leaves when the finger lifts.
 - **Toast accessibility.** An error toast is a `role="alert"`, any other a
   `role="status"`, with no explicit `aria-live`: the role already sets it, and
   repeating it double-announces in VoiceOver. The dismiss button is in the tab
@@ -1067,7 +1068,8 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   and counts as the newest for the drop order. A toast is at most 32rem wide,
   never wider than the screen less 2rem, and its message wraps anywhere; the
   stack is at most the screen's height less 2rem and scrolls beyond that, so
-  every toast stays reachable on a phone.
+  every toast stays reachable on a phone. A toast raised, or raised again,
+  scrolls into view, unless focus is in the stack.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.

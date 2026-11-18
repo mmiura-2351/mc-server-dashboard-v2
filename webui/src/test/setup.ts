@@ -5,3 +5,10 @@ import { configure } from "@testing-library/dom";
 // 1 s async-util timeout causes spurious waitFor/findByRole failures.  30 s
 // is still tight enough to catch genuine hangs while surviving CPU starvation.
 configure({ asyncUtilTimeout: 30_000 });
+
+// jsdom has no scrollIntoView, which browsers and happy-dom do. The toast
+// stack calls it on every raised toast, so the files pinned to jsdom would
+// throw on any toast without this no-op.
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}

@@ -122,8 +122,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       <div
         ref={zoneRef}
         className="toast-zone"
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
+        // Pointer, not mouse, events: a tap fires mouseover with no mouseout
+        // to follow, which left the stack paused; a touch pointer leaves as
+        // the finger lifts.
+        onPointerEnter={() => setHovered(true)}
+        onPointerLeave={() => setHovered(false)}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
       >
@@ -154,6 +157,21 @@ function ToastItem({
 }) {
   const isError = toast.variant === "error";
   const remainingRef = useRef(autoDismissMs(toast.message));
+  const ref = useRef<HTMLDivElement>(null);
+
+  // A toast raised, or raised again, comes into view in case the stack
+  // overflows and scrolls; not while focus is in the stack, so a focused
+  // toast is not scrolled away.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `toast.raisedAt` marks a raise; re-run on each one, and only then.
+  useEffect(() => {
+    const node = ref.current;
+    if (
+      node !== null &&
+      !node.parentElement?.contains(document.activeElement)
+    ) {
+      node.scrollIntoView({ block: "nearest" });
+    }
+  }, [toast.raisedAt]);
 
   useEffect(() => {
     if (isError || paused) {
@@ -169,6 +187,7 @@ function ToastItem({
 
   return (
     <div
+      ref={ref}
       role={isError ? "alert" : "status"}
       className={`toast ${toast.variant}`}
     >
