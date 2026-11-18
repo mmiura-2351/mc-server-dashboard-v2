@@ -1472,6 +1472,11 @@ function Settings({
   const cpuAllocationOk = cpuAllocationValid(cpuAllocation);
   const slugOk = slugValid(slug);
   const canDelete = can("server:delete", { serverId: server.id });
+  // A stop holds its Worker until the final snapshot and the release, and the
+  // API refuses a delete until then (409 server_assigned, #3852): hold Delete,
+  // with the reason, while the live cache shows a Worker assigned.
+  const deleteHeld = server.assigned_worker_id !== null;
+  const deleteHeldId = useId();
   const canExport = can("file:read", { serverId: server.id });
 
   const onError = (error: unknown) => {
@@ -1758,10 +1763,17 @@ function Settings({
             <div>
               <strong>{t("serverDetail.danger.deleteTitle")}</strong>
               <div className="desc">{t("serverDetail.danger.deleteDesc")}</div>
+              {deleteHeld && (
+                <div className="field-hint" id={deleteHeldId}>
+                  {t("serverDetail.danger.deleteAwaitsRelease")}
+                </div>
+              )}
             </div>
             <button
               type="button"
               className="btn danger"
+              disabled={deleteHeld}
+              aria-describedby={deleteHeld ? deleteHeldId : undefined}
               onClick={() => setConfirmOpen(true)}
             >
               {t("serverDetail.danger.deleteButton")}

@@ -104,7 +104,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | POST | `/communities/{cid}/servers/import` | ZIP import (multipart). A member named `server.properties/…` would publish that name as a directory, which the platform's own writes cannot survive — it is a `422` (`platform_managed_path`), refused before the server row is created, so nothing is left behind. Only the root name is guarded: a nested `backups/server.properties/…` member is ordinary user data. A traversal (zip-slip) member is a `422` (`invalid_path`) the same way. A member at a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), refused the same way rather than dropped. A body the zip reader fails on — not a zip at all, cut short, damage the reader detects in a member, or an encrypted member, the metadata included — is a `422` (`invalid_archive`), refused before the server row is created. |
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
-| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
+| GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. A DELETE needs the server at rest (`409 server_not_stopped` otherwise) and no Worker assigned: a stop holds its Worker until the final snapshot settles and the server is released, which can wait for the reconciler, and a delete before then is a `409` (`server_assigned`) whose `detail` says to stop the server and wait for the release. A DELETE that waited out the lifecycle lock's acquire budget behind another lifecycle operation is the `409 server_busy` instead, which a retry in a moment clears. |
 | POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
@@ -719,6 +719,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Worker is assigned, since the API refuses it in both cases
   (`409 invalid_transition`). The dashboard card quick actions follow the same
   rules and disable them.
+- Delete (the Settings tab's danger zone, 6.9) needs no Worker assigned, for
+  the same reason as Start: the API refuses a delete until the release
+  (`409 server_assigned`). While a Worker is assigned, Delete shows disabled
+  with "Stop the server and wait for it to be released before deleting it."
+  beside it, and the release frame frees it. A `409 server_assigned` that a
+  stale cache let through toasts the same words.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.
@@ -802,7 +808,8 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.9 Server detail — Settings
 - Rename, game-port edit (with availability check), `config` key/value
   editor; execution backend displayed read-only (immutable post-create).
-- Danger zone: delete server (typed confirm), export ZIP.
+- Danger zone: delete server (typed confirm; held while a Worker is assigned,
+  6.4), export ZIP.
 
 ### 6.10 Community settings
 - **Members**: table (username, roles as chips); add-member dialog by exact
@@ -1120,7 +1127,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   server must be stopped, on every surface that can receive it;
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
-  retries in a moment; the sanitized start/restart-failure categories
+  retries in a moment; `server_assigned` on a delete says to stop the server
+  and wait for it to be released before deleting it, since the hold can outlast
+  a retry (6.4); the sanitized start/restart-failure categories
   `port_conflict` / `image_missing` name the cause the Worker classified, and
   `server_properties_unreadable` says the server's `server.properties` is not a
   regular file or is too large and must be restored (Section 2, "A refused
