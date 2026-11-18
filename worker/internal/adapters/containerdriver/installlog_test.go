@@ -3,7 +3,6 @@ package containerdriver
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,8 +23,9 @@ import (
 
 const installLogOutput = "downloading libraries\n"
 
-// captureInstallLog runs one install-output capture against workingDir with the
-// installer printing output, and returns the scan and what the Worker logged.
+// captureInstallLog runs one start's install, of one attempt, against workingDir
+// with the installer printing output, and returns the scan and what the Worker
+// logged.
 func captureInstallLog(t *testing.T, workingDir, output string) (*installOutputScan, string) {
 	t.Helper()
 	docker := newForgeFakeDocker()
@@ -36,7 +36,9 @@ func captureInstallLog(t *testing.T, workingDir, output string) (*installOutputS
 		spec:   forgeSpec(workingDir),
 		logger: slog.New(slog.NewTextHandler(logged, nil)),
 	}
-	return i.captureInstallOutput(context.Background(), forgeInstallID), logged.String()
+	log := i.startInstallLog()
+	defer log.close()
+	return i.captureInstallOutput(context.Background(), forgeInstallID, log), logged.String()
 }
 
 // assertRefused fails unless the capture reported that it wrote no log.
@@ -82,14 +84,15 @@ func TestInstallLogCreatedInsideWorkingSet(t *testing.T) {
 	}
 }
 
-// The log is appended to across attempts and starts, never truncated.
-func TestInstallLogAppendsAcrossRuns(t *testing.T) {
+// A start's install empties the log: what an earlier start's wrote is not kept
+// (issue #3282).
+func TestInstallLogIsEmptiedForEachStart(t *testing.T) {
 	dir := t.TempDir()
 
-	captureInstallLog(t, dir, "first attempt\n")
-	captureInstallLog(t, dir, "second attempt\n")
+	captureInstallLog(t, dir, "first start\n")
+	captureInstallLog(t, dir, "second start\n")
 
-	if got, want := readInstallLog(t, dir), "first attempt\nsecond attempt\n"; got != want {
+	if got, want := readInstallLog(t, dir), "second start\n"; got != want {
 		t.Fatalf("install log = %q, want %q", got, want)
 	}
 }
@@ -261,20 +264,22 @@ func TestInstallLogRefusalStillScansOutput(t *testing.T) {
 // failingLogFile passes the first limit bytes through to the log file and fails
 // every write after that, the way a filesystem that has run out of space does.
 type failingLogFile struct {
-	f       io.Writer
+	f       installLogFile
 	limit   int
 	written int
 	failed  int
 }
 
-func (w *failingLogFile) Write(p []byte) (int, error) {
+func (w *failingLogFile) WriteAt(p []byte, off int64) (int, error) {
 	if w.written+len(p) > w.limit {
 		w.failed++
 		return 0, unix.ENOSPC
 	}
 	w.written += len(p)
-	return w.f.Write(p)
+	return w.f.WriteAt(p, off)
 }
+
+func (w *failingLogFile) Truncate(size int64) error { return w.f.Truncate(size) }
 
 // A write the filesystem fails part way through the install does not cost the
 // failure diagnosis either: the log is dropped with one warning, and the stream is
@@ -295,9 +300,11 @@ func TestInstallLogWriteFailureStillScansOutput(t *testing.T) {
 	docker.logBodies[forgeInstallID] = body.String()
 	logged := &syncBuffer{}
 	i := &instance{docker: docker, spec: forgeSpec(dir), logger: slog.New(slog.NewTextHandler(logged, nil)),
-		installLogSink: func(f *os.File) io.Writer { sink.f = f; return sink }}
+		installLogSink: func(f *os.File) installLogFile { sink.f = f; return sink }}
+	log := i.startInstallLog()
+	defer log.close()
 
-	scan := i.captureInstallOutput(context.Background(), forgeInstallID)
+	scan := i.captureInstallOutput(context.Background(), forgeInstallID, log)
 
 	if !scan.javaIncompatible {
 		t.Fatal("scan missed the marker in the chunk whose install log write failed")

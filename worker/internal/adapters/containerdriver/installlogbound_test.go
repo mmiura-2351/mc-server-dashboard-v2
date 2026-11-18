@@ -2,7 +2,11 @@ package containerdriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -109,13 +113,15 @@ func TestForgeInstallLogStaysBoundedAcrossRepeatedFailingStarts(t *testing.T) {
 }
 
 // Past the bound the log keeps the start of the install, then one line saying how
-// much was dropped, then the latest attempt's output whole.
+// much was omitted, then the latest output, which ends with the latest attempt's
+// output whole.
 func TestForgeInstallLogKeepsTheStartOfTheInstallAndTheLatestAttemptWhole(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
+	// 2 MiB each, the most one install prints.
 	outputs := []string{
-		installOutput("attempt 1", 5<<18), installOutput("attempt 2", 5<<18), installOutput("attempt 3", 5<<18),
+		installOutput("attempt 1", 2<<20), installOutput("attempt 2", 2<<20), installOutput("attempt 3", 2<<20),
 	}
 	scriptInstallOutputs(docker, outputs...)
 
@@ -126,14 +132,17 @@ func TestForgeInstallLogKeepsTheStartOfTheInstallAndTheLatestAttemptWhole(t *tes
 		t.Fatalf("install log is %d bytes, want at most %d", len(log), execution.ForgeInstallLogMaxBytes)
 	}
 	head, omission, latest := splitAtOmission(t, log)
-	if latest != outputs[2] {
-		t.Fatalf("install log after the omission line is %d bytes, want the latest attempt's whole output (%d bytes)",
-			len(latest), len(outputs[2]))
+	if !strings.HasSuffix(latest, outputs[2]) {
+		t.Fatal("install log does not end with the latest attempt's whole output")
 	}
 	if head == "" || !strings.HasPrefix(outputs[0], head) {
 		t.Fatalf("install log starts with %.80q, want the start of the first attempt", log)
 	}
-	if omitted := len(outputs[0]) + len(outputs[1]) - len(head); !strings.Contains(omission, strconv.Itoa(omitted)) {
+	printed := strings.Join(outputs, "")
+	if !strings.HasSuffix(printed, latest) {
+		t.Fatalf("install log after the omission line starts with %.80q, want the end of the output", latest)
+	}
+	if omitted := len(printed) - len(head) - len(latest); !strings.Contains(omission, strconv.Itoa(omitted)) {
 		t.Fatalf("omission line = %q, want it to say %d bytes were omitted", omission, omitted)
 	}
 }
@@ -184,4 +193,70 @@ func splitAtOmission(t *testing.T, log string) (before, omission, after string) 
 		t.Fatal("install log has no line saying what was omitted")
 	}
 	return strings.Join(lines[:at], ""), lines[at], strings.Join(lines[at+1:], "")
+}
+
+// dyingLogFile passes the log's writes through until the log first rewrites
+// itself, lets that one call through and fails every call after it: a Worker
+// that dies in the middle of a compaction, nothing synced.
+type dyingLogFile struct {
+	f    *os.File
+	size int64
+	died bool
+}
+
+var errWorkerDied = errors.New("the worker died")
+
+func (d *dyingLogFile) WriteAt(p []byte, off int64) (int, error) {
+	if d.died {
+		return 0, errWorkerDied
+	}
+	d.died = off < d.size
+	d.size = max(d.size, off+int64(len(p)))
+	return d.f.WriteAt(p, off)
+}
+
+func (d *dyingLogFile) Truncate(size int64) error {
+	if d.died {
+		return errWorkerDied
+	}
+	d.died = true
+	d.size = size
+	return d.f.Truncate(size)
+}
+
+// A compaction cut short leaves a log that is still under its bound and still
+// holds the latest output it was given: the rewrite lands before the file is cut
+// to its end, never after.
+func TestInstallLogCutShortMidCompactionStillHoldsTheLatestOutput(t *testing.T) {
+	f, err := os.Create(filepath.Join(t.TempDir(), "forge-install.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	file := &dyingLogFile{f: f}
+	l := &installLog{file: file, logger: slog.New(slog.DiscardHandler)}
+	l.beginAttempt()
+
+	var given strings.Builder
+	for _, line := range strings.SplitAfter(installOutput("attempt 1", 4<<20), "\n") {
+		if file.died {
+			break
+		}
+		l.write([]byte(line))
+		given.WriteString(line)
+	}
+	if !file.died {
+		t.Fatal("the log was never compacted")
+	}
+
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > execution.ForgeInstallLogMaxBytes {
+		t.Fatalf("install log is %d bytes, want at most %d", len(data), execution.ForgeInstallLogMaxBytes)
+	}
+	if latest := given.String()[given.Len()-1<<20:]; !strings.Contains(string(data), latest) {
+		t.Fatal("install log cut short does not hold the latest MiB of output it was given")
+	}
 }

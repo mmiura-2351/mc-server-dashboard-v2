@@ -37,7 +37,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"math"
@@ -1620,7 +1619,7 @@ type instance struct {
 	// installLogSink is a test-only hook that wraps the opened forge-install.log
 	// before the install follow writes to it, so a test can stand in for a write
 	// the filesystem fails (issue #3744). Nil in production.
-	installLogSink func(f *os.File) io.Writer
+	installLogSink func(f *os.File) installLogFile
 
 	// metricsMu guards the cached metrics RCON connection reused across player-count
 	// samples (issue #1622). It is a dedicated lock — never i.mu — held only for the
@@ -1773,8 +1772,12 @@ func (i *instance) superviseInstall(installID string) {
 		exitCode int64
 		waitErr  error
 	)
+	// One log for the whole install: emptied here, as the start's install begins,
+	// and kept across its retries (issue #3282).
+	sequenceLog := i.startInstallLog()
+	defer sequenceLog.close()
 	for attempt := 0; ; attempt++ {
-		follow := i.followInstallOutput(installID)
+		follow := i.followInstallOutput(installID, sequenceLog)
 
 		// Re-attach on transport errors the same way supervise does: a daemon
 		// blip does not mean the install container died (issue #881).
@@ -2136,12 +2139,12 @@ type installLogFollow struct {
 // followInstallOutput starts captureInstallOutput for installID on its own
 // context, which has no deadline: a healthy install's log is followed for as
 // long as the installer runs.
-func (i *instance) followInstallOutput(installID string) *installLogFollow {
+func (i *instance) followInstallOutput(installID string, log *installLog) *installLogFollow {
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &installLogFollow{cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(f.done)
-		f.scan = i.captureInstallOutput(ctx, installID)
+		f.scan = i.captureInstallOutput(ctx, installID, log)
 	}()
 	return f
 }
@@ -2168,62 +2171,42 @@ func (f *installLogFollow) finish(drain time.Duration) *installOutputScan {
 	return f.scan
 }
 
-// captureInstallOutput follows the install container's log stream and writes it to
-// logs/forge-install.log in the working dir, so an operator can read the install
-// diagnostics via the files API (issue #305). It is best-effort: a failure to open
-// the stream or the log file leaves the file empty/absent rather than failing the
-// install (the install's own exit code is the authority on success). A log that
-// cannot be opened inside the working set — the installer can plant a link there
-// (issue #3298) — is logged at WARN and the install goes on without it.
+// captureInstallOutput follows the install container's log stream and writes it,
+// as one attempt of the install, to the install's log (logs/forge-install.log in
+// the working dir), so an operator can read the install diagnostics via the files
+// API (issue #305). It is best-effort: a failure to open the stream leaves the
+// attempt out of the log rather than failing the install (the install's own exit
+// code is the authority on success), and a log that could not be opened
+// (startInstallLog) takes no output.
 //
 // It returns what this attempt's output said about why it might have failed. The
-// log file is appended to across attempts and starts, so the stream — not the
-// file — is what gets scanned (issue #1093); it is scanned whether or not the
-// file could be opened, and to its end when a write to the file fails (issue
-// #3744). Cancelling ctx ends the follow.
-func (i *instance) captureInstallOutput(ctx context.Context, installID string) *installOutputScan {
+// log holds earlier attempts too and drops output past its bound (issue #3282),
+// so the stream — not the file — is what gets scanned (issue #1093); it is
+// scanned whether or not the log could be opened, and to its end when a write to
+// it fails (issue #3744). Cancelling ctx ends the follow.
+func (i *instance) captureInstallOutput(ctx context.Context, installID string, log *installLog) *installOutputScan {
 	scan := &installOutputScan{}
+	log.beginAttempt()
 	rc, err := i.docker.Logs(ctx, installID)
 	if err != nil {
 		return scan
 	}
 	defer func() { _ = rc.Close() }()
-
-	f, err := openInstallLog(i.spec.WorkingDir)
-	if err != nil {
-		i.logger.Warn("forge install log not written; continuing the install without it",
-			"server_id", i.spec.ServerID, "path", execution.ForgeInstallLogRelpath, "err", err)
-		demuxLogsTo(rc, scan)
-		return scan
-	}
-	defer func() { _ = f.Close() }()
-	var file io.Writer = f
-	if i.installLogSink != nil {
-		file = i.installLogSink(f)
-	}
-	demuxLogsTo(rc, &installLogTee{scan: scan, file: file,
-		logger: i.logger.With("server_id", i.spec.ServerID, "path", execution.ForgeInstallLogRelpath)})
+	demuxLogsTo(rc, &installLogTee{scan: scan, log: log})
 	return scan
 }
 
-// installLogTee feeds the install output to the scan and to forge-install.log.
-// Unlike io.MultiWriter it never fails: the first failed write to the file (a
-// full or failing filesystem) is logged at WARN and drops the file, and the scan
-// goes on to the end of the stream (issue #3744).
+// installLogTee feeds the install output to the scan and to the install log.
+// Unlike io.MultiWriter it never fails, and neither does the log (installLog.write),
+// so the scan goes on to the end of the stream (issue #3744).
 type installLogTee struct {
-	scan   *installOutputScan
-	file   io.Writer
-	logger *slog.Logger
+	scan *installOutputScan
+	log  *installLog
 }
 
 func (t *installLogTee) Write(p []byte) (int, error) {
 	_, _ = t.scan.Write(p)
-	if t.file != nil {
-		if _, err := t.file.Write(p); err != nil {
-			t.logger.Warn("forge install log write failed; continuing the install without it", "err", err)
-			t.file = nil
-		}
-	}
+	t.log.write(p)
 	return len(p), nil
 }
 
