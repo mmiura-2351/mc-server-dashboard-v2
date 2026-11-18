@@ -489,9 +489,9 @@ def get_transfer_semaphore(request: Request) -> asyncio.Semaphore:
 def get_archive_upload_admission(request: Request) -> ArchiveUploadAdmission:
     """Return the per-process archive-upload admission (issue #3843).
 
-    One instance for both upload doors -- the backup upload and the files upload
-    with ``extract`` -- so the limit counts their archive uploads together, as
-    one pool validates them all.
+    One instance for the three archive upload doors -- the backup upload, the
+    files upload with ``extract`` and the server import (issue #3912) -- so the
+    limit counts their archive uploads together, as one pool validates them all.
     """
 
     state = request.app.state

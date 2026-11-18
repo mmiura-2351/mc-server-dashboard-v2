@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import plugins as plugins_module
+from mc_server_dashboard_api.servers.application.plugin_manifest import ParsedManifest
 from mc_server_dashboard_api.servers.application.plugins import (
     GetPlugin,
     InstallPlugin,
@@ -40,6 +43,11 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+)
+from tests.servers.executor_starvation import (
+    IN_FLIGHT,
+    InFlight,
+    assert_default_executor_free,
 )
 from tests.servers.fakes import (
     FakeClock,
@@ -350,6 +358,54 @@ async def test_install_unreadable_jar_stores_empty_manifest() -> None:
     )
     assert plugin.mod_identifier is None
     assert plugin.dependencies == []
+
+
+async def test_installs_parsing_together_leave_the_default_executor_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The manifest read walks the jar's whole zip directory, which for a crafted
+    # jar near the 512 MiB cap takes seconds. It runs on the archive-validation
+    # pool (issue #3912): on the event loop it would stall every other request,
+    # and on the default executor a few such installs would take every worker
+    # from the fs Storage calls, the sweep and everything else that runs there.
+    in_flight = InFlight()
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        in_flight.block()
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    stores = [FakeFileStore() for _ in range(IN_FLIGHT)]
+    installs = []
+    for n, store in enumerate(stores):
+        uow = FakeUnitOfWork()
+        server = _server()
+        uow.servers.seed(server)
+        use_case = InstallPlugin(
+            uow=uow,
+            file_store=store,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+        )
+        installs.append(
+            asyncio.ensure_future(
+                use_case(
+                    community_id=_COMMUNITY,
+                    server_id=server.id,
+                    filename="mod.jar",
+                    display_name="Mod",
+                    content=f"jar {n}".encode(),
+                )
+            )
+        )
+    try:
+        await assert_default_executor_free(in_flight)
+    finally:
+        await asyncio.gather(*installs)
+
+    assert [store.files["mods/mod.jar"] for store in stores] == [
+        f"jar {n}".encode() for n in range(IN_FLIGHT)
+    ]
 
 
 async def test_install_jar_with_unreadable_manifest_stores_empty_manifest() -> None:

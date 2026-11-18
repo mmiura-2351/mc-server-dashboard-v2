@@ -415,10 +415,11 @@ class UnreadableArchiveError(ServerError):
 class UploadBusyError(ServerError):
     """Every archive-upload admission slot is taken (issue #3843).
 
-    The backup upload and the files upload's extract validate their archives on
-    one small pool of their own, and admit only a few archive uploads at a time
-    between them. One past that is refused before its body is read into memory,
-    with nothing stored or written. That says nothing about the upload, so the edge
+    The backup upload, the files upload's extract and the server import (issue
+    #3912) validate their archives on one small pool of their own, and admit only
+    a few archive uploads at a time between them. One past that is refused before
+    its body is read into memory, with nothing stored, written or created. That
+    says nothing about the upload, so the edge
     maps this to 503 ``upload_busy``: the same request is worth sending again once
     an upload ahead of it ends. No ``Retry-After`` rides along: a validation takes
     from milliseconds to minutes, so nothing knows when a slot frees.

@@ -90,9 +90,6 @@ router = APIRouter(route_class=RequestBodyLimitRoute)
 public_router = APIRouter(route_class=RequestBodyLimitRoute)
 assignment_router = APIRouter(route_class=RequestBodyLimitRoute)
 
-# Chunked read buffer for the upload body (same pattern as backups.py).
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
-
 _PACK_MEDIA_TYPE = "application/zip"
 
 
@@ -505,19 +502,18 @@ def _public_download_headers(pack: ResourcePack, *, size_bytes: int) -> dict[str
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
-    """Pull the multipart body in chunks, aborting with 413 past the cap."""
+    """Read the multipart part whole, refusing it with 413 past the cap.
 
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_RESOURCE_PACK_BYTES:
-            raise _too_large()
-        chunks.append(chunk)
-    return b"".join(chunks)
+    One read, which Starlette runs on its thread pool for a part spooled to disk
+    (every part past 1 MiB), so copying a pack of up to 256 MiB never runs on the
+    event loop (issue #3912). The route's request body limit already bounds the
+    part to the cap plus the multipart envelope.
+    """
+
+    content = await file.read()
+    if len(content) > MAX_RESOURCE_PACK_BYTES:
+        raise _too_large()
+    return content
 
 
 def _not_found() -> ProblemException:

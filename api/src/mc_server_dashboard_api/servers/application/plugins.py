@@ -11,6 +11,9 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
@@ -296,7 +299,13 @@ class InstallPlugin:
 
                 # Parse the jar manifest for dependency metadata (issue #1307);
                 # tolerant of an unreadable jar (the install still proceeds).
-                manifest = parse_manifest_at_ingest(
+                # Opening the jar parses its whole zip directory, seconds for a
+                # crafted jar near the cap, so it runs on the archive-validation
+                # pool rather than on the event loop (issue #3912). It waits for
+                # that pool holding the server's lifecycle lock and this unit of
+                # work, since the loader comes from the row read here.
+                manifest = await run_archive_validation(
+                    parse_manifest_at_ingest,
                     content,
                     loader=modrinth_loader_for_server_type(server.server_type),
                 )
