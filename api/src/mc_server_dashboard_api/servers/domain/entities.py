@@ -15,6 +15,7 @@ from typing import Any
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -68,6 +69,13 @@ class Server:
     # so a malformed persisted value cannot fail every entity load; consumers
     # parse it via ``RetentionPolicy.from_json`` at the use site.
     backup_retention: dict[str, Any] | None = None
+    # The last crash's reason and detail as the Worker reported them (issue
+    # #3281), stored by the write that records ``crashed`` and cleared by the
+    # next write of any other observed state, so both are ``None`` unless the
+    # server reads ``crashed``. ``crash_reason`` is ``None`` for an unclassified
+    # crash too; ``crash_detail`` is bounded (``bound_status_detail``).
+    crash_reason: CrashReason | None = None
+    crash_detail: str | None = None
 
     def is_at_rest(self) -> bool:
         """Return whether the server is fully stopped for edits/deletion.

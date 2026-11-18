@@ -59,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.store_generation import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -1204,6 +1205,8 @@ class _OutageServerRepository(FakeServerRepository):
         *,
         unassign: bool = False,
         expected_worker: WorkerId | None = None,
+        detail: str = "",
+        reason: CrashReason | None = None,
     ) -> bool:
         self._fail_if_down("record_observed_state")
         return await super().record_observed_state(
@@ -1212,6 +1215,8 @@ class _OutageServerRepository(FakeServerRepository):
             observed_at,
             unassign=unassign,
             expected_worker=expected_worker,
+            detail=detail,
+            reason=reason,
         )
 
     async def clear_assignment_after_final_snapshot(

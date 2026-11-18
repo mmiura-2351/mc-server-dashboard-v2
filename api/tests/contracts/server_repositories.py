@@ -67,13 +67,16 @@ from mc_server_dashboard_api.servers.domain.schedule_repository import (
     ScheduleRunRepository,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    MAX_STATUS_DETAIL_BYTES,
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
     ServerName,
     ServerType,
     WorkerId,
+    bound_status_detail,
 )
 from tests.contracts.repository import RepositoryHarness
 
@@ -100,6 +103,8 @@ def server(community_id: CommunityId, *, name: str = "srv") -> Server:
         bedrock_port=19132,
         slug=f"srv-{uuid.uuid4().hex[:12]}",
         backup_retention={"nested": {"keep": 2}},
+        crash_reason=CrashReason.FORGE_INSTALL_FAILED,
+        crash_detail="forge install failed after 3 attempts",
     )
 
 
@@ -562,6 +567,191 @@ class ServerRepositoryContract:
             (ObservedState.UNKNOWN, _LATER, None)
             if applies
             else (ObservedState.CRASHED, _NOW, item.assigned_worker_id)
+        )
+
+    @pytest.mark.parametrize(
+        ("detail", "reason", "stored"),
+        [
+            (
+                "installer ran out of memory",
+                CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+                (
+                    CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+                    "installer ran out of memory",
+                ),
+            ),
+            # An unclassified crash replaces the earlier crash's reason.
+            (
+                "container exited unexpectedly",
+                None,
+                (None, "container exited unexpectedly"),
+            ),
+            ("", None, (None, None)),
+            (
+                "x" * (MAX_STATUS_DETAIL_BYTES + 1),
+                None,
+                (None, bound_status_detail("x" * (MAX_STATUS_DETAIL_BYTES + 1))),
+            ),
+        ],
+        ids=["classified", "unclassified", "bare", "over-bound"],
+    )
+    async def test_a_crash_report_stores_the_last_crash(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        detail: str,
+        reason: CrashReason | None,
+        stored: tuple[CrashReason | None, str | None],
+    ) -> None:
+        # Issue #3281: the reason and detail of the last crash are stored by the
+        # write that records it, so a later read can explain the crash.
+        item = server(contract_community_id)
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            written = await tx.repository.record_observed_state(
+                item.id,
+                ObservedState.CRASHED,
+                _LATER,
+                expected_worker=item.assigned_worker_id,
+                detail=detail,
+                reason=reason,
+            )
+            await tx.commit()
+        assert written
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.crash_reason, row.crash_detail) == stored
+
+    @pytest.mark.parametrize(
+        "state",
+        [
+            ObservedState.STARTING,
+            ObservedState.RUNNING,
+            ObservedState.STOPPED,
+            ObservedState.UNKNOWN,
+        ],
+        ids=lambda state: state.value,
+    )
+    async def test_leaving_crashed_clears_the_last_crash(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        state: ObservedState,
+    ) -> None:
+        # Issue #3281: the stored crash explains the current crash only, so the
+        # write that moves the state off crashed drops it, the detail with it.
+        item = server(contract_community_id)
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            assert await tx.repository.record_observed_state(
+                item.id,
+                state,
+                _LATER,
+                expected_worker=item.assigned_worker_id,
+                detail="a detail of the new state",
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.crash_reason, row.crash_detail) == (
+            state,
+            None,
+            None,
+        )
+
+    async def test_a_worker_disconnect_clears_the_last_crash(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        item = server(contract_community_id)
+        assert item.assigned_worker_id is not None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            await tx.repository.mark_worker_servers_unknown(
+                item.assigned_worker_id, _LATER
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.crash_reason, row.crash_detail) == (
+            ObservedState.UNKNOWN,
+            None,
+            None,
+        )
+
+    @pytest.mark.parametrize(
+        ("state", "reason", "worker", "at"),
+        [
+            # The ownership guard (issue #1708): a report from a Worker the
+            # server is not assigned to neither stores a crash nor clears one.
+            (
+                ObservedState.CRASHED,
+                CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+                "other",
+                _LATER,
+            ),
+            (ObservedState.RUNNING, None, "other", _LATER),
+            # The monotonic guard (issue #216): a stale write changes nothing.
+            (
+                ObservedState.CRASHED,
+                CrashReason.FORGE_INSTALL_OUT_OF_MEMORY,
+                "own",
+                _NOW,
+            ),
+            (ObservedState.RUNNING, None, "own", _NOW),
+        ],
+        ids=[
+            "non-owner-crash",
+            "non-owner-running",
+            "stale-crash",
+            "stale-running",
+        ],
+    )
+    async def test_a_dropped_write_leaves_the_last_crash(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        state: ObservedState,
+        reason: CrashReason | None,
+        worker: str,
+        at: dt.datetime,
+    ) -> None:
+        item = server(contract_community_id)
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            written = await tx.repository.record_observed_state(
+                item.id,
+                state,
+                at,
+                expected_worker=(
+                    item.assigned_worker_id
+                    if worker == "own"
+                    else WorkerId(uuid.uuid4())
+                ),
+                detail="dropped",
+                reason=reason,
+            )
+            await tx.commit()
+        assert not written
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.crash_reason, row.crash_detail) == (
+            ObservedState.CRASHED,
+            item.crash_reason,
+            item.crash_detail,
         )
 
     async def test_missing_updates_do_not_insert(

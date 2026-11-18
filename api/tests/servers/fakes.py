@@ -136,12 +136,14 @@ from mc_server_dashboard_api.servers.domain.store_generation import (
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
     ServerName,
     ServerType,
     WorkerId,
+    bound_status_detail,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
     UnknownVersionError,
@@ -744,6 +746,28 @@ class FakeClock(Clock):
         return self._now
 
 
+def _observe(
+    server: Server,
+    state: ObservedState,
+    at: dt.datetime,
+    *,
+    detail: str = "",
+    reason: CrashReason | None = None,
+) -> None:
+    """Mirror the real adapter's one observed-state write (issue #3281).
+
+    The state, its stamp and the last crash land together: the report's reason
+    and bounded detail for ``crashed``, nothing for any other state.
+    """
+
+    crashed = state is ObservedState.CRASHED
+    detail = bound_status_detail(detail)
+    server.observed_state = state
+    server.observed_at = at
+    server.crash_reason = reason if crashed else None
+    server.crash_detail = detail if crashed and detail else None
+
+
 class FakeServerRepository(ServerRepository):
     def __init__(self) -> None:
         self.by_id: dict[ServerId, Server] = {}
@@ -938,6 +962,8 @@ class FakeServerRepository(ServerRepository):
         *,
         unassign: bool = False,
         expected_worker: WorkerId | None = None,
+        detail: str = "",
+        reason: CrashReason | None = None,
     ) -> bool:
         server = self.by_id.get(server_id)
         if server is None:
@@ -958,8 +984,7 @@ class FakeServerRepository(ServerRepository):
             # Mirror the real adapter's applied flag (issue #292, #249 equivalence):
             # a dropped write reports False so the caller keeps its return honest.
             return False
-        server.observed_state = observed_state
-        server.observed_at = observed_at
+        _observe(server, observed_state, observed_at, detail=detail, reason=reason)
         if unassign:
             server.assigned_worker_id = None
         return True
@@ -1004,8 +1029,7 @@ class FakeServerRepository(ServerRepository):
     ) -> None:
         for server in self.by_id.values():
             if server.assigned_worker_id == worker_id:
-                server.observed_state = ObservedState.UNKNOWN
-                server.observed_at = observed_at
+                _observe(server, ObservedState.UNKNOWN, observed_at)
 
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         non_terminal = (
@@ -1020,8 +1044,7 @@ class FakeServerRepository(ServerRepository):
                 server.assigned_worker_id is not None
                 and server.observed_state in non_terminal
             ):
-                server.observed_state = ObservedState.UNKNOWN
-                server.observed_at = observed_at
+                _observe(server, ObservedState.UNKNOWN, observed_at)
                 count += 1
         return count
 
