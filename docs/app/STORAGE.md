@@ -682,7 +682,9 @@ database. It mirrors the plugin-cache GC:
    stored its blob and not yet committed its row, which is exactly an orphan's
    state, told apart only by age. The window covers the whole upload as well as
    the commit, since a store may stamp a multipart object with the time the
-   upload began; the 256 MiB upload cap keeps that well under an hour.
+   upload began. That rests on throughput, not on a bound: a pack goes up as one
+   part, and below about 75 KB/s a 256 MiB pack takes longer than an hour. Such
+   an upload is left to the re-read in step 4 and its residual race.
 4. Re-read that pack's row immediately before deleting its blobs, and keep them
    if the row is there. This catches a row committed after the read in step 2
    (the plugin-cache GC's #1404 pattern). It narrows the race to the gap between
@@ -695,6 +697,11 @@ It runs as an API lifespan task on the storage sweep's cadence
 first pass one interval after startup. It is gated on the resource pack store
 existing, not on the control plane. On fs / remote-fs there is no resource pack
 store, so no blob to reclaim, and the GC does not run.
+
+A bucket must belong to exactly one database. This GC, like the plugin-cache and
+JAR GCs, diffs the bucket against the database it is configured with, so an API
+pointed at another database's bucket treats that database's objects as orphans
+and deletes them once they are older than the safety window (#3870).
 
 ### 4.4 Single-file writes
 

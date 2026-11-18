@@ -17,7 +17,9 @@ id with no row is an orphan, whatever its filename.
 exactly an orphan to this GC. A blob younger than :data:`GC_SAFETY_WINDOW` is
 therefore never deleted. The window has to cover the whole upload as well as the
 commit, since a store may stamp a multipart object with the time the upload
-began. The 256 MiB upload cap keeps that far below an hour.
+began. That rests on throughput, not on a bound: a pack goes up as one part, and
+below about 75 KB/s a 256 MiB pack takes longer than an hour. Such an upload is
+left to the re-check below and its residual race.
 
 **Re-check before delete.** The rows are read after the blobs are listed, so a
 row committed before that read is seen. A row committed after it is caught by
