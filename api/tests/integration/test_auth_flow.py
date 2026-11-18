@@ -26,11 +26,10 @@ from mc_server_dashboard_api.identity.adapters.login_failure_delay import (
 )
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     Argon2PasswordHasher,
-    build_dummy_password_hash,
 )
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.adapters.unit_of_work import SqlAlchemyUnitOfWork
-from mc_server_dashboard_api.identity.application.login import Login
+from mc_server_dashboard_api.identity.application.login import DummyPasswordHash, Login
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import RefreshSession
 from mc_server_dashboard_api.identity.application.restore_session import RestoreSession
@@ -62,7 +61,7 @@ _PASSWORD = "Wm7!qz#Lp2vT"
 _REFRESH_TTL = dt.timedelta(days=14)
 _REUSE_GRACE = dt.timedelta(seconds=60)
 # Static dummy hash for the unknown-user verify path (login timing equalization).
-_DUMMY_HASH = build_dummy_password_hash("argon2", "dummy")
+_DUMMY_HASH = DummyPasswordHash(Argon2PasswordHasher(), "dummy")
 
 
 @pytest.fixture

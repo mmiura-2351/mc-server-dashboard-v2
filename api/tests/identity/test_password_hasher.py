@@ -272,14 +272,9 @@ class _ThreadProbeHasher(Argon2PasswordHasher):
         self.hash_thread: threading.Thread | None = None
         self.verify_thread: threading.Thread | None = None
 
-    def _hash_capture(self, plaintext: str) -> str:
+    def _hash(self, plaintext: str) -> str:
         self.hash_thread = threading.current_thread()
-        return self._hasher.hash(plaintext)
-
-    async def hash(self, plaintext: str) -> str:
-        from mc_server_dashboard_api.identity.adapters.password_hasher import _run_kdf
-
-        return await _run_kdf(self._hash_capture, plaintext)
+        return super()._hash(plaintext)
 
     def _verify(self, plaintext: str, password_hash: str) -> bool:
         self.verify_thread = threading.current_thread()
