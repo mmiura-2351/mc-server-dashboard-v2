@@ -38,7 +38,6 @@ import {
   type StatusEvent,
 } from "./communityEvents.ts";
 import { observeRestResponses, stamp } from "./restReads.ts";
-import type { Crash } from "./serverEvents.ts";
 import { NOT_RESTARTED_CRASH_REASONS } from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -53,16 +52,9 @@ type Fields = Partial<
     | "observed_state"
     | "desired_state"
     | "assigned_worker_id"
-    | "crash_reason"
-    | "crash_detail"
     | "crash_not_restarted"
   >
 >;
-
-/** A {@link Crash} as a cached server's fields. */
-function crashFields(crash: Crash): Fields {
-  return { crash_reason: crash.reason, crash_detail: crash.detail };
-}
 
 /** Poll interval while degraded (WEBUI_SPEC.md 6.2: 10s status-only polling). */
 const POLL_INTERVAL_MS = 10000;
@@ -86,15 +78,14 @@ export function useCommunityEvents(communityId: string): boolean {
     const key = serversKey(communityId);
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    // The live observed and desired states, assignments, last crashes and
-    // whether the reconciler leaves each crash alone, not yet superseded by a
-    // REST read, each stamped with when it was received (#3213). They are
-    // stamped apart, as different frames carry them (#3428, #3818, #3281): a
-    // read can supersede one and not another.
+    // The live observed and desired states, assignments and whether the
+    // reconciler leaves each crash alone, not yet superseded by a REST read,
+    // each stamped with when it was received (#3213). They are stamped apart,
+    // as different frames carry them (#3428, #3818, #3281): a read can
+    // supersede one and not another.
     const observed = new Map<string, Stamped>();
     const desired = new Map<string, Stamped>();
     const assigned = new Map<string, Stamped<string | null>>();
-    const crashes = new Map<string, Stamped<Crash>>();
     const notRestarted = new Map<string, Stamped<boolean>>();
     // The latest snapshot's server set, until a REST read supersedes it.
     let members: { ids: Set<string>; at: number } | null = null;
@@ -108,13 +99,11 @@ export function useCommunityEvents(communityId: string): boolean {
       const state = observed.get(id);
       const intent = desired.get(id);
       const worker = assigned.get(id);
-      const crash = crashes.get(id);
       const held = notRestarted.get(id);
       if (
         state === undefined &&
         intent === undefined &&
         worker === undefined &&
-        crash === undefined &&
         held === undefined
       ) {
         return null;
@@ -123,7 +112,6 @@ export function useCommunityEvents(communityId: string): boolean {
         ...(state !== undefined && { observed_state: state.value }),
         ...(intent !== undefined && { desired_state: intent.value }),
         ...(worker !== undefined && { assigned_worker_id: worker.value }),
-        ...(crash !== undefined && crashFields(crash.value)),
         ...(held !== undefined && { crash_not_restarted: held.value }),
       };
     };
@@ -167,13 +155,7 @@ export function useCommunityEvents(communityId: string): boolean {
       queryClient,
       key,
       (readStartedAt) => {
-        for (const live of [
-          observed,
-          desired,
-          assigned,
-          crashes,
-          notRestarted,
-        ]) {
+        for (const live of [observed, desired, assigned, notRestarted]) {
           for (const [id, entry] of live) {
             if (entry.at < readStartedAt) {
               live.delete(id);
@@ -205,18 +187,18 @@ export function useCommunityEvents(communityId: string): boolean {
     // A status frame sets the states it carries: an observed transition, a
     // change of the server's intent (#3428), or a placement or release
     // (#3818). Whether the reconciler leaves a crash alone is the API's rule,
-    // a crash newer than every write to the row with a reason that recurs
-    // (#3281): a crashed frame is the newest thing about the row, so its
-    // reason decides, and an intent frame is a newer write, which clears it.
+    // a crash newer than every write to the row with a reason that recurs,
+    // whose running-intent term `crashNotRestarted` checks (#3281): a crashed
+    // frame is the newest thing about the row, so its reason decides, and an
+    // intent frame is a newer write, which clears it.
     const applyStatus = (event: StatusEvent) => {
       const at = stamp();
       let held: boolean | undefined;
       if (event.desiredState !== undefined) {
         held = false;
       }
-      if (event.crash !== undefined) {
-        held = NOT_RESTARTED_CRASH_REASONS.has(event.crash.reason ?? "");
-        crashes.set(event.serverId, { value: event.crash, at });
+      if (event.crashReason !== undefined) {
+        held = NOT_RESTARTED_CRASH_REASONS.has(event.crashReason);
       }
       if (held !== undefined) {
         notRestarted.set(event.serverId, { value: held, at });
@@ -238,7 +220,6 @@ export function useCommunityEvents(communityId: string): boolean {
         ...(event.assignedWorkerId !== undefined && {
           assigned_worker_id: event.assignedWorkerId,
         }),
-        ...(event.crash !== undefined && crashFields(event.crash)),
         ...(held !== undefined && { crash_not_restarted: held }),
       };
       reconcile((id) => (id === event.serverId ? carried : null));
@@ -251,7 +232,6 @@ export function useCommunityEvents(communityId: string): boolean {
       observed.clear();
       desired.clear();
       assigned.clear();
-      crashes.clear();
       notRestarted.clear();
       for (const s of servers) {
         observed.set(s.serverId, { value: s.state, at });
@@ -260,9 +240,6 @@ export function useCommunityEvents(communityId: string): boolean {
         }
         if (s.assignedWorkerId !== undefined) {
           assigned.set(s.serverId, { value: s.assignedWorkerId, at });
-        }
-        if (s.crash !== undefined) {
-          crashes.set(s.serverId, { value: s.crash, at });
         }
         if (s.crashNotRestarted !== undefined) {
           notRestarted.set(s.serverId, { value: s.crashNotRestarted, at });

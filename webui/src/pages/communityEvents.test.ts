@@ -225,7 +225,7 @@ describe("parseCommunityFrame", () => {
     });
   });
 
-  it("parses the crash a crashed status frame carries (#3281)", () => {
+  it("parses the crash reason a crashed status frame carries (#3281)", () => {
     const crashed = (detail: string, reason: string) =>
       JSON.stringify({
         stream: "status",
@@ -241,24 +241,21 @@ describe("parseCommunityFrame", () => {
       kind: "status",
       serverId: "s1",
       state: "crashed",
-      crash: {
-        reason: "forge_install_out_of_memory",
-        detail: "installer ran out of memory",
-      },
+      crashReason: "forge_install_out_of_memory",
     });
-    // The API stores an empty reason or detail as none.
+    // An unclassified crash carries no reason.
     expect(parseCommunityFrame(crashed("", ""))).toEqual({
       kind: "status",
       serverId: "s1",
       state: "crashed",
-      crash: { reason: null, detail: null },
+      crashReason: "",
     });
     expect(
       parseCommunityFrame(statusFrame("s1", "running")),
-    ).not.toHaveProperty("crash");
+    ).not.toHaveProperty("crashReason");
   });
 
-  it("parses each snapshot entry's last crash and whether it is restarted (#3281)", () => {
+  it("parses whether each snapshot entry's crash is restarted (#3281)", () => {
     expect(
       parseCommunityFrame(
         snapshotFrame([
@@ -273,17 +270,7 @@ describe("parseCommunityFrame", () => {
       ),
     ).toEqual({
       kind: "snapshot",
-      servers: [
-        {
-          serverId: "s1",
-          state: "crashed",
-          crash: {
-            reason: "forge_install_java_incompatible",
-            detail: "java.lang.UnsupportedClassVersionError",
-          },
-          crashNotRestarted: true,
-        },
-      ],
+      servers: [{ serverId: "s1", state: "crashed", crashNotRestarted: true }],
     });
   });
 

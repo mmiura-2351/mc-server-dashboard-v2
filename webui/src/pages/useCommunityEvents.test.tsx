@@ -212,15 +212,13 @@ describe("useCommunityEvents", () => {
         },
         {
           ...serverRow("s2", "crashed", "running"),
-          crash_reason: null,
-          crash_detail: null,
           crash_not_restarted: false,
         },
       ]);
     },
   );
 
-  it("patches the crash a crashed frame carries, and whether it is restarted (#3281)", () => {
+  it("patches whether the crash a crashed frame reports is restarted (#3281)", () => {
     const { queryClient } = setup([serverRow("s1", "running", "running")]);
     act(() => {
       MockWebSocket.last().open();
@@ -238,12 +236,7 @@ describe("useCommunityEvents", () => {
       );
     });
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
-      {
-        ...serverRow("s1", "crashed", "running"),
-        crash_reason: "forge_install_out_of_memory",
-        crash_detail: "installer ran out of memory",
-        crash_not_restarted: true,
-      },
+      { ...serverRow("s1", "crashed", "running"), crash_not_restarted: true },
     ]);
 
     // The operator's start is a newer write than the crash.
@@ -251,16 +244,11 @@ describe("useCommunityEvents", () => {
       MockWebSocket.last().message(intentFrame("s1", "running"));
     });
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
-      {
-        ...serverRow("s1", "crashed", "running"),
-        crash_reason: "forge_install_out_of_memory",
-        crash_detail: "installer ran out of memory",
-        crash_not_restarted: false,
-      },
+      { ...serverRow("s1", "crashed", "running"), crash_not_restarted: false },
     ]);
   });
 
-  it("patches every cached server's crash from a snapshot (#3281)", () => {
+  it("patches whether every cached server's crash is restarted from a snapshot (#3281)", () => {
     const { queryClient } = setup([serverRow("s1", "running", "running")]);
     act(() => {
       MockWebSocket.last().open();
@@ -284,12 +272,7 @@ describe("useCommunityEvents", () => {
       );
     });
     expect(queryClient.getQueryData(serversKey(CID))).toEqual([
-      {
-        ...serverRow("s1", "crashed", "running"),
-        crash_reason: "forge_install_java_incompatible",
-        crash_detail: "java.lang.UnsupportedClassVersionError",
-        crash_not_restarted: true,
-      },
+      { ...serverRow("s1", "crashed", "running"), crash_not_restarted: true },
     ]);
   });
 
@@ -836,7 +819,7 @@ describe("useCommunityEvents with REST reads in flight (#3213)", () => {
     expect(cached()).toEqual([
       {
         ...serverRow("s1", "crashed", "running"),
-        crash_reason: "forge_install_out_of_memory",
+        crash_reason: null,
         crash_detail: null,
         crash_not_restarted: true,
       },

@@ -22,7 +22,7 @@ import {
   EventsSocketClient,
   wsOrigin,
 } from "./eventsSocket.ts";
-import { assignmentOf, type Crash, crashOf } from "./serverEvents.ts";
+import { assignmentOf } from "./serverEvents.ts";
 
 // Re-exported for the existing tests / callers that import it from here.
 export { backoffDelayMs };
@@ -32,28 +32,28 @@ export { backoffDelayMs };
  * It sets the server state fields it carries: an observed transition carries
  * `state`, a change of the server's intent carries `desiredState` (#3428), and
  * a placement or release carries `assignedWorkerId`, `null` once released
- * (#3818). A `crashed` transition also carries the crash the Worker reported
- * (#3281): its reason and detail, `null` when empty.
+ * (#3818). A `crashed` transition also carries the crash reason the Worker
+ * classified, `""` when none, which decides whether the reconciler leaves the
+ * crash alone (#3281).
  */
 export interface StatusEvent {
   serverId: string;
   state?: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
-  crash?: Crash;
+  crashReason?: string;
 }
 
 /**
  * One server of the status snapshot: its observed state and, when the API
- * reports them, its desired state (#3428), assigned Worker (#3818), last crash
- * and whether the reconciler leaves that crash alone (#3281).
+ * reports them, its desired state (#3428), assigned Worker (#3818) and whether
+ * the reconciler leaves its crash alone (#3281).
  */
 export interface SnapshotEntry {
   serverId: string;
   state: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
-  crash?: Crash;
   crashNotRestarted?: boolean;
 }
 
@@ -141,10 +141,9 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
     return null;
   }
-  const { state, desired_state, detail, reason } = payload as {
+  const { state, desired_state, reason } = payload as {
     state?: unknown;
     desired_state?: unknown;
-    detail?: unknown;
     reason?: unknown;
   };
   const assignedWorkerId = assignmentOf(payload);
@@ -155,10 +154,6 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
   ) {
     return null;
   }
-  // The API stores a crashed report's reason and detail as the last crash, ""
-  // as none (#3281).
-  const orNull = (value: unknown) =>
-    typeof value === "string" && value !== "" ? value : null;
   return {
     kind: "status",
     serverId: server_id,
@@ -166,7 +161,7 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     ...(typeof desired_state === "string" && { desiredState: desired_state }),
     ...(assignedWorkerId !== undefined && { assignedWorkerId }),
     ...(state === "crashed" && {
-      crash: { reason: orNull(reason), detail: orNull(detail) },
+      crashReason: typeof reason === "string" ? reason : "",
     }),
   };
 }
@@ -205,9 +200,9 @@ function parseNotification(
 
 /**
  * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state,
- * assigned_worker_id, crash_reason, crash_detail, crash_not_restarted}]}`
- * payload. A malformed entry rejects the whole frame: a partial snapshot would
- * misreport the community's server set.
+ * assigned_worker_id, crash_not_restarted}]}` payload. A malformed entry
+ * rejects the whole frame: a partial snapshot would misreport the community's
+ * server set.
  */
 function parseSnapshot(payload: unknown): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
@@ -230,13 +225,11 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
       return null;
     }
     const assignedWorkerId = assignmentOf(entry as object);
-    const crash = crashOf(entry as object);
     parsed.push({
       serverId: server_id,
       state,
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
       ...(assignedWorkerId !== undefined && { assignedWorkerId }),
-      ...(crash !== undefined && { crash }),
       ...(typeof crash_not_restarted === "boolean" && {
         crashNotRestarted: crash_not_restarted,
       }),

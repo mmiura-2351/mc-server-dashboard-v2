@@ -138,7 +138,7 @@ export function assignmentOf(payload: object): string | null | undefined {
  * The last crash a snapshot payload carries, or `undefined` when it does not
  * carry both fields as a string or `null`.
  */
-export function crashOf(payload: object): Crash | undefined {
+function crashOf(payload: object): Crash | undefined {
   if (!("crash_reason" in payload && "crash_detail" in payload)) {
     return undefined;
   }
