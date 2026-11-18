@@ -75,6 +75,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests import gzip_shapes
 from tests.servers import archive_cap_shapes
 from tests.servers.executor_starvation import (
     IN_FLIGHT,
@@ -1619,6 +1620,29 @@ def test_validate_accepts_a_tar_split_across_gzip_members_with_zero_padding() ->
 
     # No raise.
     _validate_backup_archive(content, max_entries=10)
+
+
+# The gzip layer gives one verdict at every gzip read site (issues #3835,
+# #3847): at most 10,000 gzip members, nothing but zeros between or after them,
+# and a member header whose CRC matches and whose reserved flag bits are clear.
+_GZIP_ACCEPTED = gzip_shapes.accepted(_RAW_TAR)
+_GZIP_REFUSED = gzip_shapes.refused(_RAW_TAR)
+
+
+@pytest.mark.parametrize(
+    "content", list(_GZIP_ACCEPTED.values()), ids=list(_GZIP_ACCEPTED)
+)
+def test_validate_accepts_a_gzip_stream_the_gzip_layer_takes(content: bytes) -> None:
+    # No raise.
+    _validate_backup_archive(content, max_entries=10)
+
+
+@pytest.mark.parametrize(
+    "content", list(_GZIP_REFUSED.values()), ids=list(_GZIP_REFUSED)
+)
+def test_validate_rejects_a_gzip_stream_the_gzip_layer_refuses(content: bytes) -> None:
+    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar archive"):
+        _validate_backup_archive(content, max_entries=10)
 
 
 async def test_server_statistics_aggregates_count_bytes_and_bounds() -> None:

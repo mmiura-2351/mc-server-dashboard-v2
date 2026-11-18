@@ -1,13 +1,15 @@
-"""The end-of-archive check, :class:`EndCheckedReader` (issue #3778), and the
-cap beneath it, :class:`CappedReader` (issue #3810).
+"""The end-of-archive check, :class:`EndCheckedReader` (issue #3778), the cap
+beneath it, :class:`CappedReader` (issue #3810), and the gzip stream beneath
+both, :class:`GzipReader` (issue #3835).
 
 Each archive is walked as the upload gates walk one: ``tarfile.open(mode="r:")``
 over the reader, the members through ``members()`` with their data read, then
 the read past the marker. Every case runs over the plain tar and over
-``gzip.GzipFile``.
+:class:`GzipReader`.
 
-This module imports only the standard library, pytest and ``archive_member``,
-so it also runs outside the project environment under another interpreter:
+This module imports only the standard library, pytest, ``archive_member`` and
+``tests.gzip_shapes`` (standard library only too), so it also runs outside the
+project environment under another interpreter:
 ``uv run --no-project --python 3.14 --with pytest python -m pytest --noconftest
 -o addopts="" tests/test_archive_member.py`` from ``api/`` with ``PYTHONPATH=src``
 (the ini's ``addopts`` name plugins a bare environment lacks). CPython changes
@@ -21,6 +23,7 @@ import io
 import shutil
 import subprocess
 import tarfile
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -30,8 +33,10 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    GzipReader,
     HeaderLimitError,
 )
+from tests import gzip_shapes
 
 _B_DATA = b"B" * 3000  # six records, the last one padded
 
@@ -120,7 +125,7 @@ def _walk(
     """
 
     body = io.BytesIO(gzip.compress(archive) if gzipped else archive)
-    source = gzip.GzipFile(fileobj=body) if gzipped else body
+    source = GzipReader(body) if gzipped else body
     stream = EndCheckedReader(
         source if cap is None else CappedReader(source, cap),
         header_limits=header_limits,
@@ -438,16 +443,16 @@ _TAR_GZ = gzip.compress(_AB)
 @pytest.mark.parametrize(
     ("body", "error"),
     [
-        pytest.param(_flipped(_TAR_GZ, len(_TAR_GZ) - 8), gzip.BadGzipFile, id="crc"),
-        pytest.param(_flipped(_TAR_GZ, len(_TAR_GZ) - 4), gzip.BadGzipFile, id="isize"),
+        pytest.param(_flipped(_TAR_GZ, len(_TAR_GZ) - 8), zlib.error, id="crc"),
+        pytest.param(_flipped(_TAR_GZ, len(_TAR_GZ) - 4), zlib.error, id="isize"),
         pytest.param(_TAR_GZ[:-1], EOFError, id="cut-trailer"),
-        pytest.param(_TAR_GZ + b"not gzip", gzip.BadGzipFile, id="garbage-after"),
+        pytest.param(_TAR_GZ + b"not gzip", zlib.error, id="garbage-after"),
     ],
 )
 def test_reading_past_the_marker_checks_the_gzip_trailer(
     body: bytes, error: type[Exception]
 ) -> None:
-    stream = EndCheckedReader(gzip.GzipFile(fileobj=io.BytesIO(body)))
+    stream = EndCheckedReader(GzipReader(io.BytesIO(body)))
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         assert _names(stream, tar) == ["a.txt", "b.txt"]
         with pytest.raises(error):
@@ -465,7 +470,7 @@ def test_reading_past_the_marker_checks_the_gzip_trailer(
     ],
 )
 def test_a_gzip_stream_gzip_itself_reads_is_accepted(body: bytes) -> None:
-    stream = EndCheckedReader(gzip.GzipFile(fileobj=io.BytesIO(body)))
+    stream = EndCheckedReader(GzipReader(io.BytesIO(body)))
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         assert _names(stream, tar) == ["a.txt", "b.txt"]
         assert sum(len(chunk) for chunk in stream.read_past_end_marker()) > 0
@@ -886,3 +891,220 @@ def test_a_member_is_checked_before_it_is_handed_out(
             for member in stream.members(tar):
                 names.append(member.name)
     assert names == handed_out
+
+
+# --- the gzip stream beneath both, GzipReader (issue #3835) -----------------
+#
+# zlib's gzip mode reads each member's header and checks its trailer. The
+# reader walks the members, skips zero padding after each, and holds a stream
+# to 10,000 members. ``tarfile`` takes a short read for the end of the data, so
+# a read returns all it asks for until the stream ends.
+
+# What zlib or the reader raises for a stream that is not one or more gzip
+# members with only zero padding after each.
+_NOT_GZIP = (zlib.error, EOFError, gzip.BadGzipFile)
+
+
+def _decompressed(body: bytes, size: int = _MIB) -> bytes:
+    reader = GzipReader(io.BytesIO(body))
+    return b"".join(iter(lambda: reader.read(size), b""))
+
+
+_MEMBER_CUTS = {
+    "one-member": [],
+    "cut-inside-a-header-block": [1024 + 100],
+    "cut-inside-member-data": [1536 + 1000],
+    "cut-inside-the-end-marker": [_B_END + 100],
+    "a-member-a-block": list(range(512, len(_AB), 512)),
+}
+
+
+@pytest.mark.parametrize("padding", [0, 700], ids=["unpadded", "zero-padded"])
+@pytest.mark.parametrize("size", [1, 511, 512, 513, 65536])
+@pytest.mark.parametrize("cuts", list(_MEMBER_CUTS.values()), ids=list(_MEMBER_CUTS))
+def test_a_read_returns_all_it_asks_for_until_the_stream_ends(
+    cuts: list[int], size: int, padding: int
+) -> None:
+    # The members' data adds up to the tar, 20 blocks: with a read of 512, the
+    # last read that returns data ends where the last member ends.
+    members = gzip_shapes.in_members(_AB, cuts)
+    reader = GzipReader(io.BytesIO(bytes(padding).join(members) + bytes(padding)))
+
+    reads = list(iter(lambda: reader.read(size), b""))
+
+    assert b"".join(reads) == _AB
+    assert {len(read) for read in reads[:-1]} <= {size}
+
+
+def test_a_seek_reads_forward_to_its_offset() -> None:
+    reader = GzipReader(io.BytesIO(b"".join(gzip_shapes.in_members(_AB, [1000]))))
+
+    assert reader.seek(1536) == 1536
+    assert reader.read(512) == _AB[1536:2048]
+    assert reader.tell() == 2048
+
+
+def test_a_seek_back_is_refused() -> None:
+    reader = GzipReader(io.BytesIO(_TAR_GZ))
+    reader.read(1024)
+
+    with pytest.raises(io.UnsupportedOperation):
+        reader.seek(512)
+
+
+@pytest.mark.parametrize(
+    ("members", "refused"),
+    [(10_000, False), (10_001, True)],
+    ids=["10000-members", "10001-members"],
+)
+def test_a_stream_holds_at_most_10000_gzip_members(members: int, refused: bool) -> None:
+    body = _TAR_GZ + gzip_shapes.EMPTY_MEMBER * (members - 1)
+
+    if refused:
+        with pytest.raises(gzip.BadGzipFile, match="more than 10000 gzip members"):
+            _decompressed(body)
+    else:
+        assert _decompressed(body) == _AB
+
+
+def test_zero_padding_is_read_in_bulk() -> None:
+    # gzip.GzipFile reads zero padding after a member one byte at a time.
+    source = _Recording(_TAR_GZ + bytes(4 * _MIB))
+    reader = GzipReader(source)
+
+    assert b"".join(iter(lambda: reader.read(_MIB), b"")) == _AB
+    assert len(source.sizes) <= 64
+
+
+_FIRST, _SECOND = gzip_shapes.in_members(_AB, [_B_END])
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(_TAR_GZ + b"\x01", id="a-non-zero-byte-after"),
+        pytest.param(_TAR_GZ + b"not gzip", id="junk-after"),
+        pytest.param(_TAR_GZ + bytes(4096) + b"\x01", id="zeros-then-a-non-zero-byte"),
+        pytest.param(_FIRST + b"\x01" + _SECOND, id="a-non-zero-byte-between-members"),
+        pytest.param(
+            _FIRST + bytes(512) + b"\x01" + _SECOND,
+            id="zeros-then-junk-between-members",
+        ),
+        pytest.param(_TAR_GZ + b"\x1f", id="a-lone-magic-byte-after"),
+        pytest.param(_TAR_GZ + bytes(512) + b"\x1f\x8b", id="zeros-then-a-cut-member"),
+        pytest.param(bytes(512) + _TAR_GZ, id="zeros-before-the-first-member"),
+        pytest.param(bytes(1024), id="only-zeros"),
+        pytest.param(b"", id="empty"),
+    ],
+)
+def test_a_stream_of_more_than_members_and_zero_padding_is_refused(
+    body: bytes,
+) -> None:
+    with pytest.raises(_NOT_GZIP):
+        _decompressed(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            gzip_shapes.with_a_header_crc(_AB, matches=False), id="a-bad-header-crc"
+        ),
+        *(
+            pytest.param(gzip_shapes.with_a_reserved_flag(_AB, flag), id=f"{flag:#x}")
+            for flag in (0x20, 0x40, 0x80)
+        ),
+    ],
+)
+def test_a_member_header_that_zlib_refuses_is_refused(body: bytes) -> None:
+    # gzip.GzipFile skips the header CRC unchecked and ignores the reserved flag
+    # bits; zlib's gzip mode refuses both (issue #3847).
+    with pytest.raises(zlib.error):
+        _decompressed(body)
+
+
+def _with_every_optional_field(data: bytes) -> bytes:
+    """``data`` as one gzip member whose header has an extra field, a name, a
+    comment and a CRC that matches."""
+
+    header = (
+        b"\x1f\x8b\x08\x1e"
+        + bytes(6)
+        + len(b"BC\x02\x00\x00\x00").to_bytes(2, "little")
+        + b"BC\x02\x00\x00\x00"
+        + b"a.tar\0a comment\0"
+    )
+    crc = zlib.crc32(header) & 0xFFFF
+    return header + crc.to_bytes(2, "little") + gzip_shapes.gzipped(data)[10:]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            gzip_shapes.with_a_header_crc(_AB, matches=True), id="a-header-crc"
+        ),
+        pytest.param(_with_every_optional_field(_AB), id="every-optional-field"),
+    ],
+)
+def test_a_member_header_with_optional_fields_is_accepted(body: bytes) -> None:
+    assert _decompressed(body) == _AB
+
+
+def _on_path(*tools: str) -> pytest.MarkDecorator:
+    missing = [tool for tool in tools if shutil.which(tool) is None]
+    return pytest.mark.skipif(bool(missing), reason=f"not on PATH: {missing}")
+
+
+def _gnu_tar_through(*compressor: str) -> Callable[[Path], bytes]:
+    """GNU tar's archive of ``a.txt`` and a sparse ``s.bin``, compressed by
+    ``compressor`` from a file, so a compressor that names it does."""
+
+    def produce(tmp_path: Path) -> bytes:
+        plain = tmp_path / "archive.tar"
+        plain.write_bytes(_by_gnu_tar()(tmp_path))
+        return subprocess.run(
+            [*compressor, str(plain)], capture_output=True, check=True, timeout=60
+        ).stdout
+
+    return produce
+
+
+def _by_python_tarfile(tmp_path: Path) -> bytes:
+    """The backup writers' way: ``tarfile`` in ``w:gz`` to a named file."""
+
+    archive = tmp_path / "backup.tar.gz"
+    with tarfile.open(archive, mode="w:gz") as tar:
+        for name, data in (("a.txt", b"A"), ("b.txt", _B_DATA)):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return archive.read_bytes()
+
+
+_GZIP_PRODUCERS = [
+    pytest.param(_by_python_tarfile, id="python-tarfile-w-gz"),
+    pytest.param(_by_gnu_tar("-z"), id="gnu-tar-z", marks=_needs_gnu_tar),
+    pytest.param(
+        _gnu_tar_through("gzip", "-9", "-c"),
+        id="gzip-9",
+        marks=[_needs_gnu_tar, _on_path("gzip")],
+    ),
+    *(
+        pytest.param(
+            _gnu_tar_through("pigz", "-c", *options),
+            id="-".join(["pigz", *options]),
+            marks=[_needs_gnu_tar, _on_path("pigz")],
+        )
+        for options in [(), ("-i",), ("--rsyncable",), ("-p", "4", "-b", "128")]
+    ),
+]
+
+
+@pytest.mark.parametrize("produce", _GZIP_PRODUCERS)
+def test_a_tar_gz_from_each_producer_reads_as_gzip_reads_it(
+    produce: Callable[[Path], bytes], tmp_path: Path
+) -> None:
+    body = produce(tmp_path)
+
+    assert _decompressed(body) == gzip.decompress(body)

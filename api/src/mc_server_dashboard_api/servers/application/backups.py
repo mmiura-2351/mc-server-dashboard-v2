@@ -40,7 +40,6 @@ retry.
 from __future__ import annotations
 
 import datetime as dt
-import gzip
 import hashlib
 import io
 import logging
@@ -55,6 +54,7 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    GzipReader,
     HeaderLimitError,
     unrestorable_reason,
     without_tar_root_prefix,
@@ -1561,7 +1561,7 @@ def _validate_backup_archive(
 
     try:
         with (
-            gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+            GzipReader(io.BytesIO(content)) as gz,
             tarfile.open(
                 fileobj=(
                     stream := EndCheckedReader(

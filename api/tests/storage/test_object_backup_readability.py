@@ -38,6 +38,8 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId,
     ServerId,
 )
+from mc_server_dashboard_api.storage.integrity.archive import GzipReadProbe
+from tests import gzip_shapes
 from tests.storage.fake_s3 import FakeS3Store, close_tracking_factory, fake_s3_factory
 from tests.storage.helpers import (
     healthy_region_bytes,
@@ -222,6 +224,24 @@ async def test_corrupt_gzip_trailer_is_unreadable() -> None:
 
     with pytest.raises(ArchiveUnreadableError):
         await storage.check_backup_health(community, server, key)
+
+
+def test_the_probe_refuses_no_part_of_a_sound_stream_before_its_end() -> None:
+    """The store delivers an archive in parts that may end anywhere: inside a
+    member header, inside the zero padding after a member, on the first byte of
+    the next member's magic. The probe refuses only what no further byte could
+    make sound, so a body that ends short reaches the re-read (issue #2371);
+    its end is judged by ``finish`` (issue #3835)."""
+
+    tar = tar_bytes({"server.properties": b"k=v"})
+    first, second = gzip_shapes.in_members(tar, [len(tar) // 2])
+    body = first + bytes(512) + second + bytes(1024)
+
+    for at in range(len(body) + 1):
+        probe = GzipReadProbe()
+        probe.feed(body[:at])
+        probe.feed(body[at:])
+        probe.finish()
 
 
 async def test_reproducible_mid_stream_teardown_is_unreadable() -> None:

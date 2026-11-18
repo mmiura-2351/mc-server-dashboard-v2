@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.storage.adapters.fs import _write_tar_gz
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+from tests import gzip_shapes
 from tests.servers import archive_cap_shapes
 from tests.servers.executor_starvation import (
     IN_FLIGHT,
@@ -4211,6 +4212,11 @@ _UNREADABLE_ARCHIVES = [
         pytest.param("pack.tar.gz", content, id=damage)
         for damage, content in _DAMAGE_ONLY_THE_GZIP_END_SHOWS.items()
     ),
+    # What the gzip layer refuses at every gzip read site (issues #3835, #3847).
+    *(
+        pytest.param("pack.tar.gz", content, id=shape)
+        for shape, content in gzip_shapes.refused(_RAW_TAR).items()
+    ),
 ]
 
 
@@ -4366,6 +4372,11 @@ _TAR_GZ_PRODUCERS = [
     pytest.param(_by_gnu_tar(), id="gnu-tar", marks=_needs_gnu_tar),
     pytest.param(_by_gnu_tar("-b", "1"), id="gnu-tar-b1", marks=_needs_gnu_tar),
     pytest.param(_by_gnu_tar("-b", "64"), id="gnu-tar-b64", marks=_needs_gnu_tar),
+    # What the gzip layer accepts at every gzip read site (issues #3835, #3847).
+    *(
+        pytest.param(lambda _, content=content: content, id=shape)
+        for shape, content in gzip_shapes.accepted(_pax_tar_bytes(_PRODUCED)).items()
+    ),
 ]
 
 

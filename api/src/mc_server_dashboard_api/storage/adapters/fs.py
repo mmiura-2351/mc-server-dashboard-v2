@@ -34,7 +34,6 @@ import datetime as dt
 import enum
 import errno
 import functools
-import gzip
 import hashlib
 import io
 import logging
@@ -53,6 +52,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
     EndCheckedReader,
+    GzipReader,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -4104,7 +4104,7 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     try:
         with (
             archive_read_errors_as_unreadable(),
-            gzip.GzipFile(archive) as gz,
+            GzipReader(open(archive, "rb")) as gz,
             tarfile.open(
                 fileobj=(stream := EndCheckedReader(gz)),
                 mode="r:",

@@ -15,7 +15,6 @@ BackupNotFoundError).
 from __future__ import annotations
 
 import errno
-import gzip
 import os
 import tarfile
 import tempfile
@@ -25,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from mc_server_dashboard_api.archive_member import GzipReader
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -1096,8 +1096,8 @@ async def test_fs_io_fault_reading_the_archive_is_unavailable_not_unreadable(
     """An EIO while the walk reads a sound archive is an outage, never the
     unreadable verdict (issue #3230): the archive-read translation must not take
     a device fault for damaged bytes, which would condemn a sound backup. The
-    walk decompresses with ``gzip.GzipFile`` itself (issue #3798), so the fault
-    reaches the backend's I/O-fault policy as the ``OSError`` it is."""
+    walk decompresses with ``archive_member.GzipReader`` (issue #3835), so the
+    fault reaches the backend's I/O-fault policy as the ``OSError`` it is."""
 
     storage = FsStorage(tmp_path, version_retention=10)
     adapter = StorageBackupStoreAdapter(storage=storage)
@@ -1105,7 +1105,7 @@ async def test_fs_io_fault_reading_the_archive_is_unavailable_not_unreadable(
     ref = await _put_backup(
         storage, community, server, {"world/region/r.0.0.mca": healthy_region_bytes()}
     )
-    monkeypatch.setattr(gzip.GzipFile, "read", _raise_errno(errno.EIO))
+    monkeypatch.setattr(GzipReader, "read", _raise_errno(errno.EIO))
 
     with pytest.raises(BackupStorageUnavailableError):
         await getattr(adapter, operation)(

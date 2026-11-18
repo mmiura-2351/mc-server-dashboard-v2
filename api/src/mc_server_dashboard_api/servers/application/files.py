@@ -53,6 +53,7 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    GzipReader,
     HeaderLimitError,
 )
 from mc_server_dashboard_api.servers.application.archive_validation import (
@@ -1009,7 +1010,7 @@ def _tar_gz_entries(
     total = 0
     count = 0
     with (
-        gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+        GzipReader(io.BytesIO(content)) as gz,
         tarfile.open(
             fileobj=(
                 stream := EndCheckedReader(

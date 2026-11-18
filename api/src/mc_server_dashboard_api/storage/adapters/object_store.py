@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import gzip
 import hashlib
 import io
 import json
@@ -67,6 +66,7 @@ import anyio
 
 from mc_server_dashboard_api.archive_member import (
     EndCheckedReader,
+    GzipReader,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -2953,7 +2953,7 @@ async def _archive_file_member_streams(
 
     with archive_read_errors_as_unreadable():
         archive = await _acquire_off_loop(
-            _close_abandoned, lambda: _EndCheckedTar(gzip.GzipFile(spool))
+            _close_abandoned, lambda: _EndCheckedTar(GzipReader(open(spool, "rb")))
         )
     jobs = _HandleJobs()
     try:

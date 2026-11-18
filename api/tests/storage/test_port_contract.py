@@ -46,6 +46,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId,
 )
 from mc_server_dashboard_api.storage.integrity.region import ReasonCode
+from tests import gzip_shapes
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
@@ -1816,6 +1817,38 @@ async def test_backup_of_two_gzip_members_restores_whole(
     it restored in part, and split inside one it refused."""
 
     await _restore_and_health_accept(harness, two_gzip_members(split), END_CHECK_FILES)
+
+
+_GZIP_REFUSED = gzip_shapes.refused(END_CHECK_TAR)
+_GZIP_ACCEPTED = gzip_shapes.accepted(END_CHECK_TAR)
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("shape", list(_GZIP_REFUSED))
+async def test_backup_whose_gzip_stream_the_gzip_layer_refuses_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """Restore and the health probe give the gzip layer's one verdict on BOTH
+    backends (issues #3835, #3847): more than 10,000 gzip members, a non-zero
+    byte between or after them, and a member header whose CRC does not match or
+    that sets a reserved flag bit are ``ArchiveUnreadableError``. The object
+    backend's probe refused the two header shapes while restore took them."""
+
+    await _restore_and_health_refuse(harness, _GZIP_REFUSED[shape])
+
+
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
+@pytest.mark.parametrize("shape", list(_GZIP_ACCEPTED))
+async def test_backup_whose_gzip_stream_the_gzip_layer_accepts_restores(
+    harness: StorageHarness, shape: str
+) -> None:
+    """10,000 gzip members, zero padding between and after them, and a member
+    header CRC that matches are healthy and restore whole on BOTH backends
+    (issues #3835, #3847)."""
+
+    await _restore_and_health_accept(harness, _GZIP_ACCEPTED[shape], END_CHECK_FILES)
 
 
 # 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
