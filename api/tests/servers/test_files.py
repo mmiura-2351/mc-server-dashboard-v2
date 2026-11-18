@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.storage.adapters.fs import _write_tar_gz
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
+from tests import gzip_shapes
 from tests.servers import archive_cap_shapes
 from tests.servers.executor_starvation import (
     IN_FLIGHT,
@@ -4387,6 +4388,57 @@ async def test_upload_extract_writes_every_member_of_a_tar_gz_from_each_producer
     )
 
     assert dict(store.writes) == _PRODUCED
+
+
+# What the gzip layer accepts and refuses at every gzip read site (issues #3835,
+# #3847). Some are over the request-body limit of the route tests, which share
+# the lists above.
+_GZIP_ACCEPTED = gzip_shapes.accepted(_pax_tar_bytes(_PRODUCED))
+_GZIP_REFUSED = gzip_shapes.refused(_pax_tar_bytes(_PRODUCED))
+
+
+@pytest.mark.parametrize(
+    "content", list(_GZIP_ACCEPTED.values()), ids=list(_GZIP_ACCEPTED)
+)
+async def test_upload_extract_writes_every_member_of_a_gzip_stream_the_layer_takes(
+    content: bytes,
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="pack.tar.gz",
+        content=content,
+        extract=True,
+    )
+
+    assert dict(store.writes) == _PRODUCED
+
+
+@pytest.mark.parametrize(
+    "content", list(_GZIP_REFUSED.values()), ids=list(_GZIP_REFUSED)
+)
+async def test_upload_extract_of_a_gzip_stream_the_layer_refuses_writes_nothing(
+    content: bytes,
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=content,
+            extract=True,
+        )
+    assert store.writes == []
 
 
 # --- download: state branching + file vs dir -------------------------------

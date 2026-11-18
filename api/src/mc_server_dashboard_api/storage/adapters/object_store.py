@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
-import gzip
 import hashlib
 import io
 import json
@@ -67,6 +66,7 @@ import anyio
 
 from mc_server_dashboard_api.archive_member import (
     EndCheckedReader,
+    GzipReader,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -2744,8 +2744,8 @@ async def _tar_stream_from_objects(
 class _EndCheckedTar:
     """A tar walked through :class:`EndCheckedReader` over ``source`` (#3798).
 
-    ``source`` is the archive's decompressed bytes: our own ``gzip.GzipFile``
-    for a backup, the spool itself for a snapshot. Walk the members with
+    ``source`` is the archive's decompressed bytes: a ``GzipReader`` over the
+    spool for a backup, the spool itself for a snapshot. Walk the members with
     :meth:`next_member`, then read :meth:`past_end_marker` to the end. Closing it
     closes the tar and ``source``, which ``tarfile`` leaves open when handed a
     file object.
@@ -2929,8 +2929,8 @@ async def _archive_file_member_streams(
 ) -> AsyncGenerator[tuple[str, AsyncIterator[bytes]], None]:
     """Single-pass streaming extraction of a backup archive's file members (#1945).
 
-    Opens the spooled ``tar.gz`` ONCE, decompressed by our own ``gzip.GzipFile``,
-    walks its members in order, judges each inline, and yields
+    Opens the spooled ``tar.gz`` ONCE, decompressed by ``GzipReader``, walks its
+    members in order, judges each inline, and yields
     ``(name, chunk_stream)`` pairs for its file members, every chunk counted
     against ``budget``. The caller MUST fully consume each chunk stream before
     advancing to the next member (the walk reads sequentially).
@@ -2945,9 +2945,10 @@ async def _archive_file_member_streams(
     The archive is read to its end, as the upload gate reads it (issue #3798):
     the walk goes through :class:`EndCheckedReader` and must stop at the
     end-of-archive marker, only zeros may follow it (counted against ``budget``
-    too), the gzip CRC32 and ISIZE must match, and only another gzip member or
-    zero padding may follow a gzip member. ``GzipFile`` reads every gzip member,
-    so a ``tar.gz`` of several restores whole.
+    too), each gzip member's header, CRC32 and ISIZE must check, only another
+    gzip member or zero padding may follow one, and there may be at most 10,000
+    of them (issue #3835). ``GzipReader`` reads every gzip member, so a
+    ``tar.gz`` of several restores whole.
 
     With ``dropped``, a member landing at or under the reserved generation-marker
     root name is not yielded but its name appended (issue #3433); its data is read
@@ -2958,7 +2959,7 @@ async def _archive_file_member_streams(
 
     with archive_read_errors_as_unreadable():
         archive = await _acquire_off_loop(
-            _close_abandoned, lambda: _EndCheckedTar(gzip.GzipFile(spool))
+            _close_abandoned, lambda: _EndCheckedTar(GzipReader(open(spool, "rb")))
         )
     jobs = _HandleJobs()
     try:

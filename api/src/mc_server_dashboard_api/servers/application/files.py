@@ -53,6 +53,7 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    GzipReader,
     HeaderLimitError,
 )
 from mc_server_dashboard_api.servers.application.archive_validation import (
@@ -168,11 +169,13 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 
 # What each archive reader raises when an uploaded archive's own bytes do not read
 # back (issue #3769), found by fuzzing both readers with truncated, garbage and
-# byte-flipped archives. Both tar.gz readers decompress with ``gzip.GzipFile``
-# and walk the tar through ``EndCheckedReader`` (issue #3778). A tar.gz fails in
-# the gzip layer (``BadGzipFile``: not gzip, a CRC32 or ISIZE that does not match,
-# bytes after the gzip stream that are neither a gzip member nor zero padding;
-# ``EOFError`` for a cut; ``zlib.error`` for damaged deflate data) or in
+# byte-flipped archives. Both tar.gz readers decompress with ``GzipReader``
+# (issue #3835) and walk the tar through ``EndCheckedReader`` (issue #3778). A
+# tar.gz fails in the gzip layer (``zlib.error``: not gzip, damaged deflate data,
+# a header CRC that does not match or a reserved flag bit, a CRC32 or ISIZE that
+# does not match, bytes after a gzip member that are neither another member nor
+# zero padding; ``EOFError`` for a cut; ``BadGzipFile`` for more than 10,000
+# gzip members) or in
 # ``tarfile`` (``ReadError``: a bad first header, damaged deflate data under a
 # header; ``ValueError`` for a GNU sparse PAX field that is not a number, which it
 # converts with a bare ``int()``), and ``EndCheckedReader`` adds a ``ReadError``
@@ -1009,7 +1012,7 @@ def _tar_gz_entries(
     total = 0
     count = 0
     with (
-        gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+        GzipReader(io.BytesIO(content)) as gz,
         tarfile.open(
             fileobj=(
                 stream := EndCheckedReader(
