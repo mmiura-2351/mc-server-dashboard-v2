@@ -1997,6 +1997,8 @@ export const en = {
     "Type the display name to enable deletion",
   "resourcePacks.error.tooLarge": "That file exceeds the 256 MiB upload limit.",
   "resourcePacks.error.uploadFailed": "Could not upload the resource pack.",
+  "resourcePacks.error.invalidFilename":
+    "This file name cannot be used for a resource pack. Rename the file so its name has no control characters, / or \\ and is at most 255 bytes, then upload it again.",
   "resourcePacks.error.deleteFailed": "Could not delete the resource pack.",
   "resourcePacks.error.inUse":
     "This resource pack is assigned to one or more servers and cannot be deleted.",

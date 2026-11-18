@@ -343,7 +343,10 @@ off the JAR's store/upload time.
 resource-pack GC (Section 4.3) run a pass the same way:
 
 - Each object a pass reclaims is logged at INFO with its key, its size and its
-  age. A resource pack's line also names its pack id.
+  age. A resource pack's line also names its pack id. A resource pack's key is
+  logged escaped, here and in the WARNING below: it ends in the upload's
+  filename, and a pack stored before the upload refused control characters may
+  carry them (issue #3907).
 - Each pass ends with one summary line: how many objects it listed, how many it
   reclaimed and their bytes, how many deletes failed, and how long it took. The
   line is at INFO when the pass reclaimed or failed anything, and at DEBUG
