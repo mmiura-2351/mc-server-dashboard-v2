@@ -78,6 +78,13 @@ In-process, deliberately, like ``StopConvergenceGuard``. The API is a single
 instance (REQUIREMENTS.md NFR-SCALE-1), and the stops it orders against are sent
 from this process. The re-read stays in front of it for what the counter cannot
 see: a deleted row, and a write from outside this process.
+
+So the record of sent starts is empty after an API restart. A start the previous
+process sent, whose instance has not reported yet, is not in it, and the clear
+releases as it did before issue #3766. Its compare of ``observed_at`` with the
+row it read is then the only cover, and only for a report that lands before the
+release. A restart's relaunch is not noted either: in-process, the entry the
+server's own start left still covers it. Issue #3854 tracks both.
 """
 
 from __future__ import annotations
@@ -94,6 +101,7 @@ class StopIntentCounter:
     Also which servers have had a start sent that no stop has stopped yet.
     """
 
+    # Neither forgets a deleted server, so each is bounded by the server count.
     _counts: dict[ServerId, int] = field(default_factory=dict)
     _unstopped_starts: set[ServerId] = field(default_factory=set)
 

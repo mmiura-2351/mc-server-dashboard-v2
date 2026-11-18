@@ -2340,7 +2340,9 @@ class StopServer:
             self.stop_intents.bump(server_id)
             start_may_be_running = self.stop_intents.start_may_be_running(server_id)
 
-        # Only a stopped or crashed row gets here with its Worker connected.
+        # A connected Worker here means a stopped or crashed row, or an unknown or
+        # stopping one whose Worker reconnected during the unit of work's exit:
+        # the next tick would send that one a stop anyway.
         if start_may_be_running and self.control_plane.is_worker_connected(
             worker_id=worker_id
         ):
@@ -2733,6 +2735,9 @@ class RestartServer:
                 raise LifecycleTransitionConflictError(str(server_id.value))
             await self.uow.commit()
 
+        # The relaunch is not noted as a sent start (issue #3766). In-process, the
+        # entry the server's own start left covers it; after an API restart it is
+        # not covered (issue #3854).
         outcome = await self.control_plane.restart(
             worker_id=worker_id, server_id=server_id
         )

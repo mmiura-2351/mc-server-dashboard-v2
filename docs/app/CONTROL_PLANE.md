@@ -657,7 +657,12 @@ Notes:
   is still the one it read, so a report that lands meanwhile keeps the server
   assigned for the reconciler. Either way it first adds one to the count, so a
   start that compares after it is not sent, and a start of a newer intent never
-  reads the count a failed start of the old one read. The count also tells a
+  reads the count a failed start of the old one read. The record of starts
+  lives in the API process, so it is empty after an API restart: a start the
+  previous process queued is not in it, and the convergence releases the
+  server, with only the `observed_at` check to cover that start. A restart's
+  relaunch is not noted either; in one process, the entry the server's own
+  start left still covers it (issue #3854). The count also tells a
   failed start's revert whether the intent is still its own (issue #3741).
   The revert undoes the intent only if the count is still the one the start
   read and the server is still `desired=running` on the start's Worker.
