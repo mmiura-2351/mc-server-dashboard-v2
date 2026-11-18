@@ -121,22 +121,33 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // browser ran or any other way, is pulled back without scrolling: to the
     // dialog's first control, or its last after Shift+Tab. A Tab that landed
     // it on the page behind may have scrolled the page; that is undone.
+    // The pull waits for the script that moved focus to finish: a click
+    // handler may close the dialog and focus something behind it, as
+    // ServerDetailPage's force-stop confirm does, and React has closed the
+    // dialog before the pull would run.
+    const isOutside = (node: Node | null) =>
+      !dialog.contains(node) && !toastZone?.contains(node);
     const onFocusIn = (event: FocusEvent) => {
-      const target = event.target as Node;
-      if (
-        dialogStack.at(-1) !== dialog ||
-        dialog.contains(target) ||
-        toastZone?.contains(target)
-      ) {
+      if (dialogStack.at(-1) !== dialog || !isOutside(event.target as Node)) {
         return;
       }
-      const inDialog = focusableWithin(dialog);
-      focusFirstOf(lastTab?.shiftKey ? inDialog.reverse() : inDialog, dialog, {
-        preventScroll: true,
+      queueMicrotask(() => {
+        if (
+          dialogStack.at(-1) !== dialog ||
+          !isOutside(document.activeElement)
+        ) {
+          return;
+        }
+        const inDialog = focusableWithin(dialog);
+        focusFirstOf(
+          lastTab?.shiftKey ? inDialog.reverse() : inDialog,
+          dialog,
+          { preventScroll: true },
+        );
+        if (lastTab !== null) {
+          window.scrollTo(lastTab.x, lastTab.y);
+        }
       });
-      if (lastTab !== null) {
-        window.scrollTo(lastTab.x, lastTab.y);
-      }
     };
     document.addEventListener("focusin", onFocusIn);
 
@@ -177,7 +188,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         }
         // Where Tab goes, best first.
         let order: HTMLElement[] | undefined;
-        if (!dialog.contains(active) && !toastZone?.contains(active)) {
+        if (isOutside(active)) {
           // From outside both, on the page behind or in a dialog below, Tab
           // enters the dialog at its start or end.
           order = event.shiftKey ? [...inDialog].reverse() : inDialog;

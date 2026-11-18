@@ -186,17 +186,18 @@ async function settle() {
   await act(async () => {});
 }
 
-// ServerDetailPage's force-stop shape: the menu item that opened the confirm
-// is gone, and confirming closes the dialog and focuses the menu's trigger.
+// ServerDetailPage's force-stop shape: confirming closes the dialog, whose
+// trigger is gone by then, and focuses an element behind it.
 function CloseAndFocusBehind() {
   const [open, setOpen] = useState(false);
+  const [done, setDone] = useState(false);
   const behindRef = useRef<HTMLButtonElement>(null);
   return (
     <>
       <button type="button" ref={behindRef}>
         Behind
       </button>
-      {!open && (
+      {!done && (
         <button type="button" onClick={() => setOpen(true)}>
           Open
         </button>
@@ -206,6 +207,7 @@ function CloseAndFocusBehind() {
           type="button"
           onClick={() => {
             setOpen(false);
+            setDone(true);
             behindRef.current?.focus();
           }}
         >
@@ -245,26 +247,28 @@ describe("Modal focus outside the dialog", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
-  it("pulls focus that lands on the page behind back to the dialog's first control", () => {
+  it("pulls focus that lands on the page behind back to the dialog's first control", async () => {
     const behind = renderOverPage();
 
     behind.focus();
+    await settle();
 
     expect(document.activeElement).toBe(first());
   });
 
-  it("pulls focus back to the dialog's last control after Shift+Tab", () => {
+  it("pulls focus back to the dialog's last control after Shift+Tab", async () => {
     const behind = renderOverPage();
     focusBody();
 
     fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true });
     // Where the browser's Shift+Tab lands.
     behind.focus();
+    await settle();
 
     expect(document.activeElement).toBe(last());
   });
 
-  it("undoes the page scroll of a Tab that landed behind the dialog", () => {
+  it("undoes the page scroll of a Tab that landed behind the dialog", async () => {
     const behind = renderOverPage();
     focusBody();
     window.scrollTo(0, 0);
@@ -274,6 +278,7 @@ describe("Modal focus outside the dialog", () => {
     // The browser scrolls to where its Tab lands.
     window.scrollTo(0, 1204);
     behind.focus();
+    await settle();
 
     expect(document.activeElement).toBe(first());
     expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
@@ -289,12 +294,13 @@ describe("Modal focus outside the dialog", () => {
     await new Promise((resolve) => setTimeout(resolve));
     window.scrollTo(0, 300);
     behind.focus();
+    await settle();
 
     expect(document.activeElement).toBe(first());
     expect(window.scrollY).toBe(300);
   });
 
-  it("does not apply a Tab's direction or scroll once its key is up", () => {
+  it("does not apply a Tab's direction or scroll once its key is up", async () => {
     const behind = renderOverPage();
     focusBody();
     window.scrollTo(0, 0);
@@ -303,23 +309,26 @@ describe("Modal focus outside the dialog", () => {
     fireEvent.keyUp(document.body, { key: "Tab", shiftKey: true });
     window.scrollTo(0, 300);
     behind.focus();
+    await settle();
 
     expect(document.activeElement).toBe(first());
     expect(window.scrollY).toBe(300);
   });
 
-  it("pulls focus back to the dialog itself when it has no controls", () => {
+  it("pulls focus back to the dialog itself when it has no controls", async () => {
     const behind = renderOverPage(<p>Body</p>);
 
     behind.focus();
+    await settle();
 
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 
-  it("pulls focus that lands in a dialog below into the topmost one", () => {
+  it("pulls focus that lands in a dialog below into the topmost one", async () => {
     render(stackedDialogs);
 
     screen.getByRole("button", { name: "Outer body" }).focus();
+    await settle();
 
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Inner first" }),
@@ -410,7 +419,7 @@ describe("Modal focus on controls that cannot take it", () => {
     );
   });
 
-  it("falls back to the dialog itself when no control takes focus", () => {
+  it("falls back to the dialog itself when no control takes focus", async () => {
     render(
       <>
         <button type="button">Behind</button>
@@ -427,6 +436,7 @@ describe("Modal focus on controls that cannot take it", () => {
     }
 
     screen.getByRole("button", { name: "Behind" }).focus();
+    await settle();
 
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
@@ -649,7 +659,7 @@ describe("Modal focus trap with toasts showing", () => {
   // In a browser a click on a toast's text leaves focus on the page body,
   // and the next Tab or Shift+Tab goes on from that text; the test DOM moves
   // neither, so both are done by hand.
-  it("pulls Shift+Tab after a click on a toast's text back to the dialog's last control", () => {
+  it("pulls Shift+Tab after a click on a toast's text back to the dialog's last control", async () => {
     renderWithToasts(controls);
     toastButtons()[0].focus();
     fireEvent.click(screen.getByText("Failed 1"));
@@ -660,6 +670,7 @@ describe("Modal focus trap with toasts showing", () => {
     ).toBe(true);
     // From the first toast's text the browser goes back to the page.
     screen.getByRole("button", { name: "Behind" }).focus();
+    await settle();
 
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Last" }),
@@ -677,10 +688,11 @@ describe("Modal focus trap with toasts showing", () => {
     expect(document.activeElement).toBe(toastButtons()[0]);
   });
 
-  it("pulls focus that lands behind back to a dialog with no controls, not to a toast", () => {
+  it("pulls focus that lands behind back to a dialog with no controls, not to a toast", async () => {
     renderWithToasts(<p>Body</p>);
 
     screen.getByRole("button", { name: "Behind" }).focus();
+    await settle();
 
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
