@@ -142,121 +142,229 @@ describe("Modal", () => {
   });
 });
 
-// Focus outside the topmost dialog, on the page body or the page behind,
-// re-enters it on the next Tab rather than walking the page (WEBUI_SPEC.md 7.4).
-describe("Modal focus from outside the dialog", () => {
-  const controls = (
-    <>
-      <button type="button">First</button>
-      <button type="button">Last</button>
-    </>
+// Puts focus on the page body, where a browser leaves it after a click on
+// text that takes no focus, or after the focused control is removed.
+function focusBody() {
+  (document.activeElement as HTMLElement).blur();
+  expect(document.activeElement).toBe(document.body);
+}
+
+// Puts focus on `element` without the open dialog seeing it arrive, to reach
+// the Tab handling that backs up its pull-back.
+function focusUnseen(element: HTMLElement) {
+  window.addEventListener(
+    "focusin",
+    (event) => event.stopImmediatePropagation(),
+    { capture: true, once: true },
   );
+  element.focus();
+  expect(document.activeElement).toBe(element);
+}
 
-  // Puts focus on the page body, where a browser leaves it after a click on
-  // text that takes no focus.
-  function focusBody() {
-    (document.activeElement as HTMLElement).blur();
-    expect(document.activeElement).toBe(document.body);
-  }
+const twoControls = (
+  <>
+    <button type="button">First</button>
+    <button type="button">Last</button>
+  </>
+);
 
-  it("moves Tab from the page body to the dialog's first control", () => {
-    render(
-      <Modal open={true} title="Title" onClose={() => {}}>
-        {controls}
-      </Modal>,
-    );
-    focusBody();
+// The Files-drawer shape, with the confirm opened over the drawer.
+const stackedDialogs = (
+  <>
+    <Modal open={true} title="History" onClose={() => {}}>
+      <button type="button">Outer body</button>
+    </Modal>
+    <Modal open={true} title="Confirm rollback" onClose={() => {}}>
+      <button type="button">Inner first</button>
+      <button type="button">Inner last</button>
+    </Modal>
+  </>
+);
 
-    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(false);
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "First" }),
-    );
-  });
-
-  it("moves Shift+Tab from the page body to the dialog's last control", () => {
-    render(
-      <Modal open={true} title="Title" onClose={() => {}}>
-        {controls}
-      </Modal>,
-    );
-    focusBody();
-
-    expect(
-      fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true }),
-    ).toBe(false);
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Last" }),
-    );
-  });
-
-  it("moves Tab from the page behind the dialog into it", () => {
+// While a modal is open, focus that lands outside the topmost dialog and the
+// toast stack is pulled back into the dialog, so it never walks the page
+// behind; Tab from the page body is the browser's (WEBUI_SPEC.md 7.4).
+describe("Modal focus outside the dialog", () => {
+  function renderOverPage(body: ReactNode = twoControls) {
     render(
       <>
         <button type="button">Behind</button>
         <Modal open={true} title="Title" onClose={() => {}}>
-          {controls}
+          {body}
         </Modal>
       </>,
     );
-    const behind = screen.getByRole("button", { name: "Behind" });
+    return screen.getByRole("button", { name: "Behind" });
+  }
+
+  const first = () => screen.getByRole("button", { name: "First" });
+  const last = () => screen.getByRole("button", { name: "Last" });
+
+  // After a focused control is removed, the browser's Tab goes on from where
+  // that control was, which the trap cannot know.
+  it("leaves Tab from the page body to the browser", () => {
+    renderOverPage();
+    focusBody();
+
+    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("pulls focus that lands on the page behind back to the dialog's first control", () => {
+    const behind = renderOverPage();
+
     behind.focus();
 
+    expect(document.activeElement).toBe(first());
+  });
+
+  it("pulls focus back to the dialog's last control after Shift+Tab", () => {
+    const behind = renderOverPage();
+    focusBody();
+
+    fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true });
+    // Where the browser's Shift+Tab lands.
+    behind.focus();
+
+    expect(document.activeElement).toBe(last());
+  });
+
+  it("undoes the page scroll of a Tab that landed behind the dialog", () => {
+    const behind = renderOverPage();
+    focusBody();
+    window.scrollTo(0, 0);
+    const focus = vi.spyOn(first(), "focus");
+
+    fireEvent.keyDown(document.body, { key: "Tab" });
+    // The browser scrolls to where its Tab lands.
+    window.scrollTo(0, 1204);
+    behind.focus();
+
+    expect(document.activeElement).toBe(first());
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+    expect(window.scrollY).toBe(0);
+  });
+
+  it("does not apply a Tab's direction or scroll to focus that lands later", async () => {
+    const behind = renderOverPage();
+    focusBody();
+    window.scrollTo(0, 0);
+
+    fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true });
+    await new Promise((resolve) => setTimeout(resolve));
+    window.scrollTo(0, 300);
+    behind.focus();
+
+    expect(document.activeElement).toBe(first());
+    expect(window.scrollY).toBe(300);
+  });
+
+  it("pulls focus back to the dialog itself when it has no controls", () => {
+    const behind = renderOverPage(<p>Body</p>);
+
+    behind.focus();
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+  });
+
+  it("pulls focus that lands in a dialog below into the topmost one", () => {
+    render(stackedDialogs);
+
+    screen.getByRole("button", { name: "Outer body" }).focus();
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Inner first" }),
+    );
+  });
+
+  it("moves Tab from the page behind into the dialog", () => {
+    const behind = renderOverPage();
+    focusUnseen(behind);
+
     expect(fireEvent.keyDown(behind, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(first());
+  });
+
+  it("moves Shift+Tab from a dialog below to the topmost one's last control", () => {
+    render(stackedDialogs);
+    const outer = screen.getByRole("button", { name: "Outer body" });
+    focusUnseen(outer);
+
+    expect(fireEvent.keyDown(outer, { key: "Tab", shiftKey: true })).toBe(
+      false,
+    );
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Inner last" }),
+    );
+  });
+
+  it("leaves Tab between the dialog's own controls to the browser", () => {
+    renderOverPage();
+    first().focus();
+
+    expect(fireEvent.keyDown(first(), { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(first());
+  });
+});
+
+// A control can match the trap's selector and still refuse focus; a Tab the
+// trap takes over still lands, on the next control or the dialog itself.
+describe("Modal focus on controls that cannot take it", () => {
+  it("skips a hidden input at the end of the dialog", () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        {twoControls}
+        <input type="hidden" name="token" />
+      </Modal>,
+    );
+    const last = screen.getByRole("button", { name: "Last" });
+    last.focus();
+
+    expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(false);
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "First" }),
     );
   });
 
-  it("leaves Tab between the dialog's own controls to the browser", () => {
+  it("goes on to the next control when one refuses focus", () => {
     render(
       <Modal open={true} title="Title" onClose={() => {}}>
-        {controls}
+        <button type="button">A</button>
+        <button type="button">B</button>
+        <button type="button">C</button>
       </Modal>,
     );
-    const first = screen.getByRole("button", { name: "First" });
-    first.focus();
+    vi.spyOn(screen.getByRole("button", { name: "A" }), "focus")
+      // As a control under `display: none` does.
+      .mockImplementation(() => {});
+    const c = screen.getByRole("button", { name: "C" });
+    c.focus();
 
-    expect(fireEvent.keyDown(first, { key: "Tab" })).toBe(true);
-    expect(document.activeElement).toBe(first);
-  });
-
-  it("moves Tab from the page body into the topmost of stacked dialogs", () => {
-    render(
-      <>
-        <Modal open={true} title="History" onClose={() => {}}>
-          <button type="button">Outer body</button>
-        </Modal>
-        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
-          <button type="button">Inner body</button>
-        </Modal>
-      </>,
-    );
-    focusBody();
-
-    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(false);
+    expect(fireEvent.keyDown(c, { key: "Tab" })).toBe(false);
     expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Inner body" }),
+      screen.getByRole("button", { name: "B" }),
     );
   });
 
-  it("moves Tab from a dialog below the topmost one into the topmost", () => {
+  it("falls back to the dialog itself when no control takes focus", () => {
     render(
       <>
-        <Modal open={true} title="History" onClose={() => {}}>
-          <button type="button">Outer body</button>
-        </Modal>
-        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
-          <button type="button">Inner body</button>
+        <button type="button">Behind</button>
+        <Modal open={true} title="Title" onClose={() => {}}>
+          {twoControls}
         </Modal>
       </>,
     );
-    const outer = screen.getByRole("button", { name: "Outer body" });
-    outer.focus();
+    for (const name of ["First", "Last"]) {
+      vi.spyOn(
+        screen.getByRole("button", { name }),
+        "focus",
+      ).mockImplementation(() => {});
+    }
 
-    expect(fireEvent.keyDown(outer, { key: "Tab" })).toBe(false);
-    expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Inner body" }),
-    );
+    screen.getByRole("button", { name: "Behind" }).focus();
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 });
 
@@ -366,6 +474,7 @@ describe("Modal focus trap with toasts showing", () => {
     render(
       <ToastProvider>
         <RaiseErrors />
+        <button type="button">Behind</button>
         <Modal open={true} title="Title" onClose={() => {}}>
           {body}
         </Modal>
@@ -478,28 +587,41 @@ describe("Modal focus trap with toasts showing", () => {
     expect(document.activeElement).toBe(toastButtons()[0]);
   });
 
-  // In a browser a click on a toast's text leaves focus on the page body;
-  // the test DOM does not move it, so it is put there by hand.
-  it("keeps Shift+Tab within the dialog and the toasts after a click on a toast's text", () => {
+  // In a browser a click on a toast's text leaves focus on the page body,
+  // and the next Tab or Shift+Tab goes on from that text; the test DOM moves
+  // neither, so both are done by hand.
+  it("pulls Shift+Tab after a click on a toast's text back to the dialog's last control", () => {
     renderWithToasts(controls);
     toastButtons()[0].focus();
-
     fireEvent.click(screen.getByText("Failed 1"));
-    (document.activeElement as HTMLElement).blur();
-    expect(document.activeElement).toBe(document.body);
-    pressTab(true);
+    focusBody();
+
+    expect(
+      fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true }),
+    ).toBe(true);
+    // From the first toast's text the browser goes back to the page.
+    screen.getByRole("button", { name: "Behind" }).focus();
 
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Last" }),
     );
   });
 
-  it("moves Tab from the page body to a dialog with no controls, not to a toast", () => {
-    renderWithToasts(<p>Body</p>);
-    (document.activeElement as HTMLElement).blur();
-    expect(document.activeElement).toBe(document.body);
+  it("leaves Tab after a click on a toast's text to reach that toast", () => {
+    renderWithToasts(controls);
+    fireEvent.click(screen.getByText("Failed 1"));
+    focusBody();
 
-    pressTab();
+    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(true);
+    toastButtons()[0].focus();
+
+    expect(document.activeElement).toBe(toastButtons()[0]);
+  });
+
+  it("pulls focus that lands behind back to a dialog with no controls, not to a toast", () => {
+    renderWithToasts(<p>Body</p>);
+
+    screen.getByRole("button", { name: "Behind" }).focus();
 
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
