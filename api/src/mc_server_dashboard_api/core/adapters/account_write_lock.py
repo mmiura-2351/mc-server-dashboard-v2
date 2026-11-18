@@ -20,8 +20,9 @@ until that transaction ends:
   ``UserExistenceChecker`` adapter). These writes do not wait for each other.
 
 No other write takes it: no other community write confers ownership or
-inserts a row referencing an account, and writes of the ``user`` row itself are
-ordered by its row locks.
+inserts a row referencing an account, and identity's own writes are ordered
+against a deletion by the ``user`` row locks (an update of the row) or the
+session lock (a login's or a rotation's token insert).
 
 Whichever side comes second waits for the first to commit, and every statement
 it runs after the wait takes a new READ COMMITTED snapshot, so it decides from
