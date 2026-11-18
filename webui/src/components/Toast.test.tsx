@@ -559,8 +559,9 @@ describe("Toast focus when the focused toast goes", () => {
 
     act(() => page.focus());
     act(() => dismissButton("Failed 1").focus());
-    fireEvent.click(dismissButton("Failed 1"));
+    act(() => dismissButton("Failed 2").focus());
     fireEvent.click(dismissButton("Failed 2"));
+    fireEvent.click(dismissButton("Failed 1"));
 
     expect(document.activeElement).toBe(page);
   });
@@ -627,22 +628,19 @@ describe("Toast focus when the focused toast goes", () => {
   });
 
   it("is left alone when the toast that goes does not hold it", () => {
-    const onBlur = vi.fn();
-    renderToasts(
-      <button type="button" onBlur={onBlur}>
-        Page
-      </button>,
-    );
+    renderToasts(<button type="button">Page</button>);
     show("Failed 1", "error");
     show("Failed 2", "error");
     const page = screen.getByRole("button", { name: "Page" });
+    const onFocusOut = vi.fn();
+    page.addEventListener("focusout", onFocusOut);
 
     act(() => page.focus());
     fireEvent.click(dismissButton("Failed 1"));
 
     expect(document.activeElement).toBe(page);
-    // Not even moved away and back: the page sees no blur.
-    expect(onBlur).not.toHaveBeenCalled();
+    // Not even moved away and back, which a screen reader would announce.
+    expect(onFocusOut).not.toHaveBeenCalled();
   });
 });
 
