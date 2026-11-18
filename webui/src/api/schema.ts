@@ -770,7 +770,8 @@ export interface paths {
          *     ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
          *     that does not match, or bytes after the gzip stream that are neither another
-         *     gzip member nor zero padding.
+         *     gzip member nor zero padding. So is a sparse member whose map reaches past
+         *     its stored data, which would make the reader seek back (issue #3810).
          *
          *     **No directory may stand at the root ``server.properties`` path (issue
          *     #2869).** A restore republishes the archive's members verbatim as the working
@@ -1590,8 +1591,11 @@ export interface paths {
          *     are ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
          *     that does not match, and bytes after the gzip stream that are neither
-         *     another gzip member nor zero padding. The zeros past the marker count toward
-         *     the extracted-size cap.
+         *     another gzip member nor zero padding. So is a sparse member whose map reaches
+         *     past its stored data, which would make the reader seek back (issue #3810).
+         *     Every byte a tar.gz decompresses counts toward the extracted-size cap,
+         *     headers, extended-header data and skipped member data included (issue
+         *     #3810).
          *
          *     **Platform-managed keys (issue #2809).** An upload landing on the root
          *     ``server.properties`` — directly, or as an archive member — may not change

@@ -1,4 +1,5 @@
-"""The end-of-archive check, :class:`EndCheckedReader` (issue #3778).
+"""The end-of-archive check, :class:`EndCheckedReader` (issue #3778), and the
+cap beneath it, :class:`CappedReader` (issue #3810).
 
 Each archive is walked as the upload gates walk one: ``tarfile.open(mode="r:")``
 over the reader, the members through ``members()`` with their data read, then
@@ -25,7 +26,11 @@ from pathlib import Path
 
 import pytest
 
-from mc_server_dashboard_api.archive_member import EndCheckedReader
+from mc_server_dashboard_api.archive_member import (
+    CapExceededError,
+    CappedReader,
+    EndCheckedReader,
+)
 
 _B_DATA = b"B" * 3000  # six records, the last one padded
 
@@ -97,17 +102,19 @@ def _by_gnu_tar(*options: str) -> Callable[[Path], bytes]:
 
 
 def _walk(
-    archive: bytes, *, gzipped: bool, data: str = "read"
+    archive: bytes, *, gzipped: bool, data: str = "read", cap: int | None = None
 ) -> tuple[list[str], int]:
     """The member names, and the bytes read past the end-of-archive marker.
 
     ``data`` is how much of each member's data the caller reads: all of it
     (``read``), none, so ``tarfile`` seeks over it (``skipped``), or one byte
-    (``partly``).
+    (``partly``). With a ``cap``, the stream is read through a
+    :class:`CappedReader`, as the upload gates read it.
     """
 
     body = io.BytesIO(gzip.compress(archive) if gzipped else archive)
-    stream = EndCheckedReader(gzip.GzipFile(fileobj=body) if gzipped else body)
+    source = gzip.GzipFile(fileobj=body) if gzipped else body
+    stream = EndCheckedReader(source if cap is None else CappedReader(source, cap))
     names: list[str] = []
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         for member in stream.members(tar):
@@ -432,3 +439,90 @@ def test_a_gzip_stream_gzip_itself_reads_is_accepted(body: bytes) -> None:
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         assert _names(stream, tar) == ["a.txt", "b.txt"]
         assert sum(len(chunk) for chunk in stream.read_past_end_marker()) > 0
+
+
+# --- the cap beneath the walk, CappedReader (issue #3810) -------------------
+#
+# Shapes whose bytes ``tarfile`` reads or skips without handing them out as
+# member data: an old-GNU sparse member's stored data when its map takes none of
+# it, and extended-header data.
+_UNMAPPED = 64 * 1024
+_SPARSE_UNMAPPED = _header("s.bin", typ=b"S", size=_UNMAPPED) + bytes(_UNMAPPED)
+_LARGE_PAX_COMMENT = {"a.txt": {"comment": "c" * _UNMAPPED}}
+_LARGE_LONGNAME = "d/" + "n" * _UNMAPPED
+
+_COUNTED: list[object] = [
+    *_ACCEPTED,
+    pytest.param(
+        lambda _: _SPARSE_UNMAPPED + _ZEROS, ["s.bin"], id="sparse-data-not-mapped"
+    ),
+    pytest.param(
+        lambda _: _tar({"a.txt": b"A"}, pax=_LARGE_PAX_COMMENT),
+        ["a.txt"],
+        id="large-pax-data",
+    ),
+    pytest.param(
+        lambda _: _tar({_LARGE_LONGNAME: b"L"}, fmt=tarfile.GNU_FORMAT),
+        [_LARGE_LONGNAME],
+        id="large-gnu-longname",
+    ),
+]
+
+
+@_both
+@_each_data_read
+@pytest.mark.parametrize(("produce", "names"), _COUNTED)
+def test_every_byte_of_the_stream_counts_toward_the_cap(
+    produce: Callable[[Path], bytes],
+    names: list[str],
+    gzipped: bool,
+    data: str,
+    tmp_path: Path,
+) -> None:
+    # The stream is the uncompressed tar. Each of its bytes counts, whether the
+    # walk reads it, skips it or reads it past the marker, so a cap of its length
+    # takes the archive and one byte less refuses it.
+    archive = produce(tmp_path)
+
+    assert _walk(archive, gzipped=gzipped, data=data, cap=len(archive))[0] == names
+    with pytest.raises(CapExceededError):
+        _walk(archive, gzipped=gzipped, data=data, cap=len(archive) - 1)
+
+
+@_both
+@pytest.mark.parametrize("data", ["read", "partly"])
+def test_a_walk_that_seeks_back_is_refused(gzipped: bool, data: str) -> None:
+    # An old-GNU sparse member that stores nothing but maps 512 bytes: its data is
+    # read from the next header on, and the walk then seeks back to that header.
+    # Over ``GzipFile`` a seek back decompresses the stream again from its start.
+    archive = _A + _header("s.bin", typ=b"S", sparse=((0, 512),), realsize=512) + _A
+    archive += _ZEROS
+
+    with pytest.raises(tarfile.ReadError):
+        _walk(archive, gzipped=gzipped, data=data, cap=len(archive))
+
+
+@pytest.mark.parametrize("size", [-1, 4096])
+def test_a_read_takes_one_byte_past_the_cap_at_most(size: int) -> None:
+    source = io.BytesIO(bytes(4096))
+    reader = CappedReader(source, 100)
+
+    with pytest.raises(CapExceededError):
+        reader.read(size)
+    assert source.tell() == 101
+
+
+def test_a_skip_takes_one_byte_past_the_cap_at_most() -> None:
+    source = io.BytesIO(bytes(4096))
+    reader = CappedReader(source, 100)
+
+    with pytest.raises(CapExceededError):
+        reader.seek(4096)
+    assert source.tell() == 101
+
+
+def test_a_skip_past_the_end_stops_at_the_end() -> None:
+    reader = CappedReader(io.BytesIO(bytes(10)), 100)
+
+    assert reader.seek(50) == 10
+    assert reader.read(1) == b""

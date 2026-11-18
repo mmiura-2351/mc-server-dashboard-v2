@@ -379,7 +379,9 @@ back to the next header, and all three refuse that seek. Restore and the probe
 read every member's data, a left-out reserved member's (below) included, and
 count it and the zeros past the marker toward the decompressed-size cap, so a
 backup whose member data ends within about 10 KiB of the cap (`tarfile`'s
-record padding) is refused too. The gate runs in a worker thread, off the
+record padding) is refused too. The gate's cap counts every byte it
+decompresses, headers, extended-header data and skipped member data included
+(issue #3810, `archive_member.CappedReader`). The gate runs in a worker thread, off the
 event loop (issue #3801). The CPU of the gate, restore and the probe is not
 bounded yet: empty gzip members and zero padding after the gzip stream add no
 decompressed bytes, so only the stored body's size bounds what they cost,

@@ -1004,7 +1004,8 @@ async def upload_backup(
     ``invalid_archive`` too: a header past the first that does not read, no
     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
     that does not match, or bytes after the gzip stream that are neither another
-    gzip member nor zero padding.
+    gzip member nor zero padding. So is a sparse member whose map reaches past
+    its stored data, which would make the reader seek back (issue #3810).
 
     **No directory may stand at the root ``server.properties`` path (issue
     #2869).** A restore republishes the archive's members verbatim as the working
