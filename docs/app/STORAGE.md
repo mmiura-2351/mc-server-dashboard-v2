@@ -76,6 +76,7 @@ across servers (FR-VER-3) and contain no Community data.
 
 ```
 <root>/
+├── mcsd-owner.json                           # the store owner marker: which database this store belongs to (Section 4.3)
 ├── communities/
 │   └── <community-id>/
 │       └── servers/
@@ -315,7 +316,9 @@ Communities.
 garbage collector: a periodic API-side loop (config `jar_gc.interval_seconds`,
 default daily, gated on the control plane with the other schedulers) plus a
 platform-admin `POST /versions/jar-pool/gc` manual trigger (audited; returns
-`{scanned, deleted, freed_bytes}`).
+`{scanned, deleted, freed_bytes}`). Both run only on a store this database owns;
+otherwise the manual trigger answers `409 store_not_owned`, with the reason as
+`detail` (Section 4.3).
 
 *Reference model.* A pooled JAR is **live** iff some server row's config records it
 as its resolved JAR (`resolved_jar_sha256`, Section 8) — the authoritative
@@ -718,10 +721,93 @@ first pass one interval after startup. It is gated on the resource pack store
 existing, not on the control plane. On fs / remote-fs there is no resource pack
 store, so no blob to reclaim, and the GC does not run.
 
-A bucket must belong to exactly one database. This GC, like the plugin-cache and
-JAR GCs, diffs the bucket against the database it is configured with, so an API
-pointed at another database's bucket treats that database's objects as orphans
-and deletes them once they are older than the safety window (#3870).
+**Store ownership** (issue #3870). A store (a bucket, or an fs root) must belong
+to exactly one database. The JAR-pool, plugin-cache and resource-pack GCs delete
+what no row of *this* database names, and the sweep deletes staging and multipart
+uploads that no lease in *this* process holds. Pointed at a store that another
+database also uses, they would delete that database's live objects. Examples are
+a probe or dev stack that copied the live object-store settings, and two
+deployments sharing one bucket. For a resource pack, the deleted object is the
+only copy of a user upload.
+
+So the store records which database owns it. Each database holds an
+installation id, minted once by migration and never changed (DATABASE.md
+Section 1.1). The **owner marker** is `mcsd-owner.json`: an object at the bucket
+root on the object backend, or a file at `<root>/` on fs and remote-fs. It holds
+`{"installation_id": ..., "created_at": ...}` and sits outside every namespace
+a GC or sweep lists. At startup, before the startup sweep, the API claims its
+store:
+
+- **No marker:** the API writes one naming its installation. The write is
+  conditional, so when two APIs start together on an unmarked store, exactly one
+  claims it. On the object store it is a PUT with `If-None-Match: *`, which
+  SeaweedFS honors. On fs, a fully written temporary file is hard-linked into
+  place. A store that rejects the conditional PUT gets a plain PUT; the marker is
+  then read back, and the read before each pass catches a lost race.
+- **A marker naming this installation:** the store is this database's.
+- **A marker naming another installation, or none it can read:** the store is
+  not this database's. The API logs an ERROR at startup and keeps the marker.
+
+The claim reads the database and writes the store, so the API fails to start if
+either is unreachable.
+
+Before **every** pass, each destructive GC and sweep reads the marker again. It
+runs only if the marker names this installation. This covers the storage sweep
+(at startup and on its loop, both backends), the JAR-pool GC (its loop, and
+`POST /versions/jar-pool/gc`, which answers `409 store_not_owned` with the
+reason as `detail`), the plugin-cache GC and the resource-pack GC. A refused pass
+deletes nothing and logs an ERROR on every pass, naming the marker and both
+installation ids. Everything
+else continues: serving, uploads, publishes, backups. Readiness (`/readyz`) is
+not affected either, because the data path still works; a refused pass only
+stops reclaiming space and orphaned staging, which the ERROR reports. A marker
+removed while the API runs is not claimed again until the next start, and the
+passes refuse until then. The passes that do not diff the store against the
+database are not gated: the backup retention prune and the post-delete prune
+remove the objects of rows this database holds, by their ids.
+
+The API reads its installation id once, at startup, and compares every pass
+against that. **Stop the API before replacing its database**: an API left running
+while its database is swapped for another (a restore, a clone, another
+installation's) keeps the old id, still matches the marker, and runs its GCs
+against the new rows.
+
+Cases the marker does not cover:
+
+- **A database restored to an earlier point** keeps its installation id, so its
+  GCs run. Objects the store gained after the restore point have no row in the
+  restored database. The safety windows (1 h) spare only the newest of them, and
+  the re-read before each delete only catches a row committed meanwhile, so a pass
+  reclaims every such object stored more than an hour before it runs. Restore the
+  store from the same point, or copy out what it gained since, before the restored
+  database's API starts.
+- **A database cloned from a dump** keeps the installation id too, so two
+  databases now carry the same one. An API on the clone (a probe or staging
+  stack seeded from a live dump) matches the live store's marker, and its GCs
+  run against the live objects with rows that are stale or diverging. A clone
+  must therefore never be pointed at the live store. A dump taken before
+  `0045_installation` is the opposite case: upgrading it mints a new id, which
+  the existing marker does not name, so its passes refuse until the reset below.
+- **An unmarked store is claimed by whichever API starts on it first**: at the
+  first start after the upgrade that introduced the marker, and again after the
+  marker is deleted or lost. If that API is a probe or a stack with the wrong
+  database, it becomes the owner: its startup sweep runs at once, and its GCs
+  run on their intervals against every object its database does not name, which
+  on a live store is the live data. The live API's passes refuse, but that does
+  not protect the live objects. Nothing stops a fresh database from claiming a
+  non-empty unmarked store (issue #3886), so a probe stack must never point at a
+  live store.
+- **The owner is not the only writer.** The marker stops a foreign API's GCs, not
+  its writes, and not the owner's GCs: the owner reclaims a foreign API's uploads
+  as orphans.
+
+To hand a store to another database, or to settle a refusal: stop every API that
+uses the store, delete `mcsd-owner.json`, and start the API whose database should
+own it. It claims the store at startup, and its next passes reclaim everything in
+the store that its database does not name. A downgrade of migration
+`0045_installation` followed by an upgrade mints a new installation id, which the
+marker no longer names, and so does upgrading a dump taken before it; the passes
+then refuse until this reset.
 
 ### 4.4 Single-file writes
 
@@ -1398,11 +1484,11 @@ ARCHITECTURE.md Section 6 (e.g. `FsStorage`, `ObjectStorage`).
 | Aspect | Guarantee / mechanism |
 |---|---|
 | Backing | A POSIX-like remote/shared mount (NFS, SMB, a CSI volume) presented as a normal path. |
-| Atomic publish | Same `current` symlink-flip mechanism as fs, **provided the mount honors symlinks, atomic same-directory rename, and close-to-open consistency.** |
+| Atomic publish | Same `current` symlink-flip mechanism as fs, **provided the mount honors symlinks, hard links, atomic same-directory rename, and close-to-open consistency.** |
 | Single-file write | temp-write + fsync + atomic rename, same as fs. |
 | Path-traversal | Identical to fs (the adapter logic is shared). |
 | Best for | Letting the authoritative store outlive a single API host / sit on shared infrastructure without moving to object storage. |
-| Caveat | Atomicity and durability depend on the mount's semantics; the adapter documents the required guarantees (symlink support, atomic same-dir rename, fsync durability) and the operator must provision a mount that meets them. SMB mounts frequently lack POSIX symlink support, so the remote-fs adapter requires a backing filesystem/mount with POSIX symlink and atomic same-directory rename semantics (NFS qualifies; SMB often does not). Cross-device rename caveat (Section 7.1) applies identically. |
+| Caveat | Atomicity and durability depend on the mount's semantics; the adapter documents the required guarantees (symlink support, hard-link support, atomic same-dir rename, fsync durability) and the operator must provision a mount that meets them. SMB mounts frequently lack POSIX symlink support, so the remote-fs adapter requires a backing filesystem/mount with POSIX symlink and atomic same-directory rename semantics (NFS qualifies; SMB often does not). The store owner marker is claimed by hard-linking a temporary file into place at the root (Section 4.3), so the mount must also support hard links, and one that does not fails the API at startup (NFS qualifies). Cross-device rename caveat (Section 7.1) applies identically. |
 
 `remote-fs` may share most code with `fs` (both are path-based); they are
 distinct entries because their **operational guarantees and failure modes

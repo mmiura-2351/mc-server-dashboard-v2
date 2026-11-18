@@ -219,13 +219,19 @@ func TestInstallLogRefusalRemovesNothingAfterADirectoryReplacement(t *testing.T)
 
 // A log the installer creates after the Worker found none, and before the
 // Worker's own gets its name, is not replaced: the Worker's link fails on it and
-// the output is appended to the installer's file, like to any existing log.
-func TestInstallLogAppendsToALogCreatedBeforeItsOwnIsNamed(t *testing.T) {
+// the output goes into the installer's file, emptied like any existing log.
+func TestInstallLogWritesALogCreatedBeforeItsOwnIsNamed(t *testing.T) {
 	dir := t.TempDir()
 	logPath := plantAtLogPath(t, dir)
 	prev := installLogFchown
+	var planted os.FileInfo
 	installLogFchown = func(int, int, int) error {
-		return os.WriteFile(logPath, []byte("the installer's\n"), 0o600)
+		if err := os.WriteFile(logPath, []byte("the installer's\n"), 0o600); err != nil {
+			return err
+		}
+		var err error
+		planted, err = os.Stat(logPath)
+		return err
 	}
 	t.Cleanup(func() { installLogFchown = prev })
 
@@ -235,8 +241,11 @@ func TestInstallLogAppendsToALogCreatedBeforeItsOwnIsNamed(t *testing.T) {
 		t.Fatalf("worker log = %q, want nothing logged", logged)
 	}
 	assertEntries(t, filepath.Join(dir, "logs"), "forge-install.log")
-	if got, want := readInstallLog(t, dir), "the installer's\n"+installLogOutput; got != want {
-		t.Fatalf("install log = %q, want %q", got, want)
+	if got, err := os.Stat(logPath); err != nil || !os.SameFile(got, planted) {
+		t.Fatalf("install log is not the installer's file (err %v), want that file written, not replaced", err)
+	}
+	if got := readInstallLog(t, dir); got != installLogOutput {
+		t.Fatalf("install log = %q, want %q", got, installLogOutput)
 	}
 }
 
@@ -343,18 +352,18 @@ func TestInstallLogWithoutUnnamedFilesLeavesAndReportsWhatItCannotHandOver(t *te
 }
 
 // A logs/ and a log that already existed are never re-owned, so there is nothing
-// to fail: the capture appends as before.
-func TestInstallLogAppendsToAnExistingLogItCouldNotHandOver(t *testing.T) {
+// to fail: the capture writes the log as before.
+func TestInstallLogWritesAnExistingLogItCouldNotHandOver(t *testing.T) {
 	dir := t.TempDir()
-	captureInstallLog(t, dir, "first attempt\n")
+	captureInstallLog(t, dir, "first start\n")
 	failInstallLogChown(t, always, nil)
 
-	_, logged := captureInstallLog(t, dir, "second attempt\n")
+	_, logged := captureInstallLog(t, dir, "second start\n")
 
 	if logged != "" {
 		t.Fatalf("worker log = %q, want nothing logged", logged)
 	}
-	if got, want := readInstallLog(t, dir), "first attempt\nsecond attempt\n"; got != want {
+	if got, want := readInstallLog(t, dir), "second start\n"; got != want {
 		t.Fatalf("install log = %q, want %q", got, want)
 	}
 }

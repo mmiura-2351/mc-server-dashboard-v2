@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from mc_server_dashboard_api.audit.adapters import models as _audit_models
 from mc_server_dashboard_api.community.adapters import models as _community_models
+from mc_server_dashboard_api.core.adapters import installation as _installation_models
 from mc_server_dashboard_api.core.adapters.database import Base
 from mc_server_dashboard_api.fleet.adapters import models as _fleet_models
 from mc_server_dashboard_api.identity.adapters import models as _identity_models
@@ -44,6 +45,7 @@ _ = (
     _schedule_models,
     _audit_models,
     _fleet_models,
+    _installation_models,
 )
 
 target_metadata = Base.metadata

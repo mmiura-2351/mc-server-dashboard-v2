@@ -543,13 +543,12 @@ func TestForgeContainerInstallFailureCrashesNoLaunch(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
-	// Use a statusError so isTransportError returns false (matching the real
-	// Docker client's behavior for a non-zero exit).
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
+	// The daemon answers a non-zero exit with the status code and no error, as
+	// the real client's Wait returns it.
 	docker.waitGates[installID] = make(chan waitResult, 3)
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1}
+	docker.waitGates[installID] <- waitResult{code: 1}
+	docker.waitGates[installID] <- waitResult{code: 1}
 	d := forgeDriver(docker)
 
 	inst, err := d.Start(context.Background(), forgeSpec(dir))
@@ -939,9 +938,8 @@ func TestForgeInstallRetrySucceeds(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
 	docker.waitGates[installID] = make(chan waitResult, 2)
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1}
 	docker.waitGates[installID] <- waitResult{code: 0}
 	// Write the argsfile when the retry creates the second install container.
 	// This runs after cleanForgeInstallArtifacts and before Wait, so the
@@ -982,11 +980,10 @@ func TestForgeInstallRetryExhausted(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
 	docker.waitGates[installID] = make(chan waitResult, 3)
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1}
+	docker.waitGates[installID] <- waitResult{code: 1}
+	docker.waitGates[installID] <- waitResult{code: 1}
 	d := forgeDriver(docker)
 
 	inst, err := d.Start(context.Background(), forgeSpec(dir))
@@ -1014,9 +1011,8 @@ func TestForgeInstallRetryStopDuringBackoff(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
 	docker.waitGates[installID] = make(chan waitResult, 1)
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1}
 	// A generous StopTimeout so Stop's waitExitDone does not time out before the
 	// supervisor's backoff poll notices the stopping latch (50ms tick).
 	d := New(docker, images(), func(context.Context, execution.InstanceSpec, string) (execution.ServerControl, error) {
@@ -1185,7 +1181,6 @@ func TestForgeInstallRetryStopWinsLatchBeforeRetryStart(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
 	// Unbuffered: Wait blocks until we push a result, giving us time to set the
 	// hook before the retry path runs.
 	docker.waitGates[installID] = make(chan waitResult)
@@ -1233,7 +1228,7 @@ func TestForgeInstallRetryStopWinsLatchBeforeRetryStart(t *testing.T) {
 	}
 
 	// Trigger attempt 0 failure → retry path.
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1}
 
 	// Wait for the hook to fire (meaning attempt 0 failed, retry container created).
 	select {
@@ -1283,11 +1278,10 @@ func TestInstallRetryResetsExitObservedForNewContainer(t *testing.T) {
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	installID := "mcsd-s1-install"
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "install exited 1"}
 	// Attempt 0: non-zero exit → retry. Attempt 1: blocks on waitGate so Stop
 	// can race it.
 	docker.waitGates[installID] = make(chan waitResult, 1)
-	docker.waitGates[installID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[installID] <- waitResult{code: 1}
 	// Stop and Kill on the retry container must NOT release Wait (survived kill).
 	docker.stopNoExitIDs = map[string]bool{installID: true}
 	docker.killNoExitIDs = map[string]bool{installID: true}
@@ -1588,9 +1582,8 @@ func TestForgeNextStartRemovesTheRetryInstallerAnAmbiguousStartLeftRunning(t *te
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
 	docker.reportsState = true
-	installErr := statusError{method: "POST", path: "/wait", code: 200, message: "download failed"}
 	docker.waitGates[forgeInstallID] = make(chan waitResult, 1)
-	docker.waitGates[forgeInstallID] <- waitResult{code: 1, err: installErr}
+	docker.waitGates[forgeInstallID] <- waitResult{code: 1}
 	// The retry, the second installer, is the one whose start and removal stall.
 	var installs atomic.Int32
 	docker.onCreateHook = func(spec CreateSpec) {

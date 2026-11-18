@@ -56,3 +56,13 @@ class JarTooLargeError(VersionError):
     before verification), so a runaway or hostile response cannot exhaust memory.
     The edge maps it to the same ``jar_unavailable`` 503 surface.
     """
+
+
+class StoreNotOwnedError(VersionError):
+    """The JAR-pool GC refused: its store belongs to another database (#3870).
+
+    The pool is diffed against this database's server rows, so on a store another
+    database also uses every JAR of that database would look unreferenced. The
+    message carries the owner marker's verdict. The edge maps it to 409
+    ``store_not_owned``.
+    """

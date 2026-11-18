@@ -14,18 +14,28 @@ blob is present but not yet referenced by any committed row -- exactly an orphan
 to this GC. Deleting it would race an in-flight install. We therefore never
 delete a blob younger than :data:`GC_SAFETY_WINDOW`; one hour is comfortably
 beyond the cache-to-commit gap of a normal install.
+
+**Ownership.** The reference model holds only if the bucket belongs to this
+database: in a bucket another database also uses, that database's blobs are named
+by no row here. Each pass therefore asks the bucket's owner marker first and is
+refused, with an ERROR, unless it names this installation (STORAGE.md Section 4.3,
+issue #3870).
 """
 
 from __future__ import annotations
 
 import abc
 import datetime as dt
+import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     PluginCacheStore,
 )
+from mc_server_dashboard_api.servers.domain.store_ownership import StoreOwnership
+
+_LOG = logging.getLogger(__name__)
 
 # Never delete a blob younger than this. See module docstring.
 GC_SAFETY_WINDOW = dt.timedelta(hours=1)
@@ -59,8 +69,13 @@ class RunPluginCacheGc:
     cache: PluginCacheStore
     references: LivePluginCacheReferences
     clock: Clock
+    ownership: StoreOwnership
 
     async def __call__(self) -> PluginCacheGcResult:
+        refusal = await self.ownership.refusal()
+        if refusal is not None:
+            _LOG.error("plugin-cache GC refused: %s", refusal)
+            return PluginCacheGcResult(scanned=0, deleted=0, freed_bytes=0)
         entries = await self.cache.list_entries()
         live = await self.references.live()
         cutoff = self.clock.now() - GC_SAFETY_WINDOW

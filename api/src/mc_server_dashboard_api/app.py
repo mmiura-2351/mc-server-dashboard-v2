@@ -39,6 +39,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
 )
+from mc_server_dashboard_api.core.adapters.installation import read_installation_id
 from mc_server_dashboard_api.core.adapters.metrics import HTTP_TELEMETRY
 from mc_server_dashboard_api.core.api import health, meta, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
@@ -235,6 +236,10 @@ from mc_server_dashboard_api.storage.adapters.object_client import (
     make_s3_client_factory,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from mc_server_dashboard_api.storage.adapters.ownership import (
+    FsStoreOwnership,
+    ObjectStoreOwnership,
+)
 from mc_server_dashboard_api.storage.adapters.sweep_loop import (
     run_storage_sweep_loop,
 )
@@ -286,7 +291,9 @@ def _resolve_config_file() -> Path | None:
     return Path(raw) if raw else None
 
 
-def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
+def _build_storage(
+    settings: Settings,
+) -> tuple[FsStorage | ObjectStorage, FsStoreOwnership | ObjectStoreOwnership]:
     """Bind the :class:`Storage` Port to the config-selected adapter.
 
     Backend selection follows STORAGE.md Section 7. ``fs`` is the M1 default and
@@ -294,13 +301,21 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
     S3-compatible adapter (Section 7.3); its endpoint/bucket/credentials are
     required and a missing one fails fast at boot rather than starting with an
     unusable store (CONFIGURATION.md Section 3).
+
+    Returned with it is the store's owner marker (Section 4.3, issue #3870), which
+    gates the adapter's sweep and every GC on the store belonging to this
+    database. The lifespan claims it at startup.
     """
 
     if settings.storage.backend in ("fs", "remote-fs"):
-        return FsStorage(
-            Path(settings.storage.fs.root),
+        root = Path(settings.storage.fs.root)
+        fs_ownership = FsStoreOwnership(root)
+        fs_storage = FsStorage(
+            root,
             version_retention=settings.storage.version_retention,
+            ownership=fs_ownership,
         )
+        return fs_storage, fs_ownership
     obj = settings.storage.object
     # Treat empty/whitespace as missing, not just None: compose interpolates an unset
     # ``${MCD_API_STORAGE__OBJECT__ACCESS_KEY}`` to "" rather than dropping it, so an
@@ -320,18 +335,22 @@ def _build_storage(settings: Settings) -> FsStorage | ObjectStorage:
     assert obj.bucket is not None
     assert obj.access_key is not None
     assert obj.secret_key is not None
-    return ObjectStorage(
-        make_s3_client_factory(
-            endpoint=obj.endpoint,
-            bucket=obj.bucket,
-            access_key=obj.access_key,
-            secret_key=obj.secret_key,
-            connect_timeout=obj.connect_timeout_seconds,
-            read_timeout=obj.read_timeout_seconds,
-            retry_max_attempts=obj.retry_max_attempts,
-        ),
-        version_retention=settings.storage.version_retention,
+    client_factory = make_s3_client_factory(
+        endpoint=obj.endpoint,
+        bucket=obj.bucket,
+        access_key=obj.access_key,
+        secret_key=obj.secret_key,
+        connect_timeout=obj.connect_timeout_seconds,
+        read_timeout=obj.read_timeout_seconds,
+        retry_max_attempts=obj.retry_max_attempts,
     )
+    object_ownership = ObjectStoreOwnership(client_factory, bucket=obj.bucket)
+    object_storage = ObjectStorage(
+        client_factory,
+        version_retention=settings.storage.version_retention,
+        ownership=object_ownership,
+    )
+    return object_storage, object_ownership
 
 
 def _build_resource_pack_store(
@@ -698,7 +717,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Bind the Storage Port to the config-selected backend now, so an unsupported
     # backend (or, by construction, a missing fs root) fails fast at boot rather
     # than on first use (CONFIGURATION.md Section 3; STORAGE.md Section 7).
-    storage = _build_storage(settings)
+    storage, store_ownership = _build_storage(settings)
 
     # Build the resource pack store (issue #1176): only available for the object
     # backend; None for fs/remote-fs.
@@ -764,6 +783,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             assert obj.endpoint is not None
             assert obj.bucket is not None
             await storage.check_reachable(endpoint=obj.endpoint, bucket=obj.bucket)
+        # Claim the store for this database before anything destructive runs
+        # (STORAGE.md Section 4.3, issue #3870): write the owner marker naming
+        # this database's installation id if the store has none. Every GC and
+        # sweep below re-reads it and refuses to run unless it names this
+        # installation, so a store shared with another database is never diffed
+        # against this one. A marker naming another database does not stop the
+        # app: serving and uploads go on, only the destructive passes refuse.
+        await store_ownership.claim(
+            await read_installation_id(create_session_factory(engine))
+        )
+        app.state.store_ownership = store_ownership
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
@@ -1294,6 +1324,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     uow=ServersUnitOfWork(create_session_factory(engine))
                 ),
                 clock=VersionsSystemClock(),
+                ownership=store_ownership,
             )
             jar_gc_task = asyncio.create_task(
                 run_jar_gc_loop(
@@ -1314,6 +1345,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     uow=ServersUnitOfWork(create_session_factory(engine))
                 ),
                 clock=ServersSystemClock(),
+                ownership=store_ownership,
             )
             plugin_cache_gc_task = asyncio.create_task(
                 run_plugin_cache_gc_loop(
@@ -1332,6 +1364,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 uow=ServersUnitOfWork(create_session_factory(engine)),
                 store=resource_pack_store,
                 clock=ServersSystemClock(),
+                ownership=store_ownership,
             )
             resource_pack_gc_task = asyncio.create_task(
                 run_resource_pack_gc_loop(
