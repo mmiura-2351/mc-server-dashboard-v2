@@ -554,3 +554,24 @@ async def test_a_resumed_pass_logs_where_it_starts_at_debug(
         if r.levelno == logging.DEBUG and keys[1] in r.getMessage()
     ]
     assert "after" in resumed.getMessage()
+
+
+async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
+    # A pass that stops after five failed deletes in a row did not come round, so
+    # the next pass still starts after the blob the store gave no answer for
+    # (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(6)
+    store.fail_deletes_of(keys[0])
+    store.faults.error = ObjectStoreUnreachableError
+    resume_point = ResumePoint()
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await gc()
+    store.faults.clear()
+    store.fail_deletes_of(*keys[1:])
+
+    result = await gc()
+
+    assert result.failed == 5
+    assert resume_point.key == keys[0]
