@@ -493,7 +493,11 @@ trigger a sweep on demand (`POST /versions/jar-pool/gc`).
 The first sweep runs soon after startup, after a random delay, uniform between 0
 and min(`jar_gc.interval_seconds`, 600) seconds. Later sweeps follow the interval.
 An API that restarts more often than the interval (on every deploy, say) still
-reclaims, and API processes that restart together do not all sweep at once.
+reclaims, and API processes that restart together do not all sweep at once. The
+plugin-cache and resource-pack GCs, the snapshot scheduler and both prunes follow
+the same rule over their own intervals. Two loops differ: the storage sweep loop
+waits one full interval (Section 5.15), and the divergence reconciler runs its
+first pass at once (Section 5.6).
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -672,12 +676,11 @@ mirroring the one-shot startup sweep. A daily default keeps the loop cold so
 overlap with a live publish stays rare. The resource-pack GC (STORAGE.md
 Section 4.3) runs on the same cadence, on the object backend only.
 
-The first pass of the sweep loop, and of the resource-pack GC, follows the
-JAR-pool GC rule (Section 5.7): a random delay, uniform between 0 and
-min(`storage_sweep.interval_seconds`, 600) seconds after startup. Later passes
-follow the interval. The one-shot startup sweep still runs
-before the API serves, so the sweep runs twice within that window after a
-restart; it is idempotent.
+The sweep loop's first pass comes one full interval after startup, because the
+one-shot startup sweep has just run. The resource-pack GC's first pass follows
+the JAR-pool GC rule (Section 5.7): a random delay, uniform between 0 and
+min(`storage_sweep.interval_seconds`, 600) seconds after startup. Later passes of
+both follow the interval.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|

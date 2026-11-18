@@ -716,8 +716,10 @@ database. It mirrors the plugin-cache GC:
    stored.
 
 It runs as an API lifespan task on the storage sweep's cadence
-(`storage_sweep.interval_seconds`, CONFIGURATION.md Section 5.15), with its
-first pass one interval after startup. It is gated on the resource pack store
+(`storage_sweep.interval_seconds`, CONFIGURATION.md Section 5.15). Its first
+pass runs after a random delay, uniform between 0 and
+min(`storage_sweep.interval_seconds`, 600) seconds from startup (CONFIGURATION.md
+Section 5.7). It is gated on the resource pack store
 existing, not on the control plane. On fs / remote-fs there is no resource pack
 store, so no blob to reclaim, and the GC does not run.
 

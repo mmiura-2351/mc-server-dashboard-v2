@@ -66,6 +66,33 @@ async def test_later_delays_follow_the_interval(
     await _cancel(task)
 
 
+async def test_can_wait_one_interval_before_the_first_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback_calls = 0
+
+    async def callback() -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+
+    sleep = RecordingSleep(returns=1)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    task = asyncio.create_task(
+        run_periodic(
+            callback,
+            tick_seconds=86400,
+            on_error=Mock(),
+            first_pass="after_interval",
+        )
+    )
+
+    await sleep.parked.wait()
+
+    assert sleep.delays == [86400, 86400]
+    assert callback_calls == 1
+    await _cancel(task)
+
+
 async def test_waits_before_the_first_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -224,7 +251,7 @@ async def test_can_run_the_initial_callback_immediately(
             callback,
             tick_seconds=1,
             on_error=Mock(),
-            run_immediately=True,
+            first_pass="immediately",
         )
     )
 

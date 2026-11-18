@@ -227,8 +227,8 @@ def _defer_periodic_first_pass(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The draw is random, so a test whose lifespan happened to outlast it would run
     a background pass mid-test: a prune against the unreachable dummy database
-    (the traceback noise of #1740) or a storage sweep. The largest draw keeps the
-    first pass a full window out. Tests of the runner pin their own draw.
+    (the traceback noise of #1740) or a GC pass. The largest draw keeps the first
+    pass a full window out. Tests of the runner pin their own draw.
     """
     monkeypatch.setattr(
         periodic_runner._RNG, "random", lambda: math.nextafter(1.0, 0.0)

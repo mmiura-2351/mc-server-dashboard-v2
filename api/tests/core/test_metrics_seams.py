@@ -11,6 +11,7 @@ from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.domain.events import AuditEvent
 from mc_server_dashboard_api.audit.domain.writer import AuditWriter
 from mc_server_dashboard_api.core.adapters import metrics
+from mc_server_dashboard_api.core.adapters.periodic_runner import FirstPass
 from mc_server_dashboard_api.servers.adapters import reconciler_loop
 
 
@@ -43,10 +44,10 @@ async def test_reconciler_loop_counts_ticks_and_stamps_success(
         *,
         tick_seconds: float,
         on_error: Callable[[], None],
-        run_immediately: bool,
+        first_pass: FirstPass,
     ) -> None:
         assert tick_seconds == 0
-        assert run_immediately
+        assert first_pass == "immediately"
         await callback()
 
     monkeypatch.setattr(reconciler_loop, "run_periodic", runner)

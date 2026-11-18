@@ -1,9 +1,11 @@
-"""First-pass timing of every periodic loop that starts soon after boot (#3868).
+"""First-pass timing of the periodic lifespan loops (#3868).
 
-Each loop runs its first pass after a random delay below ``min(interval, 10 min)``
-and later passes every interval, so an API restarted more often than the
-interval still runs them. These tests drive the real runner through each loop
-entry point, with a recording fake ``asyncio.sleep`` and no real waits.
+Each early loop runs its first pass after a random delay below
+``min(interval, 10 min)`` and later passes every interval, so an API restarted
+more often than the interval still runs them. The storage sweep loop instead
+waits one full interval: the lifespan already sweeps on every start. These tests
+drive the real runner through each loop entry point, with a recording fake
+``asyncio.sleep`` and no real waits.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ def _ticking(on_pass: Pass) -> SimpleNamespace:
     return SimpleNamespace(tick=on_pass)
 
 
-_LOOPS = [
+_EARLY_LOOPS = [
     pytest.param(
         lambda on_pass, tick: run_jar_gc_loop(
             cast(RunJarPoolGc, on_pass), tick_seconds=tick
@@ -75,10 +77,6 @@ _LOOPS = [
             cast(RunResourcePackGc, on_pass), tick_seconds=tick
         ),
         id="resource-pack-gc",
-    ),
-    pytest.param(
-        lambda on_pass, tick: run_storage_sweep_loop(on_pass, tick_seconds=tick),
-        id="storage-sweep",
     ),
     pytest.param(
         lambda on_pass, tick: run_prune_login_attempts_loop(
@@ -100,6 +98,11 @@ _LOOPS = [
     ),
 ]
 
+_STORAGE_SWEEP = pytest.param(
+    lambda on_pass, tick: run_storage_sweep_loop(on_pass, tick_seconds=tick),
+    id="storage-sweep",
+)
+
 
 class _PassCounter:
     def __init__(self) -> None:
@@ -111,7 +114,7 @@ class _PassCounter:
         self.passes += 1
 
 
-@pytest.mark.parametrize("start_loop", _LOOPS)
+@pytest.mark.parametrize("start_loop", _EARLY_LOOPS)
 async def test_first_pass_runs_within_the_startup_window_then_every_interval(
     monkeypatch: pytest.MonkeyPatch, start_loop: StartLoop
 ) -> None:
@@ -131,7 +134,29 @@ async def test_first_pass_runs_within_the_startup_window_then_every_interval(
         await task
 
 
-@pytest.mark.parametrize("start_loop", _LOOPS)
+async def test_storage_sweep_loop_waits_one_interval_before_its_first_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The lifespan sweeps before serving on every start, so an early loop pass
+    # would reclaim nothing new and would land among the post-restart snapshot
+    # publishes the sweep can race (#3893).
+    sleep = RecordingSleep(returns=2)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    counter = _PassCounter()
+    task = asyncio.create_task(
+        run_storage_sweep_loop(counter.count, tick_seconds=_DAILY)
+    )
+
+    await sleep.parked.wait()
+
+    assert sleep.delays == [_DAILY, _DAILY, _DAILY]
+    assert counter.passes == 2
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.parametrize("start_loop", [*_EARLY_LOOPS, _STORAGE_SWEEP])
 async def test_cancelling_during_the_startup_delay_ends_the_loop_without_a_pass(
     monkeypatch: pytest.MonkeyPatch, start_loop: StartLoop
 ) -> None:
