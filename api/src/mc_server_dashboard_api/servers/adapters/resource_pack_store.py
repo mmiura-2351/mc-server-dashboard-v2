@@ -58,15 +58,22 @@ from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
-from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    KeyNamespace,
+    S3ClientFactory,
+)
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
 )
 
 
+def _prefix(pack_id: ResourcePackId) -> str:
+    return f"{KeyNamespace.RESOURCE_PACKS}{pack_id.value}/"
+
+
 def _key(pack_id: ResourcePackId, filename: str) -> str:
-    return f"resource-packs/{pack_id.value}/{filename}"
+    return _prefix(pack_id) + filename
 
 
 class ObjectResourcePackStore(ResourcePackStore):
@@ -117,7 +124,7 @@ class ObjectResourcePackStore(ResourcePackStore):
             raise ResourcePackStorageUnavailableError(key) from exc
 
     async def delete(self, pack_id: ResourcePackId) -> None:
-        prefix = f"resource-packs/{pack_id.value}/"
+        prefix = _prefix(pack_id)
         try:
             async with self._client_factory() as client:
                 objects = await client.list_objects(prefix)
