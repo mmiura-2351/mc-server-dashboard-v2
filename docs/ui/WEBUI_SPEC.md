@@ -401,9 +401,9 @@ drops — the newer write publishes its own frame after the older one, so the
 client still ends on the newer state.
 
 Residual (#3307): that last step holds for sequential writes only. Each write
-publishes when its own commit returns, so two writes of one server's state made
-on different database connections publish in the order their commit
-acknowledgements reach the API's event loop, which can differ from the order
+publishes when its own commit returns, so two writes of one server's state or
+assignment made on different database connections publish in the order their
+commit acknowledgements reach the API's event loop, which can differ from the order
 the database committed them in. The frame of the earlier commit can then be
 published last, and a client is left on that older state until the next status
 frame for the server, or until the snapshot that follows a reconnect or a `gap`
