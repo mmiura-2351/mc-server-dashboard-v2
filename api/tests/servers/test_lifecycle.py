@@ -42,6 +42,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.stop_intents import (
+    StopIntentCounter,
+)
 from mc_server_dashboard_api.servers.domain.committed_resources import (
     CommittedResources,
 )
@@ -3261,6 +3264,49 @@ async def test_stop_desired_stopped_running_unassigned_is_conflict() -> None:
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
     assert cp.dispatched == []
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+async def test_stop_of_an_unplaced_start_intent_withdraws_it_without_a_worker(
+    observed: ObservedState,
+) -> None:
+    # Issue #3815: a start intent no Worker holds yet (desired=running,
+    # unassigned) while the reconciler retries its placement, e.g. because no
+    # Worker can take the server. The stop used to refuse it, so the operator could
+    # not withdraw it. It now commits desired=stopped and bumps the count, as any
+    # stop does, and sends nothing: there is no Worker to tell and no placement
+    # load to drop. The observed state stays as no Worker can speak for it.
+    community, server_id, _ = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=observed,
+        )
+    )
+    cp = FakeControlPlane()
+    intents = StopIntentCounter()
+    use_case = StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_intents=intents
+    )
+
+    result = await use_case(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.assigned_worker_id is None
+    assert stored.observed_state is observed
+    assert result.desired_state is DesiredState.STOPPED
+    assert uow.commits == 1
+    assert cp.dispatched == []
+    assert cp.decremented == []
+    assert intents.current(ServerId(server_id)) == 1
 
 
 async def test_stop_lost_race_is_conflict_without_dispatch_or_count() -> None:
