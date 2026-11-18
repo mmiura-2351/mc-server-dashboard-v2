@@ -28,7 +28,7 @@ import threading
 import uuid
 import zipfile
 import zlib
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -96,6 +96,11 @@ from mc_server_dashboard_api.storage.adapters.fs import _write_tar_gz
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.servers import archive_cap_shapes
+from tests.servers.executor_starvation import (
+    IN_FLIGHT,
+    InFlight,
+    assert_default_executor_free,
+)
 from tests.servers.fakes import FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -5841,6 +5846,63 @@ async def test_platform_key_comparison_does_not_block_the_event_loop(
         await task
 
     assert store.deleted_files == ["server.properties"]
+
+
+@pytest.mark.parametrize(
+    "slow_pass",
+    [
+        pytest.param(1, id="the-dry-run"),
+        pytest.param(2, id="the-pass-that-collects-the-entries"),
+    ],
+)
+async def test_extracts_validating_together_leave_the_default_executor_free(
+    monkeypatch: pytest.MonkeyPatch, slow_pass: int
+) -> None:
+    # An extract reads the archive twice before it writes, and a crafted archive
+    # that passes the first read costs as much in the second. Both run on the
+    # archive-validation pool (issue #3843): on the default executor, a few
+    # extracts validating for minutes would take every worker from the fs
+    # Storage calls, the sweep and everything else that runs there.
+    in_flight = InFlight()
+    passes: dict[bytes, int] = {}
+    counting = threading.Lock()
+
+    def entries(
+        filename: str, content: bytes, *, max_bytes: int, max_entries: int
+    ) -> Iterator[tuple[str, bytes]]:
+        with counting:
+            passes[content] = passes.get(content, 0) + 1
+            this_pass = passes[content]
+        if this_pass == slow_pass:
+            in_flight.block()
+        return iter([("a.txt", content)])
+
+    monkeypatch.setattr(files, "_archive_entries", entries)
+    stores = [FakeFileStore() for _ in range(IN_FLIGHT)]
+    extracts = []
+    for n, store in enumerate(stores):
+        community, server_id = uuid.uuid4(), uuid.uuid4()
+        use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+        extracts.append(
+            asyncio.ensure_future(
+                use_case(
+                    community_id=CommunityId(community),
+                    server_id=ServerId(server_id),
+                    dir_path=".",
+                    filename="pack.zip",
+                    content=f"archive {n}".encode(),
+                    extract=True,
+                )
+            )
+        )
+    try:
+        await assert_default_executor_free(in_flight)
+    finally:
+        await asyncio.gather(*extracts)
+
+    assert [store.files["a.txt"] for store in stores] == [
+        f"archive {n}".encode() for n in range(IN_FLIGHT)
+    ]
 
 
 async def test_delete_root_properties_over_the_edit_cap_is_allowed(

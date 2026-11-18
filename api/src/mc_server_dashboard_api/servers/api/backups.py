@@ -30,6 +30,7 @@ from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
 from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Permission
 from mc_server_dashboard_api.dependencies import (
+    get_archive_upload_admission,
     get_audit_recorder,
     get_clear_backup_retention,
     get_create_backup,
@@ -66,6 +67,9 @@ from mc_server_dashboard_api.http_streaming import counted, started
 from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
+)
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
 )
 from mc_server_dashboard_api.servers.application.backups import (
     ClearBackupRetention,
@@ -114,6 +118,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    UploadBusyError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
@@ -123,11 +128,6 @@ router = APIRouter(route_class=RequestBodyLimitRoute)
 _logger = logging.getLogger(__name__)
 
 _SERVER_RESOURCE_TYPE = "server"
-
-# How much to pull per chunk when buffering the multipart upload, so an over-cap
-# body is refused as soon as the running count crosses MAX_UPLOAD_BYTES rather
-# than materializing the whole part first (mirroring the files upload edge).
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 # Backups are self-contained gzip tar archives (STORAGE.md Section 2); download
 # streams the native bytes with this content type and a ``.tar.gz`` attachment.
@@ -991,12 +991,13 @@ async def upload_backup(
     ],
     use_case: Annotated[UploadBackup, Depends(get_upload_backup)],
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    admission: Annotated[ArchiveUploadAdmission, Depends(get_archive_upload_admission)],
 ) -> BackupResponse:
     """Upload an off-host backup archive as a new restorable backup (backup:create).
 
-    The multipart body is buffered with the chunked pre-buffer cap (over-cap -> 413
-    before the whole body is materialized); the use case then validates the archive
-    (opens + traversal-safe entries) before storing it. A non-archive / unsafe
+    The multipart body is read into memory off the event loop (over-cap -> 413);
+    the use case then validates the archive (opens + traversal-safe entries)
+    before storing it. A non-archive / unsafe
     member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
     member, its name and the reason; a name over 256 characters is cut to its
     first 256 and marked ``…(truncated, N chars)``); an over-cap archive is 413.
@@ -1024,16 +1025,26 @@ async def upload_backup(
     root name starting ``.mcsd_generation`` — the Worker's generation marker — or
     under one is 422 ``reserved_name``, refused before the archive is stored. A
     same-named member deeper in the tree is ordinary user data.
+
+    **Only a few archive uploads at a time (issue #3843).** This route and the
+    files upload's extract validate on one small pool, and admit at most four
+    archive uploads at a time between them: two validating and two waiting. One
+    past that is 503 ``upload_busy``, refused before its body is read into memory,
+    with nothing stored; sending it again shortly is the remedy. Once its body is
+    read, an upload whose client disconnects still runs to its end and is stored.
     """
 
-    content = await _read_capped_upload(file)
     try:
-        backup = await use_case(
-            community_id=CommunityId(community_id),
-            server_id=ServerId(server_id),
-            content=content,
-            created_by=authorized.user_id.value,
-        )
+        with admission.slot():
+            content = await _read_capped_upload(file)
+            backup = await use_case(
+                community_id=CommunityId(community_id),
+                server_id=ServerId(server_id),
+                content=content,
+                created_by=authorized.user_id.value,
+            )
+    except UploadBusyError as exc:
+        raise _service_unavailable("upload_busy") from exc
     except ServerNotFoundError as exc:
         raise _not_found() from exc
     except FileTooLargeError as exc:
@@ -1118,25 +1129,20 @@ async def global_backup_statistics(
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
-    """Pull the multipart body in chunks, aborting with 413 past the upload cap.
+    """Read the multipart part whole, refusing it with 413 past the upload cap.
 
-    Reading in bounded chunks and checking the running count after each lets an
-    over-cap upload be refused as soon as the count crosses MAX_UPLOAD_BYTES,
-    rather than materializing a body far larger than the cap (mirroring the files
-    upload edge). The use case re-checks the cap, so this is the edge's early-out.
+    One read, which Starlette runs on its thread pool for a part spooled to disk
+    (every part past 1 MiB), so copying up to 512 MiB never runs on the event loop
+    (issue #3843). A part of at most 1 MiB is still in memory and is copied on the
+    loop. The route's request body limit already bounds the part to the cap plus
+    the multipart envelope, so the read never holds more than that. The use case
+    re-checks the cap.
     """
 
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_UPLOAD_BYTES:
-            raise _too_large()
-        chunks.append(chunk)
-    return b"".join(chunks)
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise _too_large()
+    return content
 
 
 def _download_headers(

@@ -39,7 +39,6 @@ retry.
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import gzip
 import hashlib
@@ -66,6 +65,9 @@ from mc_server_dashboard_api.audit.domain.operations import (
     TARGET_BACKUP,
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.files import (
     _TAR_GZ_READ_ERRORS,
     MAX_ARCHIVE_ENTRIES,
@@ -1270,20 +1272,29 @@ class UploadBackup:
     :func:`_validate_backup_archive` for why the refusal belongs here rather than
     at restore.
 
-    The validation runs in a worker thread, the default executor ``UploadFile``
-    uses for its own (issue #1620), so it never holds the event loop (issue
-    #3801). The thread reads ``content``, the bytes the route copied out of the
-    request's spooled part, and never the spool, so the spool may close whenever
-    the request ends. A cancelled call stops waiting at once and stores nothing.
+    The validation runs off the event loop thread (issue #3801), on the
+    archive-validation pool it shares with the files upload's extract and nothing
+    else (:mod:`.archive_validation`, issue #3843), so a crafted upload can hold a
+    thread of that pool but none of the default executor's. The loop still runs
+    late while it validates: the validating thread holds the GIL as it
+    decompresses, and with one such thread a 1 ms loop tick was measured late by
+    up to 29 ms at the 99th percentile and 100 ms at most (several threads were
+    not measured). The thread reads ``content``, the bytes the route read out of
+    the request's spooled part, and never the spool, so the spool may close
+    whenever the request ends.
+
+    Once the body is read, a client that disconnects does not cancel the request:
+    the validation runs to its end and the backup is stored. Only a shutdown
+    cancels the call. A cancelled call stops waiting at once and stores nothing.
     The thread cannot be stopped: it runs on to its own end, holding ``content``
-    until then.
+    and its pool thread until then.
 
     The caps do not bound all of that thread's CPU. ``gzip`` pays for every gzip
-    member whatever it holds, about 1 s a MiB of empty members, and reads zero
-    padding after the gzip stream one byte at a time, about 0.2 s a MiB. Neither
-    adds decompressed bytes, so only the 512 MiB body cap bounds them: minutes
-    for one upload, now in the worker thread rather than on the event loop.
-    Issue #3835 bounds both.
+    member whatever it holds, about 1 CPU-s a MiB of empty members, and reads zero
+    padding after the gzip stream one byte at a time, about 0.11 CPU-s a MiB.
+    Neither adds decompressed bytes, so only the 512 MiB body cap bounds them:
+    about 8 CPU-minutes and 1 CPU-minute for one upload at that cap. Issue #3835
+    bounds both.
 
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
@@ -1309,10 +1320,11 @@ class UploadBackup:
         # the lock and never extend its hold.
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
-        # Offloaded to a thread, as UploadFile does (issue #1620): decompression
-        # is CPU-bound up to the decompressed cap, and on the event loop it would
-        # stall every other request on the process (issue #3801).
-        await asyncio.to_thread(
+        # Decompression is CPU-bound (see the docstring for what the caps leave
+        # unbounded): on the event loop it would stall every other request on the
+        # process (issue #3801), and on the default executor a few such uploads
+        # would starve everything else that runs there (issue #3843).
+        await run_archive_validation(
             _validate_backup_archive,
             content,
             max_entries=self.max_entries,
