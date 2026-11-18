@@ -105,7 +105,7 @@ dependencies = [
     # servers/adapters/ (the domain stays stdlib-only; the import-linter
     # contract below pins that). 2.7 (2025-10-21) is well outside the 7-day
     # cooldown (Section 3); cap the next major.
-    "cronsim>=2.7,<3",                  # 2025-10-21
+    "cronsim>=2.8,<3",                  # 2025-10-21
 ]
 
 [dependency-groups]
