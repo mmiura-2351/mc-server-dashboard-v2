@@ -127,8 +127,15 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // dialog before the pull would run.
     const isOutside = (node: Node | null) =>
       !dialog.contains(node) && !toastZone?.contains(node);
+    // Focus on the page body is left alone: Tab from there is the browser's.
     const pullBack = () => {
-      if (dialogStack.at(-1) !== dialog || !isOutside(document.activeElement)) {
+      const active = document.activeElement;
+      if (
+        dialogStack.at(-1) !== dialog ||
+        active === null ||
+        active === document.body ||
+        !isOutside(active)
+      ) {
         return;
       }
       const inDialog = focusableWithin(dialog);
