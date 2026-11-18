@@ -614,8 +614,9 @@ proxies the API).
 ### 5.12 Plugin-cache garbage collection
 
 The API runs a background GC that reclaims cached plugin/mod blobs no
-`server_plugin` row references. It is gated on the control plane
-like the JAR-pool GC (Section 5.7).
+`server_plugin` row references. It starts whenever the plugin cache store
+exists (object backend only), whether or not the control plane is enabled:
+plugin installs work without the control plane, so the GC must too.
 
 Its first sweep follows the JAR-pool GC rule (Section 5.7): a random delay,
 uniform between 0 and min(`plugin_cache_gc.interval_seconds`, 600) seconds after
@@ -671,9 +672,10 @@ mirroring the one-shot startup sweep. A daily default keeps the loop cold so
 overlap with a live publish stays rare. The resource-pack GC (STORAGE.md
 Section 4.3) runs on the same cadence, on the object backend only.
 
-The loop's first pass follows the JAR-pool GC rule (Section 5.7): a random delay,
-uniform between 0 and min(`storage_sweep.interval_seconds`, 600) seconds after
-startup. Later passes follow the interval. The one-shot startup sweep still runs
+The first pass of the sweep loop, and of the resource-pack GC, follows the
+JAR-pool GC rule (Section 5.7): a random delay, uniform between 0 and
+min(`storage_sweep.interval_seconds`, 600) seconds after startup. Later passes
+follow the interval. The one-shot startup sweep still runs
 before the API serves, so the sweep runs twice within that window after a
 restart; it is idempotent.
 

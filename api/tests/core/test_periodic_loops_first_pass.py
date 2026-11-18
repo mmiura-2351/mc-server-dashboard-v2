@@ -27,10 +27,16 @@ from mc_server_dashboard_api.servers.adapters.game_session_prune_loop import (
 from mc_server_dashboard_api.servers.adapters.plugin_cache_gc_loop import (
     run_plugin_cache_gc_loop,
 )
+from mc_server_dashboard_api.servers.adapters.resource_pack_gc_loop import (
+    run_resource_pack_gc_loop,
+)
 from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
 from mc_server_dashboard_api.servers.application.game_sessions import PruneGameSessions
 from mc_server_dashboard_api.servers.application.plugin_cache_gc import (
     RunPluginCacheGc,
+)
+from mc_server_dashboard_api.servers.application.resource_pack_gc import (
+    RunResourcePackGc,
 )
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
@@ -62,6 +68,12 @@ _LOOPS = [
             cast(RunPluginCacheGc, on_pass), tick_seconds=tick
         ),
         id="plugin-cache-gc",
+    ),
+    pytest.param(
+        lambda on_pass, tick: run_resource_pack_gc_loop(
+            cast(RunResourcePackGc, on_pass), tick_seconds=tick
+        ),
+        id="resource-pack-gc",
     ),
     pytest.param(
         lambda on_pass, tick: run_storage_sweep_loop(on_pass, tick_seconds=tick),
