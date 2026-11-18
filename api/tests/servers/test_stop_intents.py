@@ -2067,6 +2067,31 @@ async def test_an_owed_stop_after_a_start_that_left_nothing_running_releases(
     )
 
 
+async def test_an_owed_stop_on_a_disconnected_worker_releases_without_a_stop() -> None:
+    # A stop cannot reach a Worker whose session has ended, and the session's end
+    # discarded every command still queued on it. The row is released as before,
+    # with the exposure the release of an unknown row on a disconnected Worker
+    # already accepts: a start that had begun may still be running there.
+    world = _World()
+
+    async def disconnect() -> None:
+        world.cp._connected[world.worker] = False
+        await world.repo.mark_worker_servers_unknown(
+            world.worker, _NOW + dt.timedelta(seconds=1)
+        )
+
+    async def drain() -> None:
+        assert await world.drain() == [world.server_id]
+
+    _launches_then(world, disconnect, drain)
+    await world.start()
+
+    await world.stop()
+
+    assert world.kinds() == ["hydrate", "start"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
 async def test_a_stop_run_behind_the_start_leaves_a_later_release_plain() -> None:
     # A stop the Worker ran behind the start has stopped it. A release still owed
     # after that stop (its final snapshot timed out here) is the plain one again:
