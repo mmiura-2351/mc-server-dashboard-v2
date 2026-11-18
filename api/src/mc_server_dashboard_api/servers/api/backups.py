@@ -997,10 +997,10 @@ async def upload_backup(
 
     The multipart body is read into memory off the event loop (over-cap -> 413);
     the use case then validates the archive (opens + traversal-safe entries)
-    before storing it. A non-archive / unsafe
-    member is 422 ``invalid_archive``, whose ``detail`` names the refusal (for a
-    member, its name and the reason; a name over 256 characters is cut to its
-    first 256 and marked ``…(truncated, N chars)``); an over-cap archive is 413.
+    before storing it. A non-archive / unsafe member is 422 ``invalid_archive``,
+    whose ``detail`` names the refusal (for a member, its name and the reason; a
+    name over 256 characters is cut to its first 256 and marked
+    ``…(truncated, N chars)``); an over-cap archive is 413.
     The archive is read to its gzip end (issue #3778), so a damaged one is
     ``invalid_archive`` too: a header past the first that does not read, no
     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE

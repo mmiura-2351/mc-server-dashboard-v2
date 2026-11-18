@@ -60,6 +60,11 @@ export function backupErrorPresentation(
       // The object store, not the server host, is down (issue #2378). Without
       // this case the 503 below would blame the host for a storage outage.
       return "backups.error.storageUnavailable";
+    case "upload_busy":
+      // Too many archive uploads at once (issue #3843): nothing was stored and
+      // sending it again shortly is the remedy, so the 503 below would blame a
+      // server host that is fine.
+      return "backups.error.uploadBusy";
     case CREDENTIAL_REQUIRED_FOR_BODY:
       // A 413 for a lapsed session the client's one refresh could not mend;
       // without this case the 413 below would call the archive too large.
