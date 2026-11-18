@@ -8,22 +8,22 @@ definition the community context's last-Owner guard uses.
 
 It runs on the identity unit of work's session, inside the delete transaction,
 under the user's community-ownership lock (``core/adapters/ownership_lock.py``,
-#3217).
+#3217). A deletion reads this while it holds every active admin's ``user`` row,
+so the answer is one statement over the community tables, however many
+memberships the user has.
 """
 
 from __future__ import annotations
 
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from mc_server_dashboard_api.community.adapters.repositories import (
-    SqlAlchemyMembershipRepository,
-    SqlAlchemyRoleRepository,
+from mc_server_dashboard_api.community.adapters.models import (
+    MembershipModel,
+    MembershipRoleModel,
+    RoleModel,
 )
 from mc_server_dashboard_api.community.domain.permissions import OWNER_ROLE_NAME
-from mc_server_dashboard_api.community.domain.value_objects import RoleName
-from mc_server_dashboard_api.community.domain.value_objects import (
-    UserId as CommunityUserId,
-)
 from mc_server_dashboard_api.core.adapters.ownership_lock import (
     lock_community_ownership,
 )
@@ -38,29 +38,21 @@ class CommunityBackedOwnership(CommunityOwnership):
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
-        self._memberships = SqlAlchemyMembershipRepository(session)
-        self._roles = SqlAlchemyRoleRepository(session)
 
     async def owns_any_community(self, user_id: UserId) -> bool:
         # Exclusive: a conferral on this user holds the lock shared until it
-        # commits, so this waits for one in flight, and the reads below -- each
-        # a new snapshot -- see the ownership it committed.
+        # commits, so this waits for one in flight, and the read below -- a new
+        # snapshot -- sees the ownership it committed.
         await lock_community_ownership(self._session, user_id.value, shared=False)
-        community_user_id = CommunityUserId(user_id.value)
-        for membership in await self._memberships.list_for_user(community_user_id):
-            owner_role = next(
-                (
-                    role
-                    for role in await self._roles.list_for_community(
-                        membership.community_id
-                    )
-                    if role.is_preset and role.name == RoleName(OWNER_ROLE_NAME)
-                ),
-                None,
+        # One of the user's memberships holds its own community's preset Owner.
+        stmt = select(
+            exists().where(
+                MembershipModel.user_id == user_id.value,
+                MembershipRoleModel.membership_id == MembershipModel.id,
+                RoleModel.id == MembershipRoleModel.role_id,
+                RoleModel.community_id == MembershipModel.community_id,
+                RoleModel.is_preset.is_(True),
+                RoleModel.name == OWNER_ROLE_NAME,
             )
-            if owner_role is None:
-                continue
-            held = await self._memberships.list_role_ids(membership.id)
-            if owner_role.id in held:
-                return True
-        return False
+        )
+        return bool((await self._session.execute(stmt)).scalar_one())

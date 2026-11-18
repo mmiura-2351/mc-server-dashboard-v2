@@ -14,9 +14,10 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.community.adapters.clock import SystemClock
@@ -26,10 +27,15 @@ from mc_server_dashboard_api.community.adapters.unit_of_work import (
 from mc_server_dashboard_api.community.adapters.user_directory import (
     IdentityUserDirectory,
 )
-from mc_server_dashboard_api.community.application.manage_membership import AddMember
+from mc_server_dashboard_api.community.application.manage_membership import (
+    AddMember,
+    AssignRole,
+)
+from mc_server_dashboard_api.community.application.manage_role import CreateRole
 from mc_server_dashboard_api.community.application.provision_community import (
     ProvisionCommunity,
 )
+from mc_server_dashboard_api.community.domain.value_objects import Permission
 from mc_server_dashboard_api.community.domain.value_objects import (
     UserId as CommunityUserId,
 )
@@ -120,6 +126,37 @@ async def test_owns_any_community_false_for_plain_member(engine: AsyncEngine) ->
     assert await _owns_any_community(engine, member_id) is False
 
 
+async def test_owns_any_community_false_for_a_member_holding_another_role(
+    engine: AsyncEngine,
+) -> None:
+    owner_id = uuid.uuid4()
+    member_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    await _insert_user(engine, member_id, "bob")
+    community = await _provision(engine)(
+        name="guild", owner_user_id=CommunityUserId(owner_id)
+    )
+    await _add_member(engine)(
+        community_id=community.id, user_id=CommunityUserId(member_id)
+    )
+    factory = create_session_factory(engine)
+    role = await CreateRole(uow=CommunityUnitOfWork(factory), clock=SystemClock())(
+        community_id=community.id,
+        actor_id=CommunityUserId(owner_id),
+        name="Moderators",
+        permissions={Permission("member:read")},
+    )
+    await AssignRole(uow=CommunityUnitOfWork(factory))(
+        community_id=community.id,
+        user_id=CommunityUserId(member_id),
+        role_id=role.id,
+        actor_id=CommunityUserId(owner_id),
+    )
+
+    # Only the preset Owner role makes an owner, not any role held.
+    assert await _owns_any_community(engine, member_id) is False
+
+
 async def test_owns_any_community_false_for_non_member(engine: AsyncEngine) -> None:
     owner_id = uuid.uuid4()
     stranger_id = uuid.uuid4()
@@ -128,3 +165,43 @@ async def test_owns_any_community_false_for_non_member(engine: AsyncEngine) -> N
     await _provision(engine)(name="guild", owner_user_id=CommunityUserId(owner_id))
 
     assert await _owns_any_community(engine, stranger_id) is False
+
+
+async def test_ownership_is_one_read_under_the_lock(engine: AsyncEngine) -> None:
+    # A deletion reads ownership while it holds every active admin's user row
+    # (#3217), so the read is one statement however many memberships there are.
+    owner_id = uuid.uuid4()
+    member_id = uuid.uuid4()
+    await _insert_user(engine, owner_id, "alice")
+    await _insert_user(engine, member_id, "bob")
+    for name in ("guild", "outpost"):
+        community = await _provision(engine)(
+            name=name, owner_user_id=CommunityUserId(owner_id)
+        )
+        await _add_member(engine)(
+            community_id=community.id, user_id=CommunityUserId(member_id)
+        )
+    statements: list[str] = []
+
+    def _capture(
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    async with IdentityUnitOfWork(create_session_factory(engine)) as uow:
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture)
+        try:
+            owns = await uow.ownership.owns_any_community(UserId(member_id))
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _capture)
+
+    assert owns is False
+    locks = [s for s in statements if "pg_advisory_xact_lock" in s]
+    reads = [s for s in statements if "pg_advisory_xact_lock" not in s]
+    assert len(locks) == 1
+    assert len(reads) == 1, reads
