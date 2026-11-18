@@ -618,7 +618,7 @@ class UpdateServer:
         # transaction (issue #827): the at-rest gate and the same-transaction
         # server.properties rewrite must serialize against a concurrent start, so a
         # start cannot flip desired=running between the at-rest check and the commit.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
                 if server is None or server.community_id != community_id:
@@ -714,8 +714,14 @@ class UpdateServer:
                         raise SlugAlreadyTakenError(slug)
                     server.slug = slug
                 server.updated_at = self.clock.now()
+                # The row is written as gated above only while the lock still
+                # holds (issue #3927).
+                await lock.ensure_held()
                 await self.uow.servers.update(server)
                 await self.uow.commit()
+            if pending_overrides is not None or pending_port is not None:
+                # The rewrites are in-place working-set writes (issue #3927).
+                await lock.ensure_held()
             # Deferred file writes (#1705): run after the DB commit succeeds
             # so a commit failure never leaves the file and row out of step.
             # A post-commit file-write failure is the self-healing direction:
@@ -922,7 +928,7 @@ class DeleteServer:
         # until this delete releases. This closes the check-then-pack TOCTOU; the
         # second-transaction re-check below is now belt-and-suspenders (it only
         # fires if the lock is ever a no-op), kept rather than removed.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)
                 if server is None or server.community_id != community_id:
@@ -938,8 +944,14 @@ class DeleteServer:
             # adapters' prune_to_final_snapshot guarantees it), so if the commit
             # below fails the surviving row's next publish still mints a generation
             # above any scratch a Worker holds.
+            #
+            # The store confirms the lock after the pack and before it removes
+            # anything, under its own per-server lock (issue #3927): a check here
+            # would leave the whole pack unguarded.
             await self.backup_store.prune_to_final_snapshot(
-                community_id=community_id, server_id=server_id
+                community_id=community_id,
+                server_id=server_id,
+                fence=lock.ensure_held,
             )
             async with self.uow:
                 # Re-check at-rest in the final transaction as belt-and-suspenders:
@@ -965,6 +977,9 @@ class DeleteServer:
                 all_refs = await self.backup_store.list_archive_refs(
                     community_id=community_id, server_id=server_id
                 )
+                # The archive deletes and the row delete each rely on the lock
+                # (issue #3927).
+                await lock.ensure_held()
                 for ref in all_refs:
                     if ref != head_ref:
                         await self.backup_store.delete(
@@ -972,6 +987,7 @@ class DeleteServer:
                             server_id=server_id,
                             storage_ref=ref,
                         )
+                await lock.ensure_held()
                 # The server's resource grants cascade from the row (Section 10).
                 await self.uow.servers.delete(server_id)
                 await self.uow.commit()

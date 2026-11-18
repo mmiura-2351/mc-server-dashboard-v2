@@ -11,7 +11,7 @@ import datetime as dt
 import io
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -59,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
     InvalidFilePathError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginCacheBlobNotFoundError,
     ResourcePackInUseError,
@@ -87,7 +88,10 @@ from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioningError,
     ProvisionedJar,
 )
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
+    LifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.memory_limit import memory_limit_from_config
 from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
 from mc_server_dashboard_api.servers.domain.plugin import (
@@ -1890,18 +1894,40 @@ class FakeLifecycleLock(LifecycleLock):
     every recorded call on a single timeline. The actual cross-connection
     blocking is pinned against a real PostgreSQL advisory lock in the
     integration suite.
+
+    Each ``ensure_held`` on the held lock records ``(server_id, "check")`` on the
+    same timeline (issue #3927). ``checks_before_loss`` loses the lock: that many
+    checks pass, and every later one raises :class:`LifecycleLockLostError`, so
+    ``0`` fails the first check.
     """
 
     def __init__(self) -> None:
         self.events: list[tuple[ServerId, str]] = []
+        self.checks_before_loss: int | None = None
 
     @asynccontextmanager
-    async def hold(self, server_id: ServerId) -> "AsyncIterator[None]":
+    async def hold(self, server_id: ServerId) -> "AsyncIterator[HeldLifecycleLock]":
         self.events.append((server_id, "acquire"))
         try:
-            yield
+            yield _FakeHeldLifecycleLock(self, server_id)
         finally:
             self.events.append((server_id, "release"))
+
+    async def _check(self, server_id: ServerId) -> None:
+        self.events.append((server_id, "check"))
+        if self.checks_before_loss is not None:
+            if self.checks_before_loss == 0:
+                raise LifecycleLockLostError(str(server_id.value))
+            self.checks_before_loss -= 1
+
+
+class _FakeHeldLifecycleLock(HeldLifecycleLock):
+    def __init__(self, lock: FakeLifecycleLock, server_id: ServerId) -> None:
+        self._lock = lock
+        self._server_id = server_id
+
+    async def ensure_held(self) -> None:
+        await self._lock._check(self._server_id)
 
 
 class FakeControlPlane(ControlPlane):
@@ -2221,6 +2247,7 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         server_id: ServerId,
         storage_ref: str,
         force: bool = False,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> int:
         self.events.append((server_id, "restore"))
         if storage_ref not in self.archives:
@@ -2230,6 +2257,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
             raise BackupUnreadableError(storage_ref)
         if storage_ref in self.corrupt_refs and not force:
             raise BackupCorruptError(storage_ref, corrupt_count=self.corrupt_count)
+        # The fence comes after the refusals and right before the publish, as in
+        # the real store (issue #3927).
+        if fence is not None:
+            await fence()
         self.restored.append((server_id, storage_ref))
         return self.corrupt_count if storage_ref in self.corrupt_refs else 0
 
@@ -2261,13 +2292,21 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.deleted.append((server_id, storage_ref))
 
     async def prune_to_final_snapshot(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         # The DeleteServer reclaim path (#777). ``pack_fails`` makes it raise so a
         # test can assert the delete aborts with the working set intact.
         self.events.append((server_id, "prune-final"))
         if self.pack_fails:
             raise RuntimeError("pack failed")
+        # The fence comes after the pack and before anything is removed, as in the
+        # real store (issue #3927).
+        if fence is not None:
+            await fence()
         if self.on_prune is not None:
             self.on_prune()
         self.pruned.append(server_id)

@@ -89,7 +89,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownServerTypeError,
     UnsupportedEditionError,
 )
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
+    LifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
 )
@@ -1288,7 +1291,9 @@ class _HeldLifecycleLock(LifecycleLock):
     Gives up the way PgLifecycleLock's bounded acquire does (issue #876).
     """
 
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         raise ServerBusyError(str(server_id.value))
 
 

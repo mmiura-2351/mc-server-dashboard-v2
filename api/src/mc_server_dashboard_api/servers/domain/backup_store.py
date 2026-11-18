@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import abc
 import enum
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -80,6 +80,7 @@ class BackupArchiveStore(abc.ABC):
         server_id: ServerId,
         storage_ref: str,
         force: bool = False,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> int:
         """Atomically republish an archive into ``current/`` (FR-BAK-4, issue #743).
 
@@ -103,6 +104,11 @@ class BackupArchiveStore(abc.ABC):
         carrying the published corrupt count, and one that cannot tell whether it
         went live its subclass :class:`BackupRestorePublicationUnknownError`
         (issue #3564).
+
+        ``fence`` is the caller's lifecycle-lock check (issue #3927), awaited
+        under the store's per-server lock after the slow staging and before the
+        first write to the live working set. What it raises propagates as it is,
+        with nothing published.
         """
 
     @abc.abstractmethod
@@ -153,7 +159,11 @@ class BackupArchiveStore(abc.ABC):
 
     @abc.abstractmethod
     async def prune_to_final_snapshot(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Collapse the working set to one retained final-state archive (issue #777).
 
@@ -163,6 +173,10 @@ class BackupArchiveStore(abc.ABC):
         fail-closed — a pack failure leaves the working set intact and the error
         propagates, so a failed delete never silently loses the latest state. A
         server with no published snapshot is a no-op (nothing to pack).
+
+        ``fence`` is the caller's lifecycle-lock check (issue #3927), awaited
+        under the store's per-server lock after the pack and before anything is
+        removed. What it raises propagates as it is, with the working set intact.
         """
 
     @abc.abstractmethod

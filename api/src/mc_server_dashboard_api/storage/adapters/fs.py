@@ -85,6 +85,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
+    ExclusionFence,
     HydrateSource,
     JarPoolEntry,
     JarPoolStats,
@@ -1821,6 +1822,8 @@ class FsStorage(Storage):
         server_id: ServerId,
         staging: Path,
         report: WorkingSetReport,
+        *,
+        fence: ExclusionFence | None = None,
     ) -> None:
         """Publish a restored backup, bumping the generation first (issue #3564).
 
@@ -1845,8 +1848,12 @@ class FsStorage(Storage):
 
         await self._run_on_staging(staging, _fsync_tree, staging)
         server_root = self._server_root(community_id, server_id)
+        thread_fence = _thread_fence(fence)
 
         def _locked() -> Path | None:
+            # The caller's exclusion fence (issue #3927), before the bump.
+            if thread_fence is not None:
+                thread_fence()
             self._bump_marker(server_root, RESTORE_PUBLISHER)
             prior = self._live_snapshot_name(server_root)
             attempted: list[str] = []
@@ -1880,7 +1887,8 @@ class FsStorage(Storage):
 
         # The move and flip run under the server lock a prune holds for its whole
         # run. The lifecycle lock that RestoreBackup and DeleteServer hold keeps a
-        # server delete out of the extraction before it (issue #3904).
+        # server delete out of the extraction before it (issue #3904), and each
+        # confirms it in its fence (issue #3927).
         old_snapshot = await self._under_server_lock(
             community_id, server_id, _locked, staging=staging
         )
@@ -2226,6 +2234,7 @@ class FsStorage(Storage):
         key: BackupKey,
         *,
         force: bool = False,
+        fence: ExclusionFence | None = None,
     ) -> WorkingSetReport:
         archive = (
             self._server_root(community_id, server_id)
@@ -2275,7 +2284,9 @@ class FsStorage(Storage):
             # the PRE-restore world. The sentinel publisher (RESTORE_PUBLISHER) makes
             # the publish-time guard refuse an in-flight stale snapshot from a real
             # Worker (different publisher), closing the restore-clobber window (#873).
-            await self._publish_restore(community_id, server_id, staging, report)
+            await self._publish_restore(
+                community_id, server_id, staging, report, fence=fence
+            )
         except BaseException:
             await self._discard_staging(staging, raise_fault=False)
             raise
@@ -2365,7 +2376,11 @@ class FsStorage(Storage):
 
     @_translate_io_faults
     async def prune_to_final_snapshot(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        fence: ExclusionFence | None = None,
     ) -> None:
         # The DeleteServer reclaim path (issue #777): pack ``current/`` into a single
         # retained ``final.tar.gz`` at the server root, then drop the working-set
@@ -2378,12 +2393,18 @@ class FsStorage(Storage):
             community_id,
             server_id,
             functools.partial(
-                self._prune_to_final_snapshot_inner, community_id, server_id
+                self._prune_to_final_snapshot_inner,
+                community_id,
+                server_id,
+                _thread_fence(fence),
             ),
         )
 
     def _prune_to_final_snapshot_inner(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        fence: Callable[[], None] | None = None,
     ) -> None:
         server_root = self._server_root(community_id, server_id)
         # Sweep any ``.final.*.tmp`` left by an earlier crash mid-pack (the
@@ -2414,6 +2435,10 @@ class FsStorage(Storage):
             # on its first delete, and an upload whose guard read its generation must
             # still fail the commit re-check, or that first publish lands on a server
             # being deleted. A retry advances it again, which never lowers it.
+            #
+            # The caller's exclusion fence comes first (issue #3927).
+            if fence is not None:
+                fence()
             for sub in ("snapshots", "incoming", "versions"):
                 _rmtree(server_root / sub)
             _rmtree(server_root / "current")
@@ -2449,6 +2474,11 @@ class FsStorage(Storage):
             tmp.unlink(missing_ok=True)
             raise
         _fsync_dir(server_root)
+        # The caller's exclusion fence (issue #3927), after the slow pack and before
+        # the first write that removes or advances anything: a refusal leaves a
+        # prune that failed after its pack.
+        if fence is not None:
+            fence()
         # Advance the generation BEFORE ``current`` goes (issue #3434): this is where
         # the prune guarantees it never lowers the store generation. DeleteServer
         # commits the row delete only AFTER this prune, so a failed commit leaves a
@@ -3389,15 +3419,26 @@ class _LockHeld(enum.Enum):
     LOCK_HELD = enum.auto()
 
 
-def _fence_from_thread(fence: PublisherFence, loop: asyncio.AbstractEventLoop) -> bool:
-    """Await the commit's publisher fence on ``loop`` from a worker thread.
+def _thread_fence(fence: ExclusionFence | None) -> Callable[[], None] | None:
+    """``fence`` as a call a worker thread holding the server lock can make."""
+
+    if fence is None:
+        return None
+    return functools.partial(_fence_from_thread, fence, asyncio.get_running_loop())
+
+
+def _fence_from_thread[T](
+    fence: Callable[[], Awaitable[T]], loop: asyncio.AbstractEventLoop
+) -> T:
+    """Await a caller's fence on ``loop`` from a worker thread.
 
     The per-server lock is a thread lock held on that worker thread, so the fence
-    runs on the event loop while the thread waits for its answer (issue #3544).
-    Safe because no code acquires that lock on the event loop thread.
+    runs on the event loop while the thread waits for its answer (issues #3544,
+    #3927). An error the fence raises is raised here, on the thread. Safe because
+    no code acquires that lock on the event loop thread.
     """
 
-    async def _check() -> bool:
+    async def _check() -> T:
         return await fence()
 
     return asyncio.run_coroutine_threadsafe(_check(), loop).result()

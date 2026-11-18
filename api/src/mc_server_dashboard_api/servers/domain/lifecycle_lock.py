@@ -18,6 +18,17 @@ gated operation's duration (it then re-evaluates the row and either 409s or runs
 against the settled post-mutation state). The lock is keyed on the server UUID
 and is process-independent (a DB advisory lock), so it serializes operations
 across multiple API workers, not just within one process.
+
+A held lock can be lost before its holder releases it (issue #3927): the real
+lock lives on a database session, and when that session ends the database
+releases the lock without telling the holder. So ``hold`` yields a
+:class:`HeldLifecycleLock`, and a holder calls its ``ensure_held`` immediately
+before each write that relies on the exclusion -- a storage flip or prune, an
+in-place working-set write, an archive write or delete, a row commit that assumed
+the server at rest. A lost lock raises
+:class:`~mc_server_dashboard_api.servers.domain.errors.LifecycleLockLostError`
+there, so the operation stops before that write. A loss between the check and the
+write it guards goes unnoticed (``docs/app/DATABASE.md`` Section 7).
 """
 
 from __future__ import annotations
@@ -29,11 +40,33 @@ from collections.abc import AsyncIterator
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 
+class HeldLifecycleLock(abc.ABC):
+    """A lifecycle lock its holder still has to confirm before each guarded write."""
+
+    @abc.abstractmethod
+    async def ensure_held(self) -> None:
+        """Return if the lock is still held; raise if it was lost (issue #3927).
+
+        Raises :class:`~...domain.errors.LifecycleLockLostError` when the lock
+        is no longer held, or when that cannot be confirmed. Once lost, it stays
+        lost: every later call raises too.
+        """
+
+
+class NullHeldLifecycleLock(HeldLifecycleLock):
+    """A held lock that is never lost: what :class:`NullLifecycleLock` yields."""
+
+    async def ensure_held(self) -> None:
+        return None
+
+
 class LifecycleLock(abc.ABC):
     """Port: a per-server advisory lock held across a gated operation."""
 
     @abc.abstractmethod
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         """Acquire the per-server lock; release it when the context exits.
 
         Waits until the lock is free for ``server_id``, but the wait is *bounded*
@@ -42,7 +75,8 @@ class LifecycleLock(abc.ABC):
         :class:`~mc_server_dashboard_api.servers.domain.errors.ServerBusyError`
         (a transient 409 the caller retries) when another lifecycle operation holds
         the lock too long. The returned context manager holds the lock for its body
-        and releases on exit (normal or error).
+        and releases on exit (normal or error). It yields the
+        :class:`HeldLifecycleLock` the body confirms the lock through.
         """
 
 
@@ -56,5 +90,5 @@ class NullLifecycleLock(LifecycleLock):
     """
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
-        yield
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
+        yield NullHeldLifecycleLock()
