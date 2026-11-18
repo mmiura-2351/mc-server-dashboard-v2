@@ -411,12 +411,29 @@ without retrying, because the next install fails the same way, so a restart
 would only run it again. The server stays crashed, and its crash banner says it
 will not be restarted automatically: stop it, fix the cause (raise its memory
 limit, or fix the Java image mapping) and start it again. The skip holds only
-for a crash reported after the server's last start or stop. After that stop and
-start the old reason stays recorded until the Worker reports the new launch,
-and a start whose answer was lost there is still re-sent. Every other crash,
-`forge_install_failed` included, is restarted with its backoff. So is a server
-whose Worker disconnected while it was crashed: the disconnect records
-`unknown`, which drops the stored reason.
+while the crash is newer than the server row's `updated_at`, and every write to
+the row bumps that. The writes are:
+
+- an operator start. After the stop and start, the old reason stays recorded
+  until the Worker reports the new launch, and a start whose answer was lost
+  there is still re-sent.
+- a server edit (PATCH, including a rename).
+- a Geyser install or removal that moves the server's Bedrock port.
+- the Bedrock gate-flip sweep.
+- a restart the Worker refuses.
+
+Any of these after the crash re-arms one restart. That restart fails the same
+way and is reported again, so each such write costs one more failing attempt,
+never a loop. The server read reports the rule as `crash_not_restarted`, which
+the crash banner follows. Every other crash, `forge_install_failed` included,
+is restarted with its backoff.
+
+Two events also re-run the install once. A Worker that disconnects while the
+server is crashed is one. A graceful API restart is the other, because shutting
+down the control plane ends every Worker session and each session's teardown
+records `unknown` for its servers. Either way the stored reason is dropped, and
+once the Worker is back the reconciler restarts the server from `unknown`. Issue
+#3885 tracks keeping `crashed` across a disconnect.
 
 The stop side needs no such detour. A server whose intent is already stopped but
 which is still assigned to a Worker — a drained Worker's server still running, or

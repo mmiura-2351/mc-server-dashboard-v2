@@ -47,7 +47,11 @@ import {
   type ServerFrame,
 } from "./serverEvents.ts";
 import { serverKey } from "./serverKey.ts";
-import { atRest, normalizeState } from "./serverState.ts";
+import {
+  atRest,
+  NOT_RESTARTED_CRASH_REASONS,
+  normalizeState,
+} from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 
@@ -225,14 +229,15 @@ export function useServerEvents(
     setStatusDetail("");
     const key = serverKey(communityId, serverId);
 
-    // The live observed and desired states, assignment and last crash not yet
-    // superseded by a REST read, each stamped with when it was received
-    // (#3213). They are stamped apart, as different frames carry them (#3428,
-    // #3818, #3281).
+    // The live observed and desired states, assignment, last crash and
+    // whether the reconciler leaves it alone, not yet superseded by a REST
+    // read, each stamped with when it was received (#3213). They are stamped
+    // apart, as different frames carry them (#3428, #3818, #3281).
     let observed: { value: string; at: number } | null = null;
     let desired: { value: string; at: number } | null = null;
     let assigned: { value: string | null; at: number } | null = null;
     let crash: { value: Crash; at: number } | null = null;
+    let notRestarted: { value: boolean; at: number } | null = null;
 
     // Patch `fields` into the detail query so the header pill and controls
     // update live (no refetch). A frame patches only the field it carries, so
@@ -248,6 +253,7 @@ export function useServerEvents(
           | "assigned_worker_id"
           | "crash_reason"
           | "crash_detail"
+          | "crash_not_restarted"
         >
       >,
     ) => {
@@ -279,11 +285,17 @@ export function useServerEvents(
         if (crash !== null && crash.at < readStartedAt) {
           crash = null;
         }
+        if (notRestarted !== null && notRestarted.at < readStartedAt) {
+          notRestarted = null;
+        }
         patch({
           ...(observed !== null && { observed_state: observed.value }),
           ...(desired !== null && { desired_state: desired.value }),
           ...(assigned !== null && { assigned_worker_id: assigned.value }),
           ...(crash !== null && crashFields(crash.value)),
+          ...(notRestarted !== null && {
+            crash_not_restarted: notRestarted.value,
+          }),
         });
       },
     );
@@ -308,6 +320,15 @@ export function useServerEvents(
       patch(crashFields(value));
     };
 
+    // Whether the reconciler leaves the crash alone (#3281): the API's rule,
+    // a crash newer than every write to the row with a reason that recurs. A
+    // crashed frame is the newest thing about the row, so its reason decides;
+    // an intent frame is a newer write, which clears it.
+    const applyNotRestarted = (value: boolean) => {
+      notRestarted = { value, at: stamp() };
+      patch({ crash_not_restarted: value });
+    };
+
     const applyState = (state: string) => {
       observed = { value: state, at: stamp() };
       patch({ observed_state: state });
@@ -330,6 +351,7 @@ export function useServerEvents(
         // observed state, so the crash detail stands.
         if (frame.desiredState !== undefined) {
           applyDesired(frame.desiredState);
+          applyNotRestarted(false);
         }
         if (frame.assignedWorkerId !== undefined) {
           applyAssigned(frame.assignedWorkerId);
@@ -343,6 +365,7 @@ export function useServerEvents(
               reason: frame.reason === "" ? null : frame.reason,
               detail: frame.detail === "" ? null : frame.detail,
             });
+            applyNotRestarted(NOT_RESTARTED_CRASH_REASONS.has(frame.reason));
           }
           setStatusDetail(frame.detail);
           detailState = frame.state;
@@ -359,6 +382,9 @@ export function useServerEvents(
         applyState(frame.state);
         if (frame.crash !== undefined) {
           applyCrash(frame.crash);
+        }
+        if (frame.crashNotRestarted !== undefined) {
+          applyNotRestarted(frame.crashNotRestarted);
         }
         if (frame.state !== detailState) {
           setStatusDetail("");

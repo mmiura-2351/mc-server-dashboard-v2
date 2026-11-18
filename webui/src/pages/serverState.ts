@@ -74,6 +74,32 @@ export function converging(
 }
 
 /**
+ * The crash reasons the reconciler does not restart, as the next attempt fails
+ * the same way (CONFIGURATION.md Section 5.6, issue #3281). The API reports
+ * its rule as `crash_not_restarted`; a crashed status frame carries only the
+ * reason, so the live hooks derive the flag from this set.
+ */
+export const NOT_RESTARTED_CRASH_REASONS: ReadonlySet<string> = new Set([
+  "forge_install_out_of_memory",
+  "forge_install_java_incompatible",
+]);
+
+/**
+ * Whether the server is down on a crash the reconciler leaves alone (issue
+ * #3281): crashed under a running intent, with `crash_not_restarted` set.
+ * Nothing converges it until the operator stops and starts it, so neither the
+ * detail header nor a dashboard row marks it as applying, and the crash banner
+ * says it is not restarted automatically.
+ */
+export function crashNotRestarted(
+  state: ObservedState,
+  desired: string,
+  notRestarted: boolean,
+): boolean {
+  return state === "crashed" && desired === "running" && notRestarted;
+}
+
+/**
  * The four semantic buckets the dashboard state filter groups the raw states
  * into (#2239). `other` folds together the transitional states and `unknown`.
  */

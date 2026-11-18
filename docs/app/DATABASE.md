@@ -529,8 +529,12 @@ reconciler restarting the server on its assigned Worker while that Worker is
 connected. It skips the server while the Worker is disconnected, and it skips
 a crash whose `crash_reason` the Worker does not retry
 (`forge_install_out_of_memory`, `forge_install_java_incompatible`) when that
-crash is newer than the last intent commit, since the next attempt fails the
-same way ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). A stop of a crashed
+crash is newer than the row's `updated_at` (`observed_at > updated_at`), since
+the next attempt fails the same way. `updated_at` is bumped by every write to
+the row, not only an intent commit, so any such write after the crash re-arms
+one restart ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6 lists them).
+The server read and the status snapshot report the same rule as
+`crash_not_restarted`. A stop of a crashed
 server leaves `observed=crashed`. The Worker no
 longer holds the instance, so it reports nothing more, and the crash stays
 recorded as why the server is down. `(stopped, crashed)` with no assigned Worker is at rest and

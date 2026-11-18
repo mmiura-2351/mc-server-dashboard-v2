@@ -115,6 +115,7 @@ function server(overrides: Record<string, unknown> = {}) {
     assigned_worker_id: "worker-a",
     crash_reason: null,
     crash_detail: null,
+    crash_not_restarted: false,
     config: {},
     slug: "survival",
     join_hostname: null,
@@ -2964,7 +2965,11 @@ describe("ServerDetailPage Overview live streams", () => {
     "tells the operator a %s crash under a running intent is not restarted automatically",
     async (reason) => {
       mockApi.get.mockResolvedValue(
-        server({ observed_state: "crashed", crash_reason: reason }),
+        server({
+          observed_state: "crashed",
+          crash_reason: reason,
+          crash_not_restarted: true,
+        }),
       );
       renderPage();
       await screen.findByText("survival");
@@ -2982,11 +2987,22 @@ describe("ServerDetailPage Overview live streams", () => {
     },
   );
 
-  it.each([null, "forge_install_failed"])(
-    "keeps the automatic restart line for a crash with reason %s",
-    async (reason) => {
+  // Right after the operator's start the row still reads crashed with the old
+  // reason, and the reconciler replays that start if its answer was lost: the
+  // API reports the crash as restarted (#3281).
+  it.each([
+    [null, false],
+    ["forge_install_failed", false],
+    ["forge_install_out_of_memory", false],
+  ])(
+    "keeps the automatic restart line for a crash with reason %s and the flag %s",
+    async (reason, notRestarted) => {
       mockApi.get.mockResolvedValue(
-        server({ observed_state: "crashed", crash_reason: reason }),
+        server({
+          observed_state: "crashed",
+          crash_reason: reason,
+          crash_not_restarted: notRestarted,
+        }),
       );
       renderPage();
       await screen.findByText("survival");
@@ -2999,6 +3015,44 @@ describe("ServerDetailPage Overview live streams", () => {
       ).toBeInTheDocument();
     },
   );
+
+  it("follows a live crash the reconciler leaves alone until a start comes after it", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+    await screen.findByText("survival");
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        serverFrame("status", {
+          state: "crashed",
+          detail: "installer ran out of memory",
+          reason: "forge_install_out_of_memory",
+        }),
+      );
+    });
+    expect(
+      screen.getByText(t("serverDetail.crashBanner.noAutoRestart")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+
+    // The operator stops it, raises the limit and starts it: the row reads
+    // crashed until the Worker reports the new launch, which the reconciler
+    // replays if needed.
+    act(() => {
+      MockWebSocket.last().message(
+        serverFrame("status", { desired_state: "stopped" }),
+      );
+      MockWebSocket.last().message(
+        serverFrame("status", { desired_state: "running" }),
+      );
+    });
+    expect(
+      await screen.findByText(t("serverDetail.crashBanner.autoRestart")),
+    ).toBeInTheDocument();
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
 
   it("does not offer the install log without file:read", async () => {
     mockCan = (code) => code !== "file:read";

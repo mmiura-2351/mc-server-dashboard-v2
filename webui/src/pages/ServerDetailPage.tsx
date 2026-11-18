@@ -42,6 +42,7 @@ import {
   actionApplies,
   atRest,
   converging,
+  crashNotRestarted,
   normalizeState,
   startAwaitsRelease,
   statePill,
@@ -333,16 +334,6 @@ const CRASH_REASON_MESSAGE = {
 } as const satisfies Record<string, TranslationKey>;
 type SpecificCrashReason = keyof typeof CRASH_REASON_MESSAGE;
 
-/**
- * The reasons the reconciler does not restart under a running intent: the
- * Worker reports them without retrying, since the next install fails the same
- * way (CONFIGURATION.md Section 5.6, issue #3281).
- */
-const NOT_RESTARTED_CRASH_REASONS: ReadonlySet<string> = new Set([
-  "forge_install_out_of_memory",
-  "forge_install_java_incompatible",
-]);
-
 function Header({
   server,
   communityId,
@@ -364,11 +355,14 @@ function Header({
   const crashDetail = server.crash_detail ?? "";
   const crashReason = server.crash_reason ?? "";
   // A crash under a running intent that the reconciler leaves crashed, as the
-  // next attempt fails the same way (issue #3281).
-  const notRestarted =
-    state === "crashed" &&
-    server.desired_state === "running" &&
-    NOT_RESTARTED_CRASH_REASONS.has(crashReason);
+  // next attempt fails the same way (issue #3281). The API decides it, by the
+  // reconciler's own rule: until an operator start, or any other write to the
+  // server, comes after the crash.
+  const notRestarted = crashNotRestarted(
+    state,
+    server.desired_state,
+    server.crash_not_restarted,
+  );
   const pill = statePill(state);
   // Show an applying hint until the server converges on the intent, which a
   // stopped intent does at rest once its Worker is released (WEBUI_SPEC.md

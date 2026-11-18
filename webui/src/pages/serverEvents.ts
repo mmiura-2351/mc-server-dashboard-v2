@@ -69,8 +69,9 @@ export interface Crash {
  * The status snapshot the API sends on subscribe and after every gap that
  * dropped status frames (#1795):
  * the server's persisted observed state and, when the API reports them, its
- * desired state (#3428), assigned Worker (#3818) and last crash (#3281). The
- * live `detail` of any other state is not stored, so it has no counterpart.
+ * desired state (#3428), assigned Worker (#3818), last crash and whether the
+ * reconciler leaves that crash alone (#3281). The live `detail` of any other
+ * state is not stored, so it has no counterpart.
  */
 export interface SnapshotFrame {
   kind: "snapshot";
@@ -78,6 +79,7 @@ export interface SnapshotFrame {
   desiredState?: string;
   assignedWorkerId?: string | null;
   crash?: Crash;
+  crashNotRestarted?: boolean;
 }
 
 /** A gap marker: the client fell behind and missed events (best-effort). */
@@ -136,7 +138,7 @@ export function assignmentOf(payload: object): string | null | undefined {
  * The last crash a snapshot payload carries, or `undefined` when it does not
  * carry both fields as a string or `null`.
  */
-function crashOf(payload: object): Crash | undefined {
+export function crashOf(payload: object): Crash | undefined {
   if (!("crash_reason" in payload && "crash_detail" in payload)) {
     return undefined;
   }
@@ -203,12 +205,18 @@ export function parseServerFrame(raw: string): ServerFrame | null {
     }
     const assignedWorkerId = assignmentOf(payload);
     const crash = crashOf(payload);
+    const { crash_not_restarted } = payload as {
+      crash_not_restarted?: unknown;
+    };
     return {
       kind: "snapshot",
       state,
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
       ...(assignedWorkerId !== undefined && { assignedWorkerId }),
       ...(crash !== undefined && { crash }),
+      ...(typeof crash_not_restarted === "boolean" && {
+        crashNotRestarted: crash_not_restarted,
+      }),
     };
   }
   if (stream === "log") {
