@@ -1281,7 +1281,7 @@ class UploadBackup:
     request's spooled part, and never the spool, so the spool may close whenever
     the request ends. A cancelled call stops waiting at once and stores nothing.
     The thread cannot be stopped: it runs on to its own end, holding ``content``
-    until then, and the caps below bound how long that takes.
+    until then, and the caps bound how long that takes.
 
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
@@ -1293,7 +1293,6 @@ class UploadBackup:
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
     max_decompressed_bytes: int = MAX_DECOMPRESSED_BYTES
-    max_gzip_members: int = MAX_GZIP_MEMBERS
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
@@ -1316,7 +1315,6 @@ class UploadBackup:
             content,
             max_entries=self.max_entries,
             max_decompressed_bytes=self.max_decompressed_bytes,
-            max_gzip_members=self.max_gzip_members,
         )
 
         # Hold the per-server lifecycle lock across the server check, the row
