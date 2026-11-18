@@ -691,23 +691,27 @@ Notes:
   so a config edit made while the server runs is kept.
   The count lives in the API process. This holds because the API runs as a
   single instance (REQUIREMENTS.md NFR-SCALE-1).
-- **A stop withdraws a start intent no Worker holds yet.** A server can be
-  `desired=running` with no Worker assigned while the reconciler retries its
-  placement: no Worker can take it, or a placement failed before it sent
-  `StartServer` and gave its Worker back. A stop of such a server sends no
-  command, because there is no Worker to tell (issue #3815). It commits
-  `desired=stopped`, checking as it writes that the server is still
-  unassigned, adds one to the count as any stop does, and answers as any stop
-  does. A placement races it on the same row. If the placement's write lands
-  between the stop's read and its write, the stop answers
-  `409 transition_conflict`; a stop that reads the server after that write
-  finds it assigned and stops it as usual. If the stop lands first, the
-  placement's write finds the server no longer `desired=running` and
-  unassigned: it releases its placement reservation and sends nothing. A
-  placement that reads the server only after the stop finds no intent to
-  place. The reconciler counts neither toward its backoff (CONFIGURATION.md
-  Section 5.6). A user start needs the server `desired=stopped`, so it can
-  place the server only once the stop has landed.
+- **A stop withdraws a start intent no Worker holds yet.** A server that is
+  `desired=running` with no Worker assigned is rare. No current path creates
+  one: a start writes its intent and its Worker together, and a failed start
+  reverts both. Such a server comes from an earlier release, or would come
+  from the automatic re-placement that issue #3809 weighs. While it lasts, the
+  reconciler keeps retrying its placement: no Worker can take it, or a
+  placement fails before it sends `StartServer` and gives its Worker back. A
+  stop of such a server sends no command, because there is no Worker to tell
+  (issue #3815). It commits `desired=stopped`, checking as it writes that the
+  server is still unassigned, adds one to the count as any stop does, and
+  answers as any stop does. It leaves `observed` as it was: no Worker owns the
+  server, so none has reported on it since it lost its Worker. A placement
+  races the stop on the same row. If the placement's write lands between the
+  stop's read and its write, the stop answers `409 transition_conflict`; a
+  stop that reads the server after that write finds it assigned and stops it
+  as usual. If the stop lands first, the placement's write finds the server no
+  longer `desired=running` and unassigned: it releases its placement
+  reservation and sends nothing. A placement that reads the server only after
+  the stop finds no intent to place. The reconciler counts neither toward its
+  backoff (CONFIGURATION.md Section 5.6). A user start needs the server
+  `desired=stopped`, so it can place the server only once the stop has landed.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

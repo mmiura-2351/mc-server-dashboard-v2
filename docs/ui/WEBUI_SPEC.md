@@ -703,8 +703,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   drained server still running, or a stop left half-done — since the API then
   converges it at once, and refuses it with no Worker assigned. Under a running
   intent with no Worker assigned — a start the reconciler has yet to place —
-  Stop is offered whatever the observed state, since the API then withdraws the
-  intent with no Worker to tell. Start needs no
+  Stop is offered while the server reads stopped, crashed or unknown, since the
+  API then withdraws the intent with no Worker to tell. It is not offered while
+  the server reads running: the stopped intent would keep reading running with
+  no Worker to report otherwise, which nothing converges. Start needs no
   Worker assigned: a stop holds its Worker until the final snapshot settles,
   and the API refuses a start until the release (`409 transition_conflict`).
   So at rest under a stopped intent with a Worker still assigned, Start shows
