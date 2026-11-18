@@ -15,6 +15,10 @@ on:
       - ".github/workflows/api.yml"
       # Mirrors the anonymous body limit, pinned by test_http_body_credential.py.
       - "webui/src/api/limits.ts"
+      # Mirrors the not-restarted crash reasons, pinned by test_entities.py.
+      - "webui/src/pages/serverState.ts"
+      # The start guard table, pinned by test_lifecycle_endpoints.py.
+      - "webui/src/pages/startGuard.json"
   push:
     branches: [main]
     paths:
@@ -30,6 +34,10 @@ on:
       - ".github/workflows/api.yml"
       # Mirrors the anonymous body limit, pinned by test_http_body_credential.py.
       - "webui/src/api/limits.ts"
+      # Mirrors the not-restarted crash reasons, pinned by test_entities.py.
+      - "webui/src/pages/serverState.ts"
+      # The start guard table, pinned by test_lifecycle_endpoints.py.
+      - "webui/src/pages/startGuard.json"
 
 permissions:
   contents: read
