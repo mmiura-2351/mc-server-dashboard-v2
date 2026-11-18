@@ -1,9 +1,11 @@
 """Archives whose bytes the upload caps did not see (issue #3810).
 
 Both tar.gz upload doors, the file extract and the backup upload, are tested
-against each shape. Each one is a ``tar.gz`` that decompresses past a 1 MiB cap
-while handing out next to no member data, or whose walk seeks back. Building
-one costs a fraction of a second, so each is built once, on first use.
+against each shape. Each one is a ``tar.gz`` that decompresses past :data:`CAP`
+while handing out next to no member data, holds more extended-header data than
+the walk may read between two members (1 MiB), or whose walk seeks back.
+Building one costs up to a fraction of a second, so each is built once, on
+first use.
 """
 
 from __future__ import annotations
@@ -13,10 +15,19 @@ import gzip
 import io
 import tarfile
 
+import pytest
+
 MIB = 1024 * 1024
 
-# How much each over-cap shape decompresses outside member data.
+# The cap the over-cap shapes are refused under.
+CAP = 512 * 1024
+
+# How much the sparse over-cap shape decompresses outside member data.
 _UNSEEN = 32 * MIB
+
+# Extended-header data over CAP but under the 1 MiB budget on what the walk
+# reads between two members, so the cap is what refuses it.
+_UNDER_THE_BUDGET = 768 * 1024
 
 
 def old_gnu_sparse_header(
@@ -59,20 +70,20 @@ def _tar_gz(info: tarfile.TarInfo, *, fmt: int) -> bytes:
 
 
 @functools.cache
-def pax_data() -> bytes:
-    """A one-byte member after 32 MiB of PAX extended-header data."""
+def pax_data(size: int) -> bytes:
+    """A one-byte member after ``size`` bytes of PAX extended-header data."""
 
     info = tarfile.TarInfo(name="a.txt")
     info.size = 1
-    info.pax_headers = {"comment": "c" * _UNSEEN}
+    info.pax_headers = {"comment": "c" * size}
     return _tar_gz(info, fmt=tarfile.PAX_FORMAT)
 
 
 @functools.cache
-def gnu_longname_data() -> bytes:
-    """A one-byte member whose GNU long name is 32 MiB."""
+def gnu_longname_data(size: int) -> bytes:
+    """A one-byte member whose GNU long name is ``size`` bytes."""
 
-    info = tarfile.TarInfo(name="d/" + "n" * _UNSEEN)
+    info = tarfile.TarInfo(name="d/" + "n" * size)
     info.size = 1
     return _tar_gz(info, fmt=tarfile.GNU_FORMAT)
 
@@ -113,5 +124,21 @@ def directories(count: int) -> bytes:
     return buf.getvalue()
 
 
-# The shapes a 1 MiB cap refuses: each decompresses 32 MiB outside member data.
-OVER_CAP = [sparse_data_not_mapped, pax_data, gnu_longname_data]
+# The shapes CAP refuses: each decompresses past it outside member data.
+OVER_CAP = [
+    pytest.param(sparse_data_not_mapped, id="sparse-data-not-mapped"),
+    pytest.param(functools.partial(pax_data, _UNDER_THE_BUDGET), id="pax-data"),
+    pytest.param(
+        functools.partial(gnu_longname_data, _UNDER_THE_BUDGET), id="gnu-longname"
+    ),
+]
+
+# The shapes the 1 MiB budget refuses under the production caps.
+OVER_THE_BUDGET = [
+    pytest.param(functools.partial(pax_data, 2 * MIB), id="pax-data-2mib"),
+    pytest.param(functools.partial(pax_data, 32 * MIB), id="pax-data-32mib"),
+    pytest.param(functools.partial(gnu_longname_data, 2 * MIB), id="gnu-longname-2mib"),
+    pytest.param(
+        functools.partial(gnu_longname_data, 32 * MIB), id="gnu-longname-32mib"
+    ),
+]

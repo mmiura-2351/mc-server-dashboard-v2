@@ -16,7 +16,8 @@ through it.
 
 So does what a walk may decompress (issue #3810): :class:`CappedReader`, beneath
 :class:`EndCheckedReader`, counts every byte the walk takes from the stream
-toward a cap and refuses a walk that seeks back.
+toward a cap and refuses a walk that seeks back, and :class:`EndCheckedReader`
+bounds what the walk reads between two members.
 """
 
 from __future__ import annotations
@@ -32,6 +33,13 @@ _END_BLOCK = bytes(512)
 # What a walk reads after its last member when it stops at the marker: the block,
 # or first the one byte tarfile reads where it seeks to the next header.
 _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
+
+# How much the walk may read between handing out one member and the next: that
+# member's header blocks and extended headers (PAX records, GNU long names and
+# links, sparse maps). tarfile holds extended-header data whole, so this bounds
+# what it holds of it at a time (issue #3810). Real extended headers are long
+# names, xattrs and ACLs: kilobytes.
+_BETWEEN_MEMBERS_BYTES = 1024 * 1024
 
 # How much of the stream past the end-of-archive marker to read at a time, so a
 # long run of zeros cannot be materialized whole. Read through a CappedReader,
@@ -129,6 +137,12 @@ class EndCheckedReader(io.RawIOBase):
     the archive is refused rather than accepted. Only ``r:`` is supported: in
     ``r|`` ``tarfile`` reads the file in whole records, so where its walk stopped
     cannot be seen from here.
+
+    The same count bounds what the walk reads between handing out one member and
+    the next to 1 MiB (issue #3810): the next member's header blocks and extended
+    headers, which ``tarfile`` holds whole. A read then asks the stream for at
+    most one byte past that, and going past it is a ``ReadError``. The caller's
+    reads of member data are not held to it.
     """
 
     def __init__(self, stream: io.BufferedIOBase) -> None:
@@ -136,6 +150,9 @@ class EndCheckedReader(io.RawIOBase):
         self._stream = stream
         self._last_read = b""
         self._read_since_member = 0
+        # Whether the walk, rather than the caller, is reading: from the start
+        # until a member is handed out, and from each resume until the next.
+        self._walking = True
 
     def readable(self) -> bool:
         return True
@@ -150,8 +167,15 @@ class EndCheckedReader(io.RawIOBase):
         return True
 
     def read(self, size: int = -1, /) -> bytes:
+        if self._walking:
+            allowed = _BETWEEN_MEMBERS_BYTES + 1 - self._read_since_member
+            size = allowed if size < 0 else min(size, allowed)
         self._last_read = self._stream.read(size)
         self._read_since_member += len(self._last_read)
+        if self._walking and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
+            raise tarfile.ReadError(
+                f"more than {_BETWEEN_MEMBERS_BYTES} bytes of headers before a member"
+            )
         return self._last_read
 
     def seek(self, offset: int, whence: int = io.SEEK_SET, /) -> int:
@@ -174,11 +198,14 @@ class EndCheckedReader(io.RawIOBase):
 
         The count of what the walk reads starts over each time the walk resumes
         after a member, which is after the caller has read that member's data.
+        Only the walk's own reads are held to the budget between two members.
         """
 
         for member in tar:
+            self._walking = False
             yield member
             self._read_since_member = 0
+            self._walking = True
 
     def read_past_end_marker(self) -> Iterator[bytes]:
         """Read on from the end-of-archive marker to the end of the stream.
@@ -224,7 +251,9 @@ class CappedReader(io.BufferedIOBase):
     or skipped, the stored data of a sparse member, padding and the read past
     the end-of-archive marker. A read past the cap raises
     :class:`CapExceededError`, having taken at most one byte more than the cap
-    from the stream.
+    from the stream. The stream may decompress more than it hands over:
+    ``gzip.GzipFile`` reads ahead by ``io.DEFAULT_BUFFER_SIZE``, 8 KiB on 3.13
+    and 128 KiB on 3.14.
 
     A seek forward reads on and drops what it read, so what ``tarfile`` skips is
     counted as it is decompressed. The stream itself is never seeked. A seek back

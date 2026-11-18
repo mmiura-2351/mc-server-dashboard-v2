@@ -1262,8 +1262,34 @@ def test_validate_counts_what_tarfile_reads_outside_member_data(
     # as member data is, so they count toward the same cap (issue #3810).
     with pytest.raises(InvalidBackupArchiveError, match="exceeds cap"):
         _validate_backup_archive(
-            build(), max_entries=10, max_decompressed_bytes=archive_cap_shapes.MIB
+            build(), max_entries=10, max_decompressed_bytes=archive_cap_shapes.CAP
         )
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_THE_BUDGET)
+def test_validate_refuses_extended_headers_over_the_budget(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile holds an extended header's data whole, so what the walk reads
+    # between two members is bounded (issue #3810). The cap is the production
+    # one: only that bound can refuse this archive.
+    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar"):
+        _validate_backup_archive(build(), max_entries=10)
+
+
+@pytest.mark.parametrize("slack", [0, -1], ids=["at-the-cap", "one-byte-under"])
+def test_validate_holds_an_archive_to_its_cap_to_the_byte(slack: int) -> None:
+    # The cap is the stream's own length: header, data and padding.
+    content = _targz({"a.txt": b"A"})
+    cap = len(gzip.decompress(content)) + slack
+
+    if slack:
+        with pytest.raises(InvalidBackupArchiveError, match="exceeds cap"):
+            _validate_backup_archive(
+                content, max_entries=10, max_decompressed_bytes=cap
+            )
+    else:
+        _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=cap)
 
 
 def test_validate_counts_a_sparse_members_holes_toward_the_cap() -> None:

@@ -1512,7 +1512,9 @@ def _validate_backup_archive(
     :class:`~mc_server_dashboard_api.archive_member.CappedReader`, so headers,
     extended-header data, skipped member data, padding and the read past the
     end-of-archive marker count as member data does, and a walk that seeks back,
-    which would decompress the stream again, is refused. Each file member's body
+    which would decompress the stream again, is refused. So is one that reads
+    more than 1 MiB of headers between two members: ``tarfile`` holds
+    extended-header data whole. Each file member's body
     is drained too, and what it holds counts toward the same cap on its own: for a
     sparse member that includes holes restore writes but nothing decompresses.
     Raises :class:`InvalidBackupArchiveError` (422) on any violation.
@@ -1601,8 +1603,9 @@ def _validate_backup_archive(
         # ``ServerError`` s, none of which subclasses a member of the tuple. The
         # read past the end-of-archive marker raises them by design (#3778): a
         # ``ReadError`` for anything but zeros there, and the gzip layer's own
-        # errors for its trailer. So does ``CappedReader`` for a seek back
-        # (#3810); its cap is ``CapExceededError``, not one of them.
+        # errors for its trailer. So do ``CappedReader`` for a seek back and
+        # ``EndCheckedReader`` for more than 1 MiB of headers between two members
+        # (#3810); the cap is ``CapExceededError``, not one of them.
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 

@@ -178,6 +178,13 @@ _ACCEPTED: list[object] = [
         id="gnu-tar-sparse",
         marks=_needs_gnu_tar,
     ),
+    # Member data is read on the caller's turn, so it is not held to the budget
+    # on what the walk reads between two members (issue #3810).
+    pytest.param(
+        lambda _: _tar({"big.bin": b"B" * (2 * _MIB)}),
+        ["big.bin"],
+        id="member-over-the-header-budget",
+    ),
 ]
 
 
@@ -373,12 +380,20 @@ _REFUSED: list[object] = [
 
 @_both
 @_each_data_read
+@pytest.mark.parametrize("capped", [False, True], ids=["uncapped", "capped"])
 @pytest.mark.parametrize("produce", _REFUSED)
 def test_an_archive_that_does_not_end_at_its_marker_is_refused(
-    produce: Callable[[Path], bytes], gzipped: bool, data: str, tmp_path: Path
+    produce: Callable[[Path], bytes],
+    capped: bool,
+    gzipped: bool,
+    data: str,
+    tmp_path: Path,
 ) -> None:
+    # Capped, the stream is read as the upload gates read it, through a
+    # CappedReader whose cap the archive stays within.
+    archive = produce(tmp_path)
     with pytest.raises(tarfile.ReadError):
-        _walk(produce(tmp_path), gzipped=gzipped, data=data)
+        _walk(archive, gzipped=gzipped, data=data, cap=len(archive) if capped else None)
 
 
 @_both
@@ -526,3 +541,93 @@ def test_a_skip_past_the_end_stops_at_the_end() -> None:
 
     assert reader.seek(50) == 10
     assert reader.read(1) == b""
+
+
+class _Recording(io.BytesIO):
+    """A source that records the size of every read asked of it."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__(data)
+        self.sizes: list[int] = []
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self.sizes.append(-1 if size is None else size)
+        return super().read(size)
+
+
+def test_a_skip_is_read_in_chunks() -> None:
+    source = _Recording(bytes(8 * _MIB))
+    reader = CappedReader(source, 8 * _MIB)
+
+    assert reader.seek(4 * _MIB) == 4 * _MIB
+    assert 0 < max(source.sizes) <= _MIB
+
+
+# --- the budget on what the walk reads between two members (issue #3810) ----
+#
+# ``tarfile`` holds an extended header's data whole, so EndCheckedReader bounds
+# what the walk may read between handing out one member and the next: 1 MiB.
+
+
+def _pax_of(length: int) -> bytes:
+    """A PAX extended header whose data is one record of exactly ``length`` bytes."""
+
+    value = "c" * length
+    while len(record := _record("comment", value)) != length:
+        value = value[: len(value) - (len(record) - length)]
+    return _header("PaxHeader", typ=b"x", size=length) + record + bytes(-length % 512)
+
+
+def _global_pax_of(length: int) -> bytes:
+    block = bytearray(_pax_of(length))
+    block[:512] = _header("GlobalHead", typ=b"g", size=length)
+    return bytes(block)
+
+
+_OVER_BUDGET = 2 * _MIB
+
+_OVER_THE_BUDGET: list[object] = [
+    pytest.param(lambda: _pax_of(_OVER_BUDGET) + _A, id="pax-data"),
+    pytest.param(lambda: _A + _pax_of(_OVER_BUDGET) + _A, id="pax-data-after-a-member"),
+    pytest.param(lambda: _A + _global_pax_of(_OVER_BUDGET) + _A, id="global-pax-data"),
+    pytest.param(
+        lambda: _A + _tar({"d/" + "n" * _OVER_BUDGET: b"L"}, fmt=tarfile.GNU_FORMAT),
+        id="gnu-longname-after-a-member",
+    ),
+]
+
+
+@_both
+@_each_data_read
+@pytest.mark.parametrize("build", _OVER_THE_BUDGET)
+def test_what_the_walk_reads_between_two_members_is_bounded(
+    build: Callable[[], bytes], gzipped: bool, data: str
+) -> None:
+    archive = build() + _ZEROS
+
+    with pytest.raises(tarfile.ReadError):
+        _walk(archive, gzipped=gzipped, data=data, cap=len(archive))
+
+
+@_both
+def test_the_budget_takes_exactly_one_mib_between_two_members(gzipped: bool) -> None:
+    # The first member's reads: the PAX header block, its data and a.txt's header.
+    at_the_budget = _pax_of(_MIB - 1024) + _A + _ZEROS
+    # One byte more PAX data is one more block.
+    over_the_budget = _pax_of(_MIB - 1023) + _A + _ZEROS
+
+    assert _walk(at_the_budget, gzipped=gzipped)[0] == ["a.txt"]
+    with pytest.raises(tarfile.ReadError):
+        _walk(over_the_budget, gzipped=gzipped)
+
+
+def test_an_extended_header_is_read_one_byte_past_the_budget_at_most() -> None:
+    # The header claims 64 MiB of PAX data: tarfile asks for it in one read
+    # before 3.13.15 and in 1 MiB parts after.
+    source = _Recording(_pax_of(64 * _MIB) + _A + _ZEROS)
+    stream = EndCheckedReader(source)
+
+    with pytest.raises(tarfile.ReadError):
+        with tarfile.open(fileobj=stream, mode="r:") as tar:
+            _names(stream, tar)
+    assert source.tell() == _MIB + 1

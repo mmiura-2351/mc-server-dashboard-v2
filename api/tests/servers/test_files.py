@@ -3760,11 +3760,11 @@ async def test_upload_extract_counts_what_tarfile_reads_outside_member_data(
     use_case = UploadFile(
         uow=_stopped_uow(community, server_id),
         file_store=store,
-        max_bytes=archive_cap_shapes.MIB,
+        max_bytes=archive_cap_shapes.CAP,
     )
 
     content = build()
-    assert len(content) <= archive_cap_shapes.MIB  # the body itself is under it
+    assert len(content) <= archive_cap_shapes.CAP  # the body itself is under it
     with pytest.raises(FileTooLargeError):
         await use_case(
             community_id=CommunityId(community),
@@ -3775,6 +3775,60 @@ async def test_upload_extract_counts_what_tarfile_reads_outside_member_data(
             extract=True,
         )
     assert store.writes == []
+
+
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_THE_BUDGET)
+async def test_upload_extract_refuses_extended_headers_over_the_budget(
+    build: Callable[[], bytes],
+) -> None:
+    # tarfile holds an extended header's data whole, so what the walk reads
+    # between two members is bounded (issue #3810). The caps are the production
+    # ones: only that bound can refuse this archive.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=build(),
+            extract=True,
+        )
+    assert store.writes == []
+
+
+@pytest.mark.parametrize("slack", [0, -1], ids=["at-the-cap", "one-byte-under"])
+async def test_upload_extract_holds_a_tar_gz_to_its_cap_to_the_byte(
+    slack: int,
+) -> None:
+    # The cap is the stream's own length: header, data and padding.
+    content = _tar_gz_bytes({"a.txt": b"A"})
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=store,
+        max_bytes=len(gzip.decompress(content)) + slack,
+    )
+    upload = use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="pack.tar.gz",
+        content=content,
+        extract=True,
+    )
+
+    if slack:
+        with pytest.raises(FileTooLargeError):
+            await upload
+        assert store.writes == []
+    else:
+        await upload
+        assert dict(store.writes) == {"a.txt": b"A"}
 
 
 async def test_upload_extract_tar_that_seeks_back_writes_nothing() -> None:

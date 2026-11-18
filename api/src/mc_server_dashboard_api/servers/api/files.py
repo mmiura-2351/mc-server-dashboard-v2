@@ -705,8 +705,10 @@ async def upload_file(
     are ``invalid_archive`` too: a header past the first that does not read, no
     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
     that does not match, and bytes after the gzip stream that are neither
-    another gzip member nor zero padding. So is a sparse member whose map reaches
-    past its stored data, which would make the reader seek back (issue #3810).
+    another gzip member nor zero padding. So are a sparse member whose map
+    reaches past its stored data, which would make the reader seek back, and
+    more than 1 MiB of headers before a member, extended headers included
+    (issue #3810).
     Every byte a tar.gz decompresses counts toward the extracted-size cap,
     headers, extended-header data and skipped member data included (issue
     #3810).

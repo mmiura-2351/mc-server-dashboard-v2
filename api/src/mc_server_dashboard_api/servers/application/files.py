@@ -144,13 +144,15 @@ MAX_DECOMPRESSED_BYTES = 8 * 1024 * 1024 * 1024
 # member-count bomb: a tiny archive of hundreds of thousands of 1-byte members
 # stays under MAX_UPLOAD_BYTES yet each member is a separate versioned write
 # (an atomic temp+fsync+rename plus a retained version), so an unbounded member
-# count is a DoS amplification independent of total size. 10_000 entries
-# comfortably covers a real mod/datapack/world archive while refusing a
-# pathological count. Exceeding it is reported as :class:`FileTooLargeError`
-# (413) — the same response the size cap uses, since both are "this archive is
-# too costly to extract" rejections and a single response keeps the edge mapping
-# simple. A constant is intentional (no config knob requested); document if it
-# ever needs tuning.
+# count is a DoS amplification independent of total size. A tar.gz's directory
+# members count too (issue #3810): they are not written, but each is a header
+# the walk reads and a member ``tarfile`` keeps. 10_000 entries comfortably
+# covers a real mod/datapack/world archive while refusing a pathological count.
+# Exceeding it is reported as :class:`FileTooLargeError` (413) — the same
+# response the size cap uses, since both are "this archive is too costly to
+# extract" rejections and a single response keeps the edge mapping simple. A
+# constant is intentional (no config knob requested); document if it ever needs
+# tuning.
 MAX_ARCHIVE_ENTRIES = 10_000
 
 # How much to pull per chunk when streaming an archive member's decompressed
@@ -171,7 +173,8 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 # header; ``ValueError`` for a GNU sparse PAX field that is not a number, which it
 # converts with a bare ``int()``), and ``EndCheckedReader`` adds a ``ReadError``
 # for a walk that did not stop at the end-of-archive marker or anything but zeros
-# past it, ``CappedReader`` one for a walk that seeks back (issue #3810).
+# past it or more than 1 MiB of headers between two members, ``CappedReader``
+# one for a walk that seeks back (issue #3810).
 # ``zipfile`` raises far more than ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
@@ -879,8 +882,8 @@ def _archive_entries(
     materialized in memory before the guard trips. A tar.gz is read through
     :class:`~mc_server_dashboard_api.archive_member.CappedReader` too, so every
     byte it decompresses counts toward ``max_bytes``, headers and skipped data
-    included, and a walk that seeks back is :class:`UnreadableArchiveError`
-    (issue #3810).
+    included, and a walk that seeks back, or reads more than 1 MiB of headers
+    between two members, is :class:`UnreadableArchiveError` (issue #3810).
 
     This is the SAME generator both the validate pass and the write pass run over,
     so the per-entry checks are defined once (no duplication). The validate pass
