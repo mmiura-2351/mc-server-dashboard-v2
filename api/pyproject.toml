@@ -13,7 +13,7 @@ dependencies = [
     # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
     # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md Section 3).
     "grpcio>=1.80.0,<1.86",
-    "protobuf>=6.31.1,<7",
+    "protobuf>=6.33.6,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3); each entry's comment dates
@@ -656,7 +656,8 @@ forbidden_modules = [
 # are deliberately free to import (the export manifest's `exported_at` stamp is
 # a file format, not an HTTP header) — and `archive_member`, the standard-library
 # backup archive member rule that storage's restore and the servers upload gate
-# both judge members by (issue #3579). Keep the list in step with that `ls`: a
+# both judge members by (issue #3579), and the end-of-archive read beside it
+# (issue #3778). Keep the list in step with that `ls`: a
 # new root-level module belongs here unless it is neutral in the same way.
 [[tool.importlinter.contracts]]
 name = "no context's domain or application imports a root-level module"

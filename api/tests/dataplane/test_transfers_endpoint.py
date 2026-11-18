@@ -67,7 +67,15 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
+    GNU_SPARSE_FORMATS,
+    INVALID_SPARSE_LAYOUTS,
+    SPARSE_EXTENSION_CUTS,
+    SPARSE_FILES,
+    gnu_tar_sparse_archive_cut_in_its_extension_block,
+    tar_cut_in_a_sparse_extension_block,
     tar_with_a_bad_sparse_field,
+    tar_with_an_invalid_sparse_layout,
+    tar_with_gnu_tar_sparse_members,
     tar_with_link_member,
 )
 
@@ -2936,6 +2944,76 @@ def test_snapshot_with_a_non_numeric_sparse_field_is_refused_and_not_published(
     body = tar_with_a_bad_sparse_field(field, after=after)
 
     assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize(
+    "after", [{}, {"world/level.dat": b"new"}], ids=["first", "after-a-member"]
+)
+@pytest.mark.parametrize("layout", list(INVALID_SPARSE_LAYOUTS))
+def test_snapshot_with_an_invalid_sparse_layout_is_refused_and_not_published(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    after: dict[str, bytes],
+    layout: str,
+) -> None:
+    # ``tarfile`` takes a GNU sparse map's numbers as they are, so a negative
+    # offset or size, an entry past the real size, or entries out of order
+    # reached the ingest: fs answered 500 (its extraction seeks to a negative
+    # offset) or 422, and the object backend published the member (issue #3802).
+    body = tar_with_an_invalid_sparse_layout(layout, after=after)
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize(
+    "body",
+    [
+        *(
+            pytest.param(
+                tar_cut_in_a_sparse_extension_block(cut, after=after), id=f"{cut}-{at}"
+            )
+            for cut in SPARSE_EXTENSION_CUTS
+            for at, after in [
+                ("first", {}),
+                ("after-a-member", {"world/level.dat": b"new"}),
+            ]
+        ),
+        pytest.param(
+            gnu_tar_sparse_archive_cut_in_its_extension_block(), id="gnu-tar-archive"
+        ),
+    ],
+)
+def test_snapshot_that_ends_in_a_sparse_extension_block_is_refused(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], body: bytes
+) -> None:
+    # ``tarfile`` indexes the short extension block of an old GNU sparse header
+    # and raises ``IndexError``, which answered 500 on both backends (issue
+    # #3802).
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize("sparse_format", GNU_SPARSE_FORMATS)
+def test_snapshot_with_gnu_tar_sparse_members_is_published_expanded(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], sparse_format: str
+) -> None:
+    # The maps GNU tar itself writes stay accepted (issue #3802): a zero-length
+    # entry at the real size, and the old header's ``(0, 0)`` padding slots.
+    body = tar_with_gnu_tar_sparse_members(sparse_format)
+
+    status, _, hydrated, staging = _post_snapshot_over_a_prior(
+        tmp_path, make_storage, body
+    )
+
+    assert (status, hydrated, staging) == (204, SPARSE_FILES, [])
 
 
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(

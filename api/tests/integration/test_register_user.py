@@ -247,6 +247,9 @@ async def test_a_refused_login_reports_the_hash_read_back_from_the_database(
         await log_in_seeded(_login(engine), engine, produced, "Np4@xZ#Lq9wR")
 
     assert isinstance(failure.value.__cause__, InvalidCredentialsError)
+    assert str(failure.value).startswith(
+        "Login refused the correct password of a seeded user."
+    )
     assert f"value: {created.password_hash!r}" in str(failure.value)
     assert "equals the hash the test produced: False" in str(failure.value)
 

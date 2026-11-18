@@ -5,6 +5,7 @@ import {
   actionApplies,
   atRest,
   bucketOf,
+  converging,
   isTransitional,
   normalizeState,
   type ObservedState,
@@ -180,6 +181,32 @@ describe("atRest", () => {
 
   it("running with desired is not at rest", () => {
     expect(atRest("running", "running")).toBe(false);
+  });
+});
+
+describe("converging", () => {
+  // The "applying…" hint (WEBUI_SPEC.md 6.4): shown until the observed state
+  // has reached the intent. A stopped intent is reached by any at-rest state,
+  // so a server that crashed under it is settled (#3285).
+  const cases: Array<[string, ObservedState, boolean]> = [
+    ["running", "running", false],
+    ["running", "starting", true],
+    ["running", "stopping", true],
+    ["running", "restarting", true],
+    ["running", "stopped", true],
+    ["running", "crashed", true],
+    ["running", "unknown", true],
+    ["stopped", "stopped", false],
+    ["stopped", "crashed", false],
+    ["stopped", "unknown", false],
+    ["stopped", "running", true],
+    ["stopped", "starting", true],
+    ["stopped", "stopping", true],
+    ["stopped", "restarting", true],
+  ];
+
+  it.each(cases)("desired=%s observed=%s -> %s", (desired, state, expected) => {
+    expect(converging(state, desired)).toBe(expected);
   });
 });
 

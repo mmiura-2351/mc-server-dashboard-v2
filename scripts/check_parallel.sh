@@ -29,13 +29,17 @@
 #   Skipped entirely if Phase 1 already failed (no point running generators
 #   on a known-broken tree).
 #
-# Bounded parallelism: 11 background jobs on a 4-core host. The heavy chains
-# (A, B) are CPU-bound; the lighter ones (C-K) finish quickly and free cores.
+# Bounded parallelism: 11 background chains on a 4-core host, plus the argon2
+# canary below at nice 19, 12 jobs in all. The heavy chains (A, B) are
+# CPU-bound; the lighter ones (C-K) finish quickly and free cores.
 # golangci-lint is capped at --concurrency=2 by the Makefile, and pytest-xdist
 # uses -n auto (4 workers). Oversubscription is transient and tolerable.
 #
 # That budget assumes the run owns the host, so the run takes a host-global
 # flock first and waits, naming the holder, when another gate has it (#2513).
+#
+# Beside chain A runs the argon2 canary (scripts/argon2_canary.py, #3748), a
+# watcher rather than a check: it never fails the run.
 
 set -uo pipefail
 
@@ -151,6 +155,14 @@ fi
 # or, with `mv` into an existing dir, at check-logs.prev/check-logs. With no
 # check-logs to move -- the run before was killed after its move and before
 # its mkdir -- .prev holds the newest logs there are, so it stays.
+#
+# A step that fails part-way is not undone: an entry in .prev that cannot be
+# removed stops the run after `rm -rf` has removed the rest of .prev. That is
+# accepted (#3774). What goes is the generation this rotation discards anyway,
+# check-logs is untouched, and the gate writes only plain files into its log
+# dir, so such an entry was put there by something else. Moving .prev aside
+# first would lose the same entries when the moved copy is removed, and add a
+# third name, whose leftover the next run must clear without nesting into it.
 git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || {
     echo "FAIL: not inside a git checkout (needed to locate the log dir)" >&2
     exit 1
@@ -166,6 +178,64 @@ fi && mkdir "$LOGDIR" || {
 export MCSD_CHECK_LOGDIR="$LOGDIR"
 # On INT/TERM: kill background jobs first, then exit.
 trap 'jobs -p | xargs -r kill 2>/dev/null; exit 1' INT TERM
+
+# --- The argon2 canary beside the api chain (#3748) ---
+#
+# A correct password has intermittently failed to verify inside the api suite,
+# only ever during a gate, and only a process that shares nothing with the suite
+# but the host can tell a fault of the host from one of the suite's own process.
+# scripts/argon2_canary.py is that process: fixed Argon2id answers and a 64 MiB
+# memory control, rechecked for as long as the api chain runs, into
+# argon2-canary.log beside the chain logs (docs/dev/AGENTS.md Section 3 says how
+# to read it). It runs at nice 19, a check every 4-9 s under a gate, and it can
+# never fail the run: its exit status is ignored, and it does not inherit fd 9,
+# so it never holds the gate lock. It is stopped as the api chain ends, and by
+# the EXIT trap on every other way out of this script; a canary that ignores the
+# TERM is killed after 5 s. A SIGKILL runs no trap, so the canary also stops on
+# its own once this script, whose pid it is given, is no longer its parent.
+#
+# A hit says nothing to a run that passes, and most runs pass, so the stop
+# reads the log: a MISMATCH or ERROR line is announced on stderr and the log
+# copied to argon2-canary-hits/ in the git common dir, which neither the log
+# rotation nor a worktree removal reaches. A canary that got no check done --
+# no start line, or a last count of checks=0 -- is announced in one line, since
+# its clean log would otherwise read as a clean run. The run's verdict stays
+# its own.
+canary_pid=
+start_argon2_canary() {
+    nice -n 19 api/.venv/bin/python -I scripts/argon2_canary.py --parent "$$" \
+        </dev/null >"$LOGDIR/argon2-canary.log" 2>&1 9>&- &
+    canary_pid=$!
+}
+stop_argon2_canary() {
+    local log="$LOGDIR/argon2-canary.log" kept hits_dir checks last
+    [ -n "$canary_pid" ] || return 0
+    kill -TERM "$canary_pid" 2>/dev/null
+    for _ in $(seq 1 50); do
+        kill -0 "$canary_pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    kill -0 "$canary_pid" 2>/dev/null && kill -KILL "$canary_pid" 2>/dev/null
+    wait "$canary_pid" 2>/dev/null
+    canary_pid=
+    checks=$(grep -oE ' checks=[0-9]+' "$log" 2>/dev/null | tail -n 1)
+    checks=${checks# checks=}
+    if ! grep -q ' start pid=' "$log" 2>/dev/null || [ "${checks:-0}" -eq 0 ]; then
+        last=$(tail -n 1 "$log" 2>/dev/null)
+        echo "argon2 canary did not run: ${last:-its log is empty}" >&2
+    fi
+    grep -qE ' (MISMATCH|ERROR) ' "$log" 2>/dev/null || return 0
+    hits_dir="$(git rev-parse --path-format=absolute --git-common-dir)/argon2-canary-hits" &&
+        kept="$hits_dir/$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$worktree").log" &&
+        mkdir -p "$hits_dir" && cp "$log" "$kept" ||
+        kept="nowhere (the copy failed); it is still $log"
+    {
+        echo "!!! argon2 canary: a MISMATCH or ERROR during this run (#3748) !!!"
+        grep -E ' (MISMATCH|ERROR) ' "$log" | head -n 5
+        echo "!!! its log is kept at $kept: paste it into #3748 (docs/dev/AGENTS.md Section 3)"
+    } >&2
+}
+trap stop_argon2_canary EXIT
 
 failed_chains=()
 
@@ -211,6 +281,7 @@ run_chain relay-lint  relay-lint  || failed_chains+=(relay-lint)
 # --- Phase 1b: reader chains in parallel ---
 echo "=== Phase 1b: reader chains (parallel) ==="
 
+start_argon2_canary
 run_chain api      api-lint api-test &
 pids[0]=$!; names[0]=api
 
@@ -248,6 +319,10 @@ pids[10]=$!; names[10]=image-pins
 for i in "${!pids[@]}"; do
     if ! wait "${pids[$i]}"; then
         failed_chains+=("${names[$i]}")
+    fi
+    # The api chain is waited for first, so the canary stops as it ends.
+    if [ "${names[$i]}" = api ]; then
+        stop_argon2_canary
     fi
 done
 

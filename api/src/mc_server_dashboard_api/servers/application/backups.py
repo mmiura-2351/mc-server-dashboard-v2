@@ -39,7 +39,9 @@ retry.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import gzip
 import hashlib
 import io
 import logging
@@ -51,6 +53,7 @@ from pathlib import PurePosixPath
 from typing import IO
 
 from mc_server_dashboard_api.archive_member import (
+    EndCheckedReader,
     unrestorable_reason,
     without_tar_root_prefix,
 )
@@ -1264,6 +1267,21 @@ class UploadBackup:
     :func:`_validate_backup_archive` for why the refusal belongs here rather than
     at restore.
 
+    The validation runs in a worker thread, the default executor ``UploadFile``
+    uses for its own (issue #1620), so it never holds the event loop (issue
+    #3801). The thread reads ``content``, the bytes the route copied out of the
+    request's spooled part, and never the spool, so the spool may close whenever
+    the request ends. A cancelled call stops waiting at once and stores nothing.
+    The thread cannot be stopped: it runs on to its own end, holding ``content``
+    until then.
+
+    The caps do not bound all of that thread's CPU. ``gzip`` pays for every gzip
+    member whatever it holds, about 1 s a MiB of empty members, and reads zero
+    padding after the gzip stream one byte at a time, about 0.2 s a MiB. Neither
+    adds decompressed bytes, so only the 512 MiB body cap bounds them: minutes
+    for one upload, now in the worker thread rather than on the event loop.
+    Issue #3835 bounds both.
+
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
     """
@@ -1288,7 +1306,11 @@ class UploadBackup:
         # the lock and never extend its hold.
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
-        _validate_backup_archive(
+        # Offloaded to a thread, as UploadFile does (issue #1620): decompression
+        # is CPU-bound up to the decompressed cap, and on the event loop it would
+        # stall every other request on the process (issue #3801).
+        await asyncio.to_thread(
+            _validate_backup_archive,
             content,
             max_entries=self.max_entries,
             max_decompressed_bytes=self.max_decompressed_bytes,
@@ -1489,6 +1511,14 @@ def _validate_backup_archive(
     cannot slip past. Raises :class:`InvalidBackupArchiveError` (422) on any
     violation.
 
+    The archive must also read to its end (issue #3778). The tar is walked
+    through :class:`EndCheckedReader` over ``gzip.GzipFile``: the walk must stop
+    at the end-of-archive marker, so a header past the first that does not read
+    is refused rather than cutting the member list short, and the stream is then
+    read on to the gzip end. Only zeros may follow the marker, the gzip CRC32 and
+    ISIZE must match, and only another gzip member or zero padding may follow the
+    gzip stream. The zeros read there count toward ``max_decompressed_bytes`` too.
+
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
     ``arcname=child.name``, and :class:`RestoreBackup` republishes the extraction
@@ -1504,10 +1534,13 @@ def _validate_backup_archive(
     """
 
     try:
-        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tar:
+        with (
+            gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+            tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tar,
+        ):
             count = 0
             total = 0
-            for read in tar:
+            for read in stream.members(tar):
                 count += 1
                 if count > max_entries:
                     raise InvalidBackupArchiveError("too many entries")
@@ -1542,6 +1575,10 @@ def _validate_backup_archive(
                     handle = tar.extractfile(member)
                     if handle is not None:
                         total = _drain_capped(handle, total, max_decompressed_bytes)
+            for chunk in stream.read_past_end_marker():
+                total += len(chunk)
+                if total > max_decompressed_bytes:
+                    raise InvalidBackupArchiveError("decompressed size exceeds cap")
     except _TAR_GZ_READ_ERRORS as exc:
         # Not ``tarfile.TarError`` alone: a cut or damage inside a member's data
         # surfaces from the gzip layer as ``EOFError`` / ``zlib.error``, and a bad
@@ -1550,7 +1587,10 @@ def _validate_backup_archive(
         # helpers it calls (``without_tar_root_prefix``, ``unrestorable_reason``,
         # ``_echoed_name``, the two ``_refuse_*`` guards, ``_drain_capped``) only
         # slice, split and build ``PurePosixPath`` s, and refuse with
-        # ``ServerError`` s, none of which subclasses a member of the tuple.
+        # ``ServerError`` s, none of which subclasses a member of the tuple. The
+        # read past the end-of-archive marker raises them by design (#3778): a
+        # ``ReadError`` for anything but zeros there, and the gzip layer's own
+        # errors for its trailer.
         raise InvalidBackupArchiveError("not a gzip tar archive") from exc
 
 
