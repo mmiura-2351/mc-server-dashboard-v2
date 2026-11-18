@@ -347,7 +347,10 @@ separately in Section 7.
 ### 5.4 Snapshot cadence
 
 The API drives snapshot scheduling (REQUIREMENTS.md FR-DATA-7); see Section 8
-for the full cadence model.
+for the full cadence model. The scheduler wakes every
+`snapshot.min_interval_seconds` to dispatch the snapshots that are due. Its first
+wake comes after a random delay, uniform between 0 and
+min(`snapshot.min_interval_seconds`, 600) seconds from startup.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -487,6 +490,15 @@ no live server row references (STORAGE.md Section 3.2). It is gated on the contr
 plane like the snapshot/reconciler loops, and a platform admin can also
 trigger a sweep on demand (`POST /versions/jar-pool/gc`).
 
+The first sweep runs soon after startup, after a random delay, uniform between 0
+and min(`jar_gc.interval_seconds`, 600) seconds. Later sweeps follow the interval.
+An API that restarts more often than the interval (on every deploy, say) still
+reclaims, and API processes that restart together do not all sweep at once. The
+plugin-cache and resource-pack GCs, the snapshot scheduler and both prunes follow
+the same rule over their own intervals. Two loops differ: the storage sweep loop
+waits one full interval (Section 5.15), and the divergence reconciler runs its
+first pass at once (Section 5.6).
+
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `jar_gc.interval_seconds` | `86400` | | Loop resolution: how often the GC wakes to sweep the JAR pool. The pool grows slowly (one entry per distinct resolved JAR), so a daily default is ample. Must be positive. |
@@ -606,8 +618,13 @@ proxies the API).
 ### 5.12 Plugin-cache garbage collection
 
 The API runs a background GC that reclaims cached plugin/mod blobs no
-`server_plugin` row references. It is gated on the control plane
-like the JAR-pool GC (Section 5.7).
+`server_plugin` row references. It starts whenever the plugin cache store
+exists (object backend only), whether or not the control plane is enabled:
+plugin installs work without the control plane, so the GC must too.
+
+Its first sweep follows the JAR-pool GC rule (Section 5.7): a random delay,
+uniform between 0 and min(`plugin_cache_gc.interval_seconds`, 600) seconds after
+startup. Later sweeps follow the interval.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -634,7 +651,7 @@ missing, per the secret-blank rule above).
 | `relay.tunnel_port` | `25665` | | The relay container's published tunnel-listener host port ([`RELAY.md`](RELAY.md) Section 13): the Worker dial-back tunnel endpoint. When the relay is enabled the allocator excludes it like `relay.game_port`. Must be 1..65535. |
 | `relay.bedrock_enabled` | `false` | | Bedrock ingress capability. With `relay.enabled`, a server whose plugin set carries Geyser -- via install, catalog install, or a ZIP import -- allocates its `bedrock_port` from the dedicated UDP window (Section 5.8); server responses surface `bedrock_address` / `bedrock_port` only while at least one installed Geyser copy is *enabled* -- the port stays allocated but the fields go null if every copy is disabled. `GET /api/meta` reports the combined gate as `bedrock_enabled`. Off: Geyser detection allocates nothing and the fields stay null. |
 | `relay.bedrock_tunnel_port` | `25675` | | The relay container's published Bedrock tunnel (QUIC) **UDP** listener host port. When the Bedrock gate is on, the allocator excludes it from the assignable Bedrock window like `relay.game_port` / `relay.tunnel_port`. Must be 1..65535. |
-| `relay.session_retention_days` | `90` | | `game_session` prune window in days ([`RELAY.md`](RELAY.md) Section 8). Must be positive. |
+| `relay.session_retention_days` | `90` | | `game_session` prune window in days ([`RELAY.md`](RELAY.md) Section 8). The prune runs hourly, the first time after a random delay of up to 600 seconds from startup. Must be positive. |
 
 ### 5.14 General scheduler
 
@@ -658,6 +675,12 @@ staging/snapshot prefixes plus orphan in-progress multipart aborts
 mirroring the one-shot startup sweep. A daily default keeps the loop cold so
 overlap with a live publish stays rare. The resource-pack GC (STORAGE.md
 Section 4.3) runs on the same cadence, on the object backend only.
+
+The sweep loop's first pass comes one full interval after startup, because the
+one-shot startup sweep has just run. The resource-pack GC's first pass follows
+the JAR-pool GC rule (Section 5.7): a random delay, uniform between 0 and
+min(`storage_sweep.interval_seconds`, 600) seconds after startup. Later passes of
+both follow the interval.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -1051,7 +1074,7 @@ enumeration (REQUIREMENTS.md FR-AUTH-4).
 | `auth.brute_force.lockout_base_seconds` | `900` | Initial lockout duration; doubles on repeat (exponential back-off). Must be positive and **not exceed** `lockout_max_seconds`; a base above the cap fails fast at load. |
 | `auth.brute_force.lockout_max_seconds` | `86400` | Cap on the backed-off lockout duration. Must be positive. |
 | `auth.brute_force.delay_ms` | `200` | Artificial delay added on a failed attempt to deny timing enumeration. Must be non-negative; `0` explicitly disables the delay (forgoing the timing-uniformity guarantee). |
-| `auth.brute_force.prune_interval_seconds` | `3600` | How often the background loop prunes `login_attempt` rows older than the longest window, independent of logins (SECURITY.md Section 3). Must be positive. |
+| `auth.brute_force.prune_interval_seconds` | `3600` | How often the background loop prunes `login_attempt` rows older than the longest window, independent of logins (SECURITY.md Section 3). The first prune runs after a random delay, uniform between 0 and min(this interval, 600) seconds from startup. Must be positive. |
 
 ### 7.3 Reverse-proxy trust
 
