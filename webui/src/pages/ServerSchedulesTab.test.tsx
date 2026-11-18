@@ -86,6 +86,8 @@ function server() {
     observed_state: "running",
     observed_at: null,
     assigned_worker_id: "worker-a",
+    crash_reason: null,
+    crash_detail: null,
     config: {},
     join_hostname: null,
     bedrock_address: null,

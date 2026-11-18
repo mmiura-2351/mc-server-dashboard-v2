@@ -4175,6 +4175,10 @@ export interface components {
             };
             /** Cpu Millis */
             cpu_millis: number | null;
+            /** Crash Detail */
+            crash_detail: string | null;
+            /** Crash Reason */
+            crash_reason: string | null;
             /** Desired State */
             desired_state: string;
             /** Game Port */

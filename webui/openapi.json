@@ -3512,6 +3512,28 @@
             ],
             "title": "Cpu Millis"
           },
+          "crash_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crash Detail"
+          },
+          "crash_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crash Reason"
+          },
           "desired_state": {
             "title": "Desired State",
             "type": "string"
@@ -3608,7 +3630,9 @@
           "desired_state",
           "observed_state",
           "observed_at",
-          "assigned_worker_id"
+          "assigned_worker_id",
+          "crash_reason",
+          "crash_detail"
         ],
         "title": "ServerResponse",
         "type": "object"

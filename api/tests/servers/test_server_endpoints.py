@@ -104,6 +104,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
+    CrashReason,
     DesiredState,
     ObservedState,
     ServerId,
@@ -1334,6 +1335,39 @@ def test_read_server_backup_retention_null_when_unconfigured() -> None:
     resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
     assert resp.status_code == 200
     assert resp.json()["backup_retention"] is None
+
+
+def test_read_server_carries_the_last_crash() -> None:
+    # The last crash's reason and detail are readable on the server read path
+    # (issue #3281), so a page loaded after the crash can explain it.
+    community = uuid.uuid4()
+    server = _server_entity(
+        community_id=community,
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+    )
+    server.crash_reason = CrashReason.FORGE_INSTALL_OUT_OF_MEMORY
+    server.crash_detail = "installer ran out of memory"
+    app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
+    client = _client(app)
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["crash_reason"], body["crash_detail"]) == (
+        "forge_install_out_of_memory",
+        "installer ran out of memory",
+    )
+
+
+def test_read_server_last_crash_null_without_one() -> None:
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
+    client = _client(app)
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["crash_reason"], body["crash_detail"]) == (None, None)
 
 
 # --- config payload bounds (issue #94) -------------------------------------
