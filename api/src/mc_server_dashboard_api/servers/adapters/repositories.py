@@ -361,6 +361,10 @@ class SqlAlchemyServerRepository(ServerRepository):
         # check alone cannot.
         if expected_worker is not None:
             conditions.append(ServerModel.assigned_worker_id == expected_worker.value)
+        # An unassign is a release, which needs a stopped intent (issue #3766), as
+        # clear_assignment_after_final_snapshot's guard does.
+        if unassign:
+            conditions.append(ServerModel.desired_state == DesiredState.STOPPED.value)
         written = await self._write_observed_state(
             conditions,
             observed_state,
@@ -484,6 +488,29 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ServerModel.id == server_id.value,
                 ServerModel.desired_state == DesiredState.STOPPED.value,
                 ServerModel.assigned_worker_id == worker_id.value,
+            )
+            .values(assigned_worker_id=None)
+        )
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount == 1
+
+    async def clear_stale_assignment(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        *,
+        observed_at: dt.datetime | None,
+    ) -> bool:
+        # clear_assignment_after_final_snapshot's guard, plus the observed_at the
+        # caller read (issue #3766): a Worker report since then matches no row. IS
+        # NOT DISTINCT FROM lets an expected NULL match a never-observed row only.
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.id == server_id.value,
+                ServerModel.desired_state == DesiredState.STOPPED.value,
+                ServerModel.assigned_worker_id == worker_id.value,
+                ServerModel.observed_at.is_not_distinct_from(observed_at),
             )
             .values(assigned_worker_id=None)
         )

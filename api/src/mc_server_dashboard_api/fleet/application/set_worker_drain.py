@@ -6,7 +6,8 @@ to it is marked ``desired=stopped`` so the operator can take the host down with
 its servers gracefully stopped and their final snapshot captured. This use case
 only records the *intent*: through the ``AssignedServerStopper`` Port it
 compare-and-sets each assigned, desired-running server to ``desired=stopped``
-(skipping any already stopped), then records the drain through the
+(skipping any already stopped or moved off the Worker), then records the drain
+through the
 ``WorkerDrainStore`` Port so it survives an API restart (issue #3535), then flips
 the registry flag. The actual stop is
 then driven by the reconciler's existing ``redispatch_stop`` convergence, which

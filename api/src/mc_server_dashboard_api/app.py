@@ -829,8 +829,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Process-wide count of withdrawn start intents (issue #3739): every
         # StartServer reads it, and the HTTP and schedule-runner StopServers and
         # the drain bump it, so a stop of an intent is either seen by its start
-        # before the start is sent or enqueued after that start. The reconciler's
-        # StopServer gets it too, but never flips a row, so it never bumps. The
+        # before the start is sent or enqueued after that start. Every StopServer's
+        # stop convergence (the reconciler's included) bumps it too, and reads the
+        # starts sent that no stop has run behind yet (issue #3766). The
         # late-snapshot sink's StopServer keeps a private one by design: its
         # release neither bumps nor reads it.
         app.state.stop_intents = StopIntentCounter()

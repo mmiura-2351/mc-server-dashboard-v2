@@ -406,6 +406,9 @@ a stop left half-done (`stopping`, `unknown`, or `stopped`/`crashed` still
 assigned) — accepts an operator `stop`: it runs that server's reconciler action
 at once instead of after the grace window, re-sending the stop (honouring
 `?force=true`) or taking the final snapshot and releasing the Worker. A server
+sent a start that no stop has run behind is sent the stop instead of being
+released: the start may still be launching, unreported
+([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5). A server
 with no Worker assigned, or one still running on a Worker that is disconnected
 (the reconnect owns it), has nothing to converge, and its `stop` answers
 `409 invalid_transition`. Skipping the wait means two stop flows for one server

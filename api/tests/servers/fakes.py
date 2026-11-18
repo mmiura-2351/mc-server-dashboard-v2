@@ -880,6 +880,27 @@ class FakeServerRepository(ServerRepository):
         if server is not None:
             server.backup_retention = deepcopy(retention)
 
+    def lifecycle_matches(
+        self,
+        server_id: ServerId,
+        *,
+        expected_from: DesiredState,
+        expected_assigned_worker_id: WorkerId | None,
+    ) -> bool:
+        """Whether the stored row passes the lifecycle compare-and-set.
+
+        Mirrors the real adapter's predicate (issue #3792): the desired state and
+        the assignment the caller read, an expected ``None`` matching an unassigned
+        row only. One copy, for this fake and the doubles built on it.
+        """
+
+        current = self.by_id.get(server_id)
+        return (
+            current is not None
+            and current.desired_state is expected_from
+            and current.assigned_worker_id == expected_assigned_worker_id
+        )
+
     async def update_lifecycle(
         self,
         server: Server,
@@ -890,13 +911,10 @@ class FakeServerRepository(ServerRepository):
     ) -> bool:
         self.events.append((server.id, "flip"))
         current = self.by_id.get(server.id)
-        # Mirror the real adapter's compare-and-set (issue #3792): the desired
-        # state and the assignment the caller read, an expected ``None`` matching
-        # an unassigned row only.
-        if (
-            current is None
-            or current.desired_state is not expected_from
-            or current.assigned_worker_id != expected_assigned_worker_id
+        if current is None or not self.lifecycle_matches(
+            server.id,
+            expected_from=expected_from,
+            expected_assigned_worker_id=expected_assigned_worker_id,
         ):
             return False
         # Mirror the real adapter's narrow column set (issue #2520): the UPDATE
@@ -928,6 +946,10 @@ class FakeServerRepository(ServerRepository):
         # row.
         if expected_worker is not None and server.assigned_worker_id != expected_worker:
             return False
+        # Mirror the real adapter's release condition (issue #3766): an unassign
+        # needs a stopped intent.
+        if unassign and server.desired_state is not DesiredState.STOPPED:
+            return False
         # Mirror the real adapter's monotonic guard (issue #216): drop a write
         # stamped no later than the row's current observed_at; a never-observed row
         # (observed_at is None) still accepts its first write.
@@ -951,6 +973,26 @@ class FakeServerRepository(ServerRepository):
             server is None
             or server.desired_state is not DesiredState.STOPPED
             or server.assigned_worker_id != worker_id
+        ):
+            return False
+        server.assigned_worker_id = None
+        return True
+
+    async def clear_stale_assignment(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        *,
+        observed_at: dt.datetime | None,
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #3766): the final-snapshot clear's,
+        # plus the observed_at the caller read, None matching None only.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.desired_state is not DesiredState.STOPPED
+            or server.assigned_worker_id != worker_id
+            or server.observed_at != observed_at
         ):
             return False
         server.assigned_worker_id = None
