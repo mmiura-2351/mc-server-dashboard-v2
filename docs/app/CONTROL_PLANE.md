@@ -799,8 +799,8 @@ Notes:
   newer working set. So the write that places a server on a Worker for a start
   marks it `awaiting_hydrate` (DATABASE.md Section 7), and while the mark is
   set:
-  - the periodic snapshot skips the server, without counting it as due again
-    later, so the first tick after the mark clears takes it;
+  - the periodic snapshot skips the server but keeps it due, so the first tick
+    after the mark clears takes it;
   - a final snapshot is not taken, whether a stop, a replayed stop or the
     release of a stale assignment asks for it, and the stop releases the
     server: the store's working set stands, as it did when such a start gave
