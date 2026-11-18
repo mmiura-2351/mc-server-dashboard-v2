@@ -363,9 +363,10 @@ Requirements:
   CPU soft-ranks because shares oversubscribe. The placement function is
   isolated so a richer scheduler can replace it later without changing callers.
 - FR-WRK-4: Workers are stateless and replaceable. If a Worker disconnects, its
-  servers are marked `unknown`, and a running one stays assigned to it. If it
-  does not come back, an operator stop and then a start moves each server to
-  another eligible Worker after hydrate from authoritative storage
+  servers are marked `unknown` (a crashed one stays `crashed`), and a running
+  one stays assigned to it. If it does not come back, an operator stop and then
+  a start moves each server to another eligible Worker after hydrate from
+  authoritative storage
   ([docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 5.6). Whether the
   API should move them automatically is an open decision.
 - FR-WRK-5: A Worker can be drained/decommissioned: its servers are stopped

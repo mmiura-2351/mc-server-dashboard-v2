@@ -665,13 +665,82 @@ class ServerRepositoryContract:
             None,
         )
 
-    async def test_a_worker_disconnect_clears_the_last_crash(
+    @pytest.mark.parametrize(
+        ("desired", "stamped"),
+        [(DesiredState.RUNNING, _NOW), (DesiredState.STOPPED, _LATER)],
+        ids=["running-intent", "stopped-intent"],
+    )
+    async def test_a_worker_disconnect_keeps_the_last_crash(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
         contract_community_id: CommunityId,
+        desired: DesiredState,
+        stamped: dt.datetime,
     ) -> None:
+        # Issue #3885: the Worker has already forgotten a crashed instance, so
+        # its disconnect tells nothing new about it, and the row keeps its crash.
+        # Under a running intent it keeps its stamp too, as the API-startup reset
+        # does: a newer stamp would hold back a restart that a later write has
+        # re-armed (``Server.crash_not_restarted``). Under a stopped intent the
+        # stamp moves to the disconnect, so the release waits a full grace from
+        # it, for the Worker to come back and take the final snapshot. Another
+        # Worker's crash is not this disconnect's: its stamp stays.
         item = server(contract_community_id)
         assert item.assigned_worker_id is not None
+        item.desired_state = desired
+        elsewhere = server(contract_community_id, name="elsewhere")
+        assert elsewhere.assigned_worker_id != item.assigned_worker_id
+        elsewhere.desired_state = desired
+        elsewhere.game_port = 25566
+        elsewhere.bedrock_port = 19133
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.repository.add(elsewhere)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            await tx.repository.mark_worker_servers_unknown(
+                item.assigned_worker_id, _LATER
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+            other = await tx.repository.get_by_id(elsewhere.id)
+        assert other is not None
+        assert (other.observed_state, other.observed_at) == (
+            ObservedState.CRASHED,
+            _NOW,
+        )
+        assert row is not None
+        assert (
+            row.observed_state,
+            row.observed_at,
+            row.crash_reason,
+            row.crash_detail,
+        ) == (
+            ObservedState.CRASHED,
+            stamped,
+            CrashReason.FORGE_INSTALL_FAILED,
+            "forge install failed after 3 attempts",
+        )
+
+    @pytest.mark.parametrize(
+        "state",
+        [state for state in ObservedState if state is not ObservedState.CRASHED],
+        ids=lambda state: state.value,
+    )
+    async def test_a_worker_disconnect_marks_any_other_state_unknown(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        state: ObservedState,
+    ) -> None:
+        # Only a crash survives the disconnect (issue #3885): every other state
+        # of the Worker's servers is invalidated to unknown, at the new stamp.
+        item = server(contract_community_id)
+        assert item.assigned_worker_id is not None
+        item.observed_state = state
+        item.crash_reason = None
+        item.crash_detail = None
         async with server_repository_harness.open() as tx:
             await tx.repository.add(item)
             await tx.commit()
@@ -683,11 +752,7 @@ class ServerRepositoryContract:
         async with server_repository_harness.open() as tx:
             row = await tx.repository.get_by_id(item.id)
         assert row is not None
-        assert (row.observed_state, row.crash_reason, row.crash_detail) == (
-            ObservedState.UNKNOWN,
-            None,
-            None,
-        )
+        assert (row.observed_state, row.observed_at) == (ObservedState.UNKNOWN, _LATER)
 
     @pytest.mark.parametrize(
         ("state", "reason", "worker", "at"),

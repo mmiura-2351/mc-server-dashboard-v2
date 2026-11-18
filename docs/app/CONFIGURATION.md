@@ -428,12 +428,19 @@ never a loop. The server read reports the rule as `crash_not_restarted`, which
 the crash banner follows. Every other crash, `forge_install_failed` included,
 is restarted with its backoff.
 
-Two events also re-run the install once. A Worker that disconnects while the
-server is crashed is one. A graceful API restart is the other, because shutting
-down the control plane ends every Worker session and each session's teardown
-records `unknown` for its servers. Either way the stored reason is dropped, and
-once the Worker is back the reconciler restarts the server from `unknown`. Issue
-#3885 tracks keeping `crashed` across a disconnect.
+A Worker disconnect keeps the crash, and so does a graceful API restart, which
+ends every Worker session and runs each session's disconnect teardown. The
+teardown records `unknown` for the Worker's other servers but leaves a crashed
+one `crashed`, with its reason and detail, as the API's start-up reset of
+observed states does. The Worker has already forgotten the crashed instance and
+reports nothing for it when it reconnects (issue #3885). So a crash that is not
+restarted stays held across either, and any other crash is restarted once the
+Worker is back, its grace still measured from the crash. Under a stopped intent
+(a drained Worker's crashed server, or a stop whose dispatch failed before the
+process died) the teardown moves only the crash's `observed_at` to the
+disconnect, so its release waits a full `grace_seconds` from the disconnect, as
+for the Worker's other servers: a Worker back within it still gets the final
+snapshot taken.
 
 The stop side needs no such detour. A server whose intent is already stopped but
 which is still assigned to a Worker — a drained Worker's server still running, or
@@ -467,7 +474,8 @@ which suffices because the API is a single instance (REQUIREMENTS.md
 NFR-SCALE-1).
 
 **A Worker that never reconnects.** When a Worker disconnects, the API marks its
-servers `observed=unknown` and keeps their assignment
+servers `observed=unknown`, except a crashed one, which stays `crashed`, and keeps
+their assignment
 (`WorkerSessionServicer._teardown` in `fleet/adapters/grpc_server.py`, through
 `mark_worker_servers_unknown`). The reconciler skips a `desired=running` server
 whose assigned Worker is not connected (`RunReconcilerTick._action_for`), so the
@@ -743,7 +751,7 @@ can run**, and **where its scratch space is**.
 | `api.tls.insecure` | `false` | | When `true`, dial the control channel in plaintext (no TLS). Local/dev only; the Worker logs a `WARN` at startup. Required to opt out of TLS when `api.tls.ca_file` is unset. |
 | `api.tls.client_cert_file` | — | | **Reserved; not implemented.** Path to the Worker's client certificate for an mTLS control channel. The API does not verify client certificates (server-side TLS only; `api.credential` authenticates the Worker), so this key is reserved, unused; it is documented so the config shape admits mTLS without renaming. Must be set together with `api.tls.client_key_file` (or neither); a half-configured pair fails config validation, naming the missing half. |
 | `api.tls.client_key_file` | — | secret | **Reserved; not implemented.** Path to the Worker's client private key (mTLS). Reserved, unused (see `api.tls.client_cert_file`). |
-| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). The API accepts any spelling Python's `uuid.UUID` parses (uppercase, no hyphens, braces, a `urn:uuid:` prefix) and canonicalises it to the lowercase-hyphenated form at registration, so the Worker still matches its stored assignments and drain (issue #3542); the shipped Worker itself accepts an explicit `worker.id` only in the 36-character hyphenated form (either case). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker. Rows still assigned to the old id stay assigned to a Worker that never reconnects: the disconnect marks them `unknown`, and nothing re-places them. Move each with a stop and then a start (Section 5.6, "A Worker that never reconnects"); the start places it on another Worker. |
+| `worker.id` | *(auto)* | | Stable identifier the Worker registers under. **Must be a UUID**: the API persists a server's assigned worker as a UUID column, so registration rejects a non-UUID id with `INVALID_ARGUMENT` (and the Worker fails config load if an explicit `worker.id` is not a UUID). The API accepts any spelling Python's `uuid.UUID` parses (uppercase, no hyphens, braces, a `urn:uuid:` prefix) and canonicalises it to the lowercase-hyphenated form at registration, so the Worker still matches its stored assignments and drain (issue #3542); the shipped Worker itself accepts an explicit `worker.id` only in the 36-character hyphenated form (either case). When unset, the Worker generates a UUIDv4 on first boot, persists it at `<worker.scratch_dir>/worker-id` (mode `0600`), and reuses it on later restarts so identity stays stable. A Worker that loses its persisted id (a wiped scratch dir) registers as a brand-new Worker. Rows still assigned to the old id stay assigned to a Worker that never reconnects: the disconnect marks them `unknown` (a crashed one stays `crashed`), and nothing re-places them. Move each with a stop and then a start (Section 5.6, "A Worker that never reconnects"); the start places it on another Worker. |
 
 ¹ `api.tls.ca_file` is required **unless** `api.tls.insecure=true`; a blank value
 counts as unset (the secret-blank rule of Section 3, which the Worker applies to

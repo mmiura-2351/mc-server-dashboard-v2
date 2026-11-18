@@ -1028,8 +1028,13 @@ class FakeServerRepository(ServerRepository):
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
         for server in self.by_id.values():
-            if server.assigned_worker_id == worker_id:
+            if server.assigned_worker_id != worker_id:
+                continue
+            if server.observed_state is not ObservedState.CRASHED:
                 _observe(server, ObservedState.UNKNOWN, observed_at)
+            elif server.desired_state is DesiredState.STOPPED:
+                # A crash under a stopped intent keeps its crash, stamped anew.
+                server.observed_at = observed_at
 
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         non_terminal = (

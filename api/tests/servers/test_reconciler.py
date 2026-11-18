@@ -2189,6 +2189,57 @@ async def test_start_intent_newer_than_a_crash_not_retried_is_replayed() -> None
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
+@pytest.mark.parametrize(
+    ("reason", "restarted"),
+    [
+        (CrashReason.FORGE_INSTALL_OUT_OF_MEMORY, False),
+        (CrashReason.FORGE_INSTALL_JAVA_INCOMPATIBLE, False),
+        (CrashReason.FORGE_INSTALL_FAILED, True),
+        (None, True),
+    ],
+    ids=["out-of-memory", "java-incompatible", "install-failed", "unclassified"],
+)
+async def test_crash_keeps_its_restart_rule_across_a_worker_disconnect(
+    reason: CrashReason | None, restarted: bool
+) -> None:
+    # Issue #3885: the disconnect, or the teardown of a graceful API restart,
+    # keeps the crash and its reason, so once the Worker is back the reconciler
+    # treats the server as it did before: a crash the Worker does not retry is
+    # held, any other is restarted on the same Worker.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.CRASHED,
+        worker=_WORKER,
+        updated_at=_INTENT_AT,
+        crash_reason=reason,
+    )
+    uow.servers.seed(server)
+    await uow.servers.mark_worker_servers_unknown(_WORKER, _NOW)
+    stored = await uow.servers.get_by_id(server.id)
+    assert stored is not None
+    assert (stored.observed_state, stored.crash_reason) == (
+        ObservedState.CRASHED,
+        reason,
+    )
+    cp = FakeControlPlane()
+    # Past the grace from the disconnect as well as from the crash, so only the
+    # crash rule decides.
+    reconciler = _reconciler(
+        uow, cp, FakeClock(_NOW + dt.timedelta(seconds=_GRACE + 1))
+    )
+
+    await reconciler.tick()
+
+    if restarted:
+        assert cp.dispatched == [
+            ("hydrate", _WORKER, server.id),
+            ("start", _WORKER, server.id),
+        ]
+    else:
+        assert cp.dispatched == []
+
+
 async def test_crash_loop_flapping_through_starting_keeps_backoff_growing() -> None:
     # Regression for the flap (#343 review): a boot-crash server cycles
     # observed crashed -> starting -> crashed. While observed=starting it drops out

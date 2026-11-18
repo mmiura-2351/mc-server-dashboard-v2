@@ -28,8 +28,8 @@ already stopped. Confirm convergence PER SERVER, not by assigned load: this
 call's placement-load decrement (see :meth:`_shed_placement_load`) drops ``GET
 /workers`` assigned load to 0 synchronously, before any stop runs, so load is not
 a convergence signal. Instead watch each drain-marked server reach unassigned, at
-``observed=stopped`` (``unknown`` when its Worker went away first) (the admin
-servers list / per-server detail).
+``observed=stopped`` (``crashed`` for one that crashed, ``unknown`` when its
+Worker went away first) (the admin servers list / per-server detail).
 
 A start racing the drain can leak: a start whose placement chose this Worker
 before the flag flipped can commit ``desired=running`` + assignment after the stop

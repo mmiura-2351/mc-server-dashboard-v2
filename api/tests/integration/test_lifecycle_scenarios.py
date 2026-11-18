@@ -1200,6 +1200,98 @@ async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconcil
     assert healed.assigned_worker_id == WorkerId(worker)
 
 
+@pytest.mark.parametrize(
+    ("reason", "restarted"),
+    [
+        ("forge_install_out_of_memory", False),
+        ("forge_install_java_incompatible", False),
+        ("forge_install_failed", True),
+        ("", True),
+    ],
+    ids=["out-of-memory", "java-incompatible", "install-failed", "unclassified"],
+)
+async def test_crash_survives_a_worker_disconnect_and_reconnect(
+    engine: AsyncEngine, reason: str, restarted: bool
+) -> None:
+    """start -> crashed -> Worker disconnects -> reconnects -> reconciler tick.
+
+    Issue #3885. The disconnect keeps the crash and its reason: the Worker has
+    already forgotten the crashed instance, so it reports nothing for it on
+    reconnect, and the row reads as it did before. A crash the Worker does not
+    retry stays held; any other crash is restarted on the same Worker, as it
+    would have been without the disconnect.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    sink = _sink(engine, clock)
+    await sink.record_observed_state(
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        detail="the installer failed",
+        reason=reason,
+    )
+    crashed = await _load(engine, server_id)
+    assert crashed is not None
+
+    await sink.mark_worker_servers_unknown(worker_id=str(worker))
+    after_disconnect = await _load(engine, server_id)
+    assert after_disconnect is not None
+    assert (
+        after_disconnect.observed_state,
+        after_disconnect.observed_at,
+        after_disconnect.crash_reason,
+        after_disconnect.crash_detail,
+        after_disconnect.assigned_worker_id,
+    ) == (
+        ObservedState.CRASHED,
+        crashed.observed_at,
+        crashed.crash_reason,
+        "the installer failed",
+        WorkerId(worker),
+    )
+    assert after_disconnect.crash_not_restarted() is not restarted
+
+    # While the Worker is away the reconnect owns the server: nothing is sent.
+    away = FakeControlPlane(connected={WorkerId(worker): False})
+    await _reconciler_tick(engine, away, clock)
+    assert away.dispatched == []
+
+    # The Worker is back and reports nothing for the forgotten instance.
+    back = FakeControlPlane(connected={WorkerId(worker): True})
+    await _reconciler_tick(engine, back, clock)
+    if not restarted:
+        assert back.dispatched == []
+        held = await _load(engine, server_id)
+        assert held is not None
+        assert held.observed_state is ObservedState.CRASHED
+        assert held.crash_not_restarted()
+        return
+    assert back.dispatched == [
+        ("hydrate", WorkerId(worker), server_id),
+        ("start", WorkerId(worker), server_id),
+    ]
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    healed = await _load(engine, server_id)
+    assert healed is not None
+    assert (healed.observed_state, healed.crash_reason, healed.crash_detail) == (
+        ObservedState.RUNNING,
+        None,
+        None,
+    )
+    assert healed.assigned_worker_id == WorkerId(worker)
+
+
 # --- Timed: which grace a crashed / orphan-swept restart waits (#3387) -----
 
 # The stock graces (CONFIGURATION.md Section 5.6).
@@ -1380,6 +1472,86 @@ async def test_crash_time_snapshot_that_wins_the_race_moves_to_the_full_grace(
         ("hydrate", worker, server.id),
         ("start", worker, server.id),
     ]
+
+
+@pytest.mark.parametrize("back", [True, False], ids=["worker-back", "worker-away"])
+async def test_crash_under_a_stop_intent_waits_a_full_grace_from_a_disconnect(
+    engine: AsyncEngine, back: bool
+) -> None:
+    """failed stop -> crashed -> Worker disconnects -> released after a full grace.
+
+    Issue #3885. The disconnect keeps the crash of a server whose intent is
+    already stopped, and moves its ``observed_at`` to the disconnect. Its release
+    therefore waits a full grace from the disconnect, not from the crash: a Worker
+    back within it gets the final snapshot first, and one still away then is
+    released without it.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    worker = WorkerId(uuid.uuid4())
+    store = _StoreGeneration(0)
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=worker), clock, store
+    )(community_id=server.community_id, server_id=server.id)
+    sink = _sink(engine, clock)
+    await sink.record_observed_state(
+        server_id=str(server.id.value), worker_id=str(worker.value), state="running"
+    )
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(
+            engine, FakeControlPlane(place_to=worker, unavailable_kinds={"stop"}), clock
+        )(community_id=server.community_id, server_id=server.id)
+    await sink.record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=str(worker.value),
+        state="crashed",
+        detail="the server process exited",
+    )
+    crashed = await _load(engine, server.id)
+    assert crashed is not None
+    assert crashed.observed_at is not None
+    assert crashed.desired_state is DesiredState.STOPPED
+
+    clock.set(crashed.observed_at + dt.timedelta(seconds=_STOCK_GRACE - 60))
+    await sink.mark_worker_servers_unknown(worker_id=str(worker.value))
+    after = await _load(engine, server.id)
+    assert after is not None
+    assert after.observed_at is not None
+    assert (after.observed_state, after.crash_detail, after.assigned_worker_id) == (
+        ObservedState.CRASHED,
+        "the server process exited",
+        worker,
+    )
+    disconnected_at = after.observed_at
+    assert disconnected_at > crashed.observed_at
+
+    # The crash's own grace has lapsed, the disconnect's has not.
+    away = FakeControlPlane(connected={worker: False})
+    await _timed_tick(
+        engine,
+        away,
+        clock,
+        store,
+        crashed.observed_at + dt.timedelta(seconds=_STOCK_GRACE),
+    )
+    held = await _load(engine, server.id)
+    assert held is not None
+    assert held.assigned_worker_id == worker
+    assert away.dispatched == []
+
+    cp = FakeControlPlane(connected={worker: back})
+    await _timed_tick(
+        engine, cp, clock, store, disconnected_at + dt.timedelta(seconds=_STOCK_GRACE)
+    )
+    assert cp.dispatched == ([("snapshot", worker, server.id)] if back else [])
+    released = await _load(engine, server.id)
+    assert released is not None
+    assert (
+        released.observed_state,
+        released.crash_detail,
+        released.assigned_worker_id,
+    ) == (ObservedState.CRASHED, "the server process exited", None)
 
 
 # --- Reconnect resync of an id held only as a reservation (issue #3302) ----
