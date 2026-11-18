@@ -95,7 +95,8 @@ class Server:
     def crash_not_restarted(self) -> bool:
         """Whether the reconciler leaves this crash alone (issue #3281).
 
-        The crash's reason is one the next attempt fails the same way
+        The server is crashed under a running intent (a stopped one is owed no
+        restart), the crash's reason is one the next attempt fails the same way
         (:data:`NOT_RESTARTED_CRASH_REASONS`), and it was reported after the
         last write to the row (``observed_at > updated_at``). ``updated_at`` is
         bumped by every row write, not only an intent commit: an operator start,
@@ -109,7 +110,8 @@ class Server:
         """
 
         return (
-            self.observed_state is ObservedState.CRASHED
+            self.desired_state is DesiredState.RUNNING
+            and self.observed_state is ObservedState.CRASHED
             and self.crash_reason in NOT_RESTARTED_CRASH_REASONS
             and self.observed_at is not None
             and self.observed_at > self.updated_at

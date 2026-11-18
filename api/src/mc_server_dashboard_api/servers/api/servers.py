@@ -353,7 +353,8 @@ class ServerResponse(BaseModel):
     # server reads ``crashed``; the reason is ``None`` for an unclassified
     # crash too. ``crash_not_restarted`` says the reconciler leaves the crash
     # alone, as the next attempt fails the same way
-    # (``Server.crash_not_restarted``).
+    # (``Server.crash_not_restarted``); it is ``False`` under a stopped intent,
+    # which is owed no restart.
     crash_reason: str | None
     crash_detail: str | None
     crash_not_restarted: bool

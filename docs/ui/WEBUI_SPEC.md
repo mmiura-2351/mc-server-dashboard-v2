@@ -291,8 +291,9 @@ Bedrock join is verified on Paper only, BEDROCK.md Section 1),
 `assigned_worker_id`, `crash_reason` and `crash_detail` (the last crash's
 reason and the Worker's detail, both null unless the server is crashed;
 DATABASE.md Section 7), `crash_not_restarted` (whether the reconciler leaves
-that crash alone; CONFIGURATION.md Section 5.6), `backup_retention` (the
-scheduled-backup retention policy; null while unconfigured).
+that crash alone, false under a stopped intent; CONFIGURATION.md Section 5.6),
+`backup_retention` (the scheduled-backup retention policy; null while
+unconfigured).
 
 Server state model: `desired_state` ∈ {running, stopped};
 `observed_state` ∈ {starting, running, stopping, stopped, restarting, crashed,
@@ -353,10 +354,11 @@ subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. Its `crash_reason` and `crash_detail`
 are the stored `reason` and `detail` of the crashed `status` frame. The live
 `detail` of any other state is not stored, so the snapshot has no counterpart
-for it. No frame carries `crash_not_restarted`. A client derives it as the
-API does: a crashed frame sets it from the reason, since the crash is then the
-newest write to the row, and a `{desired_state}` frame clears it, since an
-intent commit is a newer write. Other writes that bump the row's `updated_at`
+for it. No status frame carries `crash_not_restarted`. A client derives it as
+the API does, except that it checks the running intent where it uses the flag:
+a crashed frame sets it from the reason, since the crash is then the newest
+write to the row, and a `{desired_state}` frame clears it, since an intent
+commit is a newer write. Other writes that bump the row's `updated_at`
 publish no frame (CONFIGURATION.md Section 5.6), so after one of them a client
 keeps the old value until its next read or snapshot. A client applies it like status frames, and
 on the community stream it is the complete server set, so a server missing from

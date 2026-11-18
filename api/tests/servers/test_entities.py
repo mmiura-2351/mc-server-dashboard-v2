@@ -118,6 +118,17 @@ def test_crash_not_restarted(
     assert server.crash_not_restarted() is expected
 
 
+def test_crash_not_restarted_only_under_a_running_intent() -> None:
+    # Issue #3281: a crash that lands after a stop commit is newer than the row's
+    # last write, but no restart is owed under a stopped intent, so the read model
+    # does not report one as withheld.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.CRASHED)
+    server.observed_at = _LATER
+    server.crash_reason = CrashReason.FORGE_INSTALL_OUT_OF_MEMORY
+
+    assert server.crash_not_restarted() is False
+
+
 @pytest.mark.parametrize(
     ("state", "kept"),
     [(ObservedState.CRASHED, True), (ObservedState.RUNNING, False)],

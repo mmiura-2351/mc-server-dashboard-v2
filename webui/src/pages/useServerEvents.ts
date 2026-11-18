@@ -321,9 +321,10 @@ export function useServerEvents(
     };
 
     // Whether the reconciler leaves the crash alone (#3281): the API's rule,
-    // a crash newer than every write to the row with a reason that recurs. A
-    // crashed frame is the newest thing about the row, so its reason decides;
-    // an intent frame is a newer write, which clears it.
+    // a crash newer than every write to the row with a reason that recurs,
+    // whose running-intent term `crashNotRestarted` checks. A crashed frame is
+    // the newest thing about the row, so its reason decides; an intent frame
+    // is a newer write, which clears it.
     const applyNotRestarted = (value: boolean) => {
       notRestarted = { value, at: stamp() };
       patch({ crash_not_restarted: value });
