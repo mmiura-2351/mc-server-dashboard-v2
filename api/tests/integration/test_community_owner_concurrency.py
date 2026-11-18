@@ -91,7 +91,6 @@ async def test_concurrent_last_two_owner_removals_leave_exactly_one(
     factory = create_session_factory(engine)
     community = await ProvisionCommunity(
         uow=SqlAlchemyUnitOfWork(factory),
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )(name="guild", owner_user_id=UserId(owner_a))
 
@@ -144,7 +143,6 @@ async def test_concurrent_last_two_owner_unassignments_leave_exactly_one(
     factory = create_session_factory(engine)
     community = await ProvisionCommunity(
         uow=SqlAlchemyUnitOfWork(factory),
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )(name="guild", owner_user_id=UserId(owner_a))
 

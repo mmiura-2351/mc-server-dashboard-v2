@@ -17,7 +17,10 @@ explicitly first so the row is consistent even before the cascade and the intent
 is auditable.
 
 The ownership check goes through the :class:`CommunityOwnership` seam so the
-identity context never imports the community context.
+identity context never imports the community context. The seam is bound on the
+unit of work's session, so the check runs inside the delete transaction, under
+a lock that a conferral of community ownership on the account waits for
+(#3217).
 """
 
 from __future__ import annotations
@@ -25,9 +28,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.identity.domain.clock import Clock
-from mc_server_dashboard_api.identity.domain.community_ownership import (
-    CommunityOwnership,
-)
 from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
     InvalidCredentialsError,
@@ -44,7 +44,6 @@ class DeleteAccount:
     """Delete the authenticated user's account, guarding orphaned resources."""
 
     uow: UnitOfWork
-    ownership: CommunityOwnership
     hasher: PasswordHasher
     clock: Clock
 
@@ -60,12 +59,6 @@ class DeleteAccount:
             if not await self.hasher.verify(password, actor.password_hash):
                 raise InvalidCredentialsError
 
-        # The community-owner check still runs in its own committed transaction
-        # (a separate context's seam), so its TOCTOU window is unchanged; #260
-        # closes only the last-active-admin race, which lives in this context.
-        if await self.ownership.owns_any_community(user_id):
-            raise CommunityOwnedError(str(user_id.value))
-
         async with self.uow:
             # The invariant counts ACTIVE admins only (issue #278): a deactivated
             # admin cannot act, so it does not keep the platform administrable.
@@ -76,6 +69,11 @@ class DeleteAccount:
             user, active_admins = await self.uow.users.lock_with_active_admins(user_id)
             if user is None:
                 raise UserNotFoundError(str(user_id.value))
+            # Under the account's ownership lock, held until this delete commits:
+            # a conferral of ownership on the account either committed first and
+            # is seen here, or waits and then finds no such user (#3217).
+            if await self.uow.ownership.owns_any_community(user.id):
+                raise CommunityOwnedError(str(user_id.value))
             if user.is_platform_admin and user.active and active_admins <= 1:
                 raise LastPlatformAdminError(str(user_id.value))
 

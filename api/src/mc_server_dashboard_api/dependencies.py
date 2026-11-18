@@ -144,9 +144,6 @@ from mc_server_dashboard_api.identity.adapters.clock import SystemClock
 from mc_server_dashboard_api.identity.adapters.common_passwords import (
     load_common_passwords,
 )
-from mc_server_dashboard_api.identity.adapters.community_ownership import (
-    CommunityBackedOwnership,
-)
 from mc_server_dashboard_api.identity.adapters.login_attempt_store import (
     SqlAlchemyLoginAttemptStore,
 )
@@ -891,15 +888,15 @@ def get_update_profile(request: Request) -> UpdateProfile:
 def get_delete_account(request: Request) -> DeleteAccount:
     """Assemble the :class:`DeleteAccount` use case from config-selected adapters.
 
-    Binds the community-ownership seam to the community store so the self-delete
-    guard can refuse a community owner without identity importing community.
+    The unit of work binds the community-ownership seam on its own session, so
+    the self-delete guard can refuse a community owner without identity
+    importing community (#3217).
     """
 
     session_factory = create_session_factory(get_engine(request))
     settings = get_settings(request)
     return DeleteAccount(
         uow=SqlAlchemyUnitOfWork(session_factory),
-        ownership=CommunityBackedOwnership(CommunityUnitOfWork(session_factory)),
         hasher=_build_password_hasher(settings.auth.password),
         clock=SystemClock(),
     )
@@ -925,14 +922,14 @@ def get_set_user_active(request: Request) -> SetUserActive:
 def get_admin_delete_user(request: Request) -> AdminDeleteUser:
     """Assemble the :class:`AdminDeleteUser` use case (platform-admin only, #278).
 
-    Binds the community-ownership seam to the community store so the admin delete
-    refuses a community owner, the same as the self-delete guard.
+    The unit of work binds the community-ownership seam on its own session, so
+    the admin delete refuses a community owner, the same as the self-delete
+    guard (#3217).
     """
 
     session_factory = create_session_factory(get_engine(request))
     return AdminDeleteUser(
         uow=SqlAlchemyUnitOfWork(session_factory),
-        ownership=CommunityBackedOwnership(CommunityUnitOfWork(session_factory)),
         clock=SystemClock(),
     )
 
@@ -1547,7 +1544,6 @@ def get_provision_community(request: Request) -> ProvisionCommunity:
     session_factory = create_session_factory(get_engine(request))
     return ProvisionCommunity(
         uow=CommunityUnitOfWork(session_factory),
-        users=IdentityUserDirectory(SqlAlchemyUnitOfWork(session_factory)),
         clock=CommunitySystemClock(),
     )
 
