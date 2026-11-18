@@ -335,6 +335,16 @@ describe("Modal focus outside the dialog", () => {
     );
   });
 
+  it("leaves focus that moves within the topmost of sibling dialogs", async () => {
+    render(stackedDialogs);
+    const innerLast = screen.getByRole("button", { name: "Inner last" });
+
+    innerLast.focus();
+    await settle();
+
+    expect(document.activeElement).toBe(innerLast);
+  });
+
   it("lets a script that closes the dialog move focus behind it", async () => {
     render(<CloseAndFocusBehind />);
     const open = screen.getByRole("button", { name: "Open" });

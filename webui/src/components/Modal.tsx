@@ -127,28 +127,19 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // dialog before the pull would run.
     const isOutside = (node: Node | null) =>
       !dialog.contains(node) && !toastZone?.contains(node);
-    const onFocusIn = (event: FocusEvent) => {
-      if (dialogStack.at(-1) !== dialog || !isOutside(event.target as Node)) {
+    const pullBack = () => {
+      if (dialogStack.at(-1) !== dialog || !isOutside(document.activeElement)) {
         return;
       }
-      queueMicrotask(() => {
-        if (
-          dialogStack.at(-1) !== dialog ||
-          !isOutside(document.activeElement)
-        ) {
-          return;
-        }
-        const inDialog = focusableWithin(dialog);
-        focusFirstOf(
-          lastTab?.shiftKey ? inDialog.reverse() : inDialog,
-          dialog,
-          { preventScroll: true },
-        );
-        if (lastTab !== null) {
-          window.scrollTo(lastTab.x, lastTab.y);
-        }
+      const inDialog = focusableWithin(dialog);
+      focusFirstOf(lastTab?.shiftKey ? inDialog.reverse() : inDialog, dialog, {
+        preventScroll: true,
       });
+      if (lastTab !== null) {
+        window.scrollTo(lastTab.x, lastTab.y);
+      }
     };
+    const onFocusIn = () => queueMicrotask(pullBack);
     document.addEventListener("focusin", onFocusIn);
 
     const onKeyDown = (event: KeyboardEvent) => {
