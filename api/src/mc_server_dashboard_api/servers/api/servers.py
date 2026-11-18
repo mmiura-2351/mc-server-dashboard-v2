@@ -1206,7 +1206,7 @@ async def start_server(
         await _record_op_failure(
             recorder, ops.SERVER_START, authorized, community_id, server_id, exc
         )
-        raise _lifecycle_http_error(exc) from exc
+        raise _lifecycle_http_error(exc, name_worker_state=True) from exc
     await _record(recorder, ops.SERVER_START, authorized, community_id, server.id.value)
     return ServerResponse.from_entity(
         server,
@@ -1249,7 +1249,7 @@ async def stop_server(
         await _record_op_failure(
             recorder, ops.SERVER_STOP, authorized, community_id, server_id, exc
         )
-        raise _lifecycle_http_error(exc) from exc
+        raise _lifecycle_http_error(exc, name_worker_state=True) from exc
     await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
     return ServerResponse.from_entity(
         server,
@@ -1288,7 +1288,7 @@ async def restart_server(
         await _record_op_failure(
             recorder, ops.SERVER_RESTART, authorized, community_id, server_id, exc
         )
-        raise _lifecycle_http_error(exc) from exc
+        raise _lifecycle_http_error(exc, name_worker_state=True) from exc
     await _record(
         recorder, ops.SERVER_RESTART, authorized, community_id, server.id.value
     )
@@ -1455,9 +1455,26 @@ def _lifecycle_classification(exc: Exception) -> tuple[Outcome, str]:
     return outcome, reason
 
 
-def _lifecycle_http_error(exc: Exception) -> ProblemException:
+def _lifecycle_http_error(
+    exc: Exception, *, name_worker_state: bool = False
+) -> ProblemException:
     _, reason = _lifecycle_classification(exc)
     if reason in _SERVICE_UNAVAILABLE_REASONS:
+        # Start, stop and restart name what the API knows about the Worker
+        # (issue #3820): the reconciler skips the servers of one that is not
+        # connected, while one that did not answer in time may still finish the
+        # command, so the client words the two apart. The console keeps the
+        # plain 503.
+        if (
+            name_worker_state
+            and isinstance(exc, WorkerUnavailableError)
+            and exc.worker_state is not None
+        ):
+            return problem(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                reason,
+                extensions={"worker_state": exc.worker_state.value},
+            )
         return _service_unavailable(reason)
     return _conflict(reason)
 

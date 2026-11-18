@@ -78,10 +78,11 @@ class InvalidCredentialsError(IdentityError):
 
 
 class PasswordVerificationUnavailableError(IdentityError):
-    """The password could not be checked: the verifier itself failed (#3749).
+    """The password hashing service is unavailable: the hasher itself failed.
 
-    A server-side failure, such as the KDF running out of memory or threads, not
-    a verdict on the password. It is never a credential failure: a login that
+    Raised when checking a password (#3749) or hashing a new one (#3762) fails on
+    the server's side, such as the KDF running out of memory or threads; it is
+    not a verdict on the password. It is never a credential failure: a login that
     hits it records no failed attempt and makes no lockout progress, and the
     edge maps it to a transient 503 instead of the uniform 401.
     """

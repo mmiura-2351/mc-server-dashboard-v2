@@ -130,6 +130,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    UnavailableWorkerState,
     WorkerUnavailableError,
     console_line_bytes,
 )
@@ -2303,8 +2304,11 @@ class StopServer:
                 server_id=server_id,
             )
             if upload_may_be_live:
+                # The connected Worker has not answered the snapshot yet.
                 raise WorkerUnavailableError(
-                    str(worker_id.value), upload_may_be_live=True
+                    str(worker_id.value),
+                    upload_may_be_live=True,
+                    worker_state=UnavailableWorkerState.NO_ANSWER,
                 )
 
         # --- Step C: clear the assignment ---------------------------------

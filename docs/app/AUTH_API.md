@@ -136,6 +136,17 @@ branches on exactly one contract:
   can name the missing permission in its denial toast (WEBUI_SPEC.md Section 7.4).
   This exposes only which permission a known endpoint requires —
   static catalog data (WEBUI_SPEC.md Section 2.2) — not resource existence.
+- A `503` with `reason: "worker_unavailable"` from a server's `start`, `stop`
+  or `restart` adds a `worker_state` extension member when the API knows why
+  the assigned Worker gave no answer: `"not_connected"` when it was not
+  connected or its session ended while the command waited, `"no_answer"` when
+  it is connected but the command was not answered in time. The member is
+  absent when the Worker itself answered that its container backend did not
+  cooperate, and when a data-plane setting the API needs is missing. The two
+  states need different recovery: a Worker that is not connected gets none on
+  its own ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6, "A Worker that
+  never reconnects"), so the Web UI words them apart (WEBUI_SPEC.md Section
+  7.4). Other routes that answer `worker_unavailable` do not carry it.
 - A `413` with `reason: "credential_required_for_body"` refuses a body past
   64 KiB that carries no valid credential: none, an invalid one, an expired
   token, or a deactivated account's ([`SECURITY.md`](SECURITY.md) Section 5).
@@ -150,7 +161,7 @@ Reason codes the `/auth/*` endpoints emit:
 |---|---|---|
 | `401` | `invalid_credentials` | login failure, every refresh failure (missing / unknown / expired / revoked / reused token), **and** every session-restore failure (missing / unknown / expired / revoked cookie) — the router raises one uniform `401` for all of them, so the reason does not distinguish login from refresh from restore |
 | `422` | `validation_error` | a malformed request body (e.g. login with a blank `username`/`password` or one past 1024 characters, or a present-but-empty `refresh_token` or one past 256 characters) |
-| `503` | `password_verification_unavailable` | login only: the password could not be checked because the hasher itself failed (e.g. argon2 out of memory or threads). Not a credential failure: no attempt is recorded and no lockout progresses ([`SECURITY.md`](SECURITY.md) Section 2). Retrying is the remedy. Password change `PUT /users/me/password` and account deletion `DELETE /users/me` answer the same `503` when their password re-check fails this way |
+| `503` | `password_verification_unavailable` | the password hashing service is unavailable: the hasher itself failed (e.g. argon2 out of memory or threads). Among the `/auth/*` endpoints, login only: the password could not be checked, which is not a credential failure, so no attempt is recorded and no lockout progresses ([`SECURITY.md`](SECURITY.md) Section 2). Retrying is the remedy. Outside `/auth/*`, the endpoints that check or hash a password answer the same `503`: password change `PUT /users/me/password` and account deletion `DELETE /users/me` when their password re-check fails this way, and registration `POST /users`, password change and admin user creation `POST /admin/users` when hashing the new password does. A registration answered `503` has already used a slot of the per-IP registration cap, which records the attempt before hashing ([`CONFIGURATION.md`](CONFIGURATION.md) Section 7.4), so repeated retries from one IP can reach its `429 registration_throttled` |
 
 Note the refresh failure path deliberately reuses the `invalid_credentials`
 reason rather than a token-specific code: the contract leaks no signal that would
@@ -535,6 +546,11 @@ status code returned to the client:
 | logout (token presented) | `auth:logout` | `SUCCESS` | — |
 | revoke one session (hit) | `auth:session_revoke` | `SUCCESS` | the caller (target: user) |
 | revoke all other sessions | `auth:session_revoke` | `SUCCESS` | the caller (target: user) |
+
+A login answered `503 password_verification_unavailable` (Section 2) records
+**no** row, and no `login_attempt` row either: the password was never judged, so
+it is neither a success nor a failure. Its trace is the ERROR line the API logs
+for the failure.
 
 A `DELETE /users/me/sessions/{id}` that misses (unknown / malformed id, or one
 owned by another user — all `404`) records **no** row: it changed nothing and is
