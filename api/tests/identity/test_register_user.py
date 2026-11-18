@@ -12,7 +12,10 @@ from collections.abc import Sequence
 
 import pytest
 
-from mc_server_dashboard_api.identity.application.register_user import RegisterUser
+from mc_server_dashboard_api.identity.application.register_user import (
+    RegisterUser,
+    persist_new_user,
+)
 from mc_server_dashboard_api.identity.domain.clock import Clock
 from mc_server_dashboard_api.identity.domain.entities import RefreshToken, User
 from mc_server_dashboard_api.identity.domain.errors import (
@@ -20,6 +23,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidEmailError,
     InvalidUsernameError,
     PasswordPolicyError,
+    PasswordVerificationUnavailableError,
     RegistrationDisabledError,
     RegistrationThrottledError,
     UsernameAlreadyExistsError,
@@ -269,6 +273,35 @@ async def test_rejects_weak_password_before_persisting() -> None:
         )
     assert exc.value.reason == "too_short"
     assert users.added == []
+
+
+class _FailingHasher(_StubHasher):
+    """A hasher that itself fails, as argon2 does out of memory (#3762)."""
+
+    async def hash(self, plaintext: str) -> str:
+        raise PasswordVerificationUnavailableError
+
+
+async def test_hasher_failure_persists_nothing() -> None:
+    # persist_new_user, shared by registration and admin creation, hashes before
+    # its transaction: a hasher failure writes no user row and commits nothing,
+    # and the error reaches the route for its 503.
+    users = _FakeUserRepository()
+    uow = _FakeUnitOfWork(users)
+
+    with pytest.raises(PasswordVerificationUnavailableError):
+        await persist_new_user(
+            uow=uow,
+            hasher=_FailingHasher(),
+            policy=_policy(),
+            username="alice",
+            email="alice@example.com",
+            password=_VALID_PASSWORD,
+            now=_FixedClock().now(),
+        )
+
+    assert users.added == []
+    assert uow.committed is False
 
 
 async def test_rejects_duplicate_username_precheck() -> None:
