@@ -40,7 +40,9 @@ _NOW = dt.datetime(2026, 6, 4, tzinfo=dt.timezone.utc)
 def _use_case(
     uow: FakeUnitOfWork, ownership: FakeCommunityOwnership
 ) -> AdminDeleteUser:
-    return AdminDeleteUser(uow=uow, ownership=ownership, clock=FakeClock(_NOW))
+    # The ownership seam is bound on the unit of work's transaction (#3217).
+    uow.ownership = ownership
+    return AdminDeleteUser(uow=uow, clock=FakeClock(_NOW))
 
 
 def _active_token(user_id: UserId) -> RefreshToken:

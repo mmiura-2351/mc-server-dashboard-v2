@@ -474,6 +474,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.danger.deleteDesc":
     "サーバー、そのデータおよびバックアップを完全に削除します。",
   "serverDetail.danger.deleteButton": "削除…",
+  "serverDetail.danger.deleteAwaitsRelease":
+    "削除する前にサーバーを停止し、サーバーが切り離されるまでお待ちください。",
   "serverDetail.delete.dialogTitle": "サーバーを削除",
   "serverDetail.delete.dialogBody":
     "サーバー、そのデータおよびバックアップを完全に削除します。この操作は元に戻せません。確認のためサーバー名を入力してください。",

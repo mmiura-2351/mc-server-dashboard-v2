@@ -94,7 +94,6 @@ def _provision(engine: AsyncEngine) -> ProvisionCommunity:
     factory = create_session_factory(engine)
     return ProvisionCommunity(
         uow=SqlAlchemyUnitOfWork(factory),
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )
 

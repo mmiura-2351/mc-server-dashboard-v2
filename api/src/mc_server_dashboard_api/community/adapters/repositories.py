@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
@@ -39,6 +39,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     CommunityNotFoundError,
     RoleNotFoundError,
 )
+from mc_server_dashboard_api.community.domain.permissions import OWNER_ROLE_NAME
 from mc_server_dashboard_api.community.domain.repositories import (
     CommunityRepository,
     MembershipRepository,
@@ -368,6 +369,29 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [MembershipId(row) for row in rows]
+
+
+async def user_owns_any_community(session: AsyncSession, user_id: UserId) -> bool:
+    """Return whether ``user_id`` holds the preset Owner role in any community.
+
+    The definition the last-Owner guard uses: a membership holding its own
+    community's preset ``Owner`` role. One statement on the caller's session,
+    taking no lock: identity's account deletion runs it under the account's
+    community-ownership lock, while it holds every active admin's ``user`` row
+    (issue #3217).
+    """
+
+    stmt = select(
+        exists().where(
+            MembershipModel.user_id == user_id.value,
+            MembershipRoleModel.membership_id == MembershipModel.id,
+            RoleModel.id == MembershipRoleModel.role_id,
+            RoleModel.community_id == MembershipModel.community_id,
+            RoleModel.is_preset.is_(True),
+            RoleModel.name == OWNER_ROLE_NAME,
+        )
+    )
+    return bool((await session.execute(stmt)).scalar_one())
 
 
 class SqlAlchemyRoleRepository(RoleRepository):

@@ -3,10 +3,13 @@
 Creates a community and bootstraps its ownership in one transaction (FR-COMM-4):
 the community row, a preset ``Owner`` role granting every community-scoped
 permission, the initial owner's membership, and that membership's assignment of
-the Owner role. The owner is validated against the :class:`UserDirectory` Port
-first (so an unknown user fails cleanly rather than tripping the FK), and the
-Owner role's permission set is derived from the authoritative catalog
-(:data:`COMMUNITY_PERMISSIONS`) — never hand-written.
+the Owner role. The owner is validated first, inside that transaction, through
+the unit of work's :class:`UserExistenceChecker`, so an unknown user fails
+cleanly rather than tripping the FK, and a concurrent deletion of the owner's
+account either committed before and the owner is not found, or waits for this
+commit and is then refused (issue #3217). The Owner role's permission set is
+derived from the authoritative catalog (:data:`COMMUNITY_PERMISSIONS`) — never
+hand-written.
 
 The whole bootstrap commits atomically: if any step fails, the ``UnitOfWork``
 rolls back and no partial community is left behind.
@@ -31,7 +34,6 @@ from mc_server_dashboard_api.community.domain.permissions import (
     OWNER_ROLE_NAME,
 )
 from mc_server_dashboard_api.community.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.community.domain.user_directory import UserDirectory
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     CommunityName,
@@ -47,14 +49,10 @@ class ProvisionCommunity:
     """Provision a community with its Owner role and initial owner membership."""
 
     uow: UnitOfWork
-    users: UserDirectory
     clock: Clock
 
     async def __call__(self, *, name: str, owner_user_id: UserId) -> Community:
         community_name = CommunityName(name)
-
-        if not await self.users.exists(owner_user_id):
-            raise OwnerUserNotFoundError(str(owner_user_id.value))
 
         now = self.clock.now()
         community = Community(
@@ -80,6 +78,10 @@ class ProvisionCommunity:
         )
 
         async with self.uow:
+            # First, before any other lock: the owner is held against account
+            # deletion until this commits (issue #3217).
+            if not await self.uow.users.lock_and_check_exists(owner_user_id):
+                raise OwnerUserNotFoundError(str(owner_user_id.value))
             if await self.uow.communities.get_by_name(community_name) is not None:
                 raise CommunityAlreadyExistsError(community_name.value)
             await self.uow.communities.add(community)

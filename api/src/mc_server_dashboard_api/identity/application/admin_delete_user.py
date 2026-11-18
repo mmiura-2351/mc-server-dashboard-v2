@@ -8,7 +8,9 @@ row and revokes their refresh tokens; memberships, role assignments, and resourc
 grants are removed by the ``ON DELETE CASCADE`` foreign keys on ``user.id``.
 
 The ownership check goes through the :class:`CommunityOwnership` seam so the
-identity context never imports the community context.
+identity context never imports the community context. The seam is bound on the
+unit of work's session, so the check runs inside the delete transaction, under
+a lock that a conferral of community ownership on the target waits for (#3217).
 """
 
 from __future__ import annotations
@@ -16,9 +18,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.identity.domain.clock import Clock
-from mc_server_dashboard_api.identity.domain.community_ownership import (
-    CommunityOwnership,
-)
 from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
     LastPlatformAdminError,
@@ -34,18 +33,11 @@ class AdminDeleteUser:
     """Delete a target user's account on behalf of a platform admin."""
 
     uow: UnitOfWork
-    ownership: CommunityOwnership
     clock: Clock
 
     async def __call__(self, *, actor_id: UserId, target_id: UserId) -> None:
-        # The community-owner check still runs in its own committed transaction
-        # (a separate context's seam), so its TOCTOU window is unchanged; #260
-        # closes only the last-active-admin race below.
         if target_id == actor_id:
             raise SelfTargetError(str(target_id.value))
-
-        if await self.ownership.owns_any_community(target_id):
-            raise CommunityOwnedError(str(target_id.value))
 
         async with self.uow:
             # Decide from the target as locked with the active admins, so a
@@ -56,6 +48,11 @@ class AdminDeleteUser:
             )
             if user is None:
                 raise UserNotFoundError(str(target_id.value))
+            # Under the target's ownership lock, held until this delete commits:
+            # a conferral of ownership on the target either committed first and
+            # is seen here, or waits and then finds no such user (#3217).
+            if await self.uow.ownership.owns_any_community(user.id):
+                raise CommunityOwnedError(str(target_id.value))
             if user.is_platform_admin and user.active and active_admins <= 1:
                 raise LastPlatformAdminError(str(target_id.value))
 

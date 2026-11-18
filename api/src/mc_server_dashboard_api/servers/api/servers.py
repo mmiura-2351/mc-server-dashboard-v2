@@ -139,6 +139,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortOutOfRangeError,
     PortRangeExhaustedError,
     RetiredConfigKeyError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
@@ -1132,6 +1133,12 @@ async def update_server(
     )
 
 
+_SERVER_ASSIGNED_DETAIL = (
+    "The server is still assigned to a Worker. Stop the server and wait for it "
+    "to be released before deleting it."
+)
+
+
 @router.delete(
     "/communities/{community_id}/servers/{server_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -1161,6 +1168,16 @@ async def delete_server(
         raise _not_found() from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+    except ServerAssignedError as exc:
+        # At rest, but the stop still holds its Worker until the final snapshot
+        # and the release (#1704). Not the retry-soon ``server_busy``: the hold can
+        # last until the reconciler's release, so the detail names the remedy
+        # (issue #3852).
+        raise problem(
+            status.HTTP_409_CONFLICT,
+            "server_assigned",
+            extensions={"detail": _SERVER_ASSIGNED_DETAIL},
+        ) from exc
     except ServerBusyError as exc:
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.

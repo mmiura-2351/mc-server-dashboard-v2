@@ -27,9 +27,10 @@ from mc_server_dashboard_api.storage.adapters import object_store
 from mc_server_dashboard_api.storage.adapters.object_store import (
     S3Object,
     _archive_file_member_streams,
-    _archive_member_parts,
     _file_parts,
     _HandleJobs,
+    _RestoreBudget,
+    _snapshot_file_members,
     _write_backup_targz,
 )
 from tests.storage.helpers import tar_bytes
@@ -126,8 +127,12 @@ def _patch_spool_open(monkeypatch: pytest.MonkeyPatch, held: _Held, pause: str) 
     )
 
 
+# A budget no test archive comes near.
+_BUDGET = 1024 * 1024
+
+
 async def _consume_streams(spool: Path) -> None:
-    streams = _archive_file_member_streams(spool, "r|gz")
+    streams = _archive_file_member_streams(spool, _RestoreBudget(_BUDGET))
     assert isinstance(streams, AsyncGenerator)
     try:
         async for _name, parts in streams:
@@ -155,11 +160,17 @@ _Run = Callable[[Path], Awaitable[object]]
 _PLAIN_TAR = tar_bytes({"a.txt": b"A"})
 
 
-async def _member_parts(spool: Path) -> object:
+async def _snapshot_member_parts(spool: Path) -> object:
     # The snapshot ingest reads a plain tar, so this site gets one beside the spool.
     plain = spool.with_name("spool.tar")
     plain.write_bytes(_PLAIN_TAR)
-    return await _archive_member_parts(plain, "a.txt", "r:").__anext__()
+    members = _snapshot_file_members(plain)
+    try:
+        _name, parts = await members.__anext__()
+        return await parts.__anext__()
+    finally:
+        # A real caller's ``aclosing`` closes the walk.
+        await members.aclose()
 
 
 async def _file_first_part(spool: Path) -> object:
@@ -172,7 +183,7 @@ async def _write_targz(spool: Path) -> None:
 
 
 _SITES: dict[str, tuple[_Patch, _Run]] = {
-    "archive_member_parts": (_patch_tarfile, _member_parts),
+    "snapshot_file_members": (_patch_tarfile, _snapshot_member_parts),
     "archive_file_member_streams": (_patch_tarfile, _consume_streams),
     "file_parts": (_patch_spool_open, _file_first_part),
     "write_backup_targz": (_patch_tarfile, _write_targz),
@@ -221,7 +232,8 @@ async def test_a_cancelled_open_closes_its_handle_once_the_open_finishes(
 
 
 _JOBS: list[tuple[str, str]] = [
-    ("archive_member_parts", "member_read"),
+    ("snapshot_file_members", "next"),
+    ("snapshot_file_members", "member_read"),
     ("archive_file_member_streams", "next"),
     ("archive_file_member_streams", "member_read"),
     ("file_parts", "read"),
@@ -315,7 +327,7 @@ async def test_a_cancelled_member_reads_fault_is_retrieved_before_its_archive_cl
         return job
 
     monkeypatch.setattr(loop, "run_in_executor", _submit)
-    streams = _archive_file_member_streams(spool, "r|gz")
+    streams = _archive_file_member_streams(spool, _RestoreBudget(_BUDGET))
     assert isinstance(streams, AsyncGenerator)
     try:
         _name, parts = await streams.__anext__()

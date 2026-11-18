@@ -14,6 +14,7 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import uuid
@@ -58,6 +59,7 @@ from mc_server_dashboard_api.servers.api.servers import (
 from mc_server_dashboard_api.servers.application.manage_server import (
     BedrockJoinability,
     CreateServer,
+    DeleteServer,
     ReadServer,
     UpdateServer,
 )
@@ -80,12 +82,14 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortOutOfRangeError,
     PortRangeExhaustedError,
     RetiredConfigKeyError,
+    ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
     ServerPropertiesMissingError,
     UnknownServerTypeError,
     UnsupportedEditionError,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
 )
@@ -105,6 +109,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
@@ -118,6 +123,7 @@ from tests.client_utils import enter_client
 from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
 from tests.servers.fakes import (
+    FakeBackupArchiveStore,
     FakeClock,
     FakeFileStore,
     FakePluginRepository,
@@ -251,7 +257,7 @@ def _app(
     read: _FakeUseCase | None = None,
     list_: _FakeUseCase | None = None,
     update: _FakeUseCase | UpdateServer | None = None,
-    delete: _FakeUseCase | None = None,
+    delete: _FakeUseCase | DeleteServer | None = None,
     join_config: JoinHostnameConfig | None = None,
     bedrock: BedrockJoinability | None = None,
     recorder: RecordingAuditRecorder | None = None,
@@ -1242,6 +1248,69 @@ def test_delete_success_is_204() -> None:
     client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}")
     assert resp.status_code == 204
+
+
+def test_delete_of_a_server_a_worker_still_holds_is_409_server_assigned() -> None:
+    # A stop holds its Worker until the final snapshot settles and the server is
+    # released; until then the delete is refused (#1704). That can last until the
+    # reconciler's release, so it is its own reason, not the retry-soon
+    # ``server_busy`` of a lock timeout (issue #3852), and its detail says what
+    # to do.
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    server = _server_entity(community_id=community, server_id=server_id)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    store = FakeBackupArchiveStore()
+    app = _app(
+        member=True,
+        allow=True,
+        delete=DeleteServer(uow=uow, backup_store=store),
+    )
+    client = _client(app)
+    resp = client.delete(f"/api/communities/{community}/servers/{server_id}")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason"] == "server_assigned"
+    assert body["detail"] == (
+        "The server is still assigned to a Worker. Stop the server and wait for "
+        "it to be released before deleting it."
+    )
+    assert store.pruned == []
+    assert server.id in uow.servers.by_id
+
+
+class _HeldLifecycleLock(LifecycleLock):
+    """A server lock another lifecycle operation holds past the acquire budget.
+
+    Gives up the way PgLifecycleLock's bounded acquire does (issue #876).
+    """
+
+    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+        raise ServerBusyError(str(server_id.value))
+
+
+def test_delete_while_the_server_lock_is_held_is_409_server_busy() -> None:
+    # A lock timeout stays the transient ``server_busy`` the caller retries
+    # (issue #876); only a held assignment answers ``server_assigned`` (#3852).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    app = _app(
+        member=True,
+        allow=True,
+        delete=DeleteServer(
+            uow=uow,
+            backup_store=FakeBackupArchiveStore(),
+            lifecycle_lock=_HeldLifecycleLock(),
+        ),
+    )
+    client = _client(app)
+    resp = client.delete(f"/api/communities/{community}/servers/{server_id}")
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_busy"
 
 
 def test_read_server_carries_backup_retention_policy() -> None:

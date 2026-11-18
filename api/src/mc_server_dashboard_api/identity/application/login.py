@@ -21,16 +21,17 @@ the lockout, resets the back-off, and prunes stale attempt rows.
 Two enumeration-defence details: brute-force state keys on the case-folded
 :attr:`Username.key`, so failures spread across spelling variants of one username
 aggregate and lock together; and the unknown-user path still runs
-:meth:`PasswordHasher.verify` against a static dummy hash so it costs the same as
-the wrong-password path and cannot be told apart by timing.
+:meth:`PasswordHasher.verify` against a :class:`DummyPasswordHash` so it costs the
+same as the wrong-password path and cannot be told apart by timing.
 
 The per-failure reason is recorded on the ``login_attempt`` row for forensics
 only; it is never surfaced to the caller.
 
-**Session lock.** The credentials are checked without any lock, so the slow hash
-verification blocks no one; the session is then stored in a second transaction
-under the user's session lock, and only if the user re-read under that lock still
-has the verified hash and is still active -- a compare-and-set (issue #3254).
+**Session lock.** The credentials are checked outside any transaction, so the
+slow hash verification holds no lock and no pooled connection (#3861); the
+session is then stored in a second transaction under the user's session lock,
+and only if the user re-read under that lock still has the verified hash and is
+still active -- a compare-and-set (issue #3254).
 A password change, deactivation or deletion takes the same lock before it
 revokes the user's sessions, so it either committed first, and the re-check
 refuses the login, or waits for the login and revokes or deletes its new session
@@ -42,6 +43,7 @@ session lock cannot deadlock with the login holding the session lock.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import math
 import uuid
@@ -98,6 +100,32 @@ class LoginResult:
     user_id: uuid.UUID
 
 
+class DummyPasswordHash:
+    """The hash a login for an unknown username verifies against (timing defence).
+
+    The first login builds it by hashing a throwaway plaintext through the
+    configured :class:`PasswordHasher`: off the event loop, and with a hasher
+    failure raised as :class:`PasswordVerificationUnavailableError` (a 503).
+    Every later login reuses it. A failed build is not kept, so the next login
+    tries again (#3832). One instance serves every login of a process that runs
+    one event loop, as under uvicorn: its lock binds to the loop of its first
+    contended use, and makes concurrent first logins share one build.
+    """
+
+    def __init__(self, hasher: PasswordHasher, plaintext: str) -> None:
+        self._hasher = hasher
+        self._plaintext = plaintext
+        self._hash: str | None = None
+        self._lock = asyncio.Lock()
+
+    async def get(self) -> str:
+        if self._hash is None:
+            async with self._lock:
+                if self._hash is None:
+                    self._hash = await self._hasher.hash(self._plaintext)
+        return self._hash
+
+
 @dataclass(frozen=True)
 class Login:
     """Authenticate a username/password and mint a session token pair."""
@@ -106,7 +134,7 @@ class Login:
     attempts: LoginAttemptStore
     brute_force: BruteForceConfig
     hasher: PasswordHasher
-    dummy_password_hash: str
+    dummy_password_hash: DummyPasswordHash
     tokens: TokenService
     clock: Clock
     failure_delay: LoginFailureDelay
@@ -130,21 +158,26 @@ class Login:
                 reason, retry_after = blocked
                 await self._fail(key, ip, reason, now=now, retry_after=retry_after)
 
+        # Fetched before the user lookup, for a known user too: a failure to
+        # build it must answer the same whether or not the username exists.
+        dummy_hash = await self.dummy_password_hash.get()
         async with self.uow:
             user = await self.uow.users.get_by_username(name)
-            if user is None:
-                # Verify against a static dummy hash so the unknown-user path
-                # costs the same as a wrong password (timing-enumeration defence).
-                await self.hasher.verify(password, self.dummy_password_hash)
-                await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
-            if not await self.hasher.verify(password, user.password_hash):
-                await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
-            # A deactivated account fails *after* the password verify so it costs
-            # the same as a wrong password and shares the uniform error: the
-            # response and timing must not distinguish "deactivated" from "wrong
-            # password" (enumeration posture, issue #278).
-            if not user.active:
-                await self._fail(key, ip, REASON_DEACTIVATED, now=now)
+        # Verified once the read has ended: the KDF is slow and memory-hard, and
+        # no pooled connection may wait on it (#3861).
+        if user is None:
+            # Verify against the dummy hash so the unknown-user path costs the
+            # same as a wrong password (timing-enumeration defence).
+            await self.hasher.verify(password, dummy_hash)
+            await self._fail(key, ip, REASON_UNKNOWN_USER, now=now)
+        if not await self.hasher.verify(password, user.password_hash):
+            await self._fail(key, ip, REASON_WRONG_PASSWORD, now=now)
+        # A deactivated account fails *after* the password verify so it costs the
+        # same as a wrong password and shares the uniform error: the response and
+        # timing must not distinguish "deactivated" from "wrong password"
+        # (enumeration posture, issue #278).
+        if not user.active:
+            await self._fail(key, ip, REASON_DEACTIVATED, now=now)
 
         async with self.uow:
             await self.uow.refresh_tokens.lock_sessions(user.id)

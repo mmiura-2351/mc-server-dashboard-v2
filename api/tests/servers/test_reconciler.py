@@ -1863,6 +1863,89 @@ async def test_placed_start_overtaken_by_a_stop_intent_is_skipped_quietly(
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
+class _IntentFlipsAfterListing(FakeServerRepository):
+    """Sets each listed row's intent to ``to`` once the tick has listed it.
+
+    As a stop (``to`` stopped) or a start (``to`` running) committing between the
+    tick's listing and its action does. The tick still holds the candidate as
+    listed.
+    """
+
+    def __init__(self, to: DesiredState) -> None:
+        super().__init__()
+        self._to = to
+
+    async def list_reconcilable(self) -> list[Server]:
+        listed = await super().list_reconcilable()
+        for server in listed:
+            self.by_id[server.id].desired_state = self._to
+        return listed
+
+
+@pytest.mark.parametrize(
+    "worker", [None, _WORKER], ids=["place_and_start", "redispatch_start"]
+)
+async def test_start_of_an_intent_stopped_after_listing_is_skipped_quietly(
+    caplog: pytest.LogCaptureFixture, worker: WorkerId | None
+) -> None:
+    # An operator stop withdraws the start intent after the tick listed the row
+    # and before the start action reads it: an unplaced intent (issue #3815), or
+    # one whose start this tick would re-send. The action's entry guard finds no
+    # running intent and sends nothing. Nothing failed: the stop owns the row, so
+    # the tick neither counts a failure nor warns.
+    uow = FakeUnitOfWork(servers=_IntentFlipsAfterListing(DesiredState.STOPPED))
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.STOPPED,
+        worker=worker,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(place_to=_WORKER)
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert cp.dispatched == []
+    assert cp.reserved == []
+    assert server.id not in reconciler._attempts
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+@pytest.mark.parametrize(
+    ("observed", "action"),
+    [
+        (ObservedState.RUNNING, "redispatch_stop"),
+        (ObservedState.STOPPED, "clear_stale_assignment"),
+    ],
+    ids=["redispatch_stop", "clear_stale_assignment"],
+)
+async def test_stop_side_action_refused_by_its_entry_guard_still_backs_off(
+    caplog: pytest.LogCaptureFixture, observed: ObservedState, action: str
+) -> None:
+    # The quiet skip above is kept to the two start actions (issue #3815). A
+    # stop-side action whose entry guard refuses the row, here because a start
+    # committed after the tick listed it, is still counted and logged like any
+    # other failed action.
+    uow = FakeUnitOfWork(servers=_IntentFlipsAfterListing(DesiredState.RUNNING))
+    server = _server(desired=DesiredState.STOPPED, observed=observed, worker=_WORKER)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert cp.dispatched == []
+    assert reconciler._attempts[server.id].failures == 1
+    assert [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and f"reconcile action {action} failed" in r.getMessage()
+    ]
+
+
 async def test_backoff_grows_exponentially() -> None:
     uow = FakeUnitOfWork()
     server = _server(

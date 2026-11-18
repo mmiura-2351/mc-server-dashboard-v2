@@ -4,6 +4,11 @@ Opens a session from the factory on ``__aenter__`` and binds the repositories to
 it; ``commit`` flushes and commits the transaction, while leaving the block
 without committing rolls back (the session is closed either way). This gives use
 cases the all-or-nothing transaction the Port promises (DATABASE.md Section 1).
+
+The :class:`CommunityOwnership` Port is bound to a community-store query on the
+*same* session, so an account deletion's ownership check runs inside the delete
+transaction (#3217) -- the cross-context composition the community unit of work
+uses for its resource-existence check.
 """
 
 from __future__ import annotations
@@ -13,6 +18,9 @@ from types import TracebackType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.identity.adapters.community_ownership import (
+    CommunityBackedOwnership,
+)
 from mc_server_dashboard_api.identity.adapters.integrity import (
     translate_integrity_error,
 )
@@ -34,6 +42,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self._session = self._session_factory()
         self.users = SqlAlchemyUserRepository(self._session)
         self.refresh_tokens = SqlAlchemyRefreshTokenRepository(self._session)
+        self.ownership = CommunityBackedOwnership(self._session)
         return self
 
     async def __aexit__(

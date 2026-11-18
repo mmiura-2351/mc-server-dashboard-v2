@@ -67,11 +67,19 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
+    END_CHECK_FILES,
     GNU_SPARSE_FORMATS,
+    GO_PACK_FILES,
     INVALID_SPARSE_LAYOUTS,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
+    TARS_NOT_ENDING_AT_THEIR_MARKER,
+    TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT,
+    gnu_tar,
     gnu_tar_sparse_archive_cut_in_its_extension_block,
+    go_archive_tar,
+    needs_gnu_tar,
+    needs_go,
     tar_cut_in_a_sparse_extension_block,
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
@@ -3014,6 +3022,82 @@ def test_snapshot_with_gnu_tar_sparse_members_is_published_expanded(
     )
 
     assert (status, hydrated, staging) == (204, SPARSE_FILES, [])
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize("shape", list(TARS_NOT_ENDING_AT_THEIR_MARKER))
+def test_snapshot_that_does_not_end_at_its_marker_is_refused(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], shape: str
+) -> None:
+    # ``tarfile`` takes a header it cannot read, past the first, or a body that
+    # stops where a header should start, for the end of the archive. Both
+    # backends published the members before it with 204 (issue #3798). Bytes
+    # other than zeros past the marker are refused too.
+    body = TARS_NOT_ENDING_AT_THEIR_MARKER[shape]
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize("shape", list(TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT))
+def test_snapshot_whose_member_data_runs_past_it_is_refused(
+    tmp_path: Path, make_storage: Callable[[Path], Storage], shape: str
+) -> None:
+    # A GNU sparse member that takes more data than it stores reads on into the
+    # next member, and ``tarfile`` then seeks back to that member's header. The
+    # ingest refuses the seek on both backends (issue #3798); fs refused it in
+    # ``r|`` only by accident, and the object backend published the member
+    # padded with the next member's bytes.
+    body = TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT[shape]
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize(
+    ("produce", "files"),
+    [
+        pytest.param(go_archive_tar, GO_PACK_FILES, id="go", marks=needs_go),
+        pytest.param(gnu_tar, END_CHECK_FILES, id="gnu-tar", marks=needs_gnu_tar),
+        pytest.param(
+            lambda tmp: gnu_tar(tmp, "-b", "1"),
+            END_CHECK_FILES,
+            id="gnu-tar-b1",
+            marks=needs_gnu_tar,
+        ),
+        pytest.param(
+            lambda tmp: gnu_tar(tmp, "--format=posix"),
+            END_CHECK_FILES,
+            id="gnu-tar-posix",
+            marks=needs_gnu_tar,
+        ),
+        pytest.param(
+            lambda _tmp: _tar_bytes(END_CHECK_FILES), END_CHECK_FILES, id="tarfile"
+        ),
+    ],
+)
+def test_snapshot_from_each_producer_is_published(
+    tmp_path_factory: pytest.TempPathFactory,
+    make_storage: Callable[[Path], Storage],
+    produce: Callable[[Path], bytes],
+    files: dict[str, bytes],
+) -> None:
+    # The Worker's Go ``archive/tar`` (no record padding), GNU tar (record
+    # padding, directory members) and Python's ``tarfile`` stay accepted now that
+    # the ingest must end at the end-of-archive marker (issue #3798).
+    body = produce(tmp_path_factory.mktemp("producer"))
+
+    status, _, hydrated, staging = _post_snapshot_over_a_prior(
+        tmp_path_factory.mktemp("store"), make_storage, body
+    )
+
+    assert (status, hydrated, staging) == (204, files, [])
 
 
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(

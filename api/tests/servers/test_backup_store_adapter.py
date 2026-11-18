@@ -1093,11 +1093,11 @@ async def test_check_backup_health_fs_io_fault_translates_to_unavailable(
 async def test_fs_io_fault_reading_the_archive_is_unavailable_not_unreadable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
-    """An EIO while ``tarfile`` reads a sound archive is an outage, never the
-    unreadable verdict (issue #3230). ``tarfile``'s gzip open reports ANY
-    ``OSError`` on the first read as ``ReadError("not a gzip file")``, which the
-    archive-read translation must not take for damaged bytes — doing so would
-    condemn a sound backup over a device fault."""
+    """An EIO while the walk reads a sound archive is an outage, never the
+    unreadable verdict (issue #3230): the archive-read translation must not take
+    a device fault for damaged bytes, which would condemn a sound backup. The
+    walk decompresses with ``gzip.GzipFile`` itself (issue #3798), so the fault
+    reaches the backend's I/O-fault policy as the ``OSError`` it is."""
 
     storage = FsStorage(tmp_path, version_retention=10)
     adapter = StorageBackupStoreAdapter(storage=storage)

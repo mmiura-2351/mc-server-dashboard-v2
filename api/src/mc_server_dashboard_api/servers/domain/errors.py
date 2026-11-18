@@ -212,6 +212,19 @@ class ServerBusyError(ServerError):
     """
 
 
+class ServerAssignedError(ServerError):
+    """A delete found the at-rest server still assigned to a Worker.
+
+    A stop holds its Worker until the final snapshot settles and the server is
+    released, and a late snapshot upload may still commit until then (#1704), so
+    ``DeleteServer`` refuses the row. Unlike :class:`ServerBusyError` this does not
+    clear by itself within seconds: the server stays assigned until that release,
+    which can wait for the reconciler (issue #3852). The edge maps it to 409
+    ``server_assigned``, whose detail says to stop the server and wait for the
+    release.
+    """
+
+
 class ServerPropertiesMissingError(ServerError):
     """A platform rewrite of ``server.properties`` found no file to rewrite.
 
@@ -894,10 +907,11 @@ class ResourcePackStorageUnavailableError(ServerError):
     pack is gone and asking again is pointless.
 
     The store's writes raise it too (issue #2458). An upload that hits it inserted
-    no row -- at most it left a blob no row names (issue #3277) -- and a retry
-    uploads under a fresh id, so the upload route answers the same 503. A blob
-    delete that hits it is logged by the delete use case instead of answered: the
-    row is already gone by then, so there is nothing left for a retry to do.
+    no row -- at most it left a blob no row names, for the resource-pack GC to
+    reclaim (issue #3277) -- and a retry uploads under a fresh id, so the upload
+    route answers the same 503. A blob delete that hits it is logged by the delete
+    use case instead of answered: the row is already gone by then, so there is
+    nothing left for a retry to do, and the GC reclaims the blob.
     """
 
 

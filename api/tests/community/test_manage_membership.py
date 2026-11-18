@@ -57,17 +57,12 @@ class _FakeUserDirectory(UserDirectory):
     def __init__(
         self,
         *,
-        known: bool = True,
         usernames: dict[UserId, str] | None = None,
         by_username: dict[str, UserId] | None = None,
     ) -> None:
-        self._known = known
         self._usernames = usernames or {}
         self._by_username = by_username or {}
         self.usernames_for_calls: list[list[UserId]] = []
-
-    async def exists(self, user_id: UserId) -> bool:
-        return self._known
 
     async def resolve_username(self, username: str) -> UserId | None:
         # Case-insensitive exact match, mirroring the identity uniqueness key.
@@ -115,7 +110,7 @@ async def test_add_member_stages_membership_and_commits() -> None:
     user = UserId(uuid.uuid4())
 
     membership = await AddMember(
-        uow=uow, users=_FakeUserDirectory(known=True), clock=_FakeClock()
+        uow=uow, users=_FakeUserDirectory(), clock=_FakeClock()
     )(community_id=community.id, user_id=user)
 
     assert membership.user_id == user
@@ -126,12 +121,16 @@ async def test_add_member_stages_membership_and_commits() -> None:
 
 
 async def test_add_member_unknown_user_is_rejected_and_not_committed() -> None:
+    # Checked in the add's own transaction, under the account's hold (#3856).
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
+    user = UserId(uuid.uuid4())
+    uow.users.absent.add(user)
     with pytest.raises(MemberUserNotFoundError):
-        await AddMember(
-            uow=uow, users=_FakeUserDirectory(known=False), clock=_FakeClock()
-        )(community_id=community.id, user_id=UserId(uuid.uuid4()))
+        await AddMember(uow=uow, users=_FakeUserDirectory(), clock=_FakeClock())(
+            community_id=community.id, user_id=user
+        )
+    assert await uow.memberships.get_by_user_and_community(user, community.id) is None
     assert uow.commits == 0
 
 
@@ -151,6 +150,23 @@ async def test_add_member_resolves_username_and_commits() -> None:
     persisted = await uow.memberships.get_by_user_and_community(user, community.id)
     assert persisted is not None
     assert uow.commits == 1
+
+
+async def test_add_member_username_of_a_deleted_account_is_rejected() -> None:
+    # The name resolved, but the account was deleted before the add's hold on
+    # it (#3856): rejected like an unknown user, and nothing is written.
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    user = UserId(uuid.uuid4())
+    uow.users.absent.add(user)
+    users = _FakeUserDirectory(by_username={"alice": user})
+
+    with pytest.raises(MemberUserNotFoundError):
+        await AddMember(uow=uow, users=users, clock=_FakeClock())(
+            community_id=community.id, username="alice"
+        )
+    assert await uow.memberships.get_by_user_and_community(user, community.id) is None
+    assert uow.commits == 0
 
 
 async def test_add_member_unknown_username_is_rejected_like_unknown_id() -> None:
@@ -388,6 +404,26 @@ async def test_assign_role_to_non_member_raises_not_found() -> None:
             role_id=role.id,
             actor_id=actor,
         )
+
+
+async def test_assign_role_to_a_deleted_account_raises_not_found() -> None:
+    # The recipient's account was deleted before the assignment's hold on it
+    # (#3217): refused like a non-member's, and nothing is written.
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
+    membership = uow._membership_for(user, community.id)
+    role = _seed_owner_role(uow, community.id)
+    uow._membership_for(actor, community.id)
+    uow.users.absent.add(user)
+
+    with pytest.raises(MembershipNotFoundError):
+        await AssignRole(uow=uow)(
+            community_id=community.id, user_id=user, role_id=role.id, actor_id=actor
+        )
+    assert await uow.memberships.list_role_ids(membership.id) == []
+    assert uow.commits == 0
 
 
 async def test_assign_unknown_role_raises_not_found() -> None:
