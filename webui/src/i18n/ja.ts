@@ -659,6 +659,8 @@ export const ja: Record<TranslationKey, string> = {
     "バックアップを取得できませんでした: server.properties が通常のファイルではない（シンボリックリンクなど）か、4 MiB を超えているため、稼働中のワールドの保存を一時停止できません。停止中のサーバーはバックアップできます。再度起動する前に、通常の server.properties に戻してください。",
   "backups.error.tooLarge":
     "ファイルサイズが512 MiBのアップロード上限を超えています。",
+  "backups.error.workingSetTooLarge":
+    "バックアップを取得できませんでした: サーバーのファイルからバックアップアーカイブを作ると、8 GiB の上限を超えます。何も保存されていません。サーバーからファイルを削除または移動してから、バックアップを取得してください。",
   "backups.error.generic": "問題が発生しました。もう一度お試しください。",
 
   // Schedules tab (WEBUI_SPEC.md 6.13, issue #1842).

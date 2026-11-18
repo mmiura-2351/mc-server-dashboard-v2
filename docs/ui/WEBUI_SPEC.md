@@ -826,7 +826,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   `publish_unknown` (the store could not confirm whether it published, #3564)
   says the backup may have been restored and asks the user to retry.
 - Create backup button (works on running servers — on-demand snapshot path);
-  upload backup (file picker). An upload answering 503 `upload_busy` (too many
+  upload backup (file picker). A create answering 409 `working_set_too_large`
+  (the server's files would make an archive past the 8 GiB backup cap, #3859)
+  wrote nothing; its message names the limit and asks the user to make the
+  server's files smaller, since retrying as they are fails the same way. An
+  upload answering 503 `upload_busy` (too many
   archive uploads being checked at once, #3843) was not stored; its message
   asks the user to try again shortly rather than naming a server host.
 - Schedule: backup cadence is a first-class `backup` schedule on the general
