@@ -2386,8 +2386,21 @@ describe("ServerDetailPage settings slug (issue #961)", () => {
 });
 
 describe("ServerDetailPage delete (typed confirm)", () => {
+  function openSettings() {
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.settings") }),
+    );
+  }
+
   it("deletes after typed confirm and navigates to the dashboard", async () => {
-    routeGet({ srv: { observed_state: "stopped" } });
+    // At rest with no Worker assigned: the delete the API accepts (#3852).
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
+    });
     mockApi.delete.mockResolvedValue(undefined);
     renderPage();
 
@@ -2435,6 +2448,106 @@ describe("ServerDetailPage delete (typed confirm)", () => {
         name: t("serverDetail.danger.deleteButton"),
       }),
     ).not.toBeInTheDocument();
+  });
+
+  // A stop holds its Worker until the final snapshot and the release, and the
+  // API refuses a delete until then (409 server_assigned, #3852): Delete is
+  // shown disabled, with the reason.
+  it("holds Delete with the reason while a Worker is assigned", async () => {
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      },
+    });
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    const remove = screen.getByRole("button", {
+      name: t("serverDetail.danger.deleteButton"),
+    });
+    expect(remove).toBeDisabled();
+    expect(remove).toHaveAccessibleDescription(
+      t("serverDetail.danger.deleteAwaitsRelease"),
+    );
+  });
+
+  // The cache can still show the server released when the API finds it
+  // assigned; the refusal then says the same as the held button (#3852).
+  it("toasts the release reason when the delete answers 409 server_assigned", async () => {
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
+    });
+    mockApi.delete.mockRejectedValue(
+      new ApiError(409, { reason: "server_assigned" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: t("serverDetail.danger.deleteButton"),
+      }),
+    );
+    fireEvent.change(screen.getByPlaceholderText("survival"), {
+      target: { value: "survival" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.delete.confirm") }),
+    );
+
+    expect(
+      (
+        await screen.findByText(t("serverDetail.danger.deleteAwaitsRelease"))
+      ).closest(".toast"),
+    ).not.toBeNull();
+    expect(navigateMock).not.toHaveBeenCalledWith(`/communities/${CID}`);
+  });
+
+  describe("the release frame (#3852)", () => {
+    let restoreWs: () => void;
+    beforeEach(() => {
+      restoreWs = installMockWebSocket();
+    });
+    afterEach(() => restoreWs());
+
+    it("enables Delete once the Worker is released", async () => {
+      routeGet({
+        srv: {
+          observed_state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: "worker-a",
+        },
+      });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      const remove = screen.getByRole("button", {
+        name: t("serverDetail.danger.deleteButton"),
+      });
+      expect(remove).toBeDisabled();
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          serverFrame("status", { assigned_worker_id: null }),
+        );
+      });
+
+      // The frame alone frees it: every REST read still answers worker-a.
+      await waitFor(() => expect(remove).toBeEnabled());
+      expect(
+        screen.queryByText(t("serverDetail.danger.deleteAwaitsRelease")),
+      ).not.toBeInTheDocument();
+    });
   });
 });
 
