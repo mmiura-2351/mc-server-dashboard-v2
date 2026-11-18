@@ -49,7 +49,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortOutOfRangeError,
     PortRangeExhaustedError,
     RetiredConfigKeyError,
-    ServerBusyError,
+    ServerAssignedError,
     ServerFileNotFoundError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -2734,8 +2734,10 @@ async def test_delete_rejects_while_assignment_held() -> None:
 
     After a stop whose final snapshot timed out, the row sits at
     (stopped, stopped, assigned_worker_id=A) while the late upload is still
-    live. Delete must refuse with ServerBusyError so the late commit can
-    finish and release the assignment.
+    live. Delete must refuse with ServerAssignedError so the late commit can
+    finish and release the assignment. It is not ServerBusyError (issue #3852):
+    the row can stay assigned until the release, so a retry soon after does not
+    help the way it does for a lock timeout.
     """
     uow = FakeUnitOfWork()
     store = FakeBackupArchiveStore()
@@ -2744,7 +2746,7 @@ async def test_delete_rejects_while_assignment_held() -> None:
     server.assigned_worker_id = WorkerId(uuid.uuid4())
     uow.servers.seed(server)
 
-    with pytest.raises(ServerBusyError):
+    with pytest.raises(ServerAssignedError):
         await DeleteServer(uow=uow, backup_store=store)(
             community_id=community, server_id=server.id
         )
@@ -2760,7 +2762,7 @@ async def test_delete_rechecks_assignment_after_the_pack_window() -> None:
 
     Mirrors the existing recheck pattern: the prune hook sets
     assigned_worker_id mid-pack, and the second-transaction re-check catches
-    it and raises ServerBusyError.
+    it and raises ServerAssignedError (issue #3852).
     """
     uow = FakeUnitOfWork()
     store = FakeBackupArchiveStore()
@@ -2774,7 +2776,7 @@ async def test_delete_rechecks_assignment_after_the_pack_window() -> None:
 
     store.on_prune = _assign_during_pack
 
-    with pytest.raises(ServerBusyError):
+    with pytest.raises(ServerAssignedError):
         await DeleteServer(uow=uow, backup_store=store)(
             community_id=community, server_id=server.id
         )
