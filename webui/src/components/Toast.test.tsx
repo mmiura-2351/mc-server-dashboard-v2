@@ -342,22 +342,33 @@ describe("Toast", () => {
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
   });
 
-  it("does not pause once a click on × hands focus on to the next toast", () => {
+  it("does not pause for focus a click leaves in the stack as the stack changes", () => {
+    pointerFocus();
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed 1", "error");
+
+    act(() => dismissButton("Failed 1").focus());
+    show("Failed 2", "error");
+
+    advance(3200);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("hands focus back unscrolled when a toast times out holding focus a click left", () => {
     pointerFocus();
     renderToasts(<button type="button">Page</button>);
     show("Saved", "success"); // 3.2 s
-    show("Failed", "error");
     const page = screen.getByRole("button", { name: "Page" });
 
     act(() => page.focus());
-    act(() => dismissButton("Failed").focus());
-    fireEvent.click(dismissButton("Failed"));
-
-    expect(document.activeElement).toBe(dismissButton("Saved"));
+    act(() => dismissButton("Saved").focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
     advance(3200);
+
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
-    // Timing out with focus on it, it hands focus on like a dismiss.
     expect(document.activeElement).toBe(page);
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
   });
 
   it("resumes once focus leaves the stack with the last toast", () => {
@@ -595,6 +606,69 @@ describe("Toast", () => {
 // next toast, else back where it came from, else to a fallback; never to the
 // page body.
 describe("Toast focus when the focused toast goes", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // A click or a tap sends focus straight back, past the other toasts, so a
+  // key pressed next cannot dismiss one unread, and without scrolling.
+  it("goes straight back, unscrolled, after a pointer dismiss", () => {
+    pointerFocus();
+    renderToasts(<input aria-label="Name" />);
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+    const input = screen.getByRole("textbox", { name: "Name" });
+
+    act(() => input.focus());
+    act(() => dismissButton("Failed 1").focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(dismissButton("Failed 1"));
+
+    expect(screen.getByText("Failed 2")).toBeInTheDocument();
+    expect(document.activeElement).toBe(input);
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+  });
+
+  it("falls back to main unscrolled after a pointer dismiss", () => {
+    pointerFocus();
+    renderToasts(<main />);
+    show("Failed", "error");
+
+    act(() => dismissButton("Failed").focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(dismissButton("Failed"));
+
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+  });
+
+  it("moves on to the next toast after a keyboard dismiss", () => {
+    keyboardFocus();
+    renderToasts();
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+
+    act(() => dismissButton("Failed 1").focus());
+    fireEvent.keyDown(dismissButton("Failed 1"), { key: "Escape" });
+
+    expect(document.activeElement).toBe(dismissButton("Failed 2"));
+  });
+
+  it("may scroll to where it goes back to after a keyboard dismiss", () => {
+    keyboardFocus();
+    renderToasts(<button type="button">Page</button>);
+    show("Failed", "error");
+    const page = screen.getByRole("button", { name: "Page" });
+
+    act(() => page.focus());
+    act(() => dismissButton("Failed").focus());
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.keyDown(dismissButton("Failed"), { key: "Escape" });
+
+    expect(document.activeElement).toBe(page);
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: false });
+  });
+
   it("moves to the next toast", () => {
     renderToasts();
     for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
