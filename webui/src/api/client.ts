@@ -53,13 +53,15 @@ interface ProblemDetails {
   reason?: string;
   permission?: string;
   key?: string;
+  worker_state?: string;
 }
 
 /**
  * Pull a string-valued member out of a problem+json body. The UI branches on
  * `reason` and renders the members some reasons carry — `permission` on a 403
- * denial, `key` on a 422 `platform_managed_key` refusal (AUTH_API.md 2);
- * anything that is not a problem+json object yields `undefined`.
+ * denial, `key` on a 422 `platform_managed_key` refusal, `worker_state` on a
+ * lifecycle 503 `worker_unavailable` (AUTH_API.md 2); anything that is not a
+ * problem+json object yields `undefined`.
  */
 function readProblemString(
   body: unknown,
@@ -88,6 +90,12 @@ export class ApiError extends Error {
    * undefined on other responses.
    */
   readonly key: string | undefined;
+  /**
+   * The `worker_state` extension member a start, stop or restart adds to a 503
+   * `worker_unavailable` — `not_connected` or `no_answer` (issue #3820);
+   * undefined when the API cannot tell, and on other responses.
+   */
+  readonly workerState: string | undefined;
 
   constructor(
     readonly status: number,
@@ -98,6 +106,7 @@ export class ApiError extends Error {
     this.reason = readProblemString(body, "reason");
     this.permission = readProblemString(body, "permission");
     this.key = readProblemString(body, "key");
+    this.workerState = readProblemString(body, "worker_state");
   }
 }
 

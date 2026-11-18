@@ -126,6 +126,35 @@ describe("ApiError", () => {
     expect(error.key).toBeUndefined();
   });
 
+  it("exposes the worker_state extension member on a 503 worker_unavailable", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(503, {
+        type: "urn:mcsd:error:worker_unavailable",
+        title: "Service Unavailable",
+        status: 503,
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+      }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.reason).toBe("worker_unavailable");
+    expect(error.workerState).toBe("not_connected");
+  });
+
+  it("leaves workerState undefined when the body omits it", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(503, { reason: "worker_unavailable" }),
+    );
+
+    const error = await api.get("/api/communities").catch((e) => e);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.workerState).toBeUndefined();
+  });
+
   it("leaves reason undefined for a non-problem body", async () => {
     fetchMock.mockResolvedValue(jsonResponse(500, { message: "boom" }));
 

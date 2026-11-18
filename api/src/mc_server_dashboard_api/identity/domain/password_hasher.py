@@ -24,7 +24,11 @@ class PasswordHasher(abc.ABC):
 
     @abc.abstractmethod
     async def hash(self, plaintext: str) -> str:
-        """Return a storable hash of ``plaintext`` (salt embedded by the KDF)."""
+        """Return a storable hash of ``plaintext`` (salt embedded by the KDF).
+
+        When the hasher itself fails (e.g. out of memory), it raises
+        :class:`PasswordVerificationUnavailableError` (#3762).
+        """
 
     @abc.abstractmethod
     async def verify(self, plaintext: str, password_hash: str) -> bool:

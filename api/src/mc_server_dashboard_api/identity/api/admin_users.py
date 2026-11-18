@@ -36,6 +36,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitRoute
 from mc_server_dashboard_api.http_datetime import UtcDatetime
 from mc_server_dashboard_api.http_problem import ProblemException, problem
+from mc_server_dashboard_api.identity.api.problems import password_hasher_unavailable
 from mc_server_dashboard_api.identity.api.users import UserResponse
 from mc_server_dashboard_api.identity.application.admin_create_user import (
     AdminCreateUser,
@@ -56,6 +57,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     InvalidUsernameError,
     LastPlatformAdminError,
     PasswordPolicyError,
+    PasswordVerificationUnavailableError,
     SelfTargetError,
     UsernameAlreadyExistsError,
     UserNotFoundError,
@@ -136,6 +138,8 @@ async def admin_create_user(
         raise problem(
             status.HTTP_422_UNPROCESSABLE_CONTENT, _field_reason(exc)
         ) from exc
+    except PasswordVerificationUnavailableError as exc:
+        raise password_hasher_unavailable() from exc
     await _audit(recorder, ops.USER_CREATE, admin=admin, target=user.id.value)
     # First-user bootstrap (#909): if this admin-created account is the very first
     # user on the database, persist_new_user auto-grants it platform admin. The

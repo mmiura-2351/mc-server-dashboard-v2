@@ -97,6 +97,11 @@ async def test_argon2_verify_returns_false_on_a_wrong_password(
         pytest.param(_argon2_hash(params="m=1,t=3,p=4"), id="memory-too-small"),
         pytest.param(_argon2_hash(params="m=65536,t=0,p=4"), id="time-too-small"),
         pytest.param(_argon2_hash(params="m=65536,t=3,p=0"), id="too-few-lanes"),
+        # One lane past libargon2's maximum, with the 8 KiB a lane needs, so the
+        # lane check is the one that fails, before any allocation (#3762).
+        pytest.param(
+            _argon2_hash(params="m=134217728,t=3,p=16777216"), id="too-many-lanes"
+        ),
         pytest.param(_argon2_hash(params="m=8589934592,t=3,p=4"), id="memory-overflow"),
         # argon2-cffi refuses a non-ASCII hash before libargon2 sees it.
         pytest.param(_argon2_hash(salt="MpDmDyRnsUyW+VHLyrjk3é"), id="non-ascii"),
@@ -129,6 +134,9 @@ class _FailingArgon2(argon2.PasswordHasher):
         super().__init__()
         self._message = message
 
+    def hash(self, password: str | bytes, *, salt: bytes | None = None) -> str:
+        raise argon2.exceptions.HashingError(self._message)
+
     def verify(self, hash: str | bytes, password: str | bytes) -> Literal[True]:
         raise argon2.exceptions.VerificationError(self._message)
 
@@ -156,6 +164,29 @@ async def test_argon2_verify_raises_when_the_verifier_itself_fails(
     # The log carries libargon2's message, never the hash or the password.
     assert message in caplog.text
     assert stored not in caplog.text
+    assert "Wm7!qz#Lp2vT" not in caplog.text
+
+
+@pytest.mark.parametrize("message", ["Memory allocation error", "Threading failure"])
+async def test_argon2_hash_raises_when_the_hasher_itself_fails(
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Hashing a new password can run out of memory or threads too. That is the
+    # same server failure as on verify, so hash() raises the same error, which
+    # every route that hashes answers with a 503 instead of a 500 (#3762).
+    hasher = Argon2PasswordHasher()
+    monkeypatch.setattr(hasher, "_hasher", _FailingArgon2(message))
+
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(PasswordVerificationUnavailableError),
+    ):
+        await hasher.hash("Wm7!qz#Lp2vT")
+    assert [record.levelname for record in caplog.records] == ["ERROR"]
+    # The log carries libargon2's message, never the password.
+    assert message in caplog.text
     assert "Wm7!qz#Lp2vT" not in caplog.text
 
 

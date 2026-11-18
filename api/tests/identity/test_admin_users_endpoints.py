@@ -31,6 +31,7 @@ from mc_server_dashboard_api.identity.domain.errors import (
     CommunityOwnedError,
     LastPlatformAdminError,
     PasswordPolicyError,
+    PasswordVerificationUnavailableError,
     SelfTargetError,
     UsernameAlreadyExistsError,
     UserNotFoundError,
@@ -373,6 +374,19 @@ def test_admin_create_overlong_password_422_no_echo() -> None:
     assert overlong not in resp.text
     # The structural failure short-circuits before the use case.
     assert fake.calls == []
+
+
+def test_admin_create_hasher_failure_returns_503() -> None:
+    # The password could not be hashed (the hasher itself failed, #3762): a
+    # transient server failure, not a generic 500, and no account was created,
+    # so nothing is audited.
+    fake = _Fake(error=PasswordVerificationUnavailableError())
+    recorder = RecordingAuditRecorder()
+    client = _client(admin_create_user=fake, recorder=recorder)
+    resp = client.post("/api/admin/users", json=_create_payload())
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "password_verification_unavailable"
+    assert recorder.events == []
 
 
 def test_admin_create_duplicate_username_returns_409() -> None:

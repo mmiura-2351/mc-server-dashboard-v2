@@ -51,6 +51,7 @@ from mc_server_dashboard_api.identity.application.token_pair import TokenPair
 from mc_server_dashboard_api.identity.domain.errors import (
     InvalidCredentialsError,
     InvalidRefreshTokenError,
+    PasswordVerificationUnavailableError,
     RefreshTokenReuseError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -162,6 +163,22 @@ def test_login_failure_records_denied_without_actor() -> None:
     assert recorder.events[0].outcome is Outcome.DENIED
     # Failure stays unattributed (enumeration defence, SECURITY.md Section 2).
     assert recorder.events[0].actor_id is None
+
+
+def test_login_hasher_failure_records_nothing() -> None:
+    # The password was never judged (#3749), so a 503 login is neither a success
+    # nor a failure and writes no audit row (AUTH_API.md Section 6).
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_login] = lambda: _FakeUseCase(
+        error=PasswordVerificationUnavailableError()
+    )
+    client = _client(app)
+
+    resp = client.post("/api/auth/login", json={"username": "alice", "password": "x"})
+
+    assert resp.status_code == 503
+    assert recorder.events == []
 
 
 def test_refresh_success_records_success() -> None:

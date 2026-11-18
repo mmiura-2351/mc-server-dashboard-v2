@@ -49,6 +49,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
     CommandStatus,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -5839,7 +5840,7 @@ async def test_clear_stale_assignment_snapshot_timeout_holds() -> None:
                 ) from exc
 
     cp = _SnapshotTimesOut(connected={WorkerId(worker): True})
-    with pytest.raises(WorkerUnavailableError):
+    with pytest.raises(WorkerUnavailableError) as excinfo:
         await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
@@ -5848,6 +5849,8 @@ async def test_clear_stale_assignment_snapshot_timeout_holds() -> None:
     # Assignment kept — the upload may still be live.
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id == WorkerId(worker)
+    # The Worker is connected and has not answered yet (issue #3820).
+    assert excinfo.value.worker_state is UnavailableWorkerState.NO_ANSWER
 
 
 async def test_clear_stale_assignment_snapshot_failure_still_clears() -> None:
