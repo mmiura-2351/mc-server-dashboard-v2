@@ -278,6 +278,22 @@ function BusyFooter() {
   );
 }
 
+function HistoryWithConfirm() {
+  const [confirming, setConfirming] = useState(false);
+  return (
+    <Modal open={true} title="History" onClose={() => {}}>
+      <button type="button" onClick={() => setConfirming(true)}>
+        Rollback
+      </button>
+      {confirming && (
+        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
+          <BusyFooter />
+        </Modal>
+      )}
+    </Modal>
+  );
+}
+
 describe("Modal focus when its focused control is disabled", () => {
   // The dialog hears about the change on a microtask.
   async function settle() {
@@ -319,17 +335,11 @@ describe("Modal focus when its focused control is disabled", () => {
     expect(document.activeElement).toBe(elsewhere);
   });
 
-  // The Files history drawer renders its rollback confirm inside its own body,
+  // The Files history drawer opens its rollback confirm inside its own body,
   // so the outer dialog sees the inner one's changes too.
   it("moves focus to the topmost dialog when a dialog nested inside another disables it", async () => {
-    render(
-      <Modal open={true} title="History" onClose={() => {}}>
-        <button type="button">Outer body</button>
-        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
-          <BusyFooter />
-        </Modal>
-      </Modal>,
-    );
+    render(<HistoryWithConfirm />);
+    fireEvent.click(screen.getByRole("button", { name: "Rollback" }));
     const save = screen.getByRole("button", { name: "Save" });
     save.focus();
 

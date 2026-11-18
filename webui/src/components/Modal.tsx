@@ -12,7 +12,9 @@ import { t } from "../i18n/index.ts";
 // - Focus trap: Tab / Shift+Tab cycle within the dialog's focusable elements
 //   rather than escaping to the page behind the backdrop. The toast stack
 //   joins the cycle: it sits outside every dialog, but an error raised over
-//   one must stay reachable (WEBUI_SPEC.md Section 7.4).
+//   one must stay reachable (WEBUI_SPEC.md Section 7.4). Focus anywhere else,
+//   on the page body or behind, re-enters the dialog on the next Tab, and a
+//   control disabled while it holds focus hands it to the dialog itself.
 // - Stacked dialogs: a module-level stack tracks open dialogs so Escape closes
 //   only the topmost one (the Files history drawer + rollback confirm is a live
 //   stacked case).
@@ -71,6 +73,26 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     const trigger = document.activeElement as HTMLElement | null;
     dialog.focus();
 
+    // A control disabled while it holds focus, as a confirm is while its
+    // action runs, keeps focus on nothing usable until the browser drops it
+    // to the page body (Chromium, a frame later). The dialog takes it first,
+    // unscrolled. Only that loss moves focus, never a control disabled
+    // elsewhere or enabled again, so a screen reader hears the dialog at most
+    // once per confirm rather than on every busy toggle.
+    const observer = new MutationObserver(() => {
+      if (
+        dialogStack.at(-1) === dialog &&
+        document.activeElement?.matches(":disabled")
+      ) {
+        dialog.focus({ preventScroll: true });
+      }
+    });
+    observer.observe(dialog, {
+      attributes: true,
+      attributeFilter: ["disabled"],
+      subtree: true,
+    });
+
     const onKeyDown = (event: KeyboardEvent) => {
       // Only the topmost dialog reacts to keys.
       if (dialogStack.at(-1) !== dialog) {
@@ -93,7 +115,11 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         }
         const active = document.activeElement;
         let next: HTMLElement | undefined;
-        if (event.shiftKey) {
+        if (!dialog.contains(active) && !toastZone?.contains(active)) {
+          // From outside both, as on the page body after a click on a
+          // toast's text, Tab re-enters the dialog at its start or end.
+          next = (event.shiftKey ? inDialog.at(-1) : inDialog[0]) ?? dialog;
+        } else if (event.shiftKey) {
           if (active === dialog || active === cycle[0]) {
             next = cycle.at(-1);
           } else if (active === inToasts[0]) {
@@ -113,6 +139,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     document.addEventListener("keydown", onKeyDown);
 
     return () => {
+      observer.disconnect();
       document.removeEventListener("keydown", onKeyDown);
       const slot = dialogStack.indexOf(dialog);
       if (slot !== -1) {

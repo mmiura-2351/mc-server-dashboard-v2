@@ -1155,6 +1155,15 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   order and at least 24×24 px, and Escape dismisses the toast whose button has
   focus. The button is described by its toast's message, so it reads as more
   than "Close", the name the modal's backdrop shares.
+- **Modal focus.** While a modal is open, focus stays in the topmost dialog
+  and the toast stack. Tab or Shift+Tab from anywhere else, such as the page
+  body after a click on a toast's text, the page behind or a dialog below,
+  moves to the dialog's first or last control, or to the dialog itself when it
+  has none, so focus never walks the page behind. A control disabled while it
+  holds focus, as a confirm button is while its action runs, hands focus to
+  the dialog itself without scrolling, and focus does not go back when the
+  control is enabled again. Only that loss moves focus, so a screen reader
+  announces the dialog at most once per confirm, not on every busy toggle.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast
