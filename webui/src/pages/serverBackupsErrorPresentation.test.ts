@@ -41,6 +41,17 @@ describe("backupErrorPresentation", () => {
     );
   });
 
+  // A working set whose archive would pass the 8 GiB backup cap (issue #3859):
+  // nothing was written, and trying again cannot help until the server's files
+  // are smaller, so the message names the limit instead of asking for a retry.
+  it("names the 8 GiB limit for a 409 working_set_too_large", () => {
+    const key = backupErrorPresentation(409, "working_set_too_large");
+    expect(key).toBe("backups.error.workingSetTooLarge");
+    expect(en[key]).toMatch(/8 GiB/);
+    expect(en[key]).not.toMatch(/try again/i);
+    expect(ja[key]).toMatch(/8 GiB/);
+  });
+
   // Too many archive uploads at once (issue #3843): nothing was stored, and
   // the remedy is to send it again shortly, not to look at a server host.
   it("names the busy uploads for a 503 upload_busy", () => {
