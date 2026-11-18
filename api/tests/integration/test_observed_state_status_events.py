@@ -972,6 +972,56 @@ async def test_release_under_an_unchanged_state_publishes_the_assignment_alone(
     assert [event.payload for event in await _received(watching)] == [_RELEASED]
 
 
+async def test_release_guarded_off_another_workers_row_publishes_nothing(
+    world: _World,
+) -> None:
+    """A clear that matched no row released nothing, so it announces nothing.
+
+    Its caller commits whatever the write returned; a frame here would tell
+    clients a Worker still holding the server had let it go.
+    """
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        assert not await uow.servers.clear_assignment_after_final_snapshot(
+            server.id, WorkerId(uuid.uuid4())
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
+
+
+async def test_lost_lifecycle_compare_and_set_publishes_nothing(
+    world: _World,
+) -> None:
+    """A compare-and-set that matched no row changed neither intent nor Worker.
+
+    Here it expected another Worker than the one the row holds, as a failed
+    start's revert does once a newer placement has moved the row on.
+    """
+
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker, reported="running")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        row = await uow.servers.get_by_id(server.id)
+        assert row is not None
+        row.desired_state = DesiredState.STOPPED
+        row.assigned_worker_id = None
+        assert not await uow.servers.update_lifecycle(
+            row,
+            expected_from=DesiredState.RUNNING,
+            expected_assigned_worker_id=WorkerId(uuid.uuid4()),
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
+
+
 # --- The unit of work: nothing is published for a write that did not commit --
 
 
