@@ -720,9 +720,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   it, under a line giving the failure and saying the log is the copy loaded
   earlier.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
-  Delete — each disabled by state machine (e.g. Start hidden while running)
-  and permission. A server crashed under a running intent offers Stop only:
-  Start and Restart are hidden, since the API refuses both there. Under a
+  Delete — each disabled by state machine (e.g. Start hidden under a running
+  intent) and permission. A server crashed under a running intent offers Stop
+  only: Start and Restart are hidden, since the API refuses both there. Under a
   stopped intent Stop is offered exactly while a Worker is still assigned — a
   drained server still running, or a stop left half-done — since the API then
   converges it at once, and refuses it with no Worker assigned. Under a running
@@ -730,17 +730,33 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Stop is offered while the server reads stopped, crashed or unknown, since the
   API then withdraws the intent with no Worker to tell. It is not offered while
   the server reads running: the stopped intent would keep reading running with
-  no Worker to report otherwise, which nothing converges. Start needs no
-  Worker assigned: a stop holds its Worker until the final snapshot settles,
-  and the API refuses a start until the release (`409 transition_conflict`).
-  So at rest under a stopped intent with a Worker still assigned, Start shows
-  disabled with "Waiting for the previous stop to release the server…" (on a
-  dashboard card, as the button's tooltip) until the release frame frees it.
-  The reason holds whether the release is pending on a final snapshot, a
-  re-sent stop, or a Worker that has gone offline. Restart needs a
-  running intent and an assigned Worker: it is hidden under a stopped intent
-  even while the process still runs (a drain's grace window), and whenever no
-  Worker is assigned, since the API refuses it in both cases
+  no Worker to report otherwise, which nothing converges. Start follows the
+  API's start guard exactly, which reads the intent and the assignment and
+  never the observed state. It is hidden under a running intent
+  (`409 invalid_transition`), and offered under a stopped intent with no Worker
+  assigned whatever the server reads. A server that reads starting, running,
+  stopping or restarting there is one no Worker reports on any more and nothing
+  converges, so Start is its way out. That reading does not say whether the
+  server still runs: if it is in fact live on a Worker the row no longer names,
+  the start can place a second instance on another Worker (issue #3740). A stop
+  holds its Worker until the final snapshot settles, and the API refuses a
+  start until the release (`409 transition_conflict`). So under a stopped
+  intent with a Worker still assigned, whatever the server reads (stopping,
+  still running in a drain's grace window, or at rest), Start shows disabled
+  with "Waiting for the stop to finish and release the server…" (on a dashboard
+  card, as the button's tooltip) until the release frame frees it. The reason
+  holds whether the release is pending on a final snapshot, a re-sent stop, or
+  a Worker that has gone offline. `webui/src/pages/startGuard.json` lists the
+  API's answer for every (desired, observed, assigned) row, and the Web UI and
+  the API's start route are both tested against it. A lifecycle request that
+  succeeds holds the controls until the settle refetch answers, since until
+  then the cache pairs the requested transition with the intent from before it.
+  A refetch that fails, or is paused while the browser is offline or the tab is
+  in the background, ends the hold too, and until the next read Start can show
+  as offered; the API refuses that start (`409 invalid_transition`). Restart
+  needs a running intent and an assigned Worker: it is hidden under a stopped
+  intent even while the process still runs (a drain's grace window), and
+  whenever no Worker is assigned, since the API refuses it in both cases
   (`409 invalid_transition`). The dashboard card quick actions follow the same
   rules and disable them.
 - Delete (the Settings tab's danger zone, 6.9) needs no Worker assigned, for

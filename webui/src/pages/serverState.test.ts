@@ -8,14 +8,16 @@ import {
   converging,
   crashNotRestarted,
   isTransitional,
+  KNOWN,
   normalizeState,
   type ObservedState,
   STATE_BUCKETS,
   type StateBucket,
-  startAwaitsRelease,
+  startRefusal,
   statePill,
   statesForBucket,
 } from "./serverState.ts";
+import startGuard from "./startGuard.json";
 
 describe("normalizeState", () => {
   it("passes through known states", () => {
@@ -72,13 +74,6 @@ describe("isTransitional", () => {
 });
 
 describe("actionApplies", () => {
-  it("start applies to at-rest / crashed / unknown servers", () => {
-    expect(actionApplies("start", "stopped")).toBe(true);
-    expect(actionApplies("start", "crashed")).toBe(true);
-    expect(actionApplies("start", "unknown")).toBe(true);
-    expect(actionApplies("start", "running")).toBe(false);
-  });
-
   it("stop / restart apply only to a running server", () => {
     expect(actionApplies("stop", "running")).toBe(true);
     expect(actionApplies("restart", "running")).toBe(true);
@@ -86,17 +81,12 @@ describe("actionApplies", () => {
     expect(actionApplies("restart", "crashed")).toBe(false);
   });
 
-  it("nothing applies while transitional", () => {
-    for (const action of ["start", "stop", "restart"] as const) {
+  it("neither stop nor restart applies while transitional", () => {
+    for (const action of ["stop", "restart"] as const) {
       expect(actionApplies(action, "starting")).toBe(false);
       expect(actionApplies(action, "stopping")).toBe(false);
       expect(actionApplies(action, "restarting")).toBe(false);
     }
-  });
-
-  it("crash-looping: start blocked when desired=running", () => {
-    expect(actionApplies("start", "crashed", "running")).toBe(false);
-    expect(actionApplies("start", "unknown", "running")).toBe(false);
   });
 
   // The Worker holds no live instance for a crashed server, so the API refuses
@@ -110,21 +100,6 @@ describe("actionApplies", () => {
   it("stop/restart allowed when desired=running and observed=unknown", () => {
     expect(actionApplies("stop", "unknown", "running")).toBe(true);
     expect(actionApplies("restart", "unknown", "running")).toBe(true);
-  });
-
-  it("start allowed when desired=stopped and observed=crashed", () => {
-    expect(actionApplies("start", "crashed", "stopped")).toBe(true);
-    expect(actionApplies("start", "stopped", "stopped")).toBe(true);
-  });
-
-  // A stop holds the assignment until its final snapshot settles and the
-  // Worker is released; the API refuses a start until then (409
-  // transition_conflict, the unassigned-only compare-and-set, #3818).
-  it("start does not apply while a worker is still assigned", () => {
-    for (const state of ["stopped", "crashed", "unknown"] as const) {
-      expect(actionApplies("start", state, "stopped", true)).toBe(false);
-      expect(actionApplies("start", state, "stopped", false)).toBe(true);
-    }
   });
 
   it("stop/restart for normally running server with desired", () => {
@@ -178,22 +153,32 @@ describe("actionApplies", () => {
   });
 });
 
-describe("startAwaitsRelease", () => {
-  // The one case the controls show a disabled Start with the reason: Start
-  // would apply but for the Worker the previous stop still holds (#3818).
-  it("holds Start at rest under a stopped intent while a worker is assigned", () => {
-    for (const state of ["stopped", "crashed", "unknown"] as const) {
-      expect(startAwaitsRelease(state, "stopped", true)).toBe(true);
-      expect(startAwaitsRelease(state, "stopped", false)).toBe(false);
-    }
+describe("startRefusal", () => {
+  // The API's answer to a start in every (desired, observed, assigned) row:
+  // the start route answers the same for each in
+  // api/tests/servers/test_lifecycle_endpoints.py (#3860).
+  const { rows } = startGuard;
+
+  it("lists every (desired, observed, assigned) row once", () => {
+    const row = (desired: string, observed: string, assigned: boolean) =>
+      `${desired}/${observed}/${assigned}`;
+    const every = ["running", "stopped"].flatMap((desired) =>
+      KNOWN.flatMap((observed) =>
+        [false, true].map((assigned) => row(desired, observed, assigned)),
+      ),
+    );
+
+    expect(
+      rows.map((r) => row(r.desired, r.observed, r.assigned)).sort(),
+    ).toEqual(every.sort());
   });
 
-  it("does not hold a Start that would not apply anyway", () => {
-    expect(startAwaitsRelease("running", "stopped", true)).toBe(false);
-    expect(startAwaitsRelease("stopping", "stopped", true)).toBe(false);
-    expect(startAwaitsRelease("crashed", "running", true)).toBe(false);
-    expect(startAwaitsRelease("running", "running", true)).toBe(false);
-  });
+  it.each(rows)(
+    "$desired / $observed / assigned=$assigned answers $reason",
+    ({ desired, assigned, reason }) => {
+      expect(startRefusal(desired, assigned)).toBe(reason);
+    },
+  );
 });
 
 describe("atRest", () => {

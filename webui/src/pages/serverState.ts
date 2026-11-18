@@ -36,7 +36,11 @@ export function normalizeState(state: string): ObservedState {
     : "unknown";
 }
 
-/** Whether a state is mid-transition (pill blinks; all actions held). */
+/**
+ * Whether a state is mid-transition (pill blinks; stop and restart held). Start
+ * is not held by it: the API's start guard does not read the observed state
+ * (see {@link startRefusal}).
+ */
 export function isTransitional(state: ObservedState): boolean {
   return state === "starting" || state === "stopping" || state === "restarting";
 }
@@ -173,13 +177,45 @@ export function statePill(state: ObservedState): PillSpec {
   }
 }
 
+/** The 409 reason the API answers a start it refuses. */
+export type StartRefusal = "invalid_transition" | "transition_conflict";
+
 /**
- * Whether a lifecycle action applies to the current observed state. While
- * transitional, nothing applies; otherwise start needs an at-rest/crashed
- * server with no Worker `assigned`, and stop/restart need a running one. A
- * stop holds the assignment until its final snapshot settles and the Worker is
- * released, and the API refuses a start until then (409 `transition_conflict`,
- * issue #3818; see {@link startAwaitsRelease}).
+ * Why the API would refuse a start, or `null` where it accepts one, by its
+ * StartServer entry guard (`servers/application/lifecycle.py`). The guard reads
+ * the intent and the assignment, never the observed state, and so does this:
+ * the one rule the detail header and the dashboard rows gate Start on (issue
+ * #3860).
+ *
+ * - `invalid_transition`: a running intent. Start is not offered.
+ * - `transition_conflict`: a stopped intent whose Worker is still assigned.
+ *   The stop has not finished: a drain's grace window, a stop left half-done,
+ *   or the final snapshot before the release (issue #3818). Start shows
+ *   disabled, with that reason.
+ * - `null`: a stopped intent with no Worker assigned. Start is offered whatever
+ *   the server reads. A `starting`, `running`, `stopping` or `restarting` there
+ *   is one no Worker reports on any more and nothing else converges, so Start
+ *   is the way out. If the server is in fact still live on a Worker the row no
+ *   longer names, the start can place a second instance on another Worker
+ *   (issue #3740).
+ *
+ * `startGuard.json` lists the API's answer for every (desired, observed,
+ * assigned) row; this function and the API's start route are both tested
+ * against it.
+ */
+export function startRefusal(
+  desired: string,
+  assigned: boolean,
+): StartRefusal | null {
+  if (desired === "running") return "invalid_transition";
+  if (assigned) return "transition_conflict";
+  return null;
+}
+
+/**
+ * Whether stop or restart applies to the current observed state. While
+ * transitional, neither applies; otherwise both need a running server. Start
+ * has its own rule, {@link startRefusal}.
  *
  * Under a running intent, stop also applies to a crashed or unknown server, and
  * restart to an unknown one. Restart does not apply to a crashed one: the
@@ -201,17 +237,13 @@ export function statePill(state: ObservedState): PillSpec {
  * (issue #3502).
  */
 export function actionApplies(
-  action: "start" | "stop" | "restart",
+  action: "stop" | "restart",
   state: ObservedState,
   desired?: string,
   assigned?: boolean,
 ): boolean {
   if (isTransitional(state)) {
     return false;
-  }
-  if (action === "start") {
-    if (desired === "running" || assigned === true) return false;
-    return state === "stopped" || state === "crashed" || state === "unknown";
   }
   if (action === "stop" && desired === "stopped") {
     return assigned === true;
@@ -230,18 +262,4 @@ export function actionApplies(
     return action === "stop";
   }
   return state === "running";
-}
-
-/**
- * Whether Start is held back only by the assignment: it would apply, but the
- * previous stop still holds its Worker (#3818). The controls then show a
- * disabled Start that says it waits for the release, rather than a Start the
- * API refuses or no Start at all.
- */
-export function startAwaitsRelease(
-  state: ObservedState,
-  desired: string,
-  assigned: boolean,
-): boolean {
-  return assigned && actionApplies("start", state, desired, false);
 }

@@ -1,0 +1,173 @@
+{
+  "$comment": "What the API answers a start in every (desired, observed, assigned) row: reason null where StartServer accepts it, else the reason of its 409. The WebUI's startRefusal (serverState.test.ts) and the API's start route (api/tests/servers/test_lifecycle_endpoints.py) are both tested against it (issue #3860).",
+  "rows": [
+    {
+      "desired": "running",
+      "observed": "starting",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "starting",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "running",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "running",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "stopping",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "stopping",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "stopped",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "stopped",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "restarting",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "restarting",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "crashed",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "crashed",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "unknown",
+      "assigned": false,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "running",
+      "observed": "unknown",
+      "assigned": true,
+      "reason": "invalid_transition"
+    },
+    {
+      "desired": "stopped",
+      "observed": "starting",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "starting",
+      "assigned": true,
+      "reason": "transition_conflict"
+    },
+    {
+      "desired": "stopped",
+      "observed": "running",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "running",
+      "assigned": true,
+      "reason": "transition_conflict"
+    },
+    {
+      "desired": "stopped",
+      "observed": "stopping",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "stopping",
+      "assigned": true,
+      "reason": "transition_conflict"
+    },
+    {
+      "desired": "stopped",
+      "observed": "stopped",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "stopped",
+      "assigned": true,
+      "reason": "transition_conflict"
+    },
+    {
+      "desired": "stopped",
+      "observed": "restarting",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "restarting",
+      "assigned": true,
+      "reason": "transition_conflict"
+    },
+    {
+      "desired": "stopped",
+      "observed": "crashed",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "crashed",
+      "assigned": true,
+      "reason": "transition_conflict"
+    },
+    {
+      "desired": "stopped",
+      "observed": "unknown",
+      "assigned": false,
+      "reason": null
+    },
+    {
+      "desired": "stopped",
+      "observed": "unknown",
+      "assigned": true,
+      "reason": "transition_conflict"
+    }
+  ]
+}

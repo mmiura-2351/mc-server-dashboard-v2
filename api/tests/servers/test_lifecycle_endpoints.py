@@ -15,6 +15,7 @@ import json
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx2
 import pytest
@@ -750,6 +751,75 @@ def test_a_start_whose_hydrate_finds_the_server_live_is_409_invalid_transition()
 
     assert resp.status_code == 409
     assert resp.json()["reason"] == "invalid_transition"
+
+
+# --- the start guard the Web UI gates Start on (issue #3860) ----------------
+
+# The answer to a start in every (desired, observed, assigned) row, which the
+# Web UI's ``startRefusal`` (serverState.ts) is tested against too: a guard that
+# starts reading the observed state, or answers a row differently, fails here.
+# An input the rows do not vary is not caught.
+_START_GUARD: list[dict[str, Any]] = json.loads(
+    (
+        Path(__file__).resolve().parents[3]
+        / "webui"
+        / "src"
+        / "pages"
+        / "startGuard.json"
+    ).read_text()
+)["rows"]
+
+
+def test_the_start_guard_table_lists_every_row_once() -> None:
+    assert sorted(
+        (row["desired"], row["observed"], row["assigned"]) for row in _START_GUARD
+    ) == sorted(
+        (desired.value, observed.value, assigned)
+        for desired in DesiredState
+        for observed in ObservedState
+        for assigned in (False, True)
+    )
+
+
+@pytest.mark.parametrize(
+    "row",
+    _START_GUARD,
+    ids=lambda row: "{desired}-{observed}-{held}".format(
+        held="assigned" if row["assigned"] else "unassigned", **row
+    ),
+)
+def test_start_answers_each_row_as_the_web_ui_expects(row: dict[str, Any]) -> None:
+    community = uuid.uuid4()
+    server = dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState(row["desired"]),
+        observed_state=ObservedState(row["observed"]),
+        assigned_worker_id=WorkerId(uuid.uuid4()) if row["assigned"] else None,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    worker = WorkerId(uuid.uuid4())
+    cp = FakeControlPlane(place_to=worker)
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_start_server] = lambda: use_case
+
+    resp = _client(app).post(_url(community, server.id.value, "start"))
+
+    if row["reason"] is None:
+        assert resp.status_code == 200
+        assert ("start", worker, server.id) in cp.dispatched
+    else:
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == row["reason"]
+        assert cp.dispatched == []
 
 
 # --- a Worker whose backend is unavailable (issues #3673, #3678) ------------

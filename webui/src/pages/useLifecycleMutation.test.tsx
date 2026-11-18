@@ -2,6 +2,7 @@ import {
   QueryClient,
   QueryClientProvider,
   type QueryKey,
+  useQuery,
 } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -183,6 +184,71 @@ describe("useLifecycleMutation", () => {
       true,
     );
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  // A mounted observer keeps the detail query active, so the settle
+  // invalidation refetches it rather than only marking it stale (#3860).
+  describe("the settle refetch", () => {
+    function renderObserved(read: () => Promise<unknown>) {
+      const key = serverKey(CID, "s1");
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>
+          {children}
+        </QueryClientProvider>
+      );
+      const { result } = renderHook(
+        () => {
+          useQuery({ queryKey: key, queryFn: read });
+          return useLifecycleMutation({
+            communityId: CID,
+            serverId: "s1",
+            cacheKey: key,
+            invalidateKeys: [key],
+            onError: vi.fn(),
+          });
+        },
+        { wrapper },
+      );
+      return result;
+    }
+
+    it("holds a success pending until the refetch answers", async () => {
+      const refetch = deferred();
+      const read = vi
+        .fn<() => Promise<unknown>>()
+        .mockResolvedValueOnce(server("s1", "stopped"))
+        .mockReturnValue(refetch.promise);
+      mockApi.post.mockResolvedValue(undefined);
+      const result = renderObserved(read);
+      await waitFor(() =>
+        expect(queryClient.getQueryData(serverKey(CID, "s1"))).toBeDefined(),
+      );
+
+      act(() => result.current.mutate({ action: "start" }));
+      await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+      expect(result.current.isPending).toBe(true);
+
+      await act(async () => refetch.resolve(server("s1", "starting")));
+      await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    });
+
+    it("releases a failure without waiting for the refetch", async () => {
+      const read = vi
+        .fn<() => Promise<unknown>>()
+        .mockResolvedValueOnce(server("s1", "stopped"))
+        .mockReturnValue(new Promise(() => {}));
+      mockApi.post.mockRejectedValue(
+        new ApiError(409, { reason: "transition_conflict" }),
+      );
+      const result = renderObserved(read);
+      await waitFor(() =>
+        expect(queryClient.getQueryData(serverKey(CID, "s1"))).toBeDefined(),
+      );
+
+      act(() => result.current.mutate({ action: "start" }));
+      await waitFor(() => expect(result.current.isError).toBe(true));
+      expect(read).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe.each(CACHES)("in the $shape cache", (cache) => {

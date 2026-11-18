@@ -45,7 +45,7 @@ import {
   converging,
   crashNotRestarted,
   normalizeState,
-  startAwaitsRelease,
+  startRefusal,
   statePill,
 } from "./serverState.ts";
 import { handleTabKeyDown, panelId, tabId, useTabHash } from "./urlState.ts";
@@ -491,9 +491,11 @@ function Controls({
   const state = normalizeState(server.observed_state);
   const desired = normalizeState(server.desired_state);
   const assigned = server.assigned_worker_id !== null;
-  // Start would apply but for the Worker the previous stop still holds: show
-  // it disabled, with the reason (#3818).
-  const startHeld = startAwaitsRelease(state, desired, assigned);
+  // Start follows the API's start guard, whatever the server reads (#3860).
+  // While the stop still holds its Worker, show it disabled, with the reason
+  // (#3818).
+  const startRefused = startRefusal(desired, assigned);
+  const startHeld = startRefused === "transition_conflict";
   const startHeldId = useId();
   const [eulaOpen, setEulaOpen] = useState(false);
 
@@ -544,7 +546,7 @@ function Controls({
           </span>
         )}
         {can("server:start", { serverId: server.id }) &&
-          (startHeld || actionApplies("start", state, desired, assigned)) && (
+          startRefused !== "invalid_transition" && (
             <button
               type="button"
               className="btn success"

@@ -459,7 +459,7 @@ export const en = {
   // Lifecycle controls.
   "serverDetail.start": "Start",
   "serverDetail.startAwaitsRelease":
-    "Waiting for the previous stop to release the server…",
+    "Waiting for the stop to finish and release the server…",
   "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",

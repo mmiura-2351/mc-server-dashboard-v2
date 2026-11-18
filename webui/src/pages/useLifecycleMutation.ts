@@ -13,7 +13,8 @@
  *   status frame that landed mid-flight is newer than the captured state and
  *   takes precedence (#1727);
  * - once settled either way, `invalidateKeys` refetch, so the server's own
- *   answer replaces whatever the cache holds.
+ *   answer replaces whatever the cache holds. A success stays pending until
+ *   that refetch answers (#3860); a failure does not wait for it.
  *
  * What a failure means to the operator (the 403 glue, the EULA prompt, the
  * toast) stays with each surface through `onError`.
@@ -121,10 +122,20 @@ export function useLifecycleMutation({
       }
       onError(error, action);
     },
-    onSettled: () => {
-      for (const queryKey of invalidateKeys) {
-        queryClient.invalidateQueries({ queryKey });
-      }
+    onSettled: (_data, error) => {
+      const refetched = Promise.all(
+        invalidateKeys.map((queryKey) =>
+          queryClient.invalidateQueries({ queryKey }),
+        ),
+      );
+      // A success stays pending until the refetch answers: until then the
+      // cache holds the transitional state beside the intent from before the
+      // request, and Start gates on the intent alone (#3860). A failure has
+      // rolled its state back, so it releases the controls at once. Accepted
+      // residual: a refetch that fails, or is paused while offline or in a
+      // background tab, ends the hold too, and Start reads as offered until
+      // the next read; the API refuses that start (409 invalid_transition).
+      return error ? undefined : refetched;
     },
   });
 }
