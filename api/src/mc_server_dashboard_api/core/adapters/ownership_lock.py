@@ -22,10 +22,10 @@ until that transaction ends:
 Whichever side comes second waits for the first to commit, and every statement
 it runs after the wait takes a new READ COMMITTED snapshot, so it decides from
 what the first committed: a deletion refuses an account that now owns a
-community, and otherwise cascades what the write committed, and a write finds
-no account once it was deleted. The lock lives
-here, in the adapter layer's shared kernel, because both contexts' adapters take
-it and neither context may import the other's domain.
+community and otherwise cascades what the write committed; a write finds no
+account once it was deleted. The lock lives here, in the adapter layer's shared
+kernel, because both contexts' adapters take it and neither context may import
+the other's domain.
 
 **Lock order.** A deletion takes this lock right after its ``user`` row locks
 (step 1 of the identity order, ``RefreshTokenRepository``) and before every
