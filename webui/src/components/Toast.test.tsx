@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { type ReactNode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n/index.ts";
+import { Modal } from "./Modal.tsx";
 import { ToastProvider, type ToastVariant, useToast } from "./Toast.tsx";
 
 function Harness() {
@@ -24,12 +26,28 @@ function Capture() {
   return null;
 }
 
-function renderToasts() {
+function renderToasts(page?: ReactNode) {
   render(
     <ToastProvider>
       <Capture />
+      {page}
     </ToastProvider>,
   );
+}
+
+// A button the test can take out of the page while a toast holds focus.
+let removeButton = () => {};
+function RemovableButton({ name }: { name: string }) {
+  const [shown, setShown] = useState(true);
+  removeButton = () => setShown(false);
+  return shown && <button type="button">{name}</button>;
+}
+
+// The dismiss button of the toast showing `message`.
+function dismissButton(message: string): HTMLElement {
+  return within(
+    screen.getByText(message).closest(".toast") as HTMLElement,
+  ).getByRole("button");
 }
 
 function show(message: string, variant: ToastVariant) {
@@ -278,17 +296,32 @@ describe("Toast", () => {
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
   });
 
-  it("resumes the others once the focused toast is dismissed", () => {
+  it("stays paused as focus moves on from a dismissed toast to the next", () => {
     renderToasts();
     show("Saved", "success"); // 3.2 s
     show("Failed", "error");
-    const close = within(screen.getByRole("alert")).getByRole("button");
+    const close = dismissButton("Failed");
 
     advance(1000);
     act(() => close.focus());
     fireEvent.keyDown(close, { key: "Escape" });
 
-    advance(2199);
+    expect(document.activeElement).toBe(dismissButton("Saved"));
+    advance(60_000);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+  });
+
+  it("resumes once focus leaves the stack with the last toast", () => {
+    renderToasts(<button type="button">Page</button>);
+    show("Failed", "error");
+    const close = dismissButton("Failed");
+
+    act(() => screen.getByRole("button", { name: "Page" }).focus());
+    act(() => close.focus());
+    fireEvent.keyDown(close, { key: "Escape" });
+
+    show("Saved", "success");
+    advance(3199);
     expect(screen.getByText("Saved")).toBeInTheDocument();
     advance(1);
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
@@ -490,5 +523,138 @@ describe("Toast", () => {
     show("Saved", "success");
 
     expect(screen.getAllByRole("status")).toHaveLength(2);
+  });
+});
+
+// WEBUI_SPEC.md 7.4: when the toast holding focus goes, focus moves on to the
+// next toast, else back where it came from, else to a fallback; never to the
+// page body.
+describe("Toast focus when the focused toast goes", () => {
+  it("moves to the next toast", () => {
+    renderToasts();
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+
+    act(() => dismissButton("Failed 1").focus());
+    fireEvent.click(dismissButton("Failed 1"));
+
+    expect(document.activeElement).toBe(dismissButton("Failed 2"));
+  });
+
+  it("moves to the toast before when the last one goes", () => {
+    renderToasts();
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+
+    act(() => dismissButton("Failed 2").focus());
+    fireEvent.keyDown(dismissButton("Failed 2"), { key: "Escape" });
+
+    expect(document.activeElement).toBe(dismissButton("Failed 1"));
+  });
+
+  it("returns to where it came from when no toast is left", () => {
+    renderToasts(<button type="button">Page</button>);
+    show("Failed", "error");
+    const page = screen.getByRole("button", { name: "Page" });
+
+    act(() => page.focus());
+    act(() => dismissButton("Failed").focus());
+    fireEvent.click(dismissButton("Failed"));
+
+    expect(document.activeElement).toBe(page);
+  });
+
+  it("falls back to main when the element it came from is gone", () => {
+    renderToasts(
+      <main>
+        <RemovableButton name="Page" />
+      </main>,
+    );
+    show("Failed", "error");
+
+    act(() => screen.getByRole("button", { name: "Page" }).focus());
+    act(() => dismissButton("Failed").focus());
+    act(() => removeButton());
+    fireEvent.click(dismissButton("Failed"));
+
+    const main = screen.getByRole("main");
+    expect(document.activeElement).toBe(main);
+
+    // Focusable only to take this focus: a click in the page later must not
+    // land on it.
+    act(() => main.blur());
+    expect(main).not.toHaveAttribute("tabindex");
+  });
+});
+
+describe("Toasts over an open modal", () => {
+  function renderModal(onClose: () => void, inside: ReactNode) {
+    renderToasts(
+      <main>
+        <Modal open={true} title="Title" onClose={onClose}>
+          {inside}
+        </Modal>
+      </main>,
+    );
+  }
+
+  // Reaches the toasts the way a keyboard does: Tab from the dialog's last
+  // control.
+  function tabToToasts() {
+    const inside = screen.getByRole("button", { name: "Inside" });
+    act(() => inside.focus());
+    fireEvent.keyDown(inside, { key: "Tab" });
+  }
+
+  it("dismisses only the toast on an Escape and returns focus to the dialog", () => {
+    const onClose = vi.fn();
+    renderModal(onClose, <button type="button">Inside</button>);
+    show("Failed", "error");
+
+    tabToToasts();
+    expect(document.activeElement).toBe(dismissButton("Failed"));
+    fireEvent.keyDown(dismissButton("Failed"), { key: "Escape" });
+
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Inside" }),
+    );
+  });
+
+  it("closes the modal on an Escape elsewhere in it", () => {
+    const onClose = vi.fn();
+    renderModal(onClose, <button type="button">Inside</button>);
+    show("Failed", "error");
+    const inside = screen.getByRole("button", { name: "Inside" });
+
+    act(() => inside.focus());
+    fireEvent.keyDown(inside, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+  });
+
+  it("moves focus to the next toast when the cap drops the focused one", () => {
+    renderModal(() => {}, <button type="button">Inside</button>);
+    for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
+
+    tabToToasts();
+    expect(document.activeElement).toBe(dismissButton("Failed 1"));
+    show("Failed 4", "error");
+
+    expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(dismissButton("Failed 2"));
+  });
+
+  it("falls back to the modal when the element focus came from is gone", () => {
+    renderModal(() => {}, <RemovableButton name="Inside" />);
+    show("Failed", "error");
+
+    tabToToasts();
+    act(() => removeButton());
+    fireEvent.click(dismissButton("Failed"));
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 });

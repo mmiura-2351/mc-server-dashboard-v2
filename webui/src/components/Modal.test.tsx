@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { type ReactNode, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Modal } from "./Modal.tsx";
+import { ToastProvider, useToast } from "./Toast.tsx";
 
 function Harness() {
   const [open, setOpen] = useState(false);
@@ -135,5 +136,101 @@ describe("Modal", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onCloseInner).toHaveBeenCalledTimes(1);
     expect(onCloseOuter).not.toHaveBeenCalled();
+  });
+});
+
+// The toast stack stays reachable while a dialog is open (WEBUI_SPEC.md 7.4):
+// Tab runs through the dialog, then the toasts, then wraps.
+let raise: (message: string) => void;
+function RaiseErrors() {
+  const { showToast } = useToast();
+  raise = (message) => showToast(message, "error");
+  return null;
+}
+
+describe("Modal focus trap with toasts showing", () => {
+  function renderWithToasts(body: ReactNode) {
+    render(
+      <ToastProvider>
+        <RaiseErrors />
+        <Modal open={true} title="Title" onClose={() => {}}>
+          {body}
+        </Modal>
+      </ToastProvider>,
+    );
+    act(() => {
+      raise("Failed 1");
+      raise("Failed 2");
+    });
+  }
+
+  // The modal's backdrop is a "Close" button too, so pick the toasts' own.
+  function toastButtons(): HTMLElement[] {
+    return screen
+      .getAllByRole("alert")
+      .map((toast) => within(toast).getByRole("button"));
+  }
+
+  function pressTab(shiftKey = false) {
+    fireEvent.keyDown(document.activeElement ?? document, {
+      key: "Tab",
+      shiftKey,
+    });
+  }
+
+  const controls = (
+    <>
+      <button type="button">First</button>
+      <button type="button">Last</button>
+    </>
+  );
+
+  it("moves Tab from the dialog's last control to the first toast", () => {
+    renderWithToasts(controls);
+
+    screen.getByRole("button", { name: "Last" }).focus();
+    pressTab();
+
+    expect(document.activeElement).toBe(toastButtons()[0]);
+  });
+
+  it("wraps Tab from the last toast to the dialog's first control", () => {
+    renderWithToasts(controls);
+
+    toastButtons()[1].focus();
+    pressTab();
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "First" }),
+    );
+  });
+
+  it("moves Shift+Tab from the dialog's first control to the last toast", () => {
+    renderWithToasts(controls);
+
+    screen.getByRole("button", { name: "First" }).focus();
+    pressTab(true);
+
+    expect(document.activeElement).toBe(toastButtons()[1]);
+  });
+
+  it("moves Shift+Tab from the first toast to the dialog's last control", () => {
+    renderWithToasts(controls);
+
+    toastButtons()[0].focus();
+    pressTab(true);
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Last" }),
+    );
+  });
+
+  it("moves Tab from a dialog with no controls to the first toast", () => {
+    renderWithToasts(<p>Body</p>);
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
+    pressTab();
+
+    expect(document.activeElement).toBe(toastButtons()[0]);
   });
 });
