@@ -780,10 +780,16 @@ body.col-resizing {
   border-radius: var(--radius-sm);
   font-size: 13px;
   min-width: 240px;
+  max-width: min(32rem, calc(100vw - 2rem));
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
 }
 .toast-message {
   flex: 1;
+  overflow-wrap: anywhere;
+}
+.toast-count {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 .toast-dismiss {
   font: inherit;

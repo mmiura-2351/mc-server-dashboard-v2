@@ -247,4 +247,72 @@ describe("Toast", () => {
       document.removeEventListener("keydown", onDocumentKeyDown);
     }
   });
+
+  it("shows at most five toasts, dropping the oldest", () => {
+    renderToasts();
+    for (const n of [1, 2, 3, 4, 5, 6]) show(`Saved ${n}`, "success");
+
+    expect(screen.getAllByRole("status")).toHaveLength(5);
+    expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Saved 6")).toBeInTheDocument();
+  });
+
+  it("drops the oldest timed toast before any error", () => {
+    renderToasts();
+    show("Failed 1", "error");
+    show("Saved 1", "success");
+    show("Failed 2", "error");
+    show("Saved 2", "success");
+    show("Failed 3", "error");
+
+    show("Failed 4", "error");
+
+    expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
+    for (const text of ["Failed 1", "Failed 2", "Saved 2", "Failed 3"]) {
+      expect(screen.getByText(text)).toBeInTheDocument();
+    }
+    expect(screen.getByText("Failed 4")).toBeInTheDocument();
+  });
+
+  it("drops the oldest error once only errors are showing", () => {
+    renderToasts();
+    for (const n of [1, 2, 3, 4, 5]) show(`Failed ${n}`, "error");
+
+    show("Saved", "success");
+
+    expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(4);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+  });
+
+  it("collapses a repeated error into the one showing, with a count", () => {
+    renderToasts();
+    show("Failed", "error");
+    show("Failed", "error");
+    show("Failed", "error");
+
+    const [toast] = screen.getAllByRole("alert");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(toast).toHaveTextContent("Failed");
+    expect(toast).toHaveTextContent("×3");
+  });
+
+  it("counts a repeated error as the newest when dropping", () => {
+    renderToasts();
+    for (const n of [1, 2, 3, 4, 5]) show(`Failed ${n}`, "error");
+    show("Failed 1", "error");
+
+    show("Failed 6", "error");
+
+    expect(screen.getByText("Failed 1")).toBeInTheDocument();
+    expect(screen.queryByText("Failed 2")).not.toBeInTheDocument();
+  });
+
+  it("does not collapse a repeated timed toast", () => {
+    renderToasts();
+    show("Saved", "success");
+    show("Saved", "success");
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+  });
 });

@@ -19,6 +19,10 @@ interface Toast {
   id: number;
   message: string;
   variant: ToastVariant;
+  // Times this error was raised while showing; a repeat collapses into it.
+  count: number;
+  // Order of the last raise, newest highest; the stack cap drops the lowest.
+  raisedAt: number;
 }
 
 interface ToastContextValue {
@@ -35,14 +39,27 @@ const AUTO_DISMISS_PER_CHAR_MS = 100;
 const AUTO_DISMISS_MIN_MS = 3200;
 const AUTO_DISMISS_MAX_MS = 12000;
 
+// WEBUI_SPEC.md Section 7.4: at most this many toasts show at once.
+const MAX_TOASTS = 5;
+
 function autoDismissMs(message: string): number {
   const scaled =
     AUTO_DISMISS_BASE_MS + AUTO_DISMISS_PER_CHAR_MS * message.length;
   return Math.min(AUTO_DISMISS_MAX_MS, Math.max(AUTO_DISMISS_MIN_MS, scaled));
 }
 
+// Makes room for one more toast: the oldest timed toast goes first, and the
+// oldest error only once errors are all that is showing.
+function dropOldest(toasts: Toast[]): Toast[] {
+  const timed = toasts.filter((toast) => toast.variant !== "error");
+  const pool = timed.length > 0 ? timed : toasts;
+  const oldest = pool.reduce((a, b) => (b.raisedAt < a.raisedAt ? b : a));
+  return toasts.filter((toast) => toast !== oldest);
+}
+
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const raisesRef = useRef(0);
 
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
@@ -50,7 +67,26 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const showToast = useCallback((message: string, variant: ToastVariant) => {
     const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev, { id, message, variant }]);
+    raisesRef.current += 1;
+    const raisedAt = raisesRef.current;
+    setToasts((prev) => {
+      const same =
+        variant === "error"
+          ? prev.find(
+              (toast) => toast.variant === "error" && toast.message === message,
+            )
+          : undefined;
+      if (same !== undefined) {
+        // Updated in place, not moved, so a focused dismiss button keeps focus.
+        return prev.map((toast) =>
+          toast === same
+            ? { ...toast, count: toast.count + 1, raisedAt }
+            : toast,
+        );
+      }
+      const kept = prev.length < MAX_TOASTS ? prev : dropOldest(prev);
+      return [...kept, { id, message, variant, count: 1, raisedAt }];
+    });
   }, []);
 
   const value = useMemo<ToastContextValue>(() => ({ showToast }), [showToast]);
@@ -104,6 +140,7 @@ function ToastItem({
       onMouseLeave={() => setHovered(false)}
     >
       <span className="toast-message">{toast.message}</span>
+      {toast.count > 1 && <span className="toast-count">×{toast.count}</span>}
       <button
         type="button"
         className="toast-dismiss"

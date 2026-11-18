@@ -1056,6 +1056,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   left. An error toast is a `role="alert"` with `aria-live="assertive"`, any
   other a `role="status"` with `aria-live="polite"`. The dismiss button is in
   the tab order, and Escape dismisses the toast whose button has focus.
+  At most five toasts show at once. A new toast past that drops the oldest
+  timed toast, or the oldest error once only errors are showing. An error
+  raised again while its toast still shows does not stack a copy: that toast
+  shows a count (×2, ×3, …) and counts as the newest for the drop order. A
+  toast is at most 32rem wide, never wider than the screen less 2rem, and its
+  message wraps anywhere, so a long one stays readable on a phone.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.
