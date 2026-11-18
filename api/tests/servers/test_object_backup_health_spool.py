@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from mc_server_dashboard_api.archive_member import GzipReader
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -210,8 +211,8 @@ def _inject_eio(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
         def _failing_read(self: Any, size: int) -> bytes:
             raise OSError(errno.EIO, "injected read fault")
 
-        # The member walk reads the spool through ``gzip.GzipFile`` (issue #3798).
-        monkeypatch.setattr(gzip.GzipFile, "read", _failing_read)
+        # The member walk reads the spool through ``GzipReader`` (issue #3835).
+        monkeypatch.setattr(GzipReader, "read", _failing_read)
 
 
 @pytest.mark.parametrize("stage", ["create", "write", "read"])

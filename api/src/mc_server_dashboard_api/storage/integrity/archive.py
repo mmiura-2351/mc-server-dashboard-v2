@@ -24,8 +24,9 @@ backends, and both backends' health checks — reach their verdict through
 both backends, snapshot ingest included, reads the headers through
 :class:`HeaderCheckedTarInfo` (issue #3790) and must end at the end-of-archive
 marker, with only zeros after it (``archive_member.EndCheckedReader``, issue
-#3798); restore and health decompress with our own ``gzip.GzipFile`` and read it
-to its end, which checks every gzip member's CRC32 and ISIZE. The restore and
+#3798); restore and health decompress with ``archive_member.GzipReader`` and
+read it to its end, which checks every gzip member's header, CRC32 and ISIZE
+(issue #3835). The restore and
 health paths of both backends judge each member by
 :func:`refuse_unrestorable_member` (issue #3550), and both backends' snapshot
 ingest takes only the canonical names ``is_canonical_name`` admits (issue
@@ -44,17 +45,8 @@ import zlib
 from collections.abc import Iterator
 from typing import Self, cast
 
-from mc_server_dashboard_api.archive_member import unrestorable_reason
+from mc_server_dashboard_api.archive_member import GzipDecoder, unrestorable_reason
 from mc_server_dashboard_api.storage.domain.errors import ArchiveUnreadableError
-
-# zlib's gzip-wrapper window setting: parse the gzip header and VERIFY the
-# CRC32 + ISIZE trailer (the bit-rot check), rather than raw deflate.
-_GZIP_WBITS = 16 + zlib.MAX_WBITS
-
-# The two-byte gzip member signature, used to decide whether bytes following a
-# terminated member are another member or trailing bytes the probe leaves to the
-# member walk that follows it.
-_GZIP_MAGIC = b"\x1f\x8b"
 
 # Cap the decompressed bytes materialized per ``decompress`` call. The output is
 # discarded immediately, but a gzip member can inflate ~1000x, so an unbounded
@@ -70,20 +62,14 @@ class GzipReadProbe:
     stream is exhausted. Either raises :class:`ArchiveUnreadableError` as soon as
     the bytes stop being a well-formed gzip stream.
 
-    **Past a terminated member it refuses nothing restore accepts.** A probe that
-    condemns an archive the restore path would happily read is the same class of
-    defect as the false "healthy" this exists to fix — it quarantines a good
-    backup and emits a spurious audit entry. Restore reads the archive with
-    ``gzip.GzipFile`` to its end (issue #3798), so it checks every member's
-    trailer, as the probe does, and once a member has terminated cleanly:
-
-    * another gzip member (concatenation is legal and the shell tools do it) is
-      walked too, because bytes that announce themselves with the gzip magic must
-      actually be a member, as they must for ``GzipFile``;
-    * anything else ends the probe's walk. ``GzipFile`` takes zero bytes there
-      for padding and refuses any other byte, but the probe leaves that verdict
-      to the member walk the health check runs after it, which reads the archive
-      as restore does (issue #3236).
+    **It refuses nothing restore accepts.** A probe that condemns an archive the
+    restore path would happily read is the same class of defect as the false
+    "healthy" this exists to fix — it quarantines a good backup and emits a
+    spurious audit entry. So it reads gzip as restore does, through the same
+    ``archive_member.GzipDecoder`` (issues #3835, #3847): every gzip member, its
+    header and its trailer checked, zero padding between and after them, and at
+    most 10,000 of them. Only :meth:`finish` judges where the stream ended, so a
+    body the store cut short is left to the short-body re-read.
 
     What the probe catches, then: a stream that never reaches a trailer
     (truncation) and a trailer that no longer describes its payload (bit-rot),
@@ -91,66 +77,40 @@ class GzipReadProbe:
     """
 
     def __init__(self) -> None:
-        self._decompressor = zlib.decompressobj(_GZIP_WBITS)
-        # Set once a terminated member is followed by non-member bytes: the walk is
-        # done and later chunks are ignored (they are padding, see the class docs).
-        self._padding = False
-        # Bytes held back at a member boundary because there were not yet enough of
-        # them to compare against the gzip magic.
-        self._undecided = b""
+        self._decoder = GzipDecoder()
 
     def feed(self, chunk: bytes) -> None:
-        if self._padding:
-            return
-        if self._undecided:
-            chunk = self._undecided + chunk
-            self._undecided = b""
-        while chunk:
-            if self._decompressor.eof:
-                if len(chunk) < len(_GZIP_MAGIC):
-                    self._undecided = chunk  # decide once more bytes arrive
-                    return
-                if not chunk.startswith(_GZIP_MAGIC):
-                    self._padding = True
-                    return
-                self._decompressor = zlib.decompressobj(_GZIP_WBITS)
-            try:
-                self._decompressor.decompress(chunk, _OUT_CHUNK)
-            except zlib.error as exc:
-                raise ArchiveUnreadableError(
-                    f"archive is not a readable gzip stream: {exc}"
-                ) from exc
-            tail = self._decompressor.unconsumed_tail
-            if tail:
-                chunk = tail
-            elif self._decompressor.eof:
-                chunk = self._decompressor.unused_data
-            else:
-                chunk = b""
+        self._decoder.feed(chunk)
+        try:
+            while self._decoder.decompress(_OUT_CHUNK):
+                pass
+        except (zlib.error, gzip.BadGzipFile) as exc:
+            raise ArchiveUnreadableError(
+                f"archive is not a readable gzip stream: {exc}"
+            ) from exc
 
     def finish(self) -> None:
-        # ``_padding`` and ``_undecided`` are only ever set past a terminated member,
-        # so either means the archive ended on a complete gzip stream plus trailing
-        # bytes, which the member walk after the probe judges.
-        if self._padding or self._undecided:
-            return
-        if not self._decompressor.eof:
+        try:
+            self._decoder.finish()
+        except EOFError as exc:
             raise ArchiveUnreadableError(
                 "archive ended before its gzip stream reached a trailer"
-            )
+            ) from exc
 
 
 # What reading a backup archive raises when its own bytes cannot be read back
-# (issue #3230). Restore and health decompress with ``gzip.GzipFile`` and walk
-# the tar with ``tarfile`` in ``r:`` through ``EndCheckedReader`` (issue #3798):
-# a stream that ends before its gzip end-of-stream marker (``EOFError``), damaged
-# deflate data (``zlib.error``, or ``ReadError`` where ``tarfile`` reads a
-# header), bytes that are not gzip, a compression method that is not deflate, a
-# CRC32 or ISIZE that does not match, or bytes after a gzip member that are
-# neither another member nor zero padding (``BadGzipFile``), and a tar that does
-# not frame, does not end at its end-of-archive marker or holds more than zeros
-# past it (``ReadError``). Deliberately NOT ``tarfile.TarError`` as a whole: its
-# ``FilterError`` branch refuses an unsafe member of a perfectly readable archive.
+# (issue #3230). Restore and health decompress with ``archive_member.GzipReader``
+# (issue #3835) and walk the tar with ``tarfile`` in ``r:`` through
+# ``EndCheckedReader`` (issue #3798): a stream that does not end at a gzip
+# member's end (``EOFError``), damaged deflate data, bytes that are not gzip, a
+# compression method that is not deflate, a header CRC that does not match or a
+# reserved flag bit, a CRC32 or ISIZE that does not match, or bytes after a gzip
+# member that are neither another member nor zero padding (``zlib.error``, or
+# ``ReadError`` where ``tarfile`` reads a header), more than 10,000 gzip members
+# (``BadGzipFile``), and a tar that does not frame, does not end at its
+# end-of-archive marker or holds more than zeros past it (``ReadError``).
+# Deliberately NOT ``tarfile.TarError`` as a whole: its ``FilterError`` branch
+# refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
 # nothing about the archive's bytes, reaches the caller as itself, and each
 # backend keeps its own I/O-fault policy for it. Nor is ``ValueError``, though

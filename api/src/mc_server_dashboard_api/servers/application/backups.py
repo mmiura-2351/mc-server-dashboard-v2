@@ -40,7 +40,6 @@ retry.
 from __future__ import annotations
 
 import datetime as dt
-import gzip
 import hashlib
 import io
 import logging
@@ -55,6 +54,7 @@ from mc_server_dashboard_api.archive_member import (
     CapExceededError,
     CappedReader,
     EndCheckedReader,
+    GzipReader,
     HeaderLimitError,
     unrestorable_reason,
     without_tar_root_prefix,
@@ -1289,12 +1289,10 @@ class UploadBackup:
     The thread cannot be stopped: it runs on to its own end, holding ``content``
     and its pool thread until then.
 
-    The caps do not bound all of that thread's CPU. ``gzip`` pays for every gzip
-    member whatever it holds, about 1 CPU-s a MiB of empty members, and reads zero
-    padding after the gzip stream one byte at a time, about 0.11 CPU-s a MiB.
-    Neither adds decompressed bytes, so only the 512 MiB body cap bounds them:
-    about 8 CPU-minutes and 1 CPU-minute for one upload at that cap. Issue #3835
-    bounds both.
+    Empty gzip members and zero padding after the gzip stream add no
+    decompressed bytes, so the caps do not see them. The gzip layer bounds what
+    they cost instead (issue #3835): at most 10,000 gzip members, and zero
+    padding skipped in bulk.
 
     The caps are fields so a test can inject a tiny cap and trip the guard with a
     small archive; production wiring uses the defaults.
@@ -1538,12 +1536,13 @@ def _validate_backup_archive(
     Raises :class:`InvalidBackupArchiveError` (422) on any violation.
 
     The archive must also read to its end (issue #3778). The tar is walked
-    through :class:`EndCheckedReader` over ``gzip.GzipFile``: the walk must stop
-    at the end-of-archive marker, so a header past the first that does not read
-    is refused rather than cutting the member list short, and the stream is then
-    read on to the gzip end. Only zeros may follow the marker, the gzip CRC32 and
-    ISIZE must match, and only another gzip member or zero padding may follow the
-    gzip stream.
+    through :class:`EndCheckedReader` over :class:`GzipReader` (issue #3835): the
+    walk must stop at the end-of-archive marker, so a header past the first that
+    does not read is refused rather than cutting the member list short, and the
+    stream is then read on to the gzip end. Only zeros may follow the marker,
+    each gzip member's header, CRC32 and ISIZE must check, only another gzip
+    member or zero padding may follow one, and there may be at most 10,000 of
+    them.
 
     One member shape carries its own error instead (issue #2869): the archive's
     member names ARE the restored working set's rel paths (the packer uses
@@ -1561,7 +1560,7 @@ def _validate_backup_archive(
 
     try:
         with (
-            gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+            GzipReader(io.BytesIO(content)) as gz,
             tarfile.open(
                 fileobj=(
                     stream := EndCheckedReader(
