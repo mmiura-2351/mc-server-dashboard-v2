@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { t } from "../i18n/index.ts";
+import * as focusVisible from "./focusVisible.ts";
 import { Modal } from "./Modal.tsx";
 import { ToastProvider, type ToastVariant, useToast } from "./Toast.tsx";
 
@@ -60,6 +61,16 @@ function advance(ms: number) {
   act(() => {
     vi.advanceTimersByTime(ms);
   });
+}
+
+// Only focus the browser shows, from the keyboard, holds the stack; a click or
+// a tap leaves focus on the button it hits, with no ring. The test DOMs show
+// every focus, so each side is stubbed where it matters.
+function keyboardFocus() {
+  vi.spyOn(focusVisible, "isFocusVisible").mockReturnValue(true);
+}
+function pointerFocus() {
+  vi.spyOn(focusVisible, "isFocusVisible").mockReturnValue(false);
 }
 
 describe("Toast", () => {
@@ -174,6 +185,13 @@ describe("Toast", () => {
     expect(toast).toHaveTextContent("Failed");
     expect(toast).not.toHaveAttribute("aria-live");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("describes its dismiss button by the message", () => {
+    renderToasts();
+    show("Failed", "error");
+
+    expect(dismissButton("Failed")).toHaveAccessibleDescription("Failed");
   });
 
   it("marks a success toast as a status", () => {
@@ -296,7 +314,8 @@ describe("Toast", () => {
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
   });
 
-  it("stays paused as focus moves on from a dismissed toast to the next", () => {
+  it("stays paused as keyboard focus moves on from a dismissed toast to the next", () => {
+    keyboardFocus();
     renderToasts();
     show("Saved", "success"); // 3.2 s
     show("Failed", "error");
@@ -309,6 +328,32 @@ describe("Toast", () => {
     expect(document.activeElement).toBe(dismissButton("Saved"));
     advance(60_000);
     expect(screen.getByText("Saved")).toBeInTheDocument();
+  });
+
+  it("does not pause for focus a click leaves in the stack", () => {
+    pointerFocus();
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+
+    act(() => dismissButton("Failed").focus());
+
+    advance(3200);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("does not pause once a click on × hands focus on to the next toast", () => {
+    pointerFocus();
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+
+    act(() => dismissButton("Failed").focus());
+    fireEvent.click(dismissButton("Failed"));
+
+    expect(document.activeElement).toBe(dismissButton("Saved"));
+    advance(3200);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
   });
 
   it("resumes once focus leaves the stack with the last toast", () => {
@@ -374,7 +419,8 @@ describe("Toast", () => {
     );
   });
 
-  it("does not scroll a raised toast into view while focus is in the stack", () => {
+  it("does not scroll a raised toast into view while keyboard focus is in the stack", () => {
+    keyboardFocus();
     const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
     renderToasts();
     show("Failed 1", "error");
@@ -385,6 +431,21 @@ describe("Toast", () => {
     show("Failed 1", "error");
 
     expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it("scrolls a raised toast into view while focus a click left is in the stack", () => {
+    pointerFocus();
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    renderToasts();
+    show("Failed 1", "error");
+    act(() => dismissButton("Failed 1").focus());
+    scroll.mockClear();
+
+    show("Failed 2", "error");
+
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      screen.getByText("Failed 2").closest(".toast"),
+    );
   });
 
   it("dismisses only the focused toast on Escape", () => {
@@ -725,6 +786,25 @@ describe("Toasts over an open modal", () => {
 
     expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
     expect(document.activeElement).toBe(dismissButton("Failed 2"));
+  });
+
+  it("does not return focus to an element behind the modal", () => {
+    renderToasts(
+      <main>
+        <button type="button">Behind</button>
+        <Modal open={true} title="Title" onClose={() => {}}>
+          <button type="button">Inside</button>
+        </Modal>
+      </main>,
+    );
+    show("Failed", "error");
+
+    // Focus that got behind the modal (#3883), then into the stack.
+    act(() => screen.getByRole("button", { name: "Behind" }).focus());
+    act(() => dismissButton("Failed").focus());
+    fireEvent.click(dismissButton("Failed"));
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 
   it("falls back to the modal when the element focus came from is gone", () => {
