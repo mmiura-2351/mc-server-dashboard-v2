@@ -125,15 +125,16 @@ class RunJarPoolGc:
                 continue
             try:
                 await self.pool.delete(entry.sha256)
-            except (JarPoolUnreachableError, StoreNotOwnedError):
+            except JarPoolUnreachableError:
                 # Not this JAR but the store: every later delete would fail the
                 # same way, so the pass ends here.
                 raise
             except Exception as exc:  # noqa: BLE001 - one JAR must not end the pass
                 failed += 1
                 _LOG.warning(
-                    "jar-pool GC could not delete jar %s, skipped it: %s",
+                    "jar-pool GC could not delete jar %s, skipped it: %s: %s",
                     entry.sha256,
+                    type(exc).__name__,
                     exc,
                     exc_info=True,
                 )

@@ -121,8 +121,9 @@ class RunPluginCacheGc:
             except Exception as exc:  # noqa: BLE001 - one blob must not end the pass
                 failed += 1
                 _LOG.warning(
-                    "plugin-cache GC could not delete blob %s, skipped it: %s",
+                    "plugin-cache GC could not delete blob %s, skipped it: %s: %s",
                     entry.sha256,
+                    type(exc).__name__,
                     exc,
                     exc_info=True,
                 )

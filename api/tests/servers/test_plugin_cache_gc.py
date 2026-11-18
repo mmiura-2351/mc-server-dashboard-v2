@@ -271,7 +271,7 @@ async def test_a_failing_delete_skips_that_blob_and_the_pass_reclaims_the_rest(
     assert result.freed_bytes == len(b"blob-0") * 2
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert failing in warning.getMessage()
-    assert "plugin-cache/" in warning.getMessage()  # the store's error names the key
+    assert "PluginCacheStorageUnavailableError: plugin-cache/" in warning.getMessage()
     assert all(sha not in warning.getMessage() for sha in others)
 
 

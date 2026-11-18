@@ -159,9 +159,11 @@ class ObjectStoreUnreachableError(ObjectStoreUnavailableError, StorageUnreachabl
 
     Raised by the object client for a transport failure (connection refused, a
     connect or read timeout, a dropped connection) once botocore's own retries are
-    spent, on every read and on ``delete_object``. The writes that upload still
-    raise the wider :class:`ObjectStoreUnavailableError` for it. A subclass of both
-    parents, so every handler of the wider object-store type still catches it.
+    spent: on ``delete_object``, and on the reads that fail before a body starts
+    (``get_object``, ``head_object``, ``list_objects``, ``copy_object``). The
+    uploads, and a body that fails mid-stream, still raise the wider
+    :class:`ObjectStoreUnavailableError` for it. A subclass of both parents, so
+    every handler of the wider object-store type still catches it.
     """
 
 

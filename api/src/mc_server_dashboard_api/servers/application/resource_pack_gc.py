@@ -128,9 +128,11 @@ class RunResourcePackGc:
             except Exception as exc:  # noqa: BLE001 - one pack must not end the pass
                 failed += 1
                 _LOG.warning(
-                    "resource-pack GC could not delete pack %s (%s), skipped it: %s",
+                    "resource-pack GC could not delete pack %s (%s), skipped it: "
+                    "%s: %s",
                     entry.pack_id.value,
                     entry.key,
+                    type(exc).__name__,
                     exc,
                     exc_info=True,
                 )

@@ -242,7 +242,7 @@ async def test_a_failing_delete_skips_that_jar_and_the_pass_reclaims_the_rest(
     assert result.freed_bytes == len(b"jar-0") * 2
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert failing in warning.getMessage()
-    assert "injected outage" in warning.getMessage()
+    assert "ObjectStoreUnavailableError: injected outage" in warning.getMessage()
     assert all(sha not in warning.getMessage() for sha in others)
 
 

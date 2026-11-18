@@ -234,6 +234,7 @@ async def test_a_failing_delete_skips_that_pack_and_the_pass_reclaims_the_rest(
     assert result.freed_bytes == len(_pack_zip()) * 2
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert failing.split("/")[1] in warning.getMessage()
+    assert "ResourcePackStorageUnavailableError" in warning.getMessage()
     assert all(key.split("/")[1] not in warning.getMessage() for key in others)
     summary = caplog.records[-1]
     assert summary.levelno == logging.INFO
