@@ -517,18 +517,8 @@ class SqlAlchemyServerRepository(ServerRepository):
         )
         result = await self._session.execute(stmt)
         cleared = cast("CursorResult[Any]", result).rowcount == 1
-        # The release that ends a stop (issue #3818): the guard matched a row
-        # still assigned, so live subscribers learn it is free to start again.
         if cleared:
-            self._staged_status_events.append(
-                (
-                    str(server_id.value),
-                    RealTimeEvent(
-                        stream=EventStream.STATUS,
-                        payload={"assigned_worker_id": None},
-                    ),
-                )
-            )
+            self._stage_release(server_id)
         return cleared
 
     async def clear_stale_assignment(
@@ -552,7 +542,27 @@ class SqlAlchemyServerRepository(ServerRepository):
             .values(assigned_worker_id=None)
         )
         result = await self._session.execute(stmt)
-        return cast("CursorResult[Any]", result).rowcount == 1
+        cleared = cast("CursorResult[Any]", result).rowcount == 1
+        if cleared:
+            self._stage_release(server_id)
+        return cleared
+
+    def _stage_release(self, server_id: ServerId) -> None:
+        """Stage the frame of a release that ends a stop (issue #3818).
+
+        The guard matched a row still assigned, so live subscribers learn the
+        server is free to start again. The release changes nothing else.
+        """
+
+        self._staged_status_events.append(
+            (
+                str(server_id.value),
+                RealTimeEvent(
+                    stream=EventStream.STATUS,
+                    payload={"assigned_worker_id": None},
+                ),
+            )
+        )
 
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime

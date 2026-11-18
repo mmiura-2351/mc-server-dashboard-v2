@@ -956,7 +956,7 @@ async def test_release_under_an_unchanged_state_publishes_the_assignment_alone(
     """An unassigning write that repeats the state still announces the release."""
 
     worker = uuid.uuid4()
-    server = await world.server("survival", worker=worker, reported="unknown")
+    server = await _wedged_stop(world, worker, "unknown")
     watching = world.watch(server)
 
     async with world.uow() as uow:
@@ -988,6 +988,32 @@ async def test_release_guarded_off_another_workers_row_publishes_nothing(
     async with world.uow() as uow:
         assert not await uow.servers.clear_assignment_after_final_snapshot(
             server.id, WorkerId(uuid.uuid4())
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
+
+
+async def test_stale_release_guarded_off_a_newer_report_publishes_nothing(
+    world: _World,
+) -> None:
+    """The stale-stop clear matched no row: a report landed since its read.
+
+    ``observed_at`` moved (issue #3766), so the clear released nothing and
+    announces nothing.
+    """
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    async with world.uow() as uow:
+        row = await uow.servers.get_by_id(server.id)
+    assert row is not None and row.observed_at is not None
+    read_at = row.observed_at - dt.timedelta(seconds=1)
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        assert not await uow.servers.clear_stale_assignment(
+            server.id, WorkerId(worker), observed_at=read_at
         )
         await uow.commit()
 

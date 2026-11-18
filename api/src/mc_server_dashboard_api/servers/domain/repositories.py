@@ -275,7 +275,9 @@ class ServerRepository(abc.ABC):
         observed only. Every observed-state write stamps a fresh ``observed_at``,
         so the row's ``observed_state`` has not moved either: no Worker report
         has landed since the read, a first one included. Returns ``True`` when
-        the assignment was cleared, ``False`` when the guard matched no row.
+        the assignment was cleared, ``False`` when the guard matched no row. A
+        clear is announced to live subscribers as a status event once the
+        transaction commits (issue #3818).
         """
 
     @abc.abstractmethod
