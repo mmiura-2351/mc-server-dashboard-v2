@@ -1,7 +1,7 @@
 """Adapter implementing the community :class:`UserDirectory` Port over identity.
 
 This is the edge where the community context's user-directory questions are
-answered against the identity user store: "does this user exist?" (FR-COMM-2),
+answered against the identity user store: "does this user exist?" (FR-MEM-1),
 "which user has this exact username?" so a non-admin owner can add a member
 (issue #355), and "what are these users' display names?" for member listings
 (issue #78). Only the *adapter* crosses contexts — the community domain stays
