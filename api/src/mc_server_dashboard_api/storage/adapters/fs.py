@@ -4085,11 +4085,12 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     be restored from it, override or not, which is the verdict that error models.
 
     The archive is read to its end (issue #3798), as the upload gate reads it: the
-    tar is decompressed by our own ``gzip.GzipFile`` and walked through
+    tar is decompressed by ``GzipReader`` and walked through
     :class:`EndCheckedReader`. The walk must stop at the end-of-archive marker,
-    only zeros may follow it, the gzip CRC32 and ISIZE must match, and only
-    another gzip member or zero padding may follow a gzip member; anything else
-    is :class:`ArchiveUnreadableError`. The zeros past the marker count toward
+    only zeros may follow it, each gzip member's header, CRC32 and ISIZE must
+    check, only another gzip member or zero padding may follow one, and there
+    may be at most 10,000 of them (issue #3835); anything else is
+    :class:`ArchiveUnreadableError`. The zeros past the marker count toward
     ``max_bytes`` too.
 
     A member at, or under, the reserved generation-marker root name is left out

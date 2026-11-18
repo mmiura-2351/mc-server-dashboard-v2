@@ -1458,15 +1458,17 @@ def _unreadable_archive(shape: str) -> bytes:
 
     One shape per way the read reports it, so every exception the adapters
     translate is pinned by a real archive rather than by a raised stand-in. The
-    adapters decompress with ``gzip.GzipFile`` (issue #3798).
+    adapters decompress with ``archive_member.GzipReader`` (issue #3835); its
+    ``BadGzipFile``, more than 10,000 gzip members, is in the gzip layer's
+    shapes below.
     """
 
     if shape == "not_gzip":
-        # Not even a gzip stream (``BadGzipFile``).
+        # Not even a gzip stream (``zlib.error``).
         return b"not a gzip stream " * 16
     if shape == "bad_method":
         # A gzip magic naming a compression method that is not deflate
-        # (``BadGzipFile``).
+        # (``zlib.error``).
         return b"\x1f\x8b\x07\x00" + b"\x00" * 60
     # One member large enough that damage partway lands inside its body.
     tar = tar_bytes({"world/region/r.0.0.mca": bytes(range(256)) * 1000})
@@ -1483,7 +1485,7 @@ def _unreadable_archive(shape: str) -> bytes:
         return _GZIP_HEADER + body + b"\xff" * 64
     if shape == "split_member":
         # A complete gzip member holding only the first part of the tar, followed
-        # by bytes that are not another member (``BadGzipFile``).
+        # by bytes that are not another member (``zlib.error``).
         return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
     assert shape == "split_at_a_tar_member"
     # The same, its first gzip member ending where the tar member's data does:

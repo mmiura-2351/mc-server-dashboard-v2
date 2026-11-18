@@ -244,6 +244,20 @@ def test_the_probe_refuses_no_part_of_a_sound_stream_before_its_end() -> None:
         probe.finish()
 
 
+def test_the_probe_refuses_more_than_10000_gzip_members_as_they_arrive() -> None:
+    """The probe reads the parts the store delivers on the event loop, so it
+    stops at the 10,001st gzip member rather than walking every member of the
+    part (issue #3835)."""
+
+    body = gzip_shapes.refused(tar_bytes({"server.properties": b"k=v"}))[
+        "over-the-member-cap"
+    ]
+    probe = GzipReadProbe()
+
+    with pytest.raises(ArchiveUnreadableError, match="more than 10000 gzip members"):
+        probe.feed(body)
+
+
 async def test_reproducible_mid_stream_teardown_is_unreadable() -> None:
     """The reported defect: the transfer runs at full speed to a fixed offset, then
     the connection aborts — identically on every attempt. Persistent damage."""

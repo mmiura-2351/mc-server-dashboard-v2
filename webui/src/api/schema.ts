@@ -770,7 +770,9 @@ export interface paths {
          *     ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
          *     that does not match, or bytes after the gzip stream that are neither another
-         *     gzip member nor zero padding. So are a sparse member whose map reaches past
+         *     gzip member nor zero padding. So are more than 10,000 gzip members, and a
+         *     gzip member header whose CRC does not match or that sets a reserved flag bit
+         *     (issue #3835). So are a sparse member whose map reaches past
          *     its stored data, which would make the reader seek back, a chain of extended
          *     headers too long for the reader, and a walk over the header limits, whose
          *     ``detail`` names the limit: more than 1 MiB of headers before a member,
@@ -1603,7 +1605,9 @@ export interface paths {
          *     are ``invalid_archive`` too: a header past the first that does not read, no
          *     end-of-archive marker, anything but zeros past it, a gzip CRC32 or ISIZE
          *     that does not match, and bytes after the gzip stream that are neither
-         *     another gzip member nor zero padding. So are a sparse member whose map
+         *     another gzip member nor zero padding. So are more than 10,000 gzip members,
+         *     and a gzip member header whose CRC does not match or that sets a reserved
+         *     flag bit (issue #3835). So are a sparse member whose map
          *     reaches past its stored data, which would make the reader seek back, and a
          *     chain of extended headers too long for the reader (issue #3810). So is a
          *     walk over the header limits, whose ``detail`` names the limit: more than

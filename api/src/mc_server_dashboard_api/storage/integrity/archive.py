@@ -24,8 +24,9 @@ backends, and both backends' health checks — reach their verdict through
 both backends, snapshot ingest included, reads the headers through
 :class:`HeaderCheckedTarInfo` (issue #3790) and must end at the end-of-archive
 marker, with only zeros after it (``archive_member.EndCheckedReader``, issue
-#3798); restore and health decompress with our own ``gzip.GzipFile`` and read it
-to its end, which checks every gzip member's CRC32 and ISIZE. The restore and
+#3798); restore and health decompress with ``archive_member.GzipReader`` and
+read it to its end, which checks every gzip member's header, CRC32 and ISIZE
+(issue #3835). The restore and
 health paths of both backends judge each member by
 :func:`refuse_unrestorable_member` (issue #3550), and both backends' snapshot
 ingest takes only the canonical names ``is_canonical_name`` admits (issue
@@ -98,16 +99,18 @@ class GzipReadProbe:
 
 
 # What reading a backup archive raises when its own bytes cannot be read back
-# (issue #3230). Restore and health decompress with ``gzip.GzipFile`` and walk
-# the tar with ``tarfile`` in ``r:`` through ``EndCheckedReader`` (issue #3798):
-# a stream that ends before its gzip end-of-stream marker (``EOFError``), damaged
-# deflate data (``zlib.error``, or ``ReadError`` where ``tarfile`` reads a
-# header), bytes that are not gzip, a compression method that is not deflate, a
-# CRC32 or ISIZE that does not match, or bytes after a gzip member that are
-# neither another member nor zero padding (``BadGzipFile``), and a tar that does
-# not frame, does not end at its end-of-archive marker or holds more than zeros
-# past it (``ReadError``). Deliberately NOT ``tarfile.TarError`` as a whole: its
-# ``FilterError`` branch refuses an unsafe member of a perfectly readable archive.
+# (issue #3230). Restore and health decompress with ``archive_member.GzipReader``
+# (issue #3835) and walk the tar with ``tarfile`` in ``r:`` through
+# ``EndCheckedReader`` (issue #3798): a stream that does not end at a gzip
+# member's end (``EOFError``), damaged deflate data, bytes that are not gzip, a
+# compression method that is not deflate, a header CRC that does not match or a
+# reserved flag bit, a CRC32 or ISIZE that does not match, or bytes after a gzip
+# member that are neither another member nor zero padding (``zlib.error``, or
+# ``ReadError`` where ``tarfile`` reads a header), more than 10,000 gzip members
+# (``BadGzipFile``), and a tar that does not frame, does not end at its
+# end-of-archive marker or holds more than zeros past it (``ReadError``).
+# Deliberately NOT ``tarfile.TarError`` as a whole: its ``FilterError`` branch
+# refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
 # nothing about the archive's bytes, reaches the caller as itself, and each
 # backend keeps its own I/O-fault policy for it. Nor is ``ValueError``, though

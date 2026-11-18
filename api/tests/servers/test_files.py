@@ -4212,11 +4212,6 @@ _UNREADABLE_ARCHIVES = [
         pytest.param("pack.tar.gz", content, id=damage)
         for damage, content in _DAMAGE_ONLY_THE_GZIP_END_SHOWS.items()
     ),
-    # What the gzip layer refuses at every gzip read site (issues #3835, #3847).
-    *(
-        pytest.param("pack.tar.gz", content, id=shape)
-        for shape, content in gzip_shapes.refused(_RAW_TAR).items()
-    ),
 ]
 
 
@@ -4372,11 +4367,6 @@ _TAR_GZ_PRODUCERS = [
     pytest.param(_by_gnu_tar(), id="gnu-tar", marks=_needs_gnu_tar),
     pytest.param(_by_gnu_tar("-b", "1"), id="gnu-tar-b1", marks=_needs_gnu_tar),
     pytest.param(_by_gnu_tar("-b", "64"), id="gnu-tar-b64", marks=_needs_gnu_tar),
-    # What the gzip layer accepts at every gzip read site (issues #3835, #3847).
-    *(
-        pytest.param(lambda _, content=content: content, id=shape)
-        for shape, content in gzip_shapes.accepted(_pax_tar_bytes(_PRODUCED)).items()
-    ),
 ]
 
 
@@ -4398,6 +4388,57 @@ async def test_upload_extract_writes_every_member_of_a_tar_gz_from_each_producer
     )
 
     assert dict(store.writes) == _PRODUCED
+
+
+# What the gzip layer accepts and refuses at every gzip read site (issues #3835,
+# #3847). Some are over the request-body limit of the route tests, which share
+# the lists above.
+_GZIP_ACCEPTED = gzip_shapes.accepted(_pax_tar_bytes(_PRODUCED))
+_GZIP_REFUSED = gzip_shapes.refused(_pax_tar_bytes(_PRODUCED))
+
+
+@pytest.mark.parametrize(
+    "content", list(_GZIP_ACCEPTED.values()), ids=list(_GZIP_ACCEPTED)
+)
+async def test_upload_extract_writes_every_member_of_a_gzip_stream_the_layer_takes(
+    content: bytes,
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="pack.tar.gz",
+        content=content,
+        extract=True,
+    )
+
+    assert dict(store.writes) == _PRODUCED
+
+
+@pytest.mark.parametrize(
+    "content", list(_GZIP_REFUSED.values()), ids=list(_GZIP_REFUSED)
+)
+async def test_upload_extract_of_a_gzip_stream_the_layer_refuses_writes_nothing(
+    content: bytes,
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    with pytest.raises(UnreadableArchiveError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=content,
+            extract=True,
+        )
+    assert store.writes == []
 
 
 # --- download: state branching + file vs dir -------------------------------
