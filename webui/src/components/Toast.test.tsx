@@ -627,6 +627,29 @@ describe("Toast focus when the focused toast goes", () => {
     expect(document.activeElement).toBe(screen.getByRole("main"));
   });
 
+  it("forgets where it came from once it has been handed back there", () => {
+    renderToasts(
+      <main>
+        <button type="button">Page</button>
+      </main>,
+    );
+    const page = screen.getByRole("button", { name: "Page" });
+    show("Failed 1", "error");
+
+    act(() => page.focus());
+    act(() => dismissButton("Failed 1").focus());
+    fireEvent.click(dismissButton("Failed 1"));
+    expect(document.activeElement).toBe(page);
+
+    show("Failed 2", "error");
+    // Back from nothing, as after a click on the page.
+    act(() => page.blur());
+    act(() => dismissButton("Failed 2").focus());
+    fireEvent.click(dismissButton("Failed 2"));
+
+    expect(document.activeElement).toBe(screen.getByRole("main"));
+  });
+
   it("is left alone when the toast that goes does not hold it", () => {
     renderToasts(<button type="button">Page</button>);
     show("Failed 1", "error");
