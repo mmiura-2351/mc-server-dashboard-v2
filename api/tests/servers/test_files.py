@@ -20,7 +20,9 @@ import gzip
 import io
 import logging
 import random
+import shutil
 import struct
+import subprocess
 import tarfile
 import threading
 import uuid
@@ -28,6 +30,7 @@ import zipfile
 import zlib
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -89,6 +92,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mc_server_dashboard_api.storage.adapters.fs import _write_tar_gz
 from mc_server_dashboard_api.storage.domain.errors import PathTraversalError
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.servers.fakes import FakeControlPlane, FakeUnitOfWork
@@ -3927,6 +3931,64 @@ _ZIP = _compressed_zip({"a.txt": b"A", "b.txt": _PAYLOAD})
 _TAR_GZ = _tar_gz_bytes({"a.txt": b"A", "b.txt": _PAYLOAD})
 _GARBAGE = b"not an archive " * 256
 
+# --- damage only a read to the gzip end finds (issue #3778) -----------------
+#
+# ``tarfile`` stops at the tar end-of-archive marker, so it never reads the gzip
+# trailer (CRC32 and ISIZE), and it reads a header that does not parse, past the
+# first, as that marker. Every archive below read "successfully" before: damage
+# only the trailer check catches, a member list cut short, or bytes restore
+# never reads. ``b.txt``'s header is the third record, after ``a.txt``'s header
+# and its one data record; its 64 KiB of data fill whole records.
+
+_RAW_TAR = _pax_tar_bytes({"a.txt": b"A", "b.txt": _PAYLOAD})
+_B_TXT_HEADER = 2 * 512
+_B_TXT_END = _B_TXT_HEADER + 512 + len(_PAYLOAD)
+
+
+def _flipped(data: bytes, at: int) -> bytes:
+    """``data`` with the low bit of its byte ``at`` flipped."""
+
+    damaged = bytearray(data)
+    damaged[at] ^= 0x01
+    return bytes(damaged)
+
+
+def _tar_gz_with_a_flipped_stored_byte() -> bytes:
+    """A gzip tar stored uncompressed (level 0), one byte of ``b.txt`` flipped.
+
+    A stored deflate block holds its bytes verbatim, so the flip changes
+    ``b.txt`` and leaves the deflate stream valid: only the CRC32 tells. ``b.txt``
+    is 8 KiB, so the body stays under the anonymous request-body limit the
+    backup route tests are held to.
+    """
+
+    raw = _pax_tar_bytes({"a.txt": b"A", "b.txt": _PAYLOAD[: 8 * 1024]})
+    stored = gzip.compress(raw, compresslevel=0)
+    return _flipped(stored, stored.index(_PAYLOAD[:64]) + 32)
+
+
+_DAMAGE_ONLY_THE_GZIP_END_SHOWS = {
+    "bad-crc": _flipped(_TAR_GZ, len(_TAR_GZ) - 8),
+    "bad-isize": _flipped(_TAR_GZ, len(_TAR_GZ) - 4),
+    "flipped-stored-byte": _tar_gz_with_a_flipped_stored_byte(),
+    "cut-in-the-trailer": _TAR_GZ[:-1],
+    # The damage is made before compressing, so the CRC32 holds and only the tar
+    # layer can tell: ``tarfile`` lists ``a.txt`` alone.
+    "damaged-second-header": gzip.compress(_flipped(_RAW_TAR, _B_TXT_HEADER)),
+    # The same on an empty last member, so only zeros follow the bad header.
+    "damaged-last-header": gzip.compress(
+        _flipped(_pax_tar_bytes({"a.txt": b"A", "empty.txt": b""}), _B_TXT_HEADER)
+    ),
+    # What a multi-member gzip cut at a member boundary reads as.
+    "no-end-marker": gzip.compress(_RAW_TAR[:_B_TXT_END]),
+    "cut-end-marker": gzip.compress(_RAW_TAR[: _B_TXT_END + 100]),
+    # Two tars in one gzip stream: restore reads the first alone.
+    "data-past-the-end-marker": gzip.compress(
+        _RAW_TAR + _pax_tar_bytes({"c.txt": b"C"})
+    ),
+    "garbage-past-the-gzip-end": _TAR_GZ + b"not a gzip member",
+}
+
 _UNREADABLE_ARCHIVES = [
     pytest.param("pack.zip", _ZIP[: len(_ZIP) // 2], id="truncated-zip"),
     pytest.param("pack.zip", _GARBAGE, id="garbage-zip"),
@@ -3963,6 +4025,10 @@ _UNREADABLE_ARCHIVES = [
     ),
     pytest.param(
         "pack.tar.gz", _tar_gz_with_a_bad_sparse_field(), id="bad-sparse-tar-gz"
+    ),
+    *(
+        pytest.param("pack.tar.gz", content, id=damage)
+        for damage, content in _DAMAGE_ONLY_THE_GZIP_END_SHOWS.items()
     ),
 ]
 
@@ -4035,6 +4101,111 @@ async def test_upload_extract_cap_breach_before_the_damage_stays_too_large(
             content=content,
             extract=True,
         )
+
+
+async def test_upload_extract_counts_the_zeros_past_the_end_marker_toward_the_cap() -> (
+    None
+):
+    # The read on to the gzip end decompresses whatever follows the end-of-archive
+    # marker, so it counts toward the same cap as member data (issue #3778).
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = UploadFile(
+        uow=_stopped_uow(community, server_id),
+        file_store=FakeFileStore(),
+        max_bytes=_CAP,
+    )
+
+    with pytest.raises(FileTooLargeError):
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="pack.tar.gz",
+            content=gzip.compress(_pax_tar_bytes({"a.txt": b"A"}) + bytes(2 * _CAP)),
+            extract=True,
+        )
+
+
+# --- a tar.gz from each producer reads to its gzip end (issue #3778) --------
+#
+# The read on past the end-of-archive marker takes only zeros, so it must not
+# refuse what real producers write there: two zero blocks, then zeros up to the
+# producer's record size (none at all with GNU tar's ``-b 1``).
+
+_PRODUCED = {"notes.txt": b"N\n", "world/level.dat": _PAYLOAD}
+
+
+def _gnu_tar_on_path() -> bool:
+    if shutil.which("tar") is None:
+        return False
+    version = subprocess.run(
+        ["tar", "--version"], capture_output=True, text=True, timeout=60
+    )
+    return "GNU tar" in version.stdout
+
+
+_needs_gnu_tar = pytest.mark.skipif(not _gnu_tar_on_path(), reason="no GNU tar")
+
+
+def _produced_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "tree"
+    for name, data in _PRODUCED.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_bytes(data)
+    return root
+
+
+def _by_the_backup_writer(tmp_path: Path) -> bytes:
+    archive = tmp_path / "backup.tar.gz"
+    _write_tar_gz(_produced_tree(tmp_path), archive)
+    return archive.read_bytes()
+
+
+def _by_gnu_tar(*options: str) -> Callable[[Path], bytes]:
+    def produce(tmp_path: Path) -> bytes:
+        archive = tmp_path / "gnu.tar.gz"
+        subprocess.run(
+            ["tar", "-czf", str(archive), *options]
+            + ["-C", str(_produced_tree(tmp_path)), *_PRODUCED],
+            check=True,
+            timeout=60,
+        )
+        return archive.read_bytes()
+
+    return produce
+
+
+_TAR_GZ_PRODUCERS = [
+    pytest.param(_by_the_backup_writer, id="backup-writer"),
+    pytest.param(lambda _: _tar_gz_bytes(_PRODUCED), id="python-tarfile"),
+    # Zero padding after the gzip stream is padding, as gzip itself reads it.
+    pytest.param(
+        lambda _: _tar_gz_bytes(_PRODUCED) + bytes(1024), id="zero-padded-gzip"
+    ),
+    pytest.param(_by_gnu_tar(), id="gnu-tar", marks=_needs_gnu_tar),
+    pytest.param(_by_gnu_tar("-b", "1"), id="gnu-tar-b1", marks=_needs_gnu_tar),
+    pytest.param(_by_gnu_tar("-b", "64"), id="gnu-tar-b64", marks=_needs_gnu_tar),
+]
+
+
+@pytest.mark.parametrize("produce", _TAR_GZ_PRODUCERS)
+async def test_upload_extract_writes_every_member_of_a_tar_gz_from_each_producer(
+    produce: Callable[[Path], bytes], tmp_path: Path
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+
+    await use_case(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        dir_path=".",
+        filename="pack.tar.gz",
+        content=produce(tmp_path),
+        extract=True,
+    )
+
+    assert dict(store.writes) == _PRODUCED
 
 
 # --- download: state branching + file vs dir -------------------------------
