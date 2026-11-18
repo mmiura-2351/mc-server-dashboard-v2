@@ -849,7 +849,7 @@ def _held_by_many_values(extra: int) -> bytes:
     """
 
     members = 16
-    total = _HELD + STORAGE_HEADER_LIMITS.characters_a_member * members
+    total = _HELD + 16 * 1024 * members
     own = len("m00") + len("comment")
     value, rest = divmod(total - members * own, members)
     return _pax_tar(

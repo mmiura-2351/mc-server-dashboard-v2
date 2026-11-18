@@ -1295,16 +1295,20 @@ async def test_what_the_walk_decompresses_outside_member_data_counts_toward_the_
         await harness.storage.check_backup_health(community, server, key)
 
 
+@pytest.mark.parametrize(
+    "name", ["world/sparse.dat", ".mcsd_generation-cache"], ids=["kept", "left-out"]
+)
 async def test_a_sparse_members_holes_count_toward_the_restore_cap(
-    backend: str, tmp_path: Path
+    backend: str, tmp_path: Path, name: str
 ) -> None:
     """What a member holds counts toward the cap on its own, as restore writes it
     (issue #3859), on BOTH backends: a sparse member's holes are written but not
-    decompressed, so only that count sees them."""
+    decompressed, so only that count sees them. A reserved root member restore
+    leaves out is read and counted the same way (issue #3798)."""
 
     harness = build_harness(backend, tmp_path, max_restore_bytes=64 * 1024)
     community, server = new_scope()
-    archive = gzip.compress(sparse_holes_over(1 << 20))
+    archive = gzip.compress(sparse_holes_over(1 << 20, name=name))
     key = await harness.storage.put_backup(community, server, stream_of(archive))
 
     with pytest.raises(ArchiveTooLargeError):
