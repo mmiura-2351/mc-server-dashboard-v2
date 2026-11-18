@@ -26,6 +26,7 @@ import pytest
 
 from mc_server_dashboard_api.storage.adapters.object_store import (
     ConditionalPutUnsupportedError,
+    KeyNamespace,
     S3Client,
     S3ClientFactory,
 )
@@ -320,7 +321,22 @@ async def test_claim_falls_back_to_a_plain_put_and_reads_it_back() -> None:
     assert await ownership.refusal() is None
 
 
-async def test_the_marker_lies_outside_every_swept_namespace() -> None:
-    from mc_server_dashboard_api.storage.adapters.object_store import KeyNamespace
+async def test_the_plain_put_fallback_never_replaces_another_installations_marker() -> (
+    None
+):
+    # Without a conditional write, only the read before the put keeps a claim from
+    # taking over a store another database already owns.
+    store = FakeS3Store()
+    store.objects[OWNER_MARKER] = _marker(_THEIRS)
+    ownership = ObjectStoreOwnership(
+        _factory_of(_NoConditionalPut(FakeS3Client(store))), bucket="mcsd"
+    )
 
+    await ownership.claim(_OURS)
+
+    assert store.objects[OWNER_MARKER] == _marker(_THEIRS)
+    assert await ownership.refusal() is not None
+
+
+async def test_the_marker_lies_outside_every_swept_namespace() -> None:
     assert not any(OWNER_MARKER.startswith(prefix) for prefix in KeyNamespace)
