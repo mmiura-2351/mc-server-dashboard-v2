@@ -152,17 +152,17 @@ the cooldown. Security-update PRs still require review and all required checks
 before merging; enabling automatic PR creation does not authorize automatic
 merges.
 
-The Worker and relay require **Go 1.27.3 or newer** for
-[GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) (compromised intermediate
-certificate distrust in `crypto/x509`). Both `go.mod` files set that minimum,
-which also selects CI's compiler through `setup-go`'s `go-version-file`; both
-Docker builders use `golang:1.27.3`. A `toolchain` preference alone would allow
-an older compiler when `GOTOOLCHAIN=local` is set. Go 1.27.3 was
-[released on 2026-10-19](https://go.dev/doc/devel/release#go1.27.3), and the
-[Docker Hub tag](https://hub.docker.com/v2/repositories/library/golang/tags/1.27.3)
-was last pushed on 2026-10-21 at 16:23:26 UTC (checked 2026-10-22). Both were
-inside the 7-day window when adopted; this security fix is exempt under this
-section. Future Docker updates still use the latest-push policy in Section 3.
+The Worker and relay require **Go 1.27.4 or newer** for
+[GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859) (HTTP/1 server crash from a
+`MaxBytesReader` header race in `net/http`). Both `go.mod` files set that
+minimum, which also selects CI's compiler through `setup-go`'s
+`go-version-file`; both Docker builders use `golang:1.27.4`. A `toolchain`
+preference alone would allow an older compiler when `GOTOOLCHAIN=local` is set.
+Go 1.27.4 was [released on 2026-11-10](https://go.dev/doc/devel/release#go1.27.4).
+The [Docker Hub tag](https://hub.docker.com/v2/repositories/library/golang/tags/1.27.4)
+was last pushed on 2026-11-16 at 22:23:59 UTC (checked 2026-11-18), inside the
+7-day window when adopted; this security fix is exempt under this section.
+Future Docker updates still use the latest-push policy in Section 3.
 
 ## 5. Exact pinning (exception)
 
