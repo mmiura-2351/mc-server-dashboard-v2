@@ -1335,6 +1335,44 @@ async def test_start_whose_hydrate_finds_the_server_live_keeps_it_there() -> Non
     assert tunnel_sync.calls == [(ServerId(server_id), WorkerId(worker), 19132, True)]
 
 
+async def test_a_stop_after_the_start_kept_the_server_stops_that_instance() -> None:
+    # Issue #3865. Once the start kept the server on the Worker that already runs
+    # it, a stop is an ordinary stop of that Worker's instance: it is sent there,
+    # the final snapshot follows, and the server is released.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker), outcomes={"hydrate": _HYDRATE_OVER_LIVE_INSTANCE}
+    )
+    clock = FakeClock(_NOW)
+    start = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await start(community_id=CommunityId(community), server_id=ServerId(server_id))
+    clock.set(_NOW + dt.timedelta(minutes=1))
+
+    await StopServer(uow=uow, control_plane=cp, clock=clock)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.dispatched == [
+        ("hydrate", WorkerId(worker), ServerId(server_id)),
+        ("stop", WorkerId(worker), ServerId(server_id)),
+        ("snapshot", WorkerId(worker), ServerId(server_id)),
+    ]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id is None
+
+
 async def test_start_after_a_hydrate_found_the_server_live_places_no_second() -> None:
     # Issue #3865. Placement does not know which Worker runs an instance the row
     # does not name, so a second start may be placed on another Worker. Once the
@@ -4581,6 +4619,67 @@ async def test_place_and_start_whose_hydrate_finds_the_server_live_keeps_it() ->
     assert cp.decremented == []
     assert use_case.stop_intents.current(ServerId(server_id)) == 0
     assert tunnel_sync.calls == [(ServerId(server_id), WorkerId(worker), 19132, True)]
+
+
+class _ReleasedWhileHydrating(FakeControlPlane):
+    """A stop releases the row while the Worker answers the hydrate refused.
+
+    The Worker already runs the server; the release lands between its answer and
+    the placement's write of ``observed=running``.
+    """
+
+    def __init__(self, uow: FakeUnitOfWork, *, place_to: WorkerId) -> None:
+        super().__init__(place_to=place_to)
+        self._uow = uow
+
+    async def hydrate(
+        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+    ) -> CommandOutcome:
+        await super().hydrate(
+            worker_id=worker_id, community_id=community_id, server_id=server_id
+        )
+        released = self._uow.servers.by_id[server_id]
+        released.desired_state = DesiredState.STOPPED
+        released.assigned_worker_id = None
+        return _HYDRATE_OVER_LIVE_INSTANCE
+
+
+async def test_place_and_start_records_no_running_on_a_row_released_meanwhile() -> None:
+    # Issue #3865. The write of observed=running asserts the Worker it is about:
+    # once a stop released the row, that row names no Worker, and running must not
+    # be recorded on it.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.UNKNOWN,
+            worker_id=None,
+            bedrock_port=19132,
+        )
+    )
+    tunnel_sync = FakeBedrockTunnelSync()
+    use_case = StartServer(
+        uow=uow,
+        control_plane=_ReleasedWhileHydrating(uow, place_to=WorkerId(worker)),
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+        bedrock_tunnel_sync=tunnel_sync,
+    )
+
+    result = await use_case.place_and_start(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert result.observed_state is ObservedState.UNKNOWN
+    assert uow.servers.by_id[ServerId(server_id)].observed_state is (
+        ObservedState.UNKNOWN
+    )
+    assert tunnel_sync.calls == []
 
 
 async def test_place_and_start_lost_response_keeps_assignment() -> None:
