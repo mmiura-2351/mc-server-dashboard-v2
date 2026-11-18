@@ -1335,12 +1335,14 @@ def test_validate_counts_a_sparse_members_holes_toward_the_cap() -> None:
 
 def test_validate_refuses_an_archive_that_seeks_back() -> None:
     # A seek back would decompress the stream again from its start, once per
-    # sparse member here, so it is refused (issue #3810). The cap is the
-    # production one: only the seek back can refuse this archive.
-    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar"):
+    # sparse member here, so it is refused (issues #3798, #3810). The cap is the
+    # production one. The refusal is EndCheckedReader's: a walk that read on
+    # from where it did not seek back would be refused too, later.
+    with pytest.raises(InvalidBackupArchiveError, match="not a gzip tar") as refused:
         _validate_backup_archive(
             archive_cap_shapes.sparse_maps_past_stored_data(), max_entries=10_000
         )
+    assert str(refused.value.__cause__) == "a member's data runs past the member"
 
 
 def test_validate_counts_directory_members_toward_the_entry_cap() -> None:

@@ -3881,13 +3881,14 @@ async def test_upload_extract_holds_a_tar_gz_to_its_cap_to_the_byte(
 
 async def test_upload_extract_tar_that_seeks_back_writes_nothing() -> None:
     # A seek back would decompress the stream again from its start, once per
-    # sparse member here, so it is refused (issue #3810). The caps are the
-    # production ones: only the seek back can refuse this archive.
+    # sparse member here, so it is refused (issues #3798, #3810). The caps are
+    # the production ones. The refusal is EndCheckedReader's: a walk that read
+    # on from where it did not seek back would be refused too, later.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
 
-    with pytest.raises(UnreadableArchiveError):
+    with pytest.raises(UnreadableArchiveError) as refused:
         await use_case(
             community_id=CommunityId(community),
             server_id=ServerId(server_id),
@@ -3896,6 +3897,7 @@ async def test_upload_extract_tar_that_seeks_back_writes_nothing() -> None:
             content=archive_cap_shapes.sparse_maps_past_stored_data(),
             extract=True,
         )
+    assert str(refused.value.__cause__) == "a member's data runs past the member"
     assert store.writes == []
 
 

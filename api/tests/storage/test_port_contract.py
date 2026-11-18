@@ -1864,8 +1864,8 @@ async def test_backup_from_each_producer_is_healthy_and_restores(
     await _restore_and_health_accept(harness, archive, END_CHECK_FILES)
 
 
-# 18 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(18 * 10 + 30)
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
 async def test_backup_over_the_upload_header_limits_is_healthy_and_restores(
     harness: StorageHarness,
 ) -> None:
