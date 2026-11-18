@@ -49,20 +49,32 @@ from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
+    DAMAGED_GZIP_STREAMS,
+    END_CHECK_FILES,
+    END_CHECK_TAR,
     GNU_SPARSE_FORMATS,
+    GZIP_MEMBER_SPLITS,
     INVALID_SPARSE_LAYOUTS,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
+    TARS_NOT_ENDING_AT_THEIR_MARKER,
+    TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT,
     bomb_targz,
     corrupt_region_bytes,
     drain,
+    gnu_tar,
     gnu_tar_sparse_archive_cut_in_its_extension_block,
     healthy_region_bytes,
     malicious_tar_with_escape,
     mode_invariant_corrupt_region_bytes,
+    needs_gnu_tar,
+    needs_pigz,
     new_scope,
+    pigz,
     read_tar,
     region_targz,
+    reserved_member_over,
+    reserved_member_with_unreadable_data,
     stream_of,
     tar_bytes,
     tar_cut_in_a_sparse_extension_block,
@@ -70,6 +82,7 @@ from tests.storage.helpers import (
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
     tar_with_gnu_tar_sparse_members,
+    two_gzip_members,
     unaligned_live_region_bytes,
     wait_until_contended,
     watch_lock_contention,
@@ -1215,6 +1228,42 @@ async def test_check_backup_health_rejects_decompression_bomb(
         await harness.storage.check_backup_health(community, server, key)
 
 
+async def test_a_left_out_reserved_member_counts_toward_the_restore_cap(
+    backend: str, tmp_path: Path
+) -> None:
+    """Restore and the health probe read a reserved root member's data before
+    they leave it out (issue #3798), so its bytes count toward the decompressed
+    size cap like any member's, on BOTH backends."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=64 * 1024)
+    community, server = new_scope()
+    archive = gzip.compress(reserved_member_over(1 << 20))
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
+async def test_zeros_past_the_marker_count_toward_the_restore_cap(
+    backend: str, tmp_path: Path
+) -> None:
+    """Restore and the health probe read on past the end-of-archive marker to the
+    gzip end (issue #3798), so the zeros there are decompressed bytes like any
+    member's and count toward the cap, on BOTH backends."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=64 * 1024)
+    community, server = new_scope()
+    archive = gzip.compress(tar_bytes({"server.properties": b"k=v"}) + bytes(1 << 20))
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(10 * 10 + 30)
 async def test_restore_corrupt_backup_without_force_is_refused(
@@ -1404,22 +1453,23 @@ _GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
 def _unreadable_archive(shape: str) -> bytes:
     """A stored archive whose bytes no longer read back as a tar.gz (issue #3230).
 
-    One shape per way ``tarfile`` reports it, so every exception the adapters
-    translate is pinned by a real archive rather than by a raised stand-in.
+    One shape per way the read reports it, so every exception the adapters
+    translate is pinned by a real archive rather than by a raised stand-in. The
+    adapters decompress with ``gzip.GzipFile`` (issue #3798).
     """
 
     if shape == "not_gzip":
-        # Not even a gzip stream (``ReadError``).
+        # Not even a gzip stream (``BadGzipFile``).
         return b"not a gzip stream " * 16
     if shape == "bad_method":
         # A gzip magic naming a compression method that is not deflate
-        # (``CompressionError`` from stream-mode reads).
+        # (``BadGzipFile``).
         return b"\x1f\x8b\x07\x00" + b"\x00" * 60
     # One member large enough that damage partway lands inside its body.
     tar = tar_bytes({"world/region/r.0.0.mca": bytes(range(256)) * 1000})
     if shape == "truncated":
         # The stream stops mid-deflate, short of its end-of-stream marker
-        # (``EOFError`` from ``r:gz``, ``ReadError`` from ``r|gz``).
+        # (``EOFError``).
         archive = gzip.compress(tar)
         return archive[: len(archive) // 2]
     if shape == "rotted_body":
@@ -1428,13 +1478,29 @@ def _unreadable_archive(shape: str) -> bytes:
         deflate = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
         body = deflate.compress(tar[:65536]) + deflate.flush(zlib.Z_SYNC_FLUSH)
         return _GZIP_HEADER + body + b"\xff" * 64
-    assert shape == "split_member"
-    # A complete gzip member holding only the first part of the tar, followed by
-    # bytes that are not another member (``BadGzipFile`` from ``r:gz``).
-    return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
+    if shape == "split_member":
+        # A complete gzip member holding only the first part of the tar, followed
+        # by bytes that are not another member (``BadGzipFile``).
+        return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
+    assert shape == "split_at_a_tar_member"
+    # The same, its first gzip member ending where the tar member's data does:
+    # a reader that stopped at the gzip member's end found no damage
+    # (issue #3236).
+    return gzip.compress(tar[: -len(_TAR_END)]) + b"not a gzip member" * 4
 
 
-_UNREADABLE_SHAPES = ["not_gzip", "bad_method", "truncated", "rotted_body"]
+# The two zero blocks of the end-of-archive marker and ``tarfile``'s padding to
+# its 20-block record, after the one member of the shapes above.
+_TAR_END = bytes(tarfile.RECORDSIZE - (512 + 256000) % tarfile.RECORDSIZE)
+
+_UNREADABLE_SHAPES = [
+    "not_gzip",
+    "bad_method",
+    "truncated",
+    "rotted_body",
+    "split_member",
+    "split_at_a_tar_member",
+]
 
 
 @pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
@@ -1444,7 +1510,10 @@ async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
     """The sweep's probe reports an archive it cannot read back as
     ``ArchiveUnreadableError`` on BOTH backends (issue #3230) — the verdict the
     sweep records as ``UNREADABLE`` — never a raw ``EOFError`` / ``tarfile`` error
-    that would abort the whole pass."""
+    that would abort the whole pass. Every shape is one restore refuses too, the
+    split gzip members included: the object backend's probe took the bytes after
+    a complete gzip member for padding and found such an archive healthy (issue
+    #3236)."""
 
     community, server = new_scope()
     key = await harness.storage.put_backup(
@@ -1458,7 +1527,7 @@ async def test_check_backup_health_of_an_unreadable_archive_is_unreadable(
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(10 * 10 + 30)
 @pytest.mark.parametrize("force", [False, True])
-@pytest.mark.parametrize("shape", [*_UNREADABLE_SHAPES, "split_member"])
+@pytest.mark.parametrize("shape", _UNREADABLE_SHAPES)
 async def test_restore_of_an_unreadable_archive_is_refused_and_keeps_current(
     harness: StorageHarness, shape: str, force: bool
 ) -> None:
@@ -1631,6 +1700,166 @@ async def test_archive_with_gnu_tar_sparse_members_restores_them_expanded(
 
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == SPARSE_FILES
+
+
+async def _restore_and_health_refuse(harness: StorageHarness, archive: bytes) -> None:
+    """Store ``archive`` as a backup over a live world: restore and the health
+    probe each raise ``ArchiveUnreadableError``, and the live world stays."""
+
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(
+        community, server, stream_of(archive, chunk=8192)
+    )
+
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError):
+        await harness.storage.check_backup_health(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+async def _restore_and_health_accept(
+    harness: StorageHarness, archive: bytes, files: dict[str, bytes]
+) -> None:
+    """Store ``archive`` as a backup: the health probe finds it healthy, and
+    restore publishes exactly ``files``."""
+
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(archive, chunk=8192)
+    )
+
+    assert (await harness.storage.check_backup_health(community, server, key)).healthy
+    await harness.storage.restore_backup(community, server, key)
+
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("shape", list(TARS_NOT_ENDING_AT_THEIR_MARKER))
+async def test_backup_that_does_not_end_at_its_marker_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """A backup whose tar does not end at its end-of-archive marker, or holds
+    more than zeros past it, is ``ArchiveUnreadableError`` on BOTH backends, for
+    restore and the health probe (issue #3798). Both used to stop at the damage,
+    take it for the end, and restore the members before it."""
+
+    archive = gzip.compress(TARS_NOT_ENDING_AT_THEIR_MARKER[shape])
+
+    await _restore_and_health_refuse(harness, archive)
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("shape", list(DAMAGED_GZIP_STREAMS))
+async def test_backup_whose_gzip_stream_does_not_end_soundly_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """A backup whose gzip CRC32 or ISIZE does not match, whose trailer is cut,
+    or which has bytes after the gzip stream that are not another member, is
+    ``ArchiveUnreadableError`` on BOTH backends, for restore and the health
+    probe (issue #3798). Restore stopped at the end-of-archive marker and never
+    read the trailer, so a flipped stored byte restored as different data."""
+
+    await _restore_and_health_refuse(harness, DAMAGED_GZIP_STREAMS[shape])
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("shape", list(TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT))
+async def test_backup_whose_member_data_runs_past_it_is_unreadable(
+    harness: StorageHarness, shape: str
+) -> None:
+    """A GNU sparse member that takes more data than it stores makes ``tarfile``
+    seek back to the next header once its data is read. Restore and the health
+    probe refuse that seek, so the backup is ``ArchiveUnreadableError`` on BOTH
+    backends (issue #3798), where it restored the member padded with the next
+    member's bytes."""
+
+    archive = gzip.compress(TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT[shape])
+
+    await _restore_and_health_refuse(harness, archive)
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+async def test_backup_whose_reserved_member_data_does_not_read_is_unreadable(
+    harness: StorageHarness,
+) -> None:
+    """Restore and the health probe read a reserved root member's data before
+    they leave it out (issue #3798): data that does not read makes the backup
+    ``ArchiveUnreadableError`` on BOTH backends, as any member's does."""
+
+    archive = gzip.compress(reserved_member_with_unreadable_data())
+
+    await _restore_and_health_refuse(harness, archive)
+
+
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
+@pytest.mark.parametrize("split", list(GZIP_MEMBER_SPLITS))
+async def test_backup_of_two_gzip_members_restores_whole(
+    harness: StorageHarness, split: str
+) -> None:
+    """A ``tar.gz`` of two gzip members, which gzip reads as one stream and the
+    upload gate accepts, is healthy and restores whole on BOTH backends (issue
+    #3798). The object backend read only the first member: split at a tar member
+    it restored in part, and split inside one it refused."""
+
+    await _restore_and_health_accept(harness, two_gzip_members(split), END_CHECK_FILES)
+
+
+# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(12 * 10 + 30)
+@pytest.mark.parametrize(
+    "produce",
+    [
+        pytest.param(
+            lambda tmp: gnu_tar(tmp, "-z"), id="gnu-tar-z", marks=needs_gnu_tar
+        ),
+        pytest.param(
+            lambda tmp: gnu_tar(tmp, "-z", "-b", "1"),
+            id="gnu-tar-z-b1",
+            marks=needs_gnu_tar,
+        ),
+        pytest.param(
+            lambda tmp: gnu_tar(tmp, "-z", "--format=posix"),
+            id="gnu-tar-z-posix",
+            marks=needs_gnu_tar,
+        ),
+        pytest.param(
+            lambda tmp: pigz(gnu_tar(tmp)),
+            id="gnu-tar-pigz",
+            marks=[needs_gnu_tar, needs_pigz],
+        ),
+        pytest.param(lambda _tmp: gzip.compress(END_CHECK_TAR), id="hand-written"),
+        pytest.param(
+            lambda _tmp: gzip.compress(tar_bytes(END_CHECK_FILES)), id="tarfile"
+        ),
+    ],
+)
+async def test_backup_from_each_producer_is_healthy_and_restores(
+    harness: StorageHarness,
+    produce: Callable[[Path], bytes],
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """The archives the producers write stay healthy and restorable on BOTH
+    backends now that the walk must end at the end-of-archive marker and the
+    gzip stream must end soundly (issue #3798): GNU tar with its record padding
+    and its directory members, pigz, Python's ``tarfile`` and a tar with no
+    record padding. The backup writers' own archives are the round trips
+    above."""
+
+    archive = produce(tmp_path_factory.mktemp("producer"))
+
+    await _restore_and_health_accept(harness, archive, END_CHECK_FILES)
 
 
 # One member per shape the single archive member rule decides (issue #3550): a
