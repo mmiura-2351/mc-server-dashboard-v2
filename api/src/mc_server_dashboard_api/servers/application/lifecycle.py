@@ -42,18 +42,18 @@ refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
 Worker refusing because another mutating command is already in flight, or because a
 failed-stop orphan it is still converging holds the id — either way the outcome is
-unknown), and an ``INVALID_STATE`` outcome (the Worker refusing because an instance
-is already live there), do NOT compensate — see the assignment-stickiness note
-below.
+unknown), and an ``INVALID_STATE`` outcome of the start or of its hydrate (the Worker
+refusing because an instance is already live there), do NOT compensate — see the
+assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from
 Storage (a server with no published working set yet hydrates to an empty dir, the
 data-plane endpoint being 204), then dispatches the launch; a failure before the
-start command is sent (a failed hydrate, or a pre-dispatch
-``WorkerUnavailableError``) compensates the committed intent. The launch carries a
-conventional ``server.jar`` relpath and the server's recorded MC version
-(FR-EXE-5: the Worker picks the Java runtime).
+start command is sent (a failed hydrate, unless refused ``INVALID_STATE`` as below,
+or a pre-dispatch ``WorkerUnavailableError``) compensates the committed intent. The
+launch carries a conventional ``server.jar`` relpath and the server's recorded MC
+version (FR-EXE-5: the Worker picks the Java runtime).
 
 Assignment stickiness after dispatch (the orphan-placement invariant, issue #101).
 ONCE A START COMMAND HAS BEEN SENT FOR A SERVER, THE RECONCILER NEVER PLACES IT ON
@@ -73,8 +73,19 @@ compensating. The Worker's double-start guard is per-process, so reverting a
 possibly-started or definitely-running server — and letting a later start place it
 elsewhere — would spawn a second live instance (issue #773/#774).
 
+A hydrate the placed Worker refuses ``INVALID_STATE`` is therefore not a failure
+before dispatch in the sense above, though no start was sent: it proves an instance
+already live on that Worker, one the row did not name, which placement cannot see
+(issue #3865). Both ``__call__`` and ``place_and_start`` keep the assignment and
+record observed=running. In the same transaction they owe the group-managed player
+files again: the start regenerated them into the store and cleared their marks,
+but the instance runs its own working set, and its snapshots publish that set's
+files over the store. ``place_and_start`` then returns, as nothing failed;
+``__call__`` answers ``InvalidLifecycleTransitionError``, since its start launched
+nothing and the instance may run an older working set than the store's.
+
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
-and that is what makes both convergence sites sound. Until issue #2476 the Worker
+and that is what makes every convergence site sound. Until issue #2476 the Worker
 answered the same code for a pending failed-stop orphan — an instance it could not
 confirm dead, which is as likely to be a corpse as a live process — so the
 convergence could manufacture ``observed=running`` for a server that was down, with
@@ -149,6 +160,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotRunningError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.groups import GroupKind, PendingGroupSync
 from mc_server_dashboard_api.servers.domain.jar_provisioner import (
     JarProvisioner,
     ProvisionedJar,
@@ -599,51 +611,41 @@ class StartServer:
             raise
         if outcome.success:
             return server
-        if dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
-            # The Worker refused the START because an instance for this server is
-            # ALREADY live on the assigned Worker. That is the code's ONLY meaning on
-            # a start or a hydrate (instancemanager's reserve()): a pending
-            # failed-stop orphan — the other state that gate refuses — answers BUSY
-            # since issue #2476, precisely because it is NOT evidence of a live
-            # instance, and no other condition reaches INVALID_STATE here. So
+        if outcome.status is CommandStatus.INVALID_STATE:
+            # The Worker refused the START, or its HYDRATE, because an instance for
+            # this server is ALREADY live on the assigned Worker. That is the code's
+            # ONLY meaning on a start or a hydrate (instancemanager's reserve()): a
+            # pending failed-stop orphan — the other state that gate refuses —
+            # answers BUSY since issue #2476, precisely because it is NOT evidence of
+            # a live instance, and no other condition reaches INVALID_STATE here. So
             # converging observed=running off this code is unconditionally sound;
             # before that split it was not, and a dead orphan's refusal wedged the row
-            # at a false running (issue #2467). (Gate on ``dispatch.attempted`` so a
-            # PRE-dispatch INVALID_STATE — a hydrate refused over a running instance —
-            # still compensates: that one never reached the start.)
+            # at a false running (issue #2467).
             # Compensating here (desired=stopped + unassign) would orphan that live
             # instance: its StatusChange(running) is dropped at the ownership guard
             # once unassigned, the row wedges at
             # desired=stopped/observed=running/unassigned (which the reconciler skips
             # forever), and a later start would place a SECOND instance on a different
-            # Worker (issue #773/#774). So converge exactly as redispatch_start does
-            # (#213): record observed=running and KEEP desired=running + the
-            # assignment — the user's start IS satisfied.
-            observed_at = self.clock.now()
-            async with self.uow:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.RUNNING,
-                    observed_at=observed_at,
-                    expected_worker=worker_id,
-                )
-                await self.uow.commit()
-            # Keep the return honest (issue #292): reflect the observed state on the
-            # entity only when the guarded write landed; if a same-instant/fresher
-            # write won the #216 guard, leave the as-read fields rather than claim a
-            # write that did not happen.
-            if applied:
-                server.observe(ObservedState.RUNNING, observed_at)
-                # Sync the Bedrock tunnel to match the convergence write (issue
-                # #1602): the repository write above bypasses the sink's hook, so
-                # without this the tunnel is never opened on the INVALID_STATE path.
-                await self.bedrock_tunnel_sync.sync_observed(
-                    server_id=server_id,
-                    worker_id=worker_id,
-                    bedrock_port=server.bedrock_port,
-                    running=True,
-                )
-            return server
+            # Worker (issue #773/#774, and #3865 for the refused hydrate). So converge
+            # exactly as redispatch_start does (#213): record observed=running and
+            # KEEP desired=running + the assignment.
+            if dispatch.attempted:
+                # The user's start IS satisfied.
+                await self._record_running(server, worker_id)
+                return server
+            # A refused hydrate means this start launched nothing: the instance was
+            # there before it, on whatever working set it had, which may be older
+            # than the store's. So the player files are owed again (see
+            # ``_record_running``), the start did not happen as asked, and the user
+            # gets the start verb's "already running" conflict instead of a success.
+            await self._record_running(server, worker_id, owe_again=owed_group_files)
+            _LOG.warning(
+                "worker %s refused the hydrate for server %s because it already "
+                "runs an instance of it; this start does not give that Worker back",
+                worker_id.value,
+                server_id.value,
+            )
+            raise InvalidLifecycleTransitionError(str(server_id.value))
         failure = _dispatch_failure(
             server_id=server_id, kind="StartServer", outcome=outcome
         )
@@ -695,10 +697,14 @@ class StartServer:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
-          ever reached a Worker, so re-placing elsewhere cannot double-start. The
-          one exception is the re-read just before the send raising (a database
-          error, issue #3741): the hydrate succeeded, so the assignment is kept
-          for a re-send to the same Worker (see ``_launch``).
+          ever reached a Worker, so re-placing elsewhere cannot double-start. Two
+          exceptions keep the assignment. The re-read just before the send raising
+          (a database error, issue #3741): the hydrate succeeded, so the
+          assignment is kept for a re-send to the same Worker (see ``_launch``).
+          And a hydrate refused ``INVALID_STATE`` (issue #3865): the Worker
+          already runs an instance of the server, so re-placing elsewhere WOULD
+          double-start. That one records observed=running, as
+          ``redispatch_start`` does, and returns.
         - After the start was dispatched (a failed outcome, or a timeout/lost-response
           ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
           assignment. Subsequent ticks then take the ``redispatch_start`` path to the
@@ -814,6 +820,27 @@ class StartServer:
                 )
             raise
         if not outcome.success:
+            if not dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
+                # The placed Worker refused the HYDRATE because it already runs an
+                # instance of this server (issue #3865): the code's only meaning on
+                # a hydrate, as ``__call__``'s arm explains. Placement cannot know
+                # that, so unassigning would let a later tick place the server on
+                # another Worker while this instance runs. Keep this Worker and
+                # converge as redispatch_start does, owing again the player files
+                # this placement regenerated for a launch that did not happen.
+                # Nothing failed, so this returns, and the reconciler counts no
+                # failure.
+                await self._record_running(
+                    server, worker_id, owe_again=owed_group_files
+                )
+                _LOG.warning(
+                    "worker %s refused the hydrate for server %s because it "
+                    "already runs an instance of it; this placement does not give "
+                    "that Worker back",
+                    worker_id.value,
+                    server_id.value,
+                )
+                return server
             failure = _dispatch_failure(
                 server_id=server_id, kind="StartServer", outcome=outcome
             )
@@ -938,28 +965,7 @@ class StartServer:
         if outcome.success:
             return server
         if outcome.status is CommandStatus.INVALID_STATE:
-            observed_at = self.clock.now()
-            async with self.uow:
-                applied = await self.uow.servers.record_observed_state(
-                    server_id,
-                    observed_state=ObservedState.RUNNING,
-                    observed_at=observed_at,
-                    expected_worker=worker_id,
-                )
-                await self.uow.commit()
-            # Keep the return honest (issue #292): mutate the entity only when the
-            # write landed. If the #216 guard dropped it, a same-instant/fresher
-            # observed write already won, so leave the entity's observed fields
-            # as-read rather than claim a write that did not happen.
-            if applied:
-                server.observe(ObservedState.RUNNING, observed_at)
-                # Sync the Bedrock tunnel (issue #1602), same as __call__'s arm.
-                await self.bedrock_tunnel_sync.sync_observed(
-                    server_id=server_id,
-                    worker_id=worker_id,
-                    bedrock_port=server.bedrock_port,
-                    running=True,
-                )
+            await self._record_running(server, worker_id)
             return server
         if outcome.status is CommandStatus.BUSY:
             # A BUSY start (or hydrate) means the Worker is in one of two UNSETTLED
@@ -1204,6 +1210,64 @@ class StartServer:
             )
         return outcome
 
+    async def _record_running(
+        self,
+        server: Server,
+        worker_id: WorkerId,
+        *,
+        owe_again: list[PendingGroupSync] | None = None,
+    ) -> None:
+        """Record observed=running for an instance found live on ``worker_id``.
+
+        The convergence an ``INVALID_STATE`` start or hydrate outcome is owed
+        (#213): the Worker performed no transition, so no ``StatusChange`` will
+        come to record it. The write asserts the row is still on ``worker_id``.
+
+        ``owe_again`` is passed when the refused step was the hydrate (issue
+        #3865): the marks the start cleared with its intent, for a launch that did
+        not happen. The instance keeps its own working set, and its snapshots
+        publish that set's player files over the store, so the files are owed
+        again in this same transaction: the marks the start cleared, and every
+        file a group manages, since an earlier start that never launched on this
+        Worker may have cleared a mark the instance never applied. A file no group
+        manages is left as the game left it. That includes one whose last group
+        was detached or deleted, if an earlier start that never launched cleared
+        the mark that change left: nothing owes it any more, so the instance's
+        copy stays.
+        """
+
+        observed_at = self.clock.now()
+        async with self.uow:
+            applied = await self.uow.servers.record_observed_state(
+                server.id,
+                observed_state=ObservedState.RUNNING,
+                observed_at=observed_at,
+                expected_worker=worker_id,
+            )
+            if owe_again is not None:
+                attached = await self.uow.groups.list_groups_for_server(server.id)
+                owed = {mark.kind for mark in owe_again}
+                owed |= {group.kind for group in attached}
+                for kind in GroupKind:
+                    if kind in owed:
+                        await self.uow.groups.mark_sync_pending([server.id], kind)
+            await self.uow.commit()
+        # Keep the return honest (issue #292): reflect the observed state on the
+        # entity only when the guarded write landed; if a same-instant/fresher
+        # write won the #216 guard, leave the as-read fields rather than claim a
+        # write that did not happen.
+        if applied:
+            server.observe(ObservedState.RUNNING, observed_at)
+            # Sync the Bedrock tunnel to match the convergence write (issue
+            # #1602): the repository write above bypasses the sink's hook, so
+            # without this the tunnel is never opened on the INVALID_STATE path.
+            await self.bedrock_tunnel_sync.sync_observed(
+                server_id=server.id,
+                worker_id=worker_id,
+                bedrock_port=server.bedrock_port,
+                running=True,
+            )
+
     async def _generation_before_hydrate(
         self, community_id: CommunityId, server_id: ServerId
     ) -> int | None:
@@ -1422,7 +1486,8 @@ class StartServer:
         """Undo only the assignment after a failed PRE-DISPATCH orphan placement.
 
         Called by ``place_and_start`` only when the failure happened BEFORE the start
-        command was sent (a failed hydrate): no start ever reached a Worker, so
+        command was sent (a failed hydrate, but not one refused ``INVALID_STATE``,
+        which proves a live instance): no start ever reached a Worker, so
         clearing the assignment to let a later tick re-place elsewhere cannot
         double-start (issue #101's stickiness invariant). A post-dispatch failure
         does NOT call this — the assignment must stick for a same-Worker redispatch.
