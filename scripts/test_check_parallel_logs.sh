@@ -213,12 +213,15 @@ hits_dir="$canary_worktree/.git/argon2-canary-hits"
 # to the suite's temp dir, and under IO load each can take seconds. No wait here
 # asserts how soon. A passing run pays none of it, and a wait stops once its
 # run has ended, so a red pays it only for a run that is still there and never
-# does what is awaited. The stub's wait for the canary to start is such a wait
-# when the canary never starts: its run waits on it, so nothing ends it early.
-# That red would pay the ceiling in every run, so it pays it once: the stub
-# records the expiry in $canary_expired and skips the wait from then on, and
-# the record fails the suite.
+# does what is awaited. The stub's waits are part of a run, so they get half
+# the ceiling (stub_ceiling): one that expires does so while the suite still
+# waits for its run, which then ends and reports it. Nothing ends the stub's
+# wait for the canary to start early when the canary never starts, since its
+# run is waiting on it. That red would pay the wait in every run, so it pays it
+# once: the stub records the expiry in $canary_expired and skips the wait from
+# then on, and the record fails the suite.
 ceiling=1200
+stub_ceiling=$((ceiling / 2))
 canary_expired="$canary_stub/canary-start-expired"
 
 # The stand-in canary: it records its pid, its parent, niceness, arguments and
@@ -267,9 +270,10 @@ chmod +x "$canary_worktree/api/.venv/bin/python"
 #
 # Both waits stand in for a real api chain, which outlasts the canary's start
 # and is still running when the run is stopped. A correct gate never lets either
-# reach its bound, so both take the suite's ceiling, and both stop once the
-# gate (CANARY_GATE) is gone: the stub then has no run to hold, and it has the
-# gate lock's fd 9 open, so a stub that outlived its gate would hold the lock.
+# reach its bound, so both take stub_ceiling (CANARY_CEILING), and both stop
+# once the gate (CANARY_GATE) is gone: the stub then has no run to hold, and it
+# has the gate lock's fd 9 open, so a stub that outlived its gate would hold the
+# lock.
 cat > "$canary_stub/make" << 'STUB'
 #!/usr/bin/env bash
 canary_running() {
@@ -327,7 +331,7 @@ canary_run() {
 		cd "$canary_dir" &&
 			exec env PATH="$canary_stub:$PATH" \
 				MCSD_CHECK_LOCK_FILE="$canary_stub/lock" \
-				CANARY_GATE="$BASHPID" CANARY_CEILING="$ceiling" \
+				CANARY_GATE="$BASHPID" CANARY_CEILING="$stub_ceiling" \
 				CANARY_EXPIRED="$canary_expired" \
 				CANARY_RECORD="$canary_stub/$name" "$@" \
 				bash "$ROOT/scripts/check_parallel.sh" "$canary_dir"
@@ -516,7 +520,7 @@ check_canary() {
 	# A stub that gave up waiting for a canary to start fails the suite, so
 	# skipping that wait from then on is never silent (see the ceiling above).
 	[ ! -e "$canary_expired" ] ||
-		fail_test "a canary did not start within $((ceiling / 10)) s (run, target): $(cat "$canary_expired")"
+		fail_test "a canary did not start within $((stub_ceiling / 10)) s (run, target): $(cat "$canary_expired")"
 }
 
 # ---------------------------------------------------------------------------
