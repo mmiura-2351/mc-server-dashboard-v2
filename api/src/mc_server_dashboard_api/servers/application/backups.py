@@ -1493,6 +1493,8 @@ class _MemberCappedGzipReader(gzip._GzipReader):
     starts. Both names are private to CPython, so this relies on them; in return
     the stream is read by every rule ``gzip`` reads it by, and only the count is
     added (issue #3801). The tests that pin the cap fail if either name moves.
+    The count runs over the whole read, so a backward seek, which ``gzip`` serves
+    by reading again from the start, counts the members it reads again too.
     """
 
     def __init__(self, fp: IO[bytes], max_members: int) -> None:
