@@ -17,13 +17,18 @@ Storage), per TESTING.md Section 4. Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import gzip
 import io
 import tarfile
+import threading
 import uuid
+from dataclasses import dataclass, field
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import backups as backups_module
 from mc_server_dashboard_api.servers.application.backups import (
     CreateBackup,
     DeleteBackup,
@@ -1224,10 +1229,27 @@ def test_validate_rejects_decompression_bomb_member() -> None:
         _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=1024)
 
 
+def test_validate_counts_the_zeros_past_the_end_marker_toward_the_cap() -> None:
+    # The read on to the gzip end decompresses whatever follows the end-of-archive
+    # marker, so it counts toward the same cap as member data (issue #3778).
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        info = tarfile.TarInfo(name="server.properties")
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"k=v"))
+    content = gzip.compress(buf.getvalue() + bytes(64 * 1024))
+    with pytest.raises(InvalidBackupArchiveError):
+        _validate_backup_archive(
+            content, max_entries=10, max_decompressed_bytes=32 * 1024
+        )
+
+
 def test_validate_accepts_safe_archive_within_caps() -> None:
     content = _targz({"server.properties": b"k=v", "world/level.dat": b"w"})
-    # No raise: a benign archive within both the entry and decompressed caps.
-    _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=1024)
+    # No raise: a benign archive within both the entry and decompressed caps. The
+    # cap covers the zeros past the end-of-archive marker too (issue #3778), and
+    # ``tarfile`` pads its archive to a 10 KiB record.
+    _validate_backup_archive(content, max_entries=10, max_decompressed_bytes=10 * 1024)
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------
@@ -1339,6 +1361,132 @@ async def test_upload_rejects_decompression_bomb_before_storing() -> None:
             created_by=uuid.uuid4(),
         )
     assert archive.stored == []
+
+
+# --- the archive is validated off the event loop (issue #3801) -------------
+#
+# Validation decompresses up to the 8 GiB cap, so on the event loop it would
+# stall every other request on the process. Each fake validator below blocks
+# until the test's own coroutine releases it: only a loop left free while
+# validation runs can do that. The timeout turns a blocked loop into a failure
+# rather than a hang.
+
+
+@dataclass
+class _BlockingValidator:
+    entered: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+    finished: threading.Event = field(default_factory=threading.Event)
+
+    def __call__(self, content: bytes, **_caps: int) -> None:
+        self.entered.set()
+        try:
+            if not self.release.wait(10):
+                raise AssertionError("the event loop never ran during validation")
+        finally:
+            self.finished.set()
+
+
+def _upload_task(
+    archive: FakeBackupArchiveStore, uow: FakeUnitOfWork, server: Server
+) -> asyncio.Task[Backup]:
+    upload = UploadBackup(uow=uow, backup_store=archive, clock=FakeClock(_NOW))
+    return asyncio.create_task(
+        upload(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            content=_valid_tar_gz(),
+            created_by=uuid.uuid4(),
+        )
+    )
+
+
+async def test_upload_leaves_the_event_loop_free_while_it_validates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    validator = _BlockingValidator()
+    monkeypatch.setattr(backups_module, "_validate_backup_archive", validator)
+
+    upload = _upload_task(archive, uow, server)
+    assert await asyncio.to_thread(validator.entered.wait, 10)
+    # This coroutine runs while validation is under way.
+    validator.release.set()
+    await upload
+
+    assert archive.stored == [server.id]
+
+
+async def test_cancelling_an_upload_mid_validation_stores_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _at_rest()
+    repo = FakeServerRepository()
+    repo.seed(server)
+    archive = FakeBackupArchiveStore()
+    uow = FakeUnitOfWork(servers=repo)
+    validator = _BlockingValidator()
+    monkeypatch.setattr(backups_module, "_validate_backup_archive", validator)
+
+    upload = _upload_task(archive, uow, server)
+    try:
+        assert await asyncio.to_thread(validator.entered.wait, 10)
+        upload.cancel()
+        # The request ends at once: it does not wait for the validating thread.
+        with pytest.raises(asyncio.CancelledError):
+            await upload
+        assert not validator.finished.is_set()
+    finally:
+        validator.release.set()
+    # The thread runs on to its own end, and its verdict reaches no one.
+    assert await asyncio.to_thread(validator.finished.wait, 10)
+
+    assert archive.stored == []
+    assert await uow.backups.list_for_server(server.id) == []
+
+
+# --- gzip members and zero padding read as gzip reads them -----------------
+#
+# Concatenated gzip members, with zero padding between and after them, are part
+# of the gzip format. Issue #3835 replaces the gzip layer to bound what they cost,
+# so this pins what it must keep accepting.
+
+
+def _raw_tar(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+_RAW_TAR = _raw_tar({"server.properties": b"k=v", "world/level.dat": b"w" * 2048})
+
+
+def _in_gzip_members(raw: bytes, parts: int) -> bytes:
+    """``raw`` cut into ``parts`` pieces, each compressed as its own gzip member."""
+
+    step = -(-len(raw) // parts)
+    return b"".join(
+        gzip.compress(raw[at : at + step], mtime=0) for at in range(0, len(raw), step)
+    )
+
+
+def test_validate_accepts_a_tar_split_across_gzip_members_with_zero_padding() -> None:
+    # The cuts fall inside records.
+    head, tail = _RAW_TAR[:2000], _RAW_TAR[2000:]
+    content = (
+        _in_gzip_members(head, 2) + bytes(512) + _in_gzip_members(tail, 1) + bytes(1024)
+    )
+
+    # No raise.
+    _validate_backup_archive(content, max_entries=10)
 
 
 async def test_server_statistics_aggregates_count_bytes_and_bounds() -> None:

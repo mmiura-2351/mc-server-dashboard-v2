@@ -17,16 +17,18 @@ orchestration loop is introduced.
 Convergence is ASYNCHRONOUS and needs the Worker connected: the actual stop +
 snapshot only happen after the reconciler's grace window (``grace_seconds``,
 660s default) plus a reconciler tick, and only while the Worker stays
-heartbeating (the reconciler skips disconnected Workers). An operator following
-the FR-WRK-5 workflow MUST keep the Worker up until the stops converge —
-shutting the host down immediately defers every stop (and its final snapshot)
-until the Worker reconnects, which in a decommission never happens. The returned
-count is the number of servers this call *marked*, not the number already
-stopped. Confirm convergence PER SERVER, not by assigned load: this call's
-placement-load decrement (see :meth:`_shed_placement_load`) drops ``GET
+heartbeating (the reconciler re-sends a stop only to a connected Worker). An
+operator following the FR-WRK-5 workflow MUST keep the Worker up until the stops
+converge — if the host goes down first and the Worker stays gone, the reconciler
+releases each server ``grace_seconds`` after the disconnect with no final
+snapshot: the snapshot is skipped, not deferred (CONFIGURATION.md Section 5.6).
+The returned count is the number of servers this call *marked*, not the number
+already stopped. Confirm convergence PER SERVER, not by assigned load: this
+call's placement-load decrement (see :meth:`_shed_placement_load`) drops ``GET
 /workers`` assigned load to 0 synchronously, before any stop runs, so load is not
-a convergence signal. Instead watch each drain-marked server reach
-``observed=stopped`` and unassigned (the admin servers list / per-server detail).
+a convergence signal. Instead watch each drain-marked server reach unassigned, at
+``observed=stopped`` (``unknown`` when its Worker went away first) (the admin
+servers list / per-server detail).
 
 A start racing the drain can leak: a start whose placement chose this Worker
 before the flag flipped can commit ``desired=running`` + assignment after the stop

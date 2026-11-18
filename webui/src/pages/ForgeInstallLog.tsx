@@ -16,7 +16,7 @@
  */
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { ApiError, api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
@@ -133,13 +133,30 @@ function InstallLogPanel({
           })}
         </div>
       )}
-      <pre
-        className="log-view install-log-view"
-        role="log"
-        aria-label={t("serverDetail.installLog.label")}
-      >
-        {tail.text}
-      </pre>
+      <InstallLogView text={tail.text} />
     </>
+  );
+}
+
+/**
+ * The tail itself, opened at its end, where the failure is (#3285). It scrolls
+ * there once, on mount: the log of a finished install does not grow.
+ */
+function InstallLogView({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement>(null);
+  useLayoutEffect(() => {
+    if (ref.current !== null) {
+      ref.current.scrollTop = ref.current.scrollHeight;
+    }
+  }, []);
+  return (
+    <pre
+      ref={ref}
+      className="log-view install-log-view"
+      role="log"
+      aria-label={t("serverDetail.installLog.label")}
+    >
+      {text}
+    </pre>
   );
 }

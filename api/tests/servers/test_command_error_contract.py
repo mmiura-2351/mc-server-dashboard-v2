@@ -15,12 +15,13 @@ every row, and this module DERIVES its expectations from that column instead of
 maintaining its own list and count:
 
 * the table names, per row, the sites that match the row's ``(kind, code)`` --
-  ``module.py:qualname`` inside ``servers/application/`` -- or says the outcome is
+  ``module.py:qualname`` inside ``servers/application/``, or ``api/module.py`` in
+  the HTTP edge ``servers/api/`` -- or says the outcome is
   absorbed by the catch-all (``command_failed``) or never read at all
   (``fire_and_forget``);
 * :func:`test_declared_api_sites_match_the_source` asserts the
   ``(module, qualname, CommandStatus)`` triples the table declares are EXACTLY the
-  triples an ``ast`` scan finds in the application layer.
+  triples an ``ast`` scan finds in the application layer and the HTTP edge.
 
 That makes both directions consequences of the table rather than thresholds
 somebody can nudge: a new match on a ``(kind, code)`` the Worker never emits has
@@ -38,9 +39,20 @@ that lived in two hand copies of a Go literal.
 Granularity note: a site is ``(module, enclosing qualname, status)``. Two
 references to the same status inside one function are one site; the qualname is
 class-qualified, so ``StartServer.__call__`` and ``StopServer.__call__`` are
-distinct. Only ``servers/application/`` is scanned: ``servers/adapters/
-control_plane.py`` also names every ``CommandStatus``, but that is the wire
-translation building the outcome, not a match on one.
+distinct. Only ``servers/application/`` and the HTTP edge ``servers/api/`` are
+scanned: ``servers/adapters/control_plane.py`` also names every ``CommandStatus``,
+but that is the wire translation building the outcome, not a match on one.
+
+A site can also match a status by the reason ``dispatch_failure`` gives it, as
+the reconciler matches a busy start on ``WORKER_BUSY_REASON`` (issue #3808). So a
+read of a ``command_dispatch`` reason constant counts as a reference to the
+status ``_SANITIZED_REASONS`` maps to it.
+
+Known gap: a reason is seen only as a read of that constant by its plain name. A
+literal (``"worker_busy"``), an attribute access (``command_dispatch.X``) or an
+aliased import matches the same status unseen, so a match site must read the
+constant. The lifecycle routes' ``_SERVICE_UNAVAILABLE_REASONS`` held the literal
+until issue #3808.
 """
 
 from __future__ import annotations
@@ -50,7 +62,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from mc_server_dashboard_api.servers.application import lifecycle
+from mc_server_dashboard_api.servers.application import command_dispatch, lifecycle
 from mc_server_dashboard_api.servers.domain.control_plane import CommandStatus
 
 # Repo root: tests/servers/<file> -> api/ -> repo root.
@@ -58,7 +70,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CONTRACT_PATH = _REPO_ROOT / "proto" / "contract" / "command_error_contract.json"
 
 _SRC = Path(__file__).resolve().parents[2] / "src" / "mc_server_dashboard_api"
-_APPLICATION = _SRC / "servers" / "application"
+_SERVERS = _SRC / "servers"
+_APPLICATION = _SERVERS / "application"
+# The servers HTTP edge reads a reason constant too (``backups.py`` renders a
+# ``worker_unavailable`` snapshot refusal as a 503), so it is scanned as well.
+_EDGE = _SERVERS / "api"
 
 # Codes that carry no API handling: a success, and the marker for a cell whose
 # precondition determines no emission for that kind (issue #2472).
@@ -113,31 +129,69 @@ def _declared_triples() -> dict[Triple, set[str]]:
 
 
 def _modules() -> list[tuple[str, ast.Module]]:
-    """Every application-layer module, keyed by its path relative to the layer.
+    """Every application-layer and HTTP-edge module, keyed by its path.
 
     ``rglob`` rather than ``glob``: a use case moved into a subpackage would
     otherwise drop out of the scan silently, and a match site nobody scans is a
     match site nobody checks — the drift this module exists to end. A nested module
     keys as ``sub/mod.py``, so the key stays unique and an api entry naming it says
-    where it is.
+    where it is. An edge module keys from ``servers/``, as ``api/backups.py``.
     """
 
-    return [
+    application = [
         (path.relative_to(_APPLICATION).as_posix(), ast.parse(path.read_text()))
         for path in sorted(_APPLICATION.rglob("*.py"))
     ]
+    edge = [
+        (path.relative_to(_SERVERS).as_posix(), ast.parse(path.read_text()))
+        for path in sorted(_EDGE.rglob("*.py"))
+    ]
+    return application + edge
+
+
+def _reason_constants() -> dict[str, str]:
+    """Each ``command_dispatch`` reason constant, mapped to the status it names.
+
+    Derived from ``_SANITIZED_REASONS``, so a new constant for a sanitized reason
+    is scanned without an edit here.
+    """
+
+    status_by_reason = {
+        reason: status.name
+        for status, reason in command_dispatch._SANITIZED_REASONS.items()
+    }
+    return {
+        name: status_by_reason[value]
+        for name, value in vars(command_dispatch).items()
+        if isinstance(value, str) and value in status_by_reason
+    }
+
+
+_REASON_CONSTANTS = _reason_constants()
 
 
 def _status_names(node: ast.AST) -> list[str]:
-    """Every ``CommandStatus.<NAME>`` referenced anywhere under ``node``."""
+    """Every status referenced anywhere under ``node``.
 
-    return [
-        child.attr
-        for child in ast.walk(node)
-        if isinstance(child, ast.Attribute)
-        and isinstance(child.value, ast.Name)
-        and child.value.id == "CommandStatus"
-    ]
+    A ``CommandStatus.<NAME>``, or a read of a reason constant (a ``Load``, so the
+    constant's own definition is not a match site).
+    """
+
+    names: list[str] = []
+    for child in ast.walk(node):
+        if (
+            isinstance(child, ast.Attribute)
+            and isinstance(child.value, ast.Name)
+            and child.value.id == "CommandStatus"
+        ):
+            names.append(child.attr)
+        elif (
+            isinstance(child, ast.Name)
+            and isinstance(child.ctx, ast.Load)
+            and child.id in _REASON_CONSTANTS
+        ):
+            names.append(_REASON_CONSTANTS[child.id])
+    return names
 
 
 def _assigned_name(stmt: ast.stmt) -> str | None:
@@ -164,7 +218,7 @@ def _collect(body: list[ast.stmt], owner: str, module: str, found: set[Triple]) 
 
 
 def _scanned_triples() -> set[Triple]:
-    """Every ``CommandStatus`` match site in the servers application layer."""
+    """Every status match site in the servers application layer and HTTP edge."""
 
     found: set[Triple] = set()
     for module, tree in _modules():
@@ -187,7 +241,7 @@ def _collect_definitions(
 
 
 def _defined_qualnames() -> set[tuple[str, str]]:
-    """Every ``(module, qualname)`` the application layer defines.
+    """Every ``(module, qualname)`` the application layer and HTTP edge define.
 
     Classes, functions and methods under the same class-qualified naming the match
     scan uses, plus module-level assignments — the full set of things an api entry
@@ -201,7 +255,7 @@ def _defined_qualnames() -> set[tuple[str, str]]:
 
 
 def test_declared_api_sites_match_the_source() -> None:
-    """The table's api column and the application layer name the same sites.
+    """The table's api column and the scanned source name the same sites.
 
     Both directions matter. A ``CommandStatus`` match in source that no row
     declares is the #202 class of bug -- the API acting on a code for a kind the
@@ -216,8 +270,8 @@ def test_declared_api_sites_match_the_source() -> None:
 
     undeclared = sorted(scanned - set(declared))
     assert not undeclared, (
-        "these CommandStatus match sites are in servers/application/ but no "
-        f"contract row declares them: {undeclared}. Add the site to the 'api' "
+        "these status match sites are in servers/application/ or servers/api/ "
+        f"but no contract row declares them: {undeclared}. Add the site to the 'api' "
         "column of the row for the (kind, code) it matches in "
         "proto/contract/command_error_contract.json -- and if there is no such "
         "row, the API is matching a code the Worker never emits for that kind "
@@ -227,7 +281,7 @@ def test_declared_api_sites_match_the_source() -> None:
     stale = sorted(triple for triple in declared if triple not in scanned)
     assert not stale, (
         "the contract table declares these API match sites, but the source has "
-        f"no such CommandStatus reference: {stale}. They were renamed, moved or "
+        f"no such status match: {stale}. They were renamed, moved or "
         "removed -- update the 'api' column of the rows that name them (kinds: "
         f"{ {t: sorted(declared[t]) for t in stale} })."
     )
@@ -260,7 +314,7 @@ def test_declared_via_sites_exist_in_the_source() -> None:
                 missing.append((f"({row['kind']}, {row['precondition']})", entry))
 
     assert not missing, (
-        "these contract rows declare a 'via' consumer the application layer does "
+        "these contract rows declare a 'via' consumer the scanned source does "
         f"not define: {missing}. It was renamed, moved or removed -- update the "
         "'api' column in proto/contract/command_error_contract.json."
     )

@@ -179,6 +179,264 @@ def tar_with_a_bad_sparse_field(field: str, *, after: dict[str, bytes]) -> bytes
     return buf.getvalue()
 
 
+def _padded(data: bytes) -> bytes:
+    return data + b"\0" * (-len(data) % tarfile.BLOCKSIZE)
+
+
+def _tar_of(*members: bytes) -> bytes:
+    """Members as written by :func:`_member` and the sparse builders, then the
+    end-of-archive marker."""
+
+    return b"".join(members) + b"\0" * (2 * tarfile.BLOCKSIZE)
+
+
+def _member(name: str, data: bytes, pax_headers: dict[str, str] | None = None) -> bytes:
+    """One member's header blocks (a PAX header first when given) and data."""
+
+    info = tarfile.TarInfo(name=name)
+    info.size = len(data)
+    info.pax_headers = pax_headers or {}
+    return info.tobuf(format=tarfile.PAX_FORMAT) + _padded(data)
+
+
+def _sparse_1_0_member(
+    name: str, sparse: list[tuple[int, int]], realsize: int, data: bytes
+) -> bytes:
+    """A GNU sparse format 1.0 member: the map opens its data, a block of its own."""
+
+    lines = [len(sparse), *(n for entry in sparse for n in entry)]
+    sparse_map = "".join(f"{n}\n" for n in lines).encode()
+    headers = {
+        "GNU.sparse.major": "1",
+        "GNU.sparse.minor": "0",
+        "GNU.sparse.realsize": str(realsize),
+    }
+    return _member(name, _padded(sparse_map) + data, headers)
+
+
+def _pax_record(keyword: str, value: str) -> bytes:
+    """One PAX record, ``"<length> <keyword>=<value>\\n"``; the length counts
+    its own digits."""
+
+    field = f" {keyword}={value}\n".encode()
+    length = len(field) + 1
+    while len(str(length)) + len(field) != length:
+        length += 1
+    return str(length).encode() + field
+
+
+def _sparse_0_0_member(
+    name: str, sparse: list[tuple[int, int]], realsize: int, data: bytes
+) -> bytes:
+    """A GNU sparse format 0.0 member: one ``GNU.sparse.offset`` and one
+    ``GNU.sparse.numbytes`` record per map entry, in a PAX header written by hand,
+    since a ``pax_headers`` dict holds a keyword once."""
+
+    records = [("GNU.sparse.size", str(realsize))]
+    records.append(("GNU.sparse.numblocks", str(len(sparse))))
+    for offset, numbytes in sparse:
+        records.append(("GNU.sparse.offset", str(offset)))
+        records.append(("GNU.sparse.numbytes", str(numbytes)))
+    pax = b"".join(_pax_record(keyword, value) for keyword, value in records)
+    pax_info = tarfile.TarInfo(name="PaxHeaders/" + name.rsplit("/", 1)[-1])
+    pax_info.type = tarfile.XHDTYPE
+    pax_info.size = len(pax)
+    info = tarfile.TarInfo(name=name)
+    info.size = len(data)
+    return (
+        pax_info.tobuf(format=tarfile.USTAR_FORMAT)
+        + _padded(pax)
+        + info.tobuf(format=tarfile.USTAR_FORMAT)
+        + _padded(data)
+    )
+
+
+def _gnu_number(n: int) -> bytes:
+    """A 12-byte GNU tar number field: octal when it fits, else base-256."""
+
+    if 0 <= n < 8**11:
+        return b"%011o\0" % n
+    if n >= 0:
+        return b"\x80" + n.to_bytes(11, "big")
+    return b"\xff" + (n + 256**11).to_bytes(11, "big")
+
+
+def _gnu_sparse_slots(sparse: list[tuple[int, int]]) -> bytes:
+    return b"".join(_gnu_number(offset) + _gnu_number(n) for offset, n in sparse)
+
+
+def _old_gnu_sparse_member(
+    name: str, sparse: list[tuple[int, int]], realsize: int, data: bytes
+) -> bytes:
+    """An old GNU sparse member (type ``S``): its map in the header block, and
+    past four entries in extension blocks of 21 more each.
+
+    GNU tar leaves the unused slots zero. ``tarfile`` reads those of the header
+    block back as ``(0, 0)`` entries, and leaves out every entry of an extension
+    block whose offset or length is zero.
+    """
+
+    info = tarfile.TarInfo(name=name)
+    info.type = tarfile.GNUTYPE_SPARSE
+    info.size = len(data)
+    header = bytearray(info.tobuf(format=tarfile.GNU_FORMAT))
+    header[386 : 386 + 24 * len(sparse[:4])] = _gnu_sparse_slots(sparse[:4])
+    rest = sparse[4:]
+    header[482] = 1 if rest else 0
+    header[483:495] = _gnu_number(realsize)
+    # The checksum counts its own field as spaces.
+    header[148:156] = b" " * 8
+    header[148:155] = b"%06o\0" % sum(header)
+    extensions = b""
+    while rest:
+        block = bytearray(tarfile.BLOCKSIZE)
+        slots, rest = rest[:21], rest[21:]
+        block[: 24 * len(slots)] = _gnu_sparse_slots(slots)
+        block[504] = 1 if rest else 0
+        extensions += block
+    return bytes(header) + extensions + _padded(data)
+
+
+# A GNU sparse member whose numbers read but cannot describe a file, one per
+# shape ``tarfile`` accepts without a check (issue #3802): a negative size or
+# real size, a map entry with a negative offset or length, one that ends past the
+# real size, and entries that overlap or are out of order, across the PAX formats
+# 0.0, 0.1 and 1.0 and the old GNU type ``S`` header.
+_SPARSE_NAME = "world/sparse.dat"
+INVALID_SPARSE_LAYOUTS: dict[str, bytes] = {
+    "0.1-negative-offset": _member(_SPARSE_NAME, b"A", {"GNU.sparse.map": "-5,1"}),
+    "negative-realsize": _member(_SPARSE_NAME, b"A", {"GNU.sparse.realsize": "-1"}),
+    "0.0-negative-size": _member(_SPARSE_NAME, b"A", {"GNU.sparse.size": "-1"}),
+    "0.0-negative-offset": _member(
+        _SPARSE_NAME,
+        b"A",
+        {"GNU.sparse.size": "4", "GNU.sparse.offset": "-5", "GNU.sparse.numbytes": "1"},
+    ),
+    "0.1-empty-region-at-a-negative-offset": _member(
+        _SPARSE_NAME, b"", {"GNU.sparse.size": "4", "GNU.sparse.map": "-5,0"}
+    ),
+    "0.1-negative-numbytes": _member(
+        _SPARSE_NAME, b"A", {"GNU.sparse.size": "4", "GNU.sparse.map": "0,-1"}
+    ),
+    "0.1-past-realsize": _member(
+        _SPARSE_NAME, b"AB", {"GNU.sparse.size": "4", "GNU.sparse.map": "0,1,4,1"}
+    ),
+    "0.1-overlapping": _member(
+        _SPARSE_NAME, b"ABCD", {"GNU.sparse.size": "4", "GNU.sparse.map": "0,2,1,2"}
+    ),
+    "0.1-unsorted": _member(
+        _SPARSE_NAME, b"AB", {"GNU.sparse.size": "4", "GNU.sparse.map": "2,1,0,1"}
+    ),
+    "1.0-negative-offset": _sparse_1_0_member(_SPARSE_NAME, [(-5, 1)], 1, b"A"),
+    "1.0-past-realsize": _sparse_1_0_member(_SPARSE_NAME, [(0, 1), (4, 1)], 4, b"AB"),
+    "1.0-overlapping": _sparse_1_0_member(_SPARSE_NAME, [(0, 2), (1, 2)], 4, b"ABCD"),
+    "S-negative-offset": _old_gnu_sparse_member(_SPARSE_NAME, [(-5, 1)], 4, b"A"),
+    "S-negative-numbytes": _old_gnu_sparse_member(_SPARSE_NAME, [(0, -1)], 4, b"A"),
+    "S-past-realsize": _old_gnu_sparse_member(_SPARSE_NAME, [(10, 1)], 4, b"A"),
+    "S-far-past-realsize": _old_gnu_sparse_member(_SPARSE_NAME, [(2**40, 1)], 4, b"A"),
+    "S-overlapping": _old_gnu_sparse_member(_SPARSE_NAME, [(0, 2), (1, 2)], 4, b"ABCD"),
+    "S-unsorted": _old_gnu_sparse_member(_SPARSE_NAME, [(2, 1), (0, 1)], 4, b"AB"),
+    "S-negative-realsize": _old_gnu_sparse_member(_SPARSE_NAME, [(0, 1)], -1, b"A"),
+    "S-extension-block-negative-offset": _old_gnu_sparse_member(
+        _SPARSE_NAME, [(0, 1), (2, 1), (4, 1), (6, 1), (-5, 1)], 8, b"ABCDE"
+    ),
+}
+
+
+def tar_with_an_invalid_sparse_layout(layout: str, *, after: dict[str, bytes]) -> bytes:
+    """A tar of the ``after`` members, then an :data:`INVALID_SPARSE_LAYOUTS` one.
+
+    With no ``after`` members the bad header is the first one, which
+    ``tarfile.open`` itself reads.
+    """
+
+    members = [_member(rel, content) for rel, content in after.items()]
+    return _tar_of(*members, INVALID_SPARSE_LAYOUTS[layout])
+
+
+# The files of :func:`tar_with_gnu_tar_sparse_members` (issue #3802). The maps of
+# ``a.dat``, ``hole.dat`` and ``many.dat`` are the ones GNU tar 1.35 writes: data,
+# a hole, data and a trailing hole, closed by a zero-length entry at the real
+# size; a file that is all hole; and six data regions, which take the old ``S``
+# header an extension block. ``touching.dat`` has two data regions that touch,
+# which the map allows.
+_MANY_REGIONS = [(8192 * i, 4096) for i in range(6)]
+SPARSE_FILES = {
+    "world/a.dat": b"A" * 512 + b"\0" * 512 + b"B" * 512 + b"\0" * 1536,
+    "world/hole.dat": b"\0" * 1024,
+    "world/touching.dat": b"C" * 512 + b"D" * 512 + b"\0" * 512,
+    "world/many.dat": b"".join(bytes([c]) * 4096 + b"\0" * 4096 for c in b"MNOPQR")
+    + b"\0" * 4096,
+}
+_SPARSE_MAPS: dict[str, tuple[list[tuple[int, int]], bytes]] = {
+    "world/a.dat": ([(0, 512), (1024, 512), (3072, 0)], b"A" * 512 + b"B" * 512),
+    "world/hole.dat": ([(1024, 0)], b""),
+    "world/touching.dat": ([(0, 512), (512, 512), (1536, 0)], b"C" * 512 + b"D" * 512),
+    "world/many.dat": (
+        [*_MANY_REGIONS, (53248, 0)],
+        b"".join(bytes([c]) * 4096 for c in b"MNOPQR"),
+    ),
+}
+GNU_SPARSE_FORMATS = ["S", "0.0", "0.1", "1.0"]
+
+
+def tar_with_gnu_tar_sparse_members(sparse_format: str) -> bytes:
+    """A tar holding :data:`SPARSE_FILES` as GNU sparse members of one format.
+
+    ``sparse_format`` is a :data:`GNU_SPARSE_FORMATS` entry. The old ``S``
+    header pads its map with ``(0, 0)`` slots, as GNU tar's does.
+    """
+
+    members = []
+    for name, (sparse, data) in _SPARSE_MAPS.items():
+        realsize = len(SPARSE_FILES[name])
+        if sparse_format == "S":
+            members.append(_old_gnu_sparse_member(name, sparse, realsize, data))
+        elif sparse_format == "0.0":
+            members.append(_sparse_0_0_member(name, sparse, realsize, data))
+        elif sparse_format == "1.0":
+            members.append(_sparse_1_0_member(name, sparse, realsize, data))
+        else:
+            sparse_map = ",".join(str(n) for entry in sparse for n in entry)
+            headers = {"GNU.sparse.size": str(realsize), "GNU.sparse.map": sparse_map}
+            members.append(_member(name, data, headers))
+    return _tar_of(*members)
+
+
+# Where a tar ends inside an old GNU sparse member's extension blocks: ``tarfile``
+# indexes the short block it read and raises ``IndexError`` (issue #3802). The
+# member's 30 map entries fill the header block, a first extension block that
+# announces a second, and that second block.
+_EXTENDED_SPARSE_MEMBER = _old_gnu_sparse_member(
+    _SPARSE_NAME, [(2 * i, 1) for i in range(30)], 60, b"A" * 30
+)
+SPARSE_EXTENSION_CUTS = {
+    "at-the-block": 512,
+    "100-bytes-into-the-block": 612,
+    "504-bytes-into-the-block": 1016,
+    "after-a-block-announcing-another": 1024,
+}
+
+
+def tar_cut_in_a_sparse_extension_block(cut: str, *, after: dict[str, bytes]) -> bytes:
+    """A tar of the ``after`` members that ends at a :data:`SPARSE_EXTENSION_CUTS`
+    point of an old GNU sparse member's extension blocks."""
+
+    members = [_member(rel, content) for rel, content in after.items()]
+    cut_member = _EXTENDED_SPARSE_MEMBER[: SPARSE_EXTENSION_CUTS[cut]]
+    return b"".join(members) + cut_member
+
+
+def gnu_tar_sparse_archive_cut_in_its_extension_block() -> bytes:
+    """The ``S`` archive of :func:`tar_with_gnu_tar_sparse_members`, cut 100
+    bytes into the extension block of ``world/many.dat``, as GNU tar lays it out."""
+
+    archive = tar_with_gnu_tar_sparse_members("S")
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+        header = tar.getmember("world/many.dat").offset
+    return archive[: header + tarfile.BLOCKSIZE + 100]
+
+
 def bomb_targz(*, decompressed: int = 4096) -> bytes:
     """A self-contained ``tar.gz`` whose single member inflates to ``decompressed``.
 

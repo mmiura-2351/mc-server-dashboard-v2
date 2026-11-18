@@ -383,6 +383,8 @@ async def test_a_locked_out_login_is_not_reported_as_the_argon2_flake(
     assert str(failure.value).startswith(
         "Login refused by a lockout or throttle (retry_after="
     )
+    # argon2 never saw this login, so the report skips its probes.
+    assert "skipped: a lockout or throttle refused this login" in str(failure.value)
 
 
 async def test_brute_force_lockout_then_backoff_growth(engine: AsyncEngine) -> None:
