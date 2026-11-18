@@ -12,7 +12,7 @@ import { t } from "../i18n/index.ts";
 // - Focus trap: Tab / Shift+Tab cycle within the dialog's focusable elements
 //   rather than escaping to the page behind the backdrop. The toast stack
 //   joins the cycle: it sits outside every dialog, but an error raised over
-//   one must stay reachable (WEBUI_SPEC.md Section 7.4). Focus that lands
+//   one must stay reachable (WEBUI_SPEC.md Section 7.4). A Tab that lands
 //   anywhere else is pulled back into the dialog, and a control disabled
 //   while it holds focus hands it to the dialog itself.
 // - Stacked dialogs: a module-level stack tracks open dialogs so Escape closes
@@ -117,36 +117,28 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // that keyup is lost, as when Tab leaves the page.
     let lastTab: { shiftKey: boolean; x: number; y: number } | null = null;
 
-    // Focus that lands outside the dialog and the toast stack, from a Tab the
-    // browser ran or any other way, is pulled back without scrolling: to the
-    // dialog's first control, or its last after Shift+Tab. A Tab that landed
-    // it on the page behind may have scrolled the page; that is undone.
-    // The pull waits for the script that moved focus to finish: a click
-    // handler may close the dialog and focus something behind it, as
-    // ServerDetailPage's force-stop confirm does, and React has closed the
-    // dialog before the pull would run.
+    // A Tab that lands focus outside the dialog and the toast stack, the
+    // browser's own from the page body or one that leaves the dialog, is
+    // pulled back: to the dialog's first control, or its last after
+    // Shift+Tab. The control may scroll into view inside the dialog; the
+    // page's scroll the Tab made is undone. Focus a script or the pointer
+    // moves is left alone: a confirm may close the dialog and focus behind it
+    // in any order, and the keydown branch below takes the next Tab.
     const isOutside = (node: Node | null) =>
       !dialog.contains(node) && !toastZone?.contains(node);
-    // Focus on the page body is left alone: Tab from there is the browser's.
-    const pullBack = () => {
+    const onFocusIn = () => {
       const active = document.activeElement;
       if (
+        lastTab === null ||
         dialogStack.at(-1) !== dialog ||
-        active === null ||
-        active === document.body ||
         !isOutside(active)
       ) {
         return;
       }
       const inDialog = focusableWithin(dialog);
-      focusFirstOf(lastTab?.shiftKey ? inDialog.reverse() : inDialog, dialog, {
-        preventScroll: true,
-      });
-      if (lastTab !== null) {
-        window.scrollTo(lastTab.x, lastTab.y);
-      }
+      focusFirstOf(lastTab.shiftKey ? inDialog.reverse() : inDialog, dialog);
+      window.scrollTo(lastTab.x, lastTab.y);
     };
-    const onFocusIn = () => queueMicrotask(pullBack);
     document.addEventListener("focusin", onFocusIn);
 
     const onKeyDown = (event: KeyboardEvent) => {
@@ -169,8 +161,8 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         });
         const active = document.activeElement;
         // From the page body the browser runs Tab: after a focused control is
-        // removed it goes on from where that control was. Focus it lands
-        // outside is pulled back above.
+        // removed it goes on from where that control was. If it lands
+        // outside, it is pulled back above.
         if (active === null || active === document.body) {
           return;
         }

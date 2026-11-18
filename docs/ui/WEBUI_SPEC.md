@@ -1156,19 +1156,23 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   focus. The button is described by its toast's message, so it reads as more
   than "Close", the name the modal's backdrop shares.
 - **Modal focus.** While a modal is open, Tab keeps focus in the topmost
-  dialog and the toast stack. Focus that lands anywhere else, such as the page
-  behind or a dialog below, however it got there, is pulled back to the
-  dialog's first control, or its last after Shift+Tab, or to the dialog itself
-  when it has none, without scrolling the page; a Tab that landed it there and
-  scrolled the page is undone. So focus never walks the page behind. Tab from
-  the page body is the browser's: after a focused control is removed it goes
-  on from where that control was, and after a click on a toast's text it goes
-  to that toast's dismiss button. A control disabled while it holds focus, as
-  a confirm button is while its action runs, hands focus to the dialog itself
-  without scrolling, and focus does not go back when the control is enabled
-  again. Only that loss moves focus, so focus moves at most once per confirm,
-  not on every busy toggle, and a screen reader is not given the dialog to
-  announce anew each time.
+  dialog and the toast stack. A Tab that lands focus anywhere else, such as
+  the page behind or a dialog below, is pulled back to the dialog's first
+  control, or its last after Shift+Tab, or to the dialog itself when it has
+  none; the pulled-to control may scroll into view inside the dialog, and the
+  page's scroll that Tab made is undone (a scroller of its own on the page is
+  not). So Tab never walks the page behind. Focus that a script or the pointer
+  moves outside is left there, so a confirm can close its dialog and focus the
+  control behind it in any order; the next Tab from there enters the dialog at
+  its first control, or its last after Shift+Tab. Tab from the page body is
+  the browser's: after a focused control is removed it goes on from where that
+  control was, and after a click on a toast's text it goes to that toast's
+  dismiss button. A control disabled while it holds focus, as a confirm button
+  is while its action runs, hands focus to the dialog itself without
+  scrolling, and focus does not go back when the control is enabled again.
+  Only that loss moves focus, so focus moves at most once per confirm, not on
+  every busy toggle, and a screen reader is not given the dialog to announce
+  anew each time.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast
