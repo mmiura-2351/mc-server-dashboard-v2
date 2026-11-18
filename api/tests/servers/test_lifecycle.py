@@ -1421,6 +1421,8 @@ async def test_start_whose_hydrate_may_meet_an_instance_keeps_the_worker(
     assert stored.desired_state is DesiredState.RUNNING
     assert stored.assigned_worker_id == WorkerId(worker)
     assert stored.observed_state is ObservedState.UNKNOWN
+    # The placement's mark still stands: the Worker has not hydrated.
+    assert stored.awaiting_hydrate is True
     assert cp.decremented == []
     assert use_case.stop_intents.current(ServerId(server_id)) == 0
 
@@ -5248,6 +5250,8 @@ async def test_place_and_start_whose_hydrate_may_meet_an_instance_keeps_it(
     assert stored.desired_state is DesiredState.RUNNING
     assert stored.assigned_worker_id == WorkerId(worker)
     assert stored.observed_state is ObservedState.UNKNOWN
+    # The placement's mark still stands: the Worker has not hydrated.
+    assert stored.awaiting_hydrate is True
     assert cp.decremented == []
 
 
