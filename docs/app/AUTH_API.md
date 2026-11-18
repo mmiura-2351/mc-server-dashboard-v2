@@ -136,6 +136,17 @@ branches on exactly one contract:
   can name the missing permission in its denial toast (WEBUI_SPEC.md Section 7.4).
   This exposes only which permission a known endpoint requires —
   static catalog data (WEBUI_SPEC.md Section 2.2) — not resource existence.
+- A `503` with `reason: "worker_unavailable"` from a server's `start`, `stop`
+  or `restart` adds a `worker_state` extension member when the API knows why
+  the assigned Worker gave no answer: `"not_connected"` when it was not
+  connected or its session ended while the command waited, `"no_answer"` when
+  it is connected but the command was not answered in time. The member is
+  absent when the Worker itself answered that its container backend did not
+  cooperate, and when a data-plane setting the API needs is missing. The two
+  states need different recovery: a Worker that is not connected gets none on
+  its own ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6, "A Worker that
+  never reconnects"), so the Web UI words them apart (WEBUI_SPEC.md Section
+  7.4). Other routes that answer `worker_unavailable` do not carry it.
 - A `413` with `reason: "credential_required_for_body"` refuses a body past
   64 KiB that carries no valid credential: none, an invalid one, an expired
   token, or a deactivated account's ([`SECURITY.md`](SECURITY.md) Section 5).

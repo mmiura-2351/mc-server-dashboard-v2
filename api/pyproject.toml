@@ -13,7 +13,7 @@ dependencies = [
     # (2026-06-01) is inside the 7-day cooldown as of this change, so cap below
     # it; lift the cap to <2 once it ages out (docs/dev/DEPENDENCIES.md Section 3).
     "grpcio>=1.80.0,<1.86",
-    "protobuf>=6.31.1,<7",
+    "protobuf>=6.33.6,<7",
     # API framework stack (ARCHITECTURE.md Section 7.4). 0.x libraries cap the
     # next minor; 1.x+/2.x cap the next major (docs/dev/DEPENDENCIES.md Section 1). All
     # versions respect the 7-day cooldown (Section 3); each entry's comment dates
@@ -105,7 +105,7 @@ dependencies = [
     # servers/adapters/ (the domain stays stdlib-only; the import-linter
     # contract below pins that). 2.7 (2025-10-21) is well outside the 7-day
     # cooldown (Section 3); cap the next major.
-    "cronsim>=2.7,<3",                  # 2025-10-21
+    "cronsim>=2.8,<3",                  # 2025-10-21
 ]
 
 [dependency-groups]

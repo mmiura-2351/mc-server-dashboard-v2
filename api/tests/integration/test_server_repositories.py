@@ -339,6 +339,29 @@ async def test_list_ids_missing_game_port_finds_only_legacy_rows(
     assert tracked.game_port in taken
 
 
+async def test_existing_ids_answers_past_the_bind_parameter_limit(
+    engine: AsyncEngine,
+) -> None:
+    # A Worker's registration lists every held server and every unheld scratch dir
+    # (#3794), and asyncpg caps one statement at 32767 bind parameters, so the
+    # lookup must not bind one parameter per id (issue #3807). The existing ids sit
+    # past the limit.
+    community_id = await _seed_community(engine)
+    known = {
+        await _insert_legacy_server(engine, community_id, f"known-{n}")
+        for n in range(3)
+    }
+    unknown = [uuid.uuid4() for _ in range(40_000)]
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        existing = await uow.servers.existing_ids(
+            [ServerId(v) for v in [*unknown, *known]]
+        )
+
+    assert {s.value for s in existing} == known
+
+
 async def _grant_all(_code: str) -> bool:
     """A permissive ``authorize`` for tests that exercise non-authz behavior."""
 

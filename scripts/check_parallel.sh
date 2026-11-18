@@ -155,6 +155,14 @@ fi
 # or, with `mv` into an existing dir, at check-logs.prev/check-logs. With no
 # check-logs to move -- the run before was killed after its move and before
 # its mkdir -- .prev holds the newest logs there are, so it stays.
+#
+# A step that fails part-way is not undone: an entry in .prev that cannot be
+# removed stops the run after `rm -rf` has removed the rest of .prev. That is
+# accepted (#3774). What goes is the generation this rotation discards anyway,
+# check-logs is untouched, and the gate writes only plain files into its log
+# dir, so such an entry was put there by something else. Moving .prev aside
+# first would lose the same entries when the moved copy is removed, and add a
+# third name, whose leftover the next run must clear without nesting into it.
 git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || {
     echo "FAIL: not inside a git checkout (needed to locate the log dir)" >&2
     exit 1

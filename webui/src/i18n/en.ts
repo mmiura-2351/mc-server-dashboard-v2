@@ -302,17 +302,30 @@ export const en = {
   // #3673). A start refused that way is compensated back to stopped, which is
   // why start stays on workerUnavailable above; a restart whose relaunch was
   // refused shares restartUnconfirmed, since the reconciler starts the server if
-  // it stays down. Distinct from the *Pending pair
-  // above, which can say the server did not move; these can only say the
+  // it stays down and its Worker stays connected. Distinct from the *Pending
+  // pair above, which can say the server did not move; these can only say the
   // result is unconfirmed. What still stands differs by verb: the stop intent
   // is re-driven (the reconciler keeps retrying it), while restart keeps only
   // desired=running — an undelivered restart is never re-sent, and the
-  // reconciler starts the server only if it does end up down, which is why that
-  // string is conditional rather than a promise to bring it back.
+  // reconciler starts the server only if it does end up down and only while its
+  // Worker is connected, which is why that string is conditional rather than a
+  // promise to bring it back (issue #3820).
   "dashboard.lifecycle.stopUnconfirmed":
     "Could not reach the server host to confirm the stop. The server may already be shutting down; the stop still stands and the system will keep trying.",
   "dashboard.lifecycle.restartUnconfirmed":
-    "Could not reach the server host to confirm the restart. The server may already be coming back; if it stays down the system will start it again automatically.",
+    "Could not reach the server host to confirm the restart. The server may already be coming back; if it stays down, the system will start it again automatically as long as the host stays connected.",
+  // 503 worker_unavailable on stop / restart from a Worker the API names
+  // not_connected (issue #3820). Nothing recovers such a server on its own: the
+  // reconciler skips it until its Worker returns. A stop holds only until the
+  // release, which stops nothing on the host, and a restart is never re-sent.
+  // The way out is the manual move of CONFIGURATION.md 5.6 (stop, stop again,
+  // start), which is safe only once the old host is known to be down, since
+  // nothing fences an instance still alive there. The copy carries the steps
+  // and the precondition itself: not every reader has the repository docs.
+  "dashboard.lifecycle.stopWorkerOffline":
+    "The server host is offline. The stop still stands, and the server is released from that host after a while; if the host comes back before then, the server is stopped there. If the host is down for good, stop the server again to release it now, then start it to move it to another host. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
+  "dashboard.lifecycle.restartWorkerOffline":
+    "The server host is offline, so the system cannot restart the server. Restart it again once the host is back. To move it to another host instead, stop it, stop it again, then start it. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
   // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
