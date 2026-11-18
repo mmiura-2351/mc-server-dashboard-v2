@@ -16,11 +16,13 @@ since the fleet is cross-community infrastructure, not community-scoped:
   *marked*, not stopped. The stops (and snapshots) happen only after the
   reconciler's grace window (660s default) plus a tick, and only while the Worker
   stays connected — an operator MUST keep the Worker up until the stops converge,
-  since shutting the host down first defers every stop and snapshot until
-  reconnect (which never happens in a decommission). Confirm convergence PER
-  SERVER — each drain-marked server reaching ``observed=stopped`` and unassigned
-  — NOT by assigned load: drain decrements the placement load synchronously, so
-  ``GET /workers`` assigned load drops to 0 before any stop runs.
+  since if it disconnects first and stays gone, the reconciler releases each
+  server ``grace_seconds`` after the disconnect with no final snapshot: the
+  snapshot is skipped, not deferred (CONFIGURATION.md Section 5.6). Confirm
+  convergence PER SERVER — each drain-marked server reaching unassigned, at
+  ``observed=stopped`` (``unknown`` when its Worker went away first) — NOT by
+  assigned load: drain decrements the placement load synchronously, so ``GET
+  /workers`` assigned load drops to 0 before any stop runs.
 
   Clearing the drain flag before convergence opens a transient oversubscription
   window: the load was freed at drain time, so the re-enabled Worker can take new
@@ -87,8 +89,10 @@ class DrainResponse(BaseModel):
     # The number of assigned servers this drain call MARKED desired=stopped — an
     # async intent count, not the number already stopped. The reconciler then
     # drives the graceful stop + final snapshot while the Worker stays connected
-    # (FR-WRK-5); confirm convergence per server (each reaching observed=stopped
-    # and unassigned), NOT by assigned load — drain decrements the load
+    # (FR-WRK-5); a Worker still gone grace_seconds after its disconnect has its
+    # servers released with no final snapshot. Confirm convergence per server
+    # (each reaching unassigned, at observed=stopped, or unknown when its Worker
+    # went away first), NOT by assigned load — drain decrements the load
     # synchronously, so it drops to 0 before any stop runs.
     servers_stopped: int
 

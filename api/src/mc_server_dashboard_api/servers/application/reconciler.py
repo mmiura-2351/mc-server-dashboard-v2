@@ -24,9 +24,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   the assignment even on a timeout/lost-response failure, so subsequent ticks take
   the ``redispatch_start`` path to the SAME Worker rather than re-placing on a
   different one. The reconciler never places a started server on a different Worker
-  until an authoritative path (stop, worker-disconnect) clears the assignment —
-  otherwise the Worker's per-process double-start guard would not catch a second
-  live instance on another Worker.
+  until a stop's release clears the assignment (a Worker disconnect does not clear
+  it) — otherwise the Worker's per-process double-start guard would not catch a
+  second live instance on another Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final
@@ -80,8 +80,12 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   has no producer (see the first arm).
 - Disconnected Worker -> skip (``desired=running`` side only):
   ``observed=unknown`` is expected while the Worker is gone, and the reconnect
-  assignment rebuild owns that case (FR-WRK-4). The orphan path has no assigned
-  Worker, so it is unaffected by this skip.
+  assignment rebuild owns that case (FR-WRK-4). For a Worker that never
+  reconnects nothing re-places the server: an operator stop releases it (the
+  ``unknown`` arm above, after the grace or at once on a second stop), and a start
+  then places it elsewhere (CONFIGURATION.md Section 5.6; an automatic recovery is
+  issue #3809). The orphan path has no assigned Worker, so it is unaffected by this
+  skip.
 
 Grace window — a divergence is acted on only once it has persisted past a grace
 (measured from ``max(updated_at, observed_at or updated_at)`` — the later of the
@@ -660,7 +664,10 @@ class RunReconcilerTick:
             if not self.control_plane.is_worker_connected(
                 worker_id=server.assigned_worker_id
             ):
-                return None  # disconnected: reconnect rebuild owns it
+                # Disconnected: the reconnect rebuild owns it. A Worker that never
+                # reconnects leaves it here until an operator stop releases it
+                # (CONFIGURATION.md Section 5.6).
+                return None
             return "redispatch_start"
         # desired=stopped: the selection an operator stop of the same row also runs
         # (issue #3491), so the two cannot drift apart.

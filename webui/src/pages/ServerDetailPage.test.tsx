@@ -261,6 +261,28 @@ describe("ServerDetailPage scaffold + header", () => {
     ).toBeInTheDocument();
   });
 
+  // Stopping a crashed server ends at (stopped, crashed): at rest, so no hint
+  // even though the two states differ. The rule ignores the assignment, which
+  // the live frames do not carry (#3818).
+  it.each([null, "worker-a"])(
+    "shows no converging hint for a server that crashed under a stopped intent, Worker %s (#3285)",
+    async (worker) => {
+      mockApi.get.mockResolvedValue(
+        server({
+          desired_state: "stopped",
+          observed_state: "crashed",
+          assigned_worker_id: worker,
+        }),
+      );
+      renderPage();
+
+      await screen.findByRole("heading", { level: 1 });
+      expect(
+        screen.queryByText(t("serverDetail.converging")),
+      ).not.toBeInTheDocument();
+    },
+  );
+
   it("surfaces a load error", async () => {
     mockApi.get.mockRejectedValue(new ApiError(500, {}));
     renderPage();

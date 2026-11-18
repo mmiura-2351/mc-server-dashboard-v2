@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import IO, cast
 
+from mc_server_dashboard_api.archive_member import EndCheckedReader
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     dispatch_failure,
 )
@@ -156,14 +157,16 @@ _DECOMPRESS_CHUNK_BYTES = 1024 * 1024
 
 # What each archive reader raises when an uploaded archive's own bytes do not read
 # back (issue #3769), found by fuzzing both readers with truncated, garbage and
-# byte-flipped archives. A tar.gz fails in ``tarfile`` (``ReadError``: not gzip,
-# a bad header, damaged deflate data under a header; ``ValueError`` for a GNU
-# sparse PAX field that is not a number, which it converts with a bare ``int()``)
-# or, inside a member's data, in the gzip layer (``EOFError`` for a cut,
-# ``zlib.error`` for damaged deflate data, ``BadGzipFile``). Only damage a reader
-# reaches is caught: ``tarfile`` stops at the end-of-archive marker and the gzip
-# CRC is never checked, so a tar.gz damaged elsewhere reads "successfully"
-# (issue #3778). ``zipfile`` raises far more than ``BadZipFile``:
+# byte-flipped archives. Both tar.gz readers decompress with ``gzip.GzipFile``
+# and walk the tar through ``EndCheckedReader`` (issue #3778). A tar.gz fails in
+# the gzip layer (``BadGzipFile``: not gzip, a CRC32 or ISIZE that does not match,
+# bytes after the gzip stream that are neither a gzip member nor zero padding;
+# ``EOFError`` for a cut; ``zlib.error`` for damaged deflate data) or in
+# ``tarfile`` (``ReadError``: a bad first header, damaged deflate data under a
+# header; ``ValueError`` for a GNU sparse PAX field that is not a number, which it
+# converts with a bare ``int()``), and ``EndCheckedReader`` adds a ``ReadError``
+# for a walk that did not stop at the end-of-archive marker or anything but zeros
+# past it. ``zipfile`` raises far more than ``BadZipFile``:
 # ``zlib.error``, ``LZMAError`` and ``OSError`` (bzip2) for damaged member data,
 # ``EOFError`` for short member data, ``RuntimeError`` for an encrypted member and
 # (as its ``NotImplementedError`` subclass) for an unsupported compression method,
@@ -975,8 +978,11 @@ def _tar_gz_entries(
 ) -> Iterator[tuple[str, bytes]]:
     total = 0
     count = 0
-    with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
-        for member in tf:
+    with (
+        gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb") as gz,
+        tarfile.open(fileobj=(stream := EndCheckedReader(gz)), mode="r:") as tf,
+    ):
+        for member in stream.members(tf):
             if member.isdir():
                 continue
             # Only regular files are materialized; a symlink/hardlink/device/fifo
@@ -994,6 +1000,10 @@ def _tar_gz_entries(
             data = b"" if handle is None else _read_capped(handle, total, max_bytes)
             total += len(data)
             yield member.name, data
+        for chunk in stream.read_past_end_marker():
+            total += len(chunk)
+            if total > max_bytes:
+                raise FileTooLargeError(str(total))
 
 
 @dataclass(frozen=True)

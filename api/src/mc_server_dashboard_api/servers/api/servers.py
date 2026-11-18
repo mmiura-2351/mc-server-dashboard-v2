@@ -79,6 +79,9 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
 from mc_server_dashboard_api.servers.api.console_line import ConsoleLine
+from mc_server_dashboard_api.servers.application.command_dispatch import (
+    WORKER_UNAVAILABLE_REASON,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     ExportServer,
     ImportServer,
@@ -1430,7 +1433,7 @@ _LIFECYCLE_FAILURES = tuple(_LIFECYCLE_CLASSIFICATION)
 # The transient (ERROR) reasons render as 503; the refusals (DENIED) as 409.
 _SERVICE_UNAVAILABLE_REASONS = {
     "no_eligible_worker",
-    "worker_unavailable",
+    WORKER_UNAVAILABLE_REASON,
     "jar_unavailable",
     "seed_failed",
     "storage_unavailable",

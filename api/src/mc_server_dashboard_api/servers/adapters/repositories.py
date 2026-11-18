@@ -11,7 +11,18 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, cast
 
-from sqlalchemy import ColumnElement, CursorResult, and_, delete, or_, select, update
+from sqlalchemy import (
+    ColumnElement,
+    CursorResult,
+    and_,
+    any_,
+    bindparam,
+    delete,
+    or_,
+    select,
+    update,
+)
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -633,9 +644,14 @@ class SqlAlchemyServerRepository(ServerRepository):
     async def existing_ids(self, server_ids: list[ServerId]) -> set[ServerId]:
         if not server_ids:
             return set()
-        stmt = select(ServerModel.id).where(
-            ServerModel.id.in_([sid.value for sid in server_ids])
+        # One uuid[] parameter, not one per id: asyncpg caps a statement at 32767
+        # bind parameters, and a registration can list more ids than that (#3807).
+        ids = bindparam(
+            "server_ids",
+            [sid.value for sid in server_ids],
+            type_=ARRAY(ServerModel.id.type),
         )
+        stmt = select(ServerModel.id).where(ServerModel.id == any_(ids))
         rows = (await self._session.execute(stmt)).scalars().all()
         return {ServerId(row) for row in rows}
 

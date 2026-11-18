@@ -656,7 +656,8 @@ forbidden_modules = [
 # are deliberately free to import (the export manifest's `exported_at` stamp is
 # a file format, not an HTTP header) — and `archive_member`, the standard-library
 # backup archive member rule that storage's restore and the servers upload gate
-# both judge members by (issue #3579). Keep the list in step with that `ls`: a
+# both judge members by (issue #3579), and the end-of-archive read beside it
+# (issue #3778). Keep the list in step with that `ls`: a
 # new root-level module belongs here unless it is neutral in the same way.
 [[tool.importlinter.contracts]]
 name = "no context's domain or application imports a root-level module"

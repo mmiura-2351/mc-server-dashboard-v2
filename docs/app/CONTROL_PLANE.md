@@ -513,9 +513,13 @@ Section 5.1), which is set comfortably above the interval (FR-WRK-2).
 ### 4.4 Disconnect and reconnect
 
 A stream ends on a clean close, a transport error, or a missed-heartbeat
-timeout. On disconnect the API marks the Worker's servers accordingly
-(FR-WRK-4); those servers can be (re)started on another eligible Worker after a
-hydrate from authoritative storage. The Worker is responsible for reconnecting:
+timeout. On disconnect the API marks the Worker's servers `unknown` and keeps
+their assignment (FR-WRK-4), and the reconciler does not restart a
+`desired=running` one until the Worker reconnects. If it does not come back, an
+operator stop and then a start moves each server to another eligible Worker
+after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an
+automatic recovery is the open issue #3809). The Worker is responsible for
+reconnecting:
 it opens a fresh `Session` and re-`Register`s from scratch, re-advertising its
 capabilities. The control plane keeps **no** cross-stream session state —
 each connect is a clean registration, matching the stateless, replaceable nature
@@ -1106,10 +1110,16 @@ Table-driven tests hold both sides to it:
   are green;
 - the API test (`api/tests/servers/test_command_error_contract.py`) derives its
   expectations from the rows' API column: the sites the table declares must be
-  exactly the `CommandStatus` matches an `ast` scan finds under
-  `api/src/mc_server_dashboard_api/servers/application/`, so an API match on a
-  code the Worker never produces has no row to live on, and
-  a site added or removed in source fails the API suite;
+  exactly the matches an `ast` scan finds under
+  `api/src/mc_server_dashboard_api/servers/application/` and the HTTP edge
+  `servers/api/`. A match is a `CommandStatus` reference or a read of a reason
+  constant such as `WORKER_BUSY_REASON`, which is how the reconciler matches a
+  busy start and the backup and lifecycle routes a `worker_unavailable` refusal.
+  So an API match on a code the Worker never produces has no row to live on,
+  and a site added or removed in source fails the API suite. The scan sees a
+  reason only as a read of its constant by plain name: a literal, an attribute
+  access or an aliased import goes unseen, so a match site must read the
+  constant;
 - for the declared messages, the Worker test also asserts the driven emission is
   the text the row's `message` names (and that no declared message goes
   undriven), while the API test pins the discriminator constant to the declared
