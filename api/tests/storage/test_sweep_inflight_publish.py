@@ -26,7 +26,9 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.storage.adapters.failure_seam import (
+    CrashAt,
     FailureSeam,
+    InjectedCrash,
     PublishPhase,
 )
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -42,7 +44,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     RelPath,
     ServerId,
 )
-from tests.storage.fake_s3 import FakeS3Client, FakeS3Store
+from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
     drain,
     new_scope,
@@ -260,6 +262,24 @@ async def test_object_sweep_during_a_first_write_keeps_the_new_snapshot() -> Non
     assert await _hydrate(storage, community, server) == {"a": b"FIRST"}
 
 
+async def test_object_failed_commit_releases_its_new_snapshot_to_the_sweep() -> None:
+    """A publish that fails before its flip leaves an orphan this process reclaims."""
+
+    store = FakeS3Store()
+    storage = ObjectStorage(
+        fake_s3_factory(store), failure_seam=CrashAt(PublishPhase.AFTER_MOVE)
+    )
+    community, server = new_scope()
+    with pytest.raises(InjectedCrash):
+        await _publish(storage, community, server, NEW)
+    copied = _unpointed_snapshot_keys(store, community, server)
+
+    await storage.sweep()
+
+    assert copied
+    assert not copied & set(store.objects)
+
+
 async def test_object_sweep_reads_the_registration_before_the_pointer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -446,6 +466,27 @@ async def test_fs_sweep_during_a_first_write_keeps_the_new_snapshot(
 
     assert kept == {"a"}
     assert await _hydrate(storage, community, server) == {"a": b"FIRST"}
+
+
+# 4 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(4 * 10 + 30)
+async def test_fs_failed_commit_releases_its_new_snapshot_to_the_sweep(
+    tmp_path: Path,
+) -> None:
+    """A publish that fails before its flip leaves an orphan this process reclaims."""
+
+    storage = FsStorage(tmp_path, failure_seam=CrashAt(PublishPhase.AFTER_MOVE))
+    community, server = new_scope()
+    with pytest.raises(InjectedCrash):
+        await _publish(storage, community, server, NEW)
+    server_root = _server_root(tmp_path, community, server)
+    moved = _moved_snapshot(server_root, None)
+    left = _names(moved)
+
+    await asyncio.to_thread(storage.sweep)
+
+    assert left == set(NEW)
+    assert not moved.exists()
 
 
 # 7 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).

@@ -18,14 +18,38 @@ from starlette.requests import Request
 from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.app import create_app
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
+from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
+from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 
+def _use_backend(backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", backend)
+    if backend == "fs":
+        monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+        return
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ENDPOINT", "http://s3.invalid:8333")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__BUCKET", "mcsd")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__ACCESS_KEY", "ak")
+    monkeypatch.setenv("MCD_API_STORAGE__OBJECT__SECRET_KEY", "sk")
+    backing = FakeS3Store()
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.make_s3_client_factory",
+        lambda **_kwargs: fake_s3_factory(backing),
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend", "adapter"), [("fs", FsStorage), ("object", ObjectStorage)]
+)
 async def test_the_app_builds_one_storage_adapter_for_every_caller(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    backend: str,
+    adapter: type[FsStorage | ObjectStorage],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    built: list[FsStorage] = []
+    built: list[object] = []
 
-    class _Recorded(FsStorage):
+    class _Recorded(adapter):  # type: ignore[valid-type,misc]
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             built.append(self)
@@ -35,9 +59,8 @@ async def test_the_app_builds_one_storage_adapter_for_every_caller(
     async def _capture(sweep: object, *, tick_seconds: float) -> None:
         swept.append(sweep)
 
-    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
-    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
-    monkeypatch.setattr("mc_server_dashboard_api.app.FsStorage", _Recorded)
+    _use_backend(backend, tmp_path, monkeypatch)
+    monkeypatch.setattr(f"mc_server_dashboard_api.app.{adapter.__name__}", _Recorded)
     monkeypatch.setattr("mc_server_dashboard_api.app.run_storage_sweep_loop", _capture)
     app = create_app()
 
@@ -48,4 +71,4 @@ async def test_the_app_builds_one_storage_adapter_for_every_caller(
 
     assert len(built) == 1
     assert served is built[0]
-    assert swept == [built[0].sweep]
+    assert swept == [built[0].sweep]  # type: ignore[attr-defined]
