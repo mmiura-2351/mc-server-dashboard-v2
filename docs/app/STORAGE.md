@@ -442,18 +442,21 @@ data carries a handful at most. The members may also hold only so many
 characters of names, link names and PAX records in all: the gate allows 8 Mi,
 which its entry cap keeps out of a real archive's reach, and its refusal's
 detail names the limit. Restore and the probe have no entry cap, and a backup
-the platform writes holds a member for every file of the working set (131,072
-files with 64-character names already pass 8 Mi), so they allow 8 Mi plus
-16 Ki a member (issue #3859). A member the backup writers write holds its name
-twice, as the name and as its PAX `path` record, and a few short records
-(`mtime`; `size`, `uid`, `gid`, `uname` or `gname` when out of the ustar
-fields' range): under 9 Ki characters for a 4095-byte name, Linux's
-`PATH_MAX`, which bounds every name the fs writer reads from disk and the
-Worker packs. So every backup they write of such names passes, whatever its
-member count, and so does every archive the gate admits. An object store's key
-is bounded by the store's own key limit instead (1024 bytes on S3). Measured at that bound, a walk of 1,000
-members peaks at 24 MiB with ASCII values and 95 MiB with UCS-4 ones. Past any
-of these limits restore and the probe raise `ArchiveUnreadableError`. A sparse
+the platform writes holds a member for every file of the working set (with
+64-character names, about 96,000 files from the fs writer already pass 8 Mi,
+and 131,072 from the object writer), so they allow 8 Mi plus 16 Ki a member
+(issue #3859). A member the backup writers write holds its name twice, as the
+name and as its PAX `path` record, and a few short records (`mtime`; `size`,
+`uid`, `gid`, `uname` or `gname` when out of the ustar fields' range): under
+9 Ki characters for a 4095-byte name, Linux's `PATH_MAX`, which bounds every
+name the fs writer reads from disk and the Worker packs. So every backup the
+fs writer writes passes, whatever its member count, and so does every archive
+the gate admits. The object writer's names are the snapshot's object keys, so
+its backups pass alike only while every key is at most 4095 bytes, which
+nothing enforces yet (issue #3931). A walk of 1,000 members holding all the
+characters the limit allows, 8 Mi plus 16 Ki a member, peaks at 24 MiB with
+ASCII values and at 95 MiB with UCS-4 ones. Past any of these limits restore
+and the probe raise `ArchiveUnreadableError`. A sparse
 member's map is not bounded yet (issue #3869). The snapshot ingest applies none
 of these limits and no decompressed-size cap. All three refuse a chain of
 extended headers too long for `tarfile`, which reads them recursively: a few
@@ -548,10 +551,15 @@ not, and as `ArchiveUnreadableError` if it holds more than 1 MiB of headers
 before a member, a member with more than 32 PAX records (global ones included,
 such as GNU tar's `--xattrs` on a file with about 30 xattrs or more), members
 holding more than 8 Mi characters plus 16 Ki a member, or a chain of extended
-headers `tarfile` cannot read. The gate admitted all but the first until PR
-#3840 (issue #3810), and a backup the platform wrote of a working set near
-8 GiB can be the first. No backup the platform writes now is any of them: the
-writers stay under the cap and within the header limits.
+headers `tarfile` cannot read. The gate admitted all of them until PR #3840
+(issue #3810): it counted drained member data and the zeros past the marker
+only, so an upload stored before then can be the first too, as can a backup
+the platform wrote of a working set near 8 GiB. No backup the platform writes
+now is any of them while every object key is at most 4095 bytes: the writers
+stay under the cap, and within the header limits for names of that length.
+Nothing enforces that bound on keys yet (issue #3931), so a backup the object
+writer packs of longer keys can pass the character limit and read as
+`ArchiveUnreadableError`.
 
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
