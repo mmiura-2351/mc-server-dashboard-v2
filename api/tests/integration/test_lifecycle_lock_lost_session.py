@@ -12,6 +12,7 @@ DB-gated: skipped unless ``MCD_TEST_DATABASE_URL`` is set.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -119,3 +120,26 @@ async def test_a_session_that_no_longer_holds_the_lock_reports_it_lost(
                 {"key": lifecycle_lock_mod._lock_key(server_id)},
             )
             await held.ensure_held()
+
+
+async def test_a_check_that_gets_no_answer_in_time_reports_the_lock_lost(
+    engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A connection that stops answering (a silent network drop) cannot confirm
+    # the lock either, and a check waiting on it would hold the storage lock the
+    # fences run under. The check gives up, and leaving the hold does not wait on
+    # that connection again.
+    monkeypatch.setattr(lifecycle_lock_mod, "_CHECK_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(
+        lifecycle_lock_mod,
+        "_HELD_SQL",
+        text("SELECT true FROM pg_sleep(10) WHERE CAST(:key AS bigint) IS NOT NULL"),
+    )
+    lock = PgLifecycleLock(engine=engine)
+
+    async with asyncio.timeout(5):
+        with pytest.raises(LifecycleLockLostError):
+            async with lock.hold(ServerId(uuid.uuid4())) as held:
+                with pytest.raises(LifecycleLockLostError):
+                    await held.ensure_held()
+                await held.ensure_held()

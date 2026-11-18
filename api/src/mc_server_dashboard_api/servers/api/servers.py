@@ -136,6 +136,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidServerNameError,
     InvalidSlugError,
     InvalidSnapshotIntervalError,
+    LifecycleLockLostError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
     PermissionDeniedError,
@@ -1454,6 +1455,9 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     # ``server_busy`` (issue #876), the same retry-able conflict the gated routes
     # surface. Only start takes the lock, so stop/restart never raise this.
     ServerBusyError: (Outcome.DENIED, "server_busy"),
+    # The start lost that lock before its flip (issue #3927): nothing started,
+    # and the retry takes the lock afresh.
+    LifecycleLockLostError: (Outcome.ERROR, "lifecycle_lock_lost"),
     CommandDispatchError: (Outcome.DENIED, "command_failed"),
     ServerNotRunningError: (Outcome.DENIED, "server_not_running"),
     NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),
@@ -1472,6 +1476,7 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
 _LIFECYCLE_FAILURES = tuple(_LIFECYCLE_CLASSIFICATION)
 # The transient (ERROR) reasons render as 503; the refusals (DENIED) as 409.
 _SERVICE_UNAVAILABLE_REASONS = {
+    "lifecycle_lock_lost",
     "no_eligible_worker",
     WORKER_UNAVAILABLE_REASON,
     "jar_unavailable",
