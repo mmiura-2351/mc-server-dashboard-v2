@@ -44,6 +44,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId,
     Username,
 )
+from tests.argon2_diagnostics import argon2_mismatch_report
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.integration.migrate import downgrade_base, upgrade_head
 
@@ -143,9 +144,20 @@ def _log_in(client: TestClient) -> httpx2.Response:
     )
 
 
-@pytest.mark.usefixtures("alice", "first_login")
+def _assert_logged_in(response: httpx2.Response, user: User) -> None:
+    """Assert a 200. Nothing here can lock ``user`` out, so a 401 is argon2
+    refusing the correct password, the intermittent #3748: fail with its report."""
+    __tracebackhide__ = True
+    if response.status_code == 401:
+        raise AssertionError(
+            argon2_mismatch_report(password=_PASSWORD, stored_hash=user.password_hash)
+        )
+    assert response.status_code == 200
+
+
+@pytest.mark.usefixtures("first_login")
 def test_a_dummy_hash_build_failure_answers_503_until_a_build_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
+    alice: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     builds = _count_dummy_builds(monkeypatch, fail_first=True)
 
@@ -156,22 +168,23 @@ def test_a_dummy_hash_build_failure_answers_503_until_a_build_succeeds(
 
     assert failed.status_code == 503
     assert failed.json()["reason"] == "password_verification_unavailable"
-    assert recovered.status_code == 200
-    assert again.status_code == 200
+    _assert_logged_in(recovered, alice)
+    _assert_logged_in(again, alice)
     # The failure was not remembered, and the success was: two builds, not three.
     assert len(builds) == 2
     # Off the event loop, on the dedicated KDF pool (#1696).
     assert all(name.startswith("password-kdf") for name in builds), builds
 
 
-@pytest.mark.usefixtures("alice", "first_login")
+@pytest.mark.usefixtures("first_login")
 def test_concurrent_first_logins_build_the_dummy_hash_once(
-    monkeypatch: pytest.MonkeyPatch,
+    alice: User, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     builds = _count_dummy_builds(monkeypatch, hold_s=0.3)
 
     with _client() as client, ThreadPoolExecutor(max_workers=4) as pool:
         responses = list(pool.map(lambda _: _log_in(client), range(4)))
 
-    assert [r.status_code for r in responses] == [200] * 4
+    for response in responses:
+        _assert_logged_in(response, alice)
     assert len(builds) == 1

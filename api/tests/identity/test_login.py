@@ -276,6 +276,28 @@ async def test_dummy_hash_build_failure_is_no_failed_attempt(username: str) -> N
     assert uow.refresh_tokens.by_hash == {}
 
 
+async def test_a_blocked_login_does_not_build_the_dummy_hash() -> None:
+    # A blocked login verifies nothing, so it needs no dummy hash: it keeps its
+    # uniform 401 and Retry-After even while the hasher cannot build one.
+    uow = FakeUnitOfWork()
+    uow.users.seed(make_user(password=_PASSWORD))
+    attempts = FakeLoginAttemptStore()
+    await attempts.lock(
+        "alice", locked_until=_NOW + dt.timedelta(minutes=10), lockout_count=1
+    )
+    hasher = _CountingHasher(failures=1)
+    login = replace(
+        _login(uow, RecordingFailureDelay(), attempts),
+        dummy_password_hash=DummyPasswordHash(hasher, "x"),
+    )
+
+    with pytest.raises(InvalidCredentialsError) as exc_info:
+        await login(username="alice", password=_PASSWORD, ip="198.51.100.1")
+
+    assert exc_info.value.retry_after == 600
+    assert hasher.hash_calls == 0
+
+
 async def test_a_failed_dummy_hash_build_is_not_kept() -> None:
     hasher = _CountingHasher(failures=1)
     dummy = DummyPasswordHash(hasher, "__dummy__")
