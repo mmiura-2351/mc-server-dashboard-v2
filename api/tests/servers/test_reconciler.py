@@ -2818,6 +2818,190 @@ async def test_a_failed_stop_of_a_server_kept_on_its_worker_is_sent_again() -> N
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
+# The hydrate refusals that leave an instance of the server on the placed Worker
+# possible (issue #3890), as the contract table names their Worker states.
+_HYDRATE_REFUSALS_KEEPING_THE_WORKER = [
+    pytest.param("command_in_flight", id="busy-in-flight"),
+    pytest.param("orphan_pending", id="busy-orphan"),
+    pytest.param("untracked_container", id="unavailable"),
+    pytest.param("command_expired", id="expired"),
+]
+
+
+def _hydrate_refused(precondition: str) -> CommandOutcome:
+    return CommandOutcome(
+        status=worker_status("HydrateTrigger", precondition), message="refused"
+    )
+
+
+@pytest.mark.parametrize("precondition", _HYDRATE_REFUSALS_KEEPING_THE_WORKER)
+async def test_a_placement_whose_hydrate_may_meet_an_instance_retries_that_worker(
+    precondition: str,
+) -> None:
+    # Issue #3890. An unplaced running intent is placed on worker A, which refuses
+    # the hydrate with an answer that leaves an instance of the server there
+    # possible. The tick keeps A, so each tick past the grace and any backoff
+    # retries A, never worker B, which the next placement would pick. Once A's
+    # reservation, orphan, leftover or queue clears, the retry hydrates and
+    # starts the server on A.
+    worker_a, worker_b = WorkerId(uuid.uuid4()), WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.UNKNOWN, worker=None
+    )
+    uow.servers.seed(server)
+    hydrate_outcomes = {worker_a: _hydrate_refused(precondition)}
+    cp = PlacementSequenceControlPlane(
+        places=[worker_a, worker_b], hydrate_outcomes=hydrate_outcomes
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()  # placed on A and refused
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+    await reconciler.tick()  # A again, refused again
+    del hydrate_outcomes[worker_a]
+    clock.set(_NOW + dt.timedelta(seconds=2 * (_GRACE + 1)))
+    await reconciler.tick()  # A answers
+
+    assert cp.dispatched == [
+        ("hydrate", worker_a, server.id),
+        ("hydrate", worker_a, server.id),
+        ("hydrate", worker_a, server.id),
+        ("start", worker_a, server.id),
+    ]
+
+
+@pytest.mark.parametrize("precondition", _HYDRATE_REFUSALS_KEEPING_THE_WORKER)
+async def test_a_kept_placement_whose_worker_disconnects_waits_for_the_release(
+    precondition: str,
+) -> None:
+    # Issue #3890. Worker A kept the server after refusing its hydrate, then its
+    # session ended. While A is gone the reconciler places the server nowhere
+    # else. What releases it is what releases any server of a Worker that does
+    # not come back (CONTROL_PLANE.md Section 4.4): an operator stop, which
+    # cannot reach A, and the release the reconciler then owes that stop. Only a
+    # start after that places the server on worker B.
+    worker_a, worker_b = WorkerId(uuid.uuid4()), WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.UNKNOWN, worker=None
+    )
+    uow.servers.seed(server)
+    connected = {worker_a: True, worker_b: True}
+    cp = PlacementSequenceControlPlane(
+        places=[worker_a, worker_b],
+        hydrate_outcomes={worker_a: _hydrate_refused(precondition)},
+        connected=connected,
+        # The stop cannot reach a Worker with no session (the fake still records
+        # the attempt).
+        unavailable_kinds={"stop"},
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    await reconciler.tick()  # placed on A and refused
+    connected[worker_a] = False
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+    await reconciler.tick()  # A is gone: nothing to do
+
+    with pytest.raises(WorkerUnavailableError):
+        await reconciler.make_stop_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    clock.set(_NOW + dt.timedelta(seconds=2 * (_GRACE + 1)))
+    await reconciler.tick()  # the stop's release
+    await reconciler.make_start_server()(
+        community_id=server.community_id, server_id=server.id
+    )
+
+    assert cp.dispatched == [
+        ("hydrate", worker_a, server.id),
+        ("stop", worker_a, server.id),
+        ("hydrate", worker_b, server.id),
+        ("start", worker_b, server.id),
+    ]
+
+
+@pytest.mark.parametrize("entry", ["placement", "user-start"])
+async def test_a_kept_server_that_read_running_without_a_worker_is_retried(
+    entry: str,
+) -> None:
+    # Issue #3890. A row with no Worker can still read observed=running, which no
+    # Worker reports on any more (#3740). Kept on worker A after a refused
+    # hydrate, it would then read converged, and nothing would retry the start
+    # that was never sent. The keep records observed=unknown, so the reconciler
+    # retries the start on A once the grace lapses.
+    worker_a, worker_b = WorkerId(uuid.uuid4()), WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=(
+            DesiredState.RUNNING if entry == "placement" else DesiredState.STOPPED
+        ),
+        observed=ObservedState.RUNNING,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = PlacementSequenceControlPlane(
+        places=[worker_a, worker_b],
+        hydrate_outcomes={worker_a: _hydrate_refused("command_in_flight")},
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    if entry == "placement":
+        await reconciler.tick()
+    else:
+        with pytest.raises(CommandDispatchError):
+            await reconciler.make_start_server()(
+                community_id=server.community_id, server_id=server.id
+            )
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+
+    await reconciler.tick()
+
+    assert cp.dispatched == [
+        ("hydrate", worker_a, server.id),
+        ("hydrate", worker_a, server.id),
+    ]
+
+
+async def test_a_failed_stop_after_a_refused_hydrate_is_sent_again() -> None:
+    # Issue #3890. A user start kept the server on its Worker after a hydrate
+    # refused over a failed-stop orphan, which may still be running. The
+    # operator's stop then fails to dispatch. The reconciler sends the stop again.
+    # It must not take the final snapshot and release the row, as it would for
+    # the row's earlier observed=stopped: no start was sent, and the release
+    # would leave that orphan running under no Worker.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED, observed=ObservedState.STOPPED, worker=None
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={
+            "hydrate": _hydrate_refused("orphan_pending"),
+            "stop": CommandOutcome(status=CommandStatus.INTERNAL, message="boom"),
+        },
+    )
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+    with pytest.raises(CommandDispatchError):
+        await reconciler.make_start_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    with pytest.raises(CommandDispatchError):
+        await reconciler.make_stop_server()(
+            community_id=server.community_id, server_id=server.id
+        )
+    cp.dispatched.clear()
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE + 1))
+
+    await reconciler.tick()
+
+    assert cp.dispatched == [("stop", _WORKER, server.id)]
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
 # --- concurrent dispatch (#871) --------------------------------------------
 
 

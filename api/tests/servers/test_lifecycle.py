@@ -1039,30 +1039,21 @@ async def test_expired_start_compensates() -> None:
     assert cp.decremented == [WorkerId(worker)]
 
 
-@pytest.mark.parametrize(
-    ("leg", "kind", "precondition"),
-    [
-        # The driver's create/start timed out, or it could not remove a leftover
-        # container of the server (issue #3673): the start itself was refused.
-        ("start", "StartServer", "backend_unavailable"),
-        # The hydrate before it met a leftover the Worker could not end (issue
-        # #3678): the start was never sent.
-        ("hydrate", "HydrateTrigger", "untracked_container"),
-    ],
-)
-async def test_unavailable_start_compensates_and_renders_worker_unavailable(
-    leg: str, kind: str, precondition: str
-) -> None:
-    # Nothing was started, so the committed intent compensates as for any refused
-    # start. The reason is the transient ``worker_unavailable``, not the catch-all
-    # ``command_failed`` nor the contention ``worker_busy``.
+async def test_unavailable_start_compensates_and_renders_worker_unavailable() -> None:
+    # The driver's create/start timed out, or it could not remove a leftover
+    # container of the server (issue #3673): the start itself was refused, so the
+    # committed intent compensates as for any refused start. The reason is the
+    # transient ``worker_unavailable``, not the catch-all ``command_failed`` nor
+    # the contention ``worker_busy``. A hydrate refused the same way keeps the
+    # server on its Worker instead (issue #3890), pinned below.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community_id=community, server_id=server_id))
     refused = CommandOutcome(
-        status=worker_status(kind, precondition), message="backend unavailable"
+        status=worker_status("StartServer", "backend_unavailable"),
+        message="backend unavailable",
     )
-    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={leg: refused})
+    cp = FakeControlPlane(place_to=WorkerId(worker), outcomes={"start": refused})
     use_case = StartServer(
         uow=uow,
         control_plane=cp,
@@ -1245,44 +1236,6 @@ async def test_start_busy_outcome_keeps_assignment_without_converging() -> None:
     assert cp.decremented == []
 
 
-async def test_start_pre_dispatch_busy_compensates() -> None:
-    # A BUSY on the HYDRATE (the same reservation race, before the start is sent):
-    # the start never reached the Worker, so __call__ must compensate normally
-    # (desired->stopped + unassign + decrement), exactly as a failed hydrate
-    # does. The post-dispatch keep-assignment arm is gated on
-    # ``dispatch.attempted`` so this pre-dispatch case falls through to compensation.
-    community, server_id, worker = _ids()
-    uow = FakeUnitOfWork()
-    uow.servers.seed(_server(community_id=community, server_id=server_id))
-    cp = FakeControlPlane(
-        place_to=WorkerId(worker),
-        outcomes={
-            "hydrate": CommandOutcome(status=CommandStatus.BUSY, message="in flight")
-        },
-    )
-    use_case = StartServer(
-        uow=uow,
-        control_plane=cp,
-        clock=FakeClock(_NOW),
-        jar_provisioner=FakeJarProvisioner(),
-        store_generation=FakeStoreGenerationReader(),
-        file_store=FakeFileStore(seed_eula=True),
-    )
-
-    with pytest.raises(CommandDispatchError):
-        await use_case(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
-        )
-
-    # Only hydrate was dispatched; start was never reached, so the intent reverts.
-    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
-    reverted = uow.servers.by_id[ServerId(server_id)]
-    assert reverted.desired_state is DesiredState.STOPPED
-    assert reverted.assigned_worker_id is None
-    assert cp.incremented == [WorkerId(worker)]
-    assert cp.decremented == [WorkerId(worker)]
-
-
 # The Worker's answer to a hydrate of a server it already runs (issue #3865): the
 # code is the contract row's, so these tests track what the Worker really emits.
 _HYDRATE_OVER_LIVE_INSTANCE = CommandOutcome(
@@ -1396,6 +1349,96 @@ async def test_start_after_a_hydrate_found_the_server_live_places_no_second() ->
     )
     # The first start's own answer is pinned by the test above.
     with pytest.raises((InvalidLifecycleTransitionError, CommandDispatchError)):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    with pytest.raises(InvalidLifecycleTransitionError):
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == [("hydrate", WorkerId(worker_a), ServerId(server_id))]
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(
+        worker_a
+    )
+
+
+# The hydrate refusals that leave an instance of the server on the placed Worker
+# possible (issue #3890), as the contract table names their Worker states:
+# another command holds a reservation for the server, a failed-stop orphan may
+# still run, a container the Worker does not track may run against the working
+# set, or the hydrate waited past its budget and was never looked at.
+_HYDRATE_REFUSALS_KEEPING_THE_WORKER = [
+    pytest.param("command_in_flight", id="busy-in-flight"),
+    pytest.param("orphan_pending", id="busy-orphan"),
+    pytest.param("untracked_container", id="unavailable"),
+    pytest.param("command_expired", id="expired"),
+]
+
+# The reason each of them answers a start with, as it does today.
+_REASON_FOR_REFUSED_HYDRATE = {
+    "command_in_flight": "worker_busy",
+    "orphan_pending": "worker_busy",
+    "untracked_container": "worker_unavailable",
+    "command_expired": "command_expired",
+}
+
+
+def _hydrate_refused(precondition: str) -> CommandOutcome:
+    return CommandOutcome(
+        status=worker_status("HydrateTrigger", precondition), message="refused"
+    )
+
+
+@pytest.mark.parametrize("precondition", _HYDRATE_REFUSALS_KEEPING_THE_WORKER)
+async def test_start_whose_hydrate_may_meet_an_instance_keeps_the_worker(
+    precondition: str,
+) -> None:
+    # Issue #3890. The placed Worker refused the hydrate with an answer that does
+    # not rule out an instance of this server there. Reverting would let a later
+    # start place the server on another Worker while that instance runs, so the
+    # start keeps desired=running on this Worker for the reconciler to retry. It
+    # records observed=unknown, never running, and answers the refusal's reason.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={"hydrate": _hydrate_refused(precondition)},
+    )
+    use_case = _start_server(uow, cp)
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await use_case(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == _REASON_FOR_REFUSED_HYDRATE[precondition]
+    assert [kind for kind, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert cp.decremented == []
+    assert use_case.stop_intents.current(ServerId(server_id)) == 0
+
+
+@pytest.mark.parametrize("precondition", _HYDRATE_REFUSALS_KEEPING_THE_WORKER)
+async def test_start_after_a_hydrate_that_may_meet_an_instance_places_no_second(
+    precondition: str,
+) -> None:
+    # Issue #3890. Once worker A kept the server, a second start is refused and
+    # sends nothing to worker B, the next Worker placement would pick.
+    community, server_id, worker_a, worker_b = (*_ids(), uuid.uuid4())
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community_id=community, server_id=server_id))
+    cp = PlacementSequenceControlPlane(
+        places=[WorkerId(worker_a), WorkerId(worker_b)],
+        hydrate_outcomes={WorkerId(worker_a): _hydrate_refused(precondition)},
+    )
+    use_case = _start_server(uow, cp)
+    with pytest.raises(CommandDispatchError):
         await use_case(
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
@@ -4539,10 +4582,17 @@ async def test_place_and_start_always_hydrates_even_if_worker_holds_working_set(
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
 
 
-async def test_place_and_start_pre_dispatch_failure_unassigns() -> None:
+@pytest.mark.parametrize(
+    "status", [CommandStatus.INTERNAL, CommandStatus.TRANSFER_FAILED]
+)
+async def test_place_and_start_pre_dispatch_failure_unassigns(
+    status: CommandStatus,
+) -> None:
     # A failure BEFORE the start command is sent (here a failed hydrate) must NOT
     # flip desired to stopped (the running intent is authoritative) but IS safe to
     # unassign so a later tick re-places: no start ever reached a Worker (#101).
+    # TRANSFER_FAILED is the Worker's answer once it has ruled out any instance of
+    # the server and held the id through the failed transfer (issue #3890).
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -4556,9 +4606,7 @@ async def test_place_and_start_pre_dispatch_failure_unassigns() -> None:
     )
     cp = FakeControlPlane(
         place_to=WorkerId(worker),
-        outcomes={
-            "hydrate": CommandOutcome(status=CommandStatus.INTERNAL, message="boom")
-        },
+        outcomes={"hydrate": CommandOutcome(status=status, message="boom")},
     )
     with pytest.raises(CommandDispatchError):
         await _start_server(uow, cp).place_and_start(
@@ -4624,13 +4672,21 @@ async def test_place_and_start_whose_hydrate_finds_the_server_live_keeps_it() ->
 class _ReleasedWhileHydrating(FakeControlPlane):
     """A stop releases the row while the Worker answers the hydrate refused.
 
-    The Worker already runs the server; the release lands between its answer and
-    the placement's write of ``observed=running``.
+    By default the Worker already runs the server; the release lands between its
+    answer and the placement's write of ``observed=running``. ``answer`` gives
+    the hydrate another refusal (issue #3890).
     """
 
-    def __init__(self, uow: FakeUnitOfWork, *, place_to: WorkerId) -> None:
+    def __init__(
+        self,
+        uow: FakeUnitOfWork,
+        *,
+        place_to: WorkerId,
+        answer: CommandOutcome = _HYDRATE_OVER_LIVE_INSTANCE,
+    ) -> None:
         super().__init__(place_to=place_to)
         self._uow = uow
+        self._answer = answer
 
     async def hydrate(
         self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
@@ -4641,7 +4697,7 @@ class _ReleasedWhileHydrating(FakeControlPlane):
         released = self._uow.servers.by_id[server_id]
         released.desired_state = DesiredState.STOPPED
         released.assigned_worker_id = None
-        return _HYDRATE_OVER_LIVE_INSTANCE
+        return self._answer
 
 
 async def test_place_and_start_records_no_running_on_a_row_released_meanwhile() -> None:
@@ -4680,6 +4736,77 @@ async def test_place_and_start_records_no_running_on_a_row_released_meanwhile() 
         ObservedState.UNKNOWN
     )
     assert tunnel_sync.calls == []
+
+
+@pytest.mark.parametrize("precondition", _HYDRATE_REFUSALS_KEEPING_THE_WORKER)
+async def test_place_and_start_whose_hydrate_may_meet_an_instance_keeps_it(
+    precondition: str,
+) -> None:
+    # Issue #3890. The placed Worker refused the hydrate with an answer that does
+    # not rule out an instance of this server there, so unassigning would let a
+    # later tick place the server on another Worker while that instance runs. The
+    # placement keeps this Worker and sends no start. The row read running before
+    # it had a Worker, which says nothing about this one, so it records
+    # observed=unknown: the reconciler then retries the start here.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={"hydrate": _hydrate_refused(precondition)},
+    )
+
+    with pytest.raises(CommandDispatchError) as excinfo:
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert excinfo.value.reason == _REASON_FOR_REFUSED_HYDRATE[precondition]
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.RUNNING
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.observed_state is ObservedState.UNKNOWN
+    assert cp.decremented == []
+
+
+async def test_place_and_start_records_no_unknown_on_a_row_released_meanwhile() -> None:
+    # Issue #3890. The write of observed=unknown asserts the Worker it is about:
+    # once a stop released the row, that row names no Worker, and its observed
+    # state is left alone.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.STOPPED,
+            worker_id=None,
+        )
+    )
+    cp = _ReleasedWhileHydrating(
+        uow,
+        place_to=WorkerId(worker),
+        answer=_hydrate_refused("command_in_flight"),
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await _start_server(uow, cp).place_and_start(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert uow.servers.by_id[ServerId(server_id)].observed_state is (
+        ObservedState.STOPPED
+    )
 
 
 async def test_place_and_start_lost_response_keeps_assignment() -> None:

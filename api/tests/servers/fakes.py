@@ -2096,7 +2096,9 @@ class PlacementSequenceControlPlane(FakeControlPlane):
 
     The last Worker keeps taking every later placement. ``hydrate_outcomes``
     answers a hydrate per Worker, so a test can have one Worker refuse it and see
-    where the next placement lands (issue #3865).
+    where the next placement lands (issue #3865). The fake reads the dict, and
+    ``connected``, on every call, so a test can change a Worker's answer or take it
+    offline between ticks (issue #3890).
     """
 
     def __init__(
@@ -2104,8 +2106,14 @@ class PlacementSequenceControlPlane(FakeControlPlane):
         *,
         places: list[WorkerId],
         hydrate_outcomes: dict[WorkerId, CommandOutcome],
+        connected: dict[WorkerId, bool] | None = None,
+        unavailable_kinds: set[str] | None = None,
     ) -> None:
-        super().__init__(place_to=places[0])
+        super().__init__(
+            place_to=places[0],
+            connected=connected,
+            unavailable_kinds=unavailable_kinds,
+        )
         self._next_places = places[1:]
         self._hydrate_outcomes = hydrate_outcomes
 
