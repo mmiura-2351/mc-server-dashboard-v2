@@ -53,16 +53,24 @@ export function atRest(state: ObservedState, desired?: string): boolean {
 }
 
 /**
- * Whether the observed state has yet to reach the intent — the "applying…"
- * hint (WEBUI_SPEC.md 6.4). A running intent is reached only by `running`. A
- * stopped intent is reached by any at-rest state, whether or not a Worker is
- * still assigned: a server that crashed under it is as settled as a stopped
- * one (#3285). With a Worker assigned the reconciler may still owe it work (a
- * final snapshot, the release, or a stop), but the live status frames do not
- * carry the assignment, so a hint keyed on it would go stale (#3818).
+ * Whether the server has yet to converge on its intent — the "applying…" hint
+ * (WEBUI_SPEC.md 6.4). A running intent is reached only by `running`. A
+ * stopped intent is reached by any at-rest state — a server that crashed under
+ * it is as settled as a stopped one (#3285) — once no Worker is `assigned`:
+ * while one is, the stop is still finishing (its final snapshot and the
+ * release, or for an `unknown` server the stop itself) and the API refuses a
+ * start. The live status frames carry every release, so the assignment is as
+ * fresh as the states (#3818).
  */
-export function converging(state: ObservedState, desired: string): boolean {
-  return state !== desired && !atRest(state, desired);
+export function converging(
+  state: ObservedState,
+  desired: string,
+  assigned: boolean,
+): boolean {
+  if (atRest(state, desired)) {
+    return assigned;
+  }
+  return state !== desired;
 }
 
 /**
@@ -140,13 +148,20 @@ export function statePill(state: ObservedState): PillSpec {
 /**
  * Whether a lifecycle action applies to the current observed state. While
  * transitional, nothing applies; otherwise start needs an at-rest/crashed
- * server, and stop/restart need a running one.
+ * server with no Worker `assigned`, and stop/restart need a running one. A
+ * stop holds the assignment until its final snapshot settles and the Worker is
+ * released, and the API refuses a start until then (409 `transition_conflict`,
+ * issue #3818; see {@link startAwaitsRelease}).
  *
  * Under a running intent, stop also applies to a crashed or unknown server, and
  * restart to an unknown one. Restart does not apply to a crashed one: the
  * Worker holds no live instance, so the API refuses it (409
  * `server_not_running`) and the reconciler restarts the server on its own
- * (issue #3419).
+ * (issue #3419). With no Worker `assigned` (a start the reconciler has yet to
+ * place) stop applies to a stopped, crashed or unknown server: the API
+ * withdraws the intent, with no Worker to tell (issue #3815). Not to a running
+ * one: the stopped intent would keep reading running, with no Worker to report
+ * otherwise, and nothing converges that.
  *
  * Under a stopped intent, stop applies exactly while a Worker is still
  * `assigned`: the API then runs the convergence the reconciler would (a drain
@@ -167,11 +182,14 @@ export function actionApplies(
     return false;
   }
   if (action === "start") {
-    if (desired === "running") return false;
+    if (desired === "running" || assigned === true) return false;
     return state === "stopped" || state === "crashed" || state === "unknown";
   }
   if (action === "stop" && desired === "stopped") {
     return assigned === true;
+  }
+  if (action === "stop" && desired === "running" && assigned === false) {
+    return state === "stopped" || state === "crashed" || state === "unknown";
   }
   if (action === "restart" && (desired === "stopped" || assigned === false)) {
     return false;
@@ -184,4 +202,18 @@ export function actionApplies(
     return action === "stop";
   }
   return state === "running";
+}
+
+/**
+ * Whether Start is held back only by the assignment: it would apply, but the
+ * previous stop still holds its Worker (#3818). The controls then show a
+ * disabled Start that says it waits for the release, rather than a Start the
+ * API refuses or no Start at all.
+ */
+export function startAwaitsRelease(
+  state: ObservedState,
+  desired: string,
+  assigned: boolean,
+): boolean {
+  return assigned && actionApplies("start", state, desired, false);
 }

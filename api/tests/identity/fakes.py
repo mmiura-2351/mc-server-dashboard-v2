@@ -372,14 +372,17 @@ class FakeUnitOfWork(UnitOfWork):
     # reach their inspection helpers (``seed`` / ``by_hash``) without casts.
     users: FakeUserRepository
     refresh_tokens: FakeRefreshTokenRepository
+    ownership: FakeCommunityOwnership
 
     def __init__(
         self,
         users: FakeUserRepository | None = None,
         refresh_tokens: FakeRefreshTokenRepository | None = None,
+        ownership: FakeCommunityOwnership | None = None,
     ) -> None:
         self.users = users or FakeUserRepository()
         self.refresh_tokens = refresh_tokens or FakeRefreshTokenRepository()
+        self.ownership = ownership or FakeCommunityOwnership()
         self.commits = 0
 
     async def __aenter__(self) -> "FakeUnitOfWork":
@@ -398,18 +401,19 @@ class FakeUnitOfWork(UnitOfWork):
 class StubHasher(PasswordHasher):
     """Treats a hash of the form ``hashed::<plaintext>`` as the stored hash.
 
-    Counts ``verify`` calls so tests can assert the unknown-user and
-    wrong-password paths both run a verify (timing-enumeration defence).
+    Records each ``verify`` call's ``(plaintext, password_hash)`` so tests can
+    assert the unknown-user and wrong-password paths both run a verify, and
+    against which hash (timing-enumeration defence).
     """
 
     def __init__(self) -> None:
-        self.verify_calls = 0
+        self.verified: list[tuple[str, str]] = []
 
     async def hash(self, plaintext: str) -> str:
         return f"hashed::{plaintext}"
 
     async def verify(self, plaintext: str, password_hash: str) -> bool:
-        self.verify_calls += 1
+        self.verified.append((plaintext, password_hash))
         return password_hash == f"hashed::{plaintext}"
 
 

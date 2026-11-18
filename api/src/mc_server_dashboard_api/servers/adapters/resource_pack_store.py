@@ -33,20 +33,24 @@ behind:
   the multipart upload before it reports the outage, and an incomplete upload is
   never an object — but not always: when the store completes the upload and the
   response is lost, the abort finds nothing to undo and the completed blob
-  stays, referenced by no row and therefore never served. Reclaiming it is
-  issue #3277. Every upload mints a fresh pack id, so a retry shares no key with
-  the failed attempt either way: the upload route answers 503
-  ``storage_unavailable``.
+  stays, referenced by no row and therefore never served, until the
+  resource-pack GC reclaims it (issue #3277). Every upload mints a fresh pack id,
+  so a retry shares no key with the failed attempt either way: the upload route
+  answers 503 ``storage_unavailable``.
 - An interrupted :meth:`delete` may have removed some of the pack's objects. It
   is idempotent — it re-lists the prefix, and the store treats deleting an absent
   key as success — so re-running it finishes the job. Its one caller commits the
   row's delete first and treats this as best-effort cleanup, so the outage is
   logged there rather than answered: the pack is already gone, and a 503 would
-  invite a retry that can only find a 404.
+  invite a retry that can only find a 404. The same GC reclaims what it leaves.
+
+:meth:`list_entries` feeds that GC: every blob under the namespace, with its key,
+the pack id the key names and its store time.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
@@ -57,16 +61,43 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.resource_pack import ResourcePackId
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
+    StoredBlob,
 )
-from mc_server_dashboard_api.storage.adapters.object_store import S3ClientFactory
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    KeyNamespace,
+    S3ClientFactory,
+)
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
 )
 
 
+def _prefix(pack_id: ResourcePackId) -> str:
+    return f"{KeyNamespace.RESOURCE_PACKS}{pack_id.value}/"
+
+
 def _key(pack_id: ResourcePackId, filename: str) -> str:
-    return f"resource-packs/{pack_id.value}/{filename}"
+    return _prefix(pack_id) + filename
+
+
+def _pack_id_of(key: str) -> ResourcePackId | None:
+    """The pack a ``resource-packs/<pack-id>/<filename>`` key names, else ``None``.
+
+    Only a key :func:`_key` could have built names a pack: a canonical UUID and a
+    non-empty filename. A stray key under the namespace is no pack's, so it is
+    neither an error (one would stop every GC pass for good) nor a pack id the GC
+    could act on (issue #3277).
+    """
+
+    head, _, filename = key.removeprefix(KeyNamespace.RESOURCE_PACKS).partition("/")
+    try:
+        pack_uuid = uuid.UUID(head)
+    except ValueError:
+        return None
+    if not filename or str(pack_uuid) != head:
+        return None
+    return ResourcePackId(pack_uuid)
 
 
 class ObjectResourcePackStore(ResourcePackStore):
@@ -117,7 +148,7 @@ class ObjectResourcePackStore(ResourcePackStore):
             raise ResourcePackStorageUnavailableError(key) from exc
 
     async def delete(self, pack_id: ResourcePackId) -> None:
-        prefix = f"resource-packs/{pack_id.value}/"
+        prefix = _prefix(pack_id)
         try:
             async with self._client_factory() as client:
                 objects = await client.list_objects(prefix)
@@ -142,3 +173,16 @@ class ObjectResourcePackStore(ResourcePackStore):
         if result is None:
             raise ResourcePackNotFoundError(key)
         return result
+
+    async def list_entries(self) -> list[StoredBlob]:
+        prefix = KeyNamespace.RESOURCE_PACKS
+        try:
+            async with self._client_factory() as client:
+                objects = await client.list_objects(prefix)
+        except ObjectStoreUnavailableError as exc:
+            raise ResourcePackStorageUnavailableError(prefix) from exc
+        return [
+            StoredBlob(pack_id=pack_id, key=obj.key, modified_at=obj.last_modified)
+            for obj in objects
+            if (pack_id := _pack_id_of(obj.key)) is not None
+        ]

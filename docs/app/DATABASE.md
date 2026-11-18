@@ -329,6 +329,32 @@ Primary key: composite `(membership_id, role_id)`. A role and the membership it 
 assigned to are always in the same Community; this is an application invariant
 (both FK to rows under one `community_id`), not enforceable by a single FK.
 
+### Owners and account deletion
+
+An account that holds a Community's preset Owner role cannot be deleted
+(`DELETE /users/me`, `DELETE /admin/users/{id}`): the delete would cascade its
+memberships and role assignments and leave the Community without an Owner. The
+refusal holds against every write that makes the account an Owner --
+provisioning a Community with it as the initial owner, assigning it a role --
+through one lock, the account's **community-ownership lock**: a
+transaction-scoped advisory lock keyed by `user_id`. A deletion takes it
+exclusively, right after its `user` row locks, then decides whether the account
+owns a Community, and holds it until the delete commits. A conferral takes it
+shared as the first statement of the transaction that writes the assignment,
+then checks that the account exists. Whichever comes second waits for the first
+to commit and decides from what it committed: the deletion is refused as a
+Community owner (`409 owns_community`), or the conferral finds no such account
+(provisioning `422 owner_not_found`, role assignment `404`).
+
+The lock uses PostgreSQL's two-`int4` key form (class `0x6D637364`, then a
+32-bit hash of the user id), a key space apart from the `bigint` keys of the
+session lock (Section 4) and every other advisory lock, so it collides with none
+of them. Where it sits in each lock order is defined beside the locks: the
+identity order in the `RefreshTokenRepository` Port
+(`identity/domain/repositories.py`), the community order in
+`community/application/permission_ceiling.py`, and how the two meet in
+`core/adapters/ownership_lock.py`.
+
 ---
 
 ## 6. Authorization grants

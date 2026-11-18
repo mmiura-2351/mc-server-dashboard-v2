@@ -1,6 +1,7 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ToastProvider, useToast } from "./Toast.tsx";
+import { t } from "../i18n/index.ts";
+import { ToastProvider, type ToastVariant, useToast } from "./Toast.tsx";
 
 function Harness() {
   const { showToast } = useToast();
@@ -16,6 +17,33 @@ function Harness() {
   );
 }
 
+// Captures showToast so a test can raise toasts of any message and variant.
+let raise: (message: string, variant: ToastVariant) => void;
+function Capture() {
+  raise = useToast().showToast;
+  return null;
+}
+
+function renderToasts() {
+  render(
+    <ToastProvider>
+      <Capture />
+    </ToastProvider>,
+  );
+}
+
+function show(message: string, variant: ToastVariant) {
+  act(() => {
+    raise(message, variant);
+  });
+}
+
+function advance(ms: number) {
+  act(() => {
+    vi.advanceTimersByTime(ms);
+  });
+}
+
 describe("Toast", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -23,6 +51,7 @@ describe("Toast", () => {
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("shows a toast with its message and variant when triggered", () => {
@@ -34,7 +63,7 @@ describe("Toast", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "err" }));
 
-    const toast = screen.getByRole("status");
+    const toast = screen.getByRole("alert");
     expect(toast).toHaveTextContent("Failed");
     expect(toast).toHaveClass("toast", "error");
   });
@@ -85,5 +114,381 @@ describe("Toast", () => {
 
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // Success toasts stay 2 s plus 100 ms per character, clamped to 3.2-12 s.
+  it.each([
+    ["a short message for the 3.2 s floor", "Saved", 3200],
+    ["a medium message for a length-scaled time", "x".repeat(50), 7000],
+    ["a long message for the 12 s ceiling", "x".repeat(300), 12000],
+    // 28 characters with no word breaks: counted per character, not per word.
+    ["Japanese text per character", "保存しました。".repeat(4), 4800],
+  ])("keeps %s", (_, message, durationMs) => {
+    renderToasts();
+    show(message, "success");
+
+    advance(durationMs - 1);
+    expect(screen.getByText(message)).toBeInTheDocument();
+
+    advance(1);
+    expect(screen.queryByText(message)).not.toBeInTheDocument();
+  });
+
+  it("keeps an error toast until it is dismissed", () => {
+    renderToasts();
+    show("Failed", "error");
+
+    advance(60_000);
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(vi.getTimerCount()).toBe(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+  });
+
+  // The role alone sets the live region: an explicit aria-live on top of it
+  // double-announces in VoiceOver.
+  it("marks an error toast as an alert", () => {
+    renderToasts();
+    show("Failed", "error");
+
+    const toast = screen.getByRole("alert");
+    expect(toast).toHaveTextContent("Failed");
+    expect(toast).not.toHaveAttribute("aria-live");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("marks a success toast as a status", () => {
+    renderToasts();
+    show("Saved", "success");
+
+    const toast = screen.getByRole("status");
+    expect(toast).toHaveTextContent("Saved");
+    expect(toast).not.toHaveAttribute("aria-live");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("pauses while hovered and resumes with the time left", () => {
+    renderToasts();
+    show("x".repeat(50), "success"); // 7 s
+
+    advance(3000);
+    fireEvent.pointerEnter(screen.getByRole("status"));
+    advance(60_000);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    fireEvent.pointerLeave(screen.getByRole("status"));
+    advance(3999);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("pauses while focused and resumes with the time left", () => {
+    renderToasts();
+    show("x".repeat(50), "success"); // 7 s
+    const close = screen.getByRole("button", { name: "Close" });
+
+    advance(3000);
+    act(() => close.focus());
+    advance(60_000);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    act(() => close.blur());
+    advance(3999);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("stays paused while focused after the pointer leaves", () => {
+    renderToasts();
+    show("x".repeat(50), "success"); // 7 s
+    const close = screen.getByRole("button", { name: "Close" });
+
+    advance(3000);
+    fireEvent.pointerEnter(screen.getByRole("status"));
+    act(() => close.focus());
+    fireEvent.pointerLeave(screen.getByRole("status"));
+    advance(60_000);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+
+    act(() => close.blur());
+    advance(3999);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("resumes with the time left after pausing twice", () => {
+    renderToasts();
+    show("x".repeat(50), "success"); // 7 s
+
+    advance(1000);
+    fireEvent.pointerEnter(screen.getByRole("status"));
+    advance(10_000);
+    fireEvent.pointerLeave(screen.getByRole("status"));
+    advance(2000);
+    fireEvent.pointerEnter(screen.getByRole("status"));
+    advance(10_000);
+    fireEvent.pointerLeave(screen.getByRole("status"));
+
+    advance(3999);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("pauses every toast while the pointer is over any of them", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("x".repeat(50), "success"); // 7 s
+
+    advance(1000);
+    fireEvent.pointerEnter(screen.getByText("x".repeat(50)));
+    advance(60_000);
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+
+    fireEvent.pointerLeave(screen.getByText("x".repeat(50)));
+    advance(2199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    advance(3799);
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("pauses every toast while focus is in any of them", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+    const close = within(screen.getByRole("alert")).getByRole("button");
+
+    advance(1000);
+    act(() => close.focus());
+    advance(60_000);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+
+    act(() => close.blur());
+    advance(2199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("resumes the others once the focused toast is dismissed", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+    const close = within(screen.getByRole("alert")).getByRole("button");
+
+    advance(1000);
+    act(() => close.focus());
+    fireEvent.keyDown(close, { key: "Escape" });
+
+    advance(2199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("resumes once the last toast goes from under the pointer", () => {
+    renderToasts();
+    show("Failed", "error");
+    fireEvent.pointerEnter(screen.getByRole("alert"));
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    show("Saved", "success");
+    advance(3200);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("resumes after a tap dismisses one toast while another shows", () => {
+    renderToasts();
+    show("Saved", "success"); // 3.2 s
+    show("Failed", "error");
+    const error = screen.getByRole("alert");
+
+    // A tap: the pointer enters and leaves as the finger lifts, then the
+    // compatibility mouse events fire with no mouseout to follow.
+    fireEvent.pointerEnter(error);
+    fireEvent.pointerLeave(error);
+    fireEvent.mouseEnter(error);
+    fireEvent.click(within(error).getByRole("button"));
+
+    advance(3199);
+    expect(screen.getByText("Saved")).toBeInTheDocument();
+    advance(1);
+    expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+  });
+
+  it("scrolls a raised toast into view", () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    renderToasts();
+    show("Failed 1", "error");
+    show("Failed 2", "error");
+
+    expect(scroll).toHaveBeenLastCalledWith({ block: "nearest" });
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      screen.getByText("Failed 2").closest(".toast"),
+    );
+
+    show("Failed 1", "error");
+    expect(scroll.mock.contexts.at(-1)).toBe(
+      screen.getByText("Failed 1").closest(".toast"),
+    );
+  });
+
+  it("does not scroll a raised toast into view while focus is in the stack", () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    renderToasts();
+    show("Failed 1", "error");
+    act(() => screen.getByRole("button", { name: "Close" }).focus());
+    scroll.mockClear();
+
+    show("Failed 2", "error");
+    show("Failed 1", "error");
+
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
+  it("dismisses only the focused toast on Escape", () => {
+    renderToasts();
+    show("First", "error");
+    show("Second", "error");
+    const [first] = screen.getAllByRole("button", { name: "Close" });
+
+    act(() => first.focus());
+    fireEvent.keyDown(first, { key: "Escape" });
+
+    expect(screen.queryByText("First")).not.toBeInTheDocument();
+    expect(screen.getByText("Second")).toBeInTheDocument();
+  });
+
+  it("keeps the Escape that dismisses a toast from the page underneath", () => {
+    // Modal and Popover close on an Escape that reaches the document.
+    const onDocumentKeyDown = vi.fn();
+    document.addEventListener("keydown", onDocumentKeyDown);
+    try {
+      renderToasts();
+      show("Failed", "error");
+      const close = screen.getByRole("button", { name: "Close" });
+
+      act(() => close.focus());
+      fireEvent.keyDown(close, { key: "Escape" });
+
+      expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+      expect(onDocumentKeyDown).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    }
+  });
+
+  it("leaves the toast up and passes on a key other than Escape", () => {
+    const onDocumentKeyDown = vi.fn();
+    document.addEventListener("keydown", onDocumentKeyDown);
+    try {
+      renderToasts();
+      show("Failed", "error");
+      const close = screen.getByRole("button", { name: "Close" });
+
+      act(() => close.focus());
+      fireEvent.keyDown(close, { key: "Tab" });
+
+      expect(screen.getByText("Failed")).toBeInTheDocument();
+      expect(onDocumentKeyDown).toHaveBeenCalledTimes(1);
+    } finally {
+      document.removeEventListener("keydown", onDocumentKeyDown);
+    }
+  });
+
+  it("shows at most two timed toasts, dropping the oldest", () => {
+    renderToasts();
+    for (const n of [1, 2, 3]) show(`Saved ${n}`, "success");
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Saved 3")).toBeInTheDocument();
+  });
+
+  it("shows at most three errors, dropping the oldest", () => {
+    renderToasts();
+    for (const n of [1, 2, 3, 4]) show(`Failed ${n}`, "error");
+
+    expect(screen.getAllByRole("alert")).toHaveLength(3);
+    expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Failed 4")).toBeInTheDocument();
+  });
+
+  it("drops a toast only for a newer toast of its own kind", () => {
+    renderToasts();
+    for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
+    for (const n of [1, 2]) show(`Saved ${n}`, "success");
+
+    show("Saved 3", "success");
+    expect(screen.getAllByRole("alert")).toHaveLength(3);
+    expect(screen.queryByText("Saved 1")).not.toBeInTheDocument();
+
+    show("Failed 4", "error");
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.queryByText("Failed 1")).not.toBeInTheDocument();
+  });
+
+  it("collapses a repeated error into the one showing, with a count", () => {
+    renderToasts();
+    show("Failed", "error");
+    show("Failed", "error");
+    show("Failed", "error");
+
+    const [toast] = screen.getAllByRole("alert");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(toast).toHaveTextContent("Failed");
+    expect(
+      within(toast).getByText(t("common.toastRepeated", { count: 3 })),
+    ).toBeInTheDocument();
+    // The visible number is for sighted users; screen readers get the text.
+    expect(within(toast).getByText("3")).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("shows no count on an error raised once", () => {
+    renderToasts();
+    show("Failed", "error");
+
+    expect(
+      within(screen.getByRole("alert")).queryByText(
+        t("common.toastRepeated", { count: 1 }),
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("counts a repeated error as the newest when dropping", () => {
+    renderToasts();
+    for (const n of [1, 2, 3]) show(`Failed ${n}`, "error");
+    show("Failed 1", "error");
+
+    show("Failed 4", "error");
+
+    expect(screen.getByText("Failed 1")).toBeInTheDocument();
+    expect(screen.queryByText("Failed 2")).not.toBeInTheDocument();
+  });
+
+  it("keeps a success and an error with the same text apart", () => {
+    renderToasts();
+    show("Done", "success");
+    show("Done", "error");
+    show("Done", "success");
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("does not collapse a repeated timed toast", () => {
+    renderToasts();
+    show("Saved", "success");
+    show("Saved", "success");
+
+    expect(screen.getAllByRole("status")).toHaveLength(2);
   });
 });

@@ -247,6 +247,12 @@ select.community-switcher {
   gap: 8px;
   flex-shrink: 0;
 }
+/* Why Start is held, beside it: the previous stop has not released the server (#3818). */
+.start-held {
+  align-self: center;
+  color: var(--text-faint);
+  font-size: 12px;
+}
 
 /* ---------- Buttons ---------- */
 .btn {
@@ -768,6 +774,8 @@ body.col-resizing {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
 }
 .toast {
   display: flex;
@@ -780,10 +788,23 @@ body.col-resizing {
   border-radius: var(--radius-sm);
   font-size: 13px;
   min-width: 240px;
+  max-width: min(32rem, calc(100vw - 2rem));
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
 }
 .toast-message {
   flex: 1;
+  overflow-wrap: anywhere;
+}
+.toast-count {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 .toast-dismiss {
   font: inherit;
@@ -793,6 +814,8 @@ body.col-resizing {
   background: none;
   border: 0;
   padding: 0;
+  min-width: 24px;
+  min-height: 24px;
   cursor: pointer;
 }
 .toast-dismiss:hover {

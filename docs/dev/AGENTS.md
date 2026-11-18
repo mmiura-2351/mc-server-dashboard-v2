@@ -133,8 +133,9 @@ Each one succeeds, or appears to; the damage surfaces later.
 - **Re-running the gate past the argon2 flake throws away its only evidence.**
   A correct password has intermittently failed to verify against a hash the
   same process had just made (#3748). The api tests exposed to it (the logins
-  in `tests/integration/test_auth_flow.py` and `test_register_user.py`, and the
-  argon2 verifies in `tests/identity/test_password_hasher.py`) then fail with
+  in `tests/integration/test_auth_flow.py`, `test_register_user.py` and
+  `test_login_dummy_hash.py`, and the argon2 verifies in
+  `tests/identity/test_password_hasher.py`) then fail with
   an `AssertionError` whose message is a timestamped diagnostic report, in the
   api chain's log, and the gate's canary (below) writes `argon2-canary.log`
   beside it. Both are in `check-logs/`, or `check-logs.prev/` after one
@@ -160,7 +161,9 @@ Each one succeeds, or appears to; the damage surfaces later.
   native ones included. The printed hash can be re-verified in a fresh process
   at any time afterwards. `<password>` is the password the failing test used:
   its `_PASSWORD` constant (`_VALID_PASSWORD` in `test_register_user.py`, a
-  literal in `test_password_hasher.py`), `Wm7!qz#Lp2vT` in all three. This
+  literal in `test_password_hasher.py`), `Wm7!qz#Lp2vT` in all four, except
+  that the login dummy-hash check in `test_password_hasher.py` verifies
+  `_DUMMY_VERIFY_PLAINTEXT` from `dependencies.py`. This
   prints `True`, or raises `VerifyMismatchError` when the hash itself is bad:
   ```sh
   cd api && uv run python -c 'import argon2, sys; print(argon2.PasswordHasher().verify(*sys.argv[1:]))' '<hash>' '<password>'

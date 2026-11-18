@@ -390,6 +390,26 @@ async def test_assign_role_to_non_member_raises_not_found() -> None:
         )
 
 
+async def test_assign_role_to_a_deleted_account_raises_not_found() -> None:
+    # The recipient's account was deleted before the assignment's hold on it
+    # (#3217): refused like a non-member's, and nothing is written.
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    user = UserId(uuid.uuid4())
+    actor = UserId(uuid.uuid4())
+    membership = uow._membership_for(user, community.id)
+    role = _seed_owner_role(uow, community.id)
+    uow._membership_for(actor, community.id)
+    uow.users.absent.add(user)
+
+    with pytest.raises(MembershipNotFoundError):
+        await AssignRole(uow=uow)(
+            community_id=community.id, user_id=user, role_id=role.id, actor_id=actor
+        )
+    assert await uow.memberships.list_role_ids(membership.id) == []
+    assert uow.commits == 0
+
+
 async def test_assign_unknown_role_raises_not_found() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)

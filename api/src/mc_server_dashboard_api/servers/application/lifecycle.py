@@ -1592,15 +1592,15 @@ class StopServer:
                 if owed is None:
                     raise InvalidLifecycleTransitionError(str(server_id.value))
             else:
-                if server.assigned_worker_id is None:
-                    # Desired-running with no assigned Worker is inconsistent; there
-                    # is nothing to command. Treat as a transition conflict.
-                    raise InvalidLifecycleTransitionError(str(server_id.value))
+                # ``None`` is a start intent no Worker holds yet, while the
+                # reconciler retries its placement (issue #3815). The stop withdraws
+                # it all the same; only the dispatch below has nobody to go to.
                 worker_id = server.assigned_worker_id
                 applied = await _mark_stopped(self.uow, server, at=self.clock.now())
                 if not applied:
                     # A concurrent transition already moved the row out of running,
-                    # or off the Worker it was read on (issue #3792). Abort before
+                    # off the Worker it was read on (issue #3792), or onto one: a
+                    # placement of an unassigned row (issue #3815). Abort before
                     # dispatch or the placement-load decrement so the lost race
                     # does not double-decrement the count (FR-SRV-2).
                     raise LifecycleTransitionConflictError(str(server_id.value))
@@ -1627,6 +1627,13 @@ class StopServer:
             return await self._clear_stale_assignment(
                 community_id=community_id, server_id=server_id, force=force
             )
+        if worker_id is None:
+            # Nothing was placed, so there is no Worker to tell and no placement
+            # load to drop (a placement's reservation is its own to release). A
+            # placement that read the row before this commit expects it running
+            # and unassigned, so its compare-and-set now matches nothing and it
+            # sends no start.
+            return server
 
         # Decrement the placement load symmetrically with StartServer's
         # increment, right after desired flips to stopped. This keeps the

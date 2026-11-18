@@ -42,10 +42,15 @@ import { observeRestResponses, stamp } from "./restReads.ts";
 type ServerResponse = components["schemas"]["ServerResponse"];
 
 /** A live state value, stamped with when it was received (#3213). */
-type Stamped = { value: string; at: number };
+type Stamped<T = string> = { value: T; at: number };
 
 /** The state fields a live write sets on a cached server. */
-type Fields = Partial<Pick<ServerResponse, "observed_state" | "desired_state">>;
+type Fields = Partial<
+  Pick<
+    ServerResponse,
+    "observed_state" | "desired_state" | "assigned_worker_id"
+  >
+>;
 
 /** Poll interval while degraded (WEBUI_SPEC.md 6.2: 10s status-only polling). */
 const POLL_INTERVAL_MS = 10000;
@@ -69,12 +74,13 @@ export function useCommunityEvents(communityId: string): boolean {
     const key = serversKey(communityId);
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-    // The live observed and desired states not yet superseded by a REST
-    // read, each stamped with when it was received (#3213). The two are
-    // stamped apart, as different frames carry them (#3428): a read can
-    // supersede one and not the other.
+    // The live observed and desired states and assignments not yet
+    // superseded by a REST read, each stamped with when it was received
+    // (#3213). They are stamped apart, as different frames carry them (#3428,
+    // #3818): a read can supersede one and not another.
     const observed = new Map<string, Stamped>();
     const desired = new Map<string, Stamped>();
+    const assigned = new Map<string, Stamped<string | null>>();
     // The latest snapshot's server set, until a REST read supersedes it.
     let members: { ids: Set<string>; at: number } | null = null;
 
@@ -86,12 +92,14 @@ export function useCommunityEvents(communityId: string): boolean {
     const live = (id: string): Fields | null => {
       const state = observed.get(id);
       const intent = desired.get(id);
-      if (state === undefined && intent === undefined) {
+      const worker = assigned.get(id);
+      if (state === undefined && intent === undefined && worker === undefined) {
         return null;
       }
       return {
         ...(state !== undefined && { observed_state: state.value }),
         ...(intent !== undefined && { desired_state: intent.value }),
+        ...(worker !== undefined && { assigned_worker_id: worker.value }),
       };
     };
 
@@ -118,9 +126,11 @@ export function useCommunityEvents(communityId: string): boolean {
         );
       }
       const listed = new Set(current.map((s) => s.id));
-      const created = [...observed.keys(), ...desired.keys()].some(
-        (id) => !listed.has(id),
-      );
+      const created = [
+        ...observed.keys(),
+        ...desired.keys(),
+        ...assigned.keys(),
+      ].some((id) => !listed.has(id));
       const deleted =
         members !== null && current.some((s) => !members?.ids.has(s.id));
       if (created || deleted) {
@@ -132,7 +142,7 @@ export function useCommunityEvents(communityId: string): boolean {
       queryClient,
       key,
       (readStartedAt) => {
-        for (const live of [observed, desired]) {
+        for (const live of [observed, desired, assigned]) {
           for (const [id, entry] of live) {
             if (entry.at < readStartedAt) {
               live.delete(id);
@@ -161,8 +171,9 @@ export function useCommunityEvents(communityId: string): boolean {
       pollTimer = setInterval(refetch, POLL_INTERVAL_MS);
     };
 
-    // A status frame sets the states it carries: an observed transition, or
-    // a change of the server's intent (#3428).
+    // A status frame sets the states it carries: an observed transition, a
+    // change of the server's intent (#3428), or a placement or release
+    // (#3818).
     const applyStatus = (event: StatusEvent) => {
       const at = stamp();
       if (event.state !== undefined) {
@@ -171,10 +182,16 @@ export function useCommunityEvents(communityId: string): boolean {
       if (event.desiredState !== undefined) {
         desired.set(event.serverId, { value: event.desiredState, at });
       }
+      if (event.assignedWorkerId !== undefined) {
+        assigned.set(event.serverId, { value: event.assignedWorkerId, at });
+      }
       const carried: Fields = {
         ...(event.state !== undefined && { observed_state: event.state }),
         ...(event.desiredState !== undefined && {
           desired_state: event.desiredState,
+        }),
+        ...(event.assignedWorkerId !== undefined && {
+          assigned_worker_id: event.assignedWorkerId,
         }),
       };
       reconcile((id) => (id === event.serverId ? carried : null));
@@ -186,10 +203,14 @@ export function useCommunityEvents(communityId: string): boolean {
       const at = stamp();
       observed.clear();
       desired.clear();
+      assigned.clear();
       for (const s of servers) {
         observed.set(s.serverId, { value: s.state, at });
         if (s.desiredState !== undefined) {
           desired.set(s.serverId, { value: s.desiredState, at });
+        }
+        if (s.assignedWorkerId !== undefined) {
+          assigned.set(s.serverId, { value: s.assignedWorkerId, at });
         }
       }
       members = { ids: new Set(observed.keys()), at };

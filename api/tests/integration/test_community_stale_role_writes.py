@@ -180,7 +180,6 @@ async def _world(engine: AsyncEngine) -> _World:
     factory = create_session_factory(engine)
     community = await ProvisionCommunity(
         uow=SqlAlchemyUnitOfWork(factory),
-        users=IdentityUserDirectory(IdentityUnitOfWork(factory)),
         clock=SystemClock(),
     )(name="guild", owner_user_id=owner)
     await AddMember(

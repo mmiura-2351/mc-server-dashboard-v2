@@ -105,7 +105,7 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. |
-| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
+| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. A `PUT` to a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), running or at rest; a `DELETE` of such an entry stays allowed, so one planted before the guard can be removed while the server is stopped. |
@@ -320,9 +320,9 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). An object-store outage answers 503 `storage_unavailable`: the file is stored before the pack row is inserted, so no pack was created and the upload is safe to send again (each attempt uses a fresh id). The failed attempt can leave a stored file no pack references — never served; reclaiming it is issue #3277. |
+| POST | `/resource-packs` | Upload a resource pack (multipart; requires `server:update` in at least one community). An object-store outage answers 503 `storage_unavailable`: the file is stored before the pack row is inserted, so no pack was created and the upload is safe to send again (each attempt uses a fresh id). The failed attempt can leave a stored file no pack references — never served, and reclaimed by the resource-pack GC ([`STORAGE.md`](../app/STORAGE.md) Section 4.3). |
 | GET | `/resource-packs` | List all resource packs (authenticated). |
-| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served. |
+| DELETE | `/resource-packs/{id}` | Delete a resource pack (uploader or platform admin; 409 when still assigned to a server). The pack row is deleted first and the stored file's removal is best-effort, so an object-store outage still answers 204 — the pack is gone and a repeat is a 404 — and leaves an orphaned file that is logged, never served, and reclaimed by the resource-pack GC ([`STORAGE.md`](../app/STORAGE.md) Section 4.3). |
 | GET / HEAD | `/resource-packs/{id}/download` | Download (authenticated). The response declares `Cache-Control: no-store`. `HEAD` is the metadata probe: the same gate and the same headers with no body, so a client learns the `Content-Length` without starting a transfer; it never opens the blob nor records a `resource_pack:download` audit event. |
 | GET / HEAD | `/public/resource-packs/{id}/{filename}` | Public download (no auth) — the URL Minecraft clients fetch. Validates `filename` matches. The two statuses declare different caching policies, because the URL ends in the stored filename and an undeclared policy is decided by the edge's extension heuristic instead: the `200` declares `Cache-Control: public, max-age=3600, immutable` — a pack is immutable and the game client verifies it against `resource-pack-sha1`, so the max-age bounds only how long a deleted pack stays fetchable from a cache — and the `404` declares `Cache-Control: no-store`, since a pack's id and filename are both fixed at creation and a URL that 404s can never later become a `200`. `HEAD` is the metadata probe: this is the unauthenticated URL a resumable-download client probes before a transfer, and it declares a `Content-Length`, so it has a real reason to. The probe answers each status with the `GET`'s headers — the same `Cache-Control` per status — and no body, so an edge does not cache a probe differently from the download; it never opens the blob. |
 | POST | `…/{sid}/resource-pack` | Assign a resource pack to a server (`server:update`). Body: `{resource_pack_id, require_resource_pack, resource_pack_prompt}`. A storage failure writing `server.properties` answers 503 `seed_failed`: the assignment is not committed, so assigning again is safe. The file is not rolled back with it and may already carry the new pack keys. A storage outage while **reading** `server.properties` answers 503 `storage_unavailable`; that read precedes the assignment, so nothing changed. |
@@ -333,8 +333,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), or `{desired_state}` for a change of the server's intent (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -342,7 +342,8 @@ right after a `gap` frame when status frames were dropped since the previous
 such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
-them): the persisted observed and desired states of the stream's scope, read
+them): the persisted observed and desired states and the assigned Worker
+(`assigned_worker_id`, `null` when none) of the stream's scope, read
 together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. It has no `detail` or `reason`, which
@@ -364,11 +365,26 @@ Every change of a server's desired state publishes a `status` frame
 `{desired_state}` too, after the write that made it commits: a start, stop or
 drain from any session, a start the API reverts after its dispatch failed,
 and the reconciler's own starts and stops, which go through the same
-operations. A write under an unchanged intent (a restart) publishes nothing.
-The frame carries no `state`: an intent change is not an observation, and a
-client keeps the observed state it holds. A client applies each `status` frame
-by setting the fields it carries, so another tab's dashboard offers the
-actions of the current intent without a reload (#3428).
+operations. The frame carries no `state`: an intent change is not an
+observation, and a client keeps the observed state it holds.
+
+Every change of a server's assignment publishes a `status` frame carrying
+`assigned_worker_id` too — the Worker's id, or `null` once released — after
+the write that made it commits: a start's placement and a failed start's
+revert (in the frame of their `desired_state`), the reconciler's placement of a
+desired-running server and its undo when the launch never reached the Worker,
+and every release of a stopped server: after its final snapshot, on a late
+final-snapshot result, and the reconciler's recovery of a stop left holding
+its Worker. A release changes nothing else, so its frame is
+`{assigned_worker_id: null}` alone, except where the same write converges the
+observed state (a stop left `stopping`, released as `unknown`). Deleting a
+server changes no assignment: the API refuses it while a Worker is assigned.
+A write that changes neither the intent nor the assignment (a restart)
+publishes nothing.
+
+A client applies each `status` frame by setting the fields it carries, so
+another tab's dashboard offers the actions of the current intent without a
+reload (#3428), and gates Start and Stop on the current assignment (#3818).
 
 Ordering: the subscription is registered before the snapshot is read, so every
 status transition published from then on reaches the subscriber's buffer.
@@ -385,14 +401,16 @@ drops — the newer write publishes its own frame after the older one, so the
 client still ends on the newer state.
 
 Residual (#3307): that last step holds for sequential writes only. Each write
-publishes when its own commit returns, so two writes of one server's state made
-on different database connections publish in the order their commit
-acknowledgements reach the API's event loop, which can differ from the order
+publishes when its own commit returns, so two writes of one server's state or
+assignment made on different database connections publish in the order their
+commit acknowledgements reach the API's event loop, which can differ from the order
 the database committed them in. The frame of the earlier commit can then be
-published last, and a client is left on that older state until the next status
-frame for the server, or until the snapshot that follows a reconnect or a `gap`
-that dropped status. Closing this needs per-server sequencing of status frames,
-tracked separately in #3307.
+published last, and a client is left on that older value until the next frame
+that carries the same field for the server (a status frame for the observed
+state, an intent frame for the desired state, an assignment frame for the
+Worker), the snapshot that follows a reconnect or a `gap` that dropped status,
+or a REST refetch that starts after the stale frame. Closing this needs
+per-server sequencing of status frames, tracked separately in #3307.
 
 Auth: browsers pass the access token via `Sec-WebSocket-Protocol` as two
 subprotocols `["access_token", "<jwt>"]`; the server echoes `access_token` as
@@ -650,9 +668,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.4 Server detail — Overview
 - Header: name, state pill (+ `detail` from last status event, e.g. crash
   category), desired-vs-observed mismatch hint ("applying…" while the
-  reconciler converges), worker id, port. No hint shows for a server at rest
-  under a stopped intent (observed stopped, crashed or unknown), whether or not
-  a Worker is still assigned; the dashboard rows mark drift by the same rule.
+  reconciler converges), worker id, port. A stopped intent is reached at rest
+  (observed stopped, crashed or unknown) once no Worker is assigned: while one
+  still is, the stop is still finishing (its final snapshot and the release,
+  or for `unknown` the stop itself) and the hint shows. Every release
+  publishes a status frame (Section 2.6), so the hint clears with it. The
+  dashboard rows mark drift by the same rule.
 - Crash banner: while crashed, the `detail`, a guidance line with a link to the
   Console tab, and — keyed on the status event's `reason` — the Forge install
   diagnostics. The guidance line follows the desired state. Under a running
@@ -668,7 +689,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   serves a server only at rest or running (REQUIREMENTS.md Section 6.9), and a server that crashed
   under a running intent is neither, so until it is stopped the viewer says to
   stop it first (409 `server_unsettled`); a log that was never written (404)
-  and one past the read cap (413) get their own line too. `detail` and `reason`
+  and one past the read cap (413) get their own line too. A refetch that fails
+  once the log is shown keeps that log on screen, where the operator scrolled
+  it, under a line giving the failure and saying the log is the copy loaded
+  earlier. `detail` and `reason`
   are not persisted, so the banner's diagnostics exist only on a page that was
   open when the crash was reported.
 - Controls: Start / Stop (dropdown: graceful · force) / Restart / Export /
@@ -677,7 +701,19 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   Start and Restart are hidden, since the API refuses both there. Under a
   stopped intent Stop is offered exactly while a Worker is still assigned — a
   drained server still running, or a stop left half-done — since the API then
-  converges it at once, and refuses it with no Worker assigned. Restart needs a
+  converges it at once, and refuses it with no Worker assigned. Under a running
+  intent with no Worker assigned — a start the reconciler has yet to place —
+  Stop is offered while the server reads stopped, crashed or unknown, since the
+  API then withdraws the intent with no Worker to tell. It is not offered while
+  the server reads running: the stopped intent would keep reading running with
+  no Worker to report otherwise, which nothing converges. Start needs no
+  Worker assigned: a stop holds its Worker until the final snapshot settles,
+  and the API refuses a start until the release (`409 transition_conflict`).
+  So at rest under a stopped intent with a Worker still assigned, Start shows
+  disabled with "Waiting for the previous stop to release the server…" (on a
+  dashboard card, as the button's tooltip) until the release frame frees it.
+  The reason holds whether the release is pending on a final snapshot, a
+  re-sent stop, or a Worker that has gone offline. Restart needs a
   running intent and an assigned Worker: it is hidden under a stopped intent
   even while the process still runs (a drain's grace window), and whenever no
   Worker is assigned, since the API refuses it in both cases
@@ -1047,6 +1083,29 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` and `worker_state` members are enumerated in
   [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
+- **Toast timing.** An error toast stays until it is dismissed, since many
+  errors name a remedy to act on. Any other toast closes on its own after 2 s
+  plus 100 ms per character of its message, clamped to 3.2–12 s. It counts
+  characters, not words, because Japanese has no word breaks; about 10
+  characters a second suits Japanese and leaves English time to spare. The
+  pointer or focus anywhere in the toast stack pauses every countdown, so no
+  toast closes or slides out from under the one being read; each resumes with
+  the time it had left. On a touch screen only a finger held on the stack
+  pauses it, since a touch pointer leaves when the finger lifts.
+- **Toast accessibility.** An error toast is a `role="alert"`, any other a
+  `role="status"`, with no explicit `aria-live`: the role already sets it, and
+  repeating it double-announces in VoiceOver. The dismiss button is in the tab
+  order and at least 24×24 px, and Escape dismisses the toast whose button has
+  focus.
+- **Toast stack.** At most three errors and two timed toasts show at once. A
+  new toast past that drops the oldest of its own kind, so a timed toast never
+  pushes out an error, nor an error a timed toast. An error raised again while
+  its toast still shows does not stack a copy: that toast shows a count badge
+  and counts as the newest for the drop order. A toast is at most 32rem wide,
+  never wider than the screen less 2rem, and its message wraps anywhere; the
+  stack is at most the screen's height less 2rem and scrolls beyond that, so
+  every toast stays reachable on a phone. A toast raised, or raised again,
+  scrolls into view, unless focus is in the stack.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.

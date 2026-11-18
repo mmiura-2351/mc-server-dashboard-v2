@@ -16,6 +16,7 @@ import argon2
 import bcrypt
 import pytest
 
+from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.identity.adapters.password_hasher import (
     _MALFORMED_HASH_ERRORS,
     Argon2PasswordHasher,
@@ -24,6 +25,7 @@ from mc_server_dashboard_api.identity.adapters.password_hasher import (
 from mc_server_dashboard_api.identity.domain.errors import (
     PasswordVerificationUnavailableError,
 )
+from mc_server_dashboard_api.identity.domain.password_hasher import PasswordHasher
 from tests.argon2_diagnostics import RusageWindow, argon2_mismatch_report
 
 
@@ -272,14 +274,9 @@ class _ThreadProbeHasher(Argon2PasswordHasher):
         self.hash_thread: threading.Thread | None = None
         self.verify_thread: threading.Thread | None = None
 
-    def _hash_capture(self, plaintext: str) -> str:
+    def _hash(self, plaintext: str) -> str:
         self.hash_thread = threading.current_thread()
-        return self._hasher.hash(plaintext)
-
-    async def hash(self, plaintext: str) -> str:
-        from mc_server_dashboard_api.identity.adapters.password_hasher import _run_kdf
-
-        return await _run_kdf(self._hash_capture, plaintext)
+        return super()._hash(plaintext)
 
     def _verify(self, plaintext: str, password_hash: str) -> bool:
         self.verify_thread = threading.current_thread()
@@ -345,7 +342,7 @@ async def test_hasher_not_starved_by_default_executor_saturation() -> None:
     futs = [default_pool.submit(blocker.wait) for _ in range(4)]
     try:
         hasher = Argon2PasswordHasher()
-        hashed = await hasher.hash("Wm7!qz#Lp2vT")
+        hashed = await asyncio.wait_for(hasher.hash("Wm7!qz#Lp2vT"), timeout=5)
         with RusageWindow() as window:
             result = await asyncio.wait_for(
                 hasher.verify("Wm7!qz#Lp2vT", hashed), timeout=5
@@ -358,3 +355,28 @@ async def test_hasher_not_starved_by_default_executor_saturation() -> None:
         blocker.set()
         concurrent.futures.wait(futs)
         default_pool.shutdown(wait=True)
+
+
+@pytest.mark.parametrize(
+    ("algorithm", "adapter"),
+    [("argon2", Argon2PasswordHasher), ("bcrypt", BcryptPasswordHasher)],
+)
+async def test_each_login_dummy_hash_is_one_its_own_adapter_verifies(
+    algorithm: str, adapter: type[PasswordHasher]
+) -> None:
+    # The unknown-user login verifies the dummy hash with the configured hasher.
+    # A hash of the other algorithm is refused without the KDF work, which would
+    # void the timing defence (#3832).
+    hashed = await dependencies._DUMMY_PASSWORD_HASHES[algorithm].get()
+    with RusageWindow() as window:
+        verified = await adapter().verify(dependencies._DUMMY_VERIFY_PLAINTEXT, hashed)
+    # The report runs only on an argon2 failure, the intermittent refusal of #3748.
+    assert verified is True, (
+        argon2_mismatch_report(
+            password=dependencies._DUMMY_VERIFY_PLAINTEXT,
+            stored_hash=hashed,
+            rusage=window,
+        )
+        if algorithm == "argon2"
+        else hashed
+    )

@@ -280,7 +280,11 @@ describe("DashboardPage permission-gated actions", () => {
 describe("DashboardPage lifecycle actions", () => {
   it("starts a stopped server and invalidates the list on settle", async () => {
     mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     ]);
     mockApi.post.mockResolvedValue(server({ observed_state: "starting" }));
     renderPage();
@@ -335,7 +339,11 @@ describe("DashboardPage lifecycle actions", () => {
 
   it("surfaces a specific message for a 409 port_conflict start failure", async () => {
     mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     ]);
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "port_conflict" }),
@@ -355,7 +363,11 @@ describe("DashboardPage lifecycle actions", () => {
 
   it("surfaces a specific message for a 409 image_missing start failure", async () => {
     mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     ]);
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "image_missing" }),
@@ -374,7 +386,11 @@ describe("DashboardPage lifecycle actions", () => {
   // to restore a regular file, not left with the generic state-changed toast.
   it("surfaces a specific message for a 409 server_properties_unreadable start failure", async () => {
     mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     ]);
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_properties_unreadable" }),
@@ -414,6 +430,7 @@ describe("DashboardPage lifecycle actions", () => {
       server({
         observed_state: "crashed",
         desired_state: "stopped",
+        assigned_worker_id: null,
       }),
     ]);
     renderPage();
@@ -682,6 +699,60 @@ describe("DashboardPage live status", () => {
     expect(mockApi.get).toHaveBeenCalledTimes(1);
   });
 
+  // The previous stop still holds its Worker, and the API refuses a start
+  // until the release (409 transition_conflict): Start is disabled and says
+  // why; the release frame frees it without a refetch (#3818).
+  it("holds Start with the reason until the release frame frees the Worker", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      }),
+    ]);
+    renderPage();
+    await screen.findByText("survival");
+
+    const start = screen.getByRole("button", { name: t("dashboard.start") });
+    expect(start).toBeDisabled();
+    expect(start).toHaveAccessibleDescription(
+      t("serverDetail.startAwaitsRelease"),
+    );
+    // The reason belongs to Start alone.
+    for (const name of [t("dashboard.stop"), t("dashboard.restart")]) {
+      expect(screen.getByRole("button", { name })).not.toHaveAttribute("title");
+    }
+    expect(
+      screen.getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeEnabled();
+
+    act(() => {
+      const socket = MockWebSocket.last();
+      socket.open();
+      socket.message({
+        stream: "status",
+        ts: "t",
+        payload: { assigned_worker_id: null },
+        server_id: "s1",
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: t("dashboard.start") }),
+      ).toBeEnabled(),
+    );
+    expect(
+      screen.getByRole("button", { name: t("dashboard.start") }),
+    ).not.toHaveAccessibleDescription(t("serverDetail.startAwaitsRelease"));
+    expect(
+      screen.getByRole("button", { name: t("dashboard.stop") }),
+    ).toBeDisabled();
+    expect(screen.getByText(t("dashboard.noWorker"))).toBeInTheDocument();
+    // Patched in place: no second list fetch.
+    expect(mockApi.get).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the live-degraded indicator on WS failure", async () => {
     mockApi.get.mockResolvedValue([server({ observed_state: "running" })]);
     renderPage();
@@ -760,7 +831,11 @@ describe("DashboardPage view toggle (#541)", () => {
 
   it("runs a quick action from the table row", async () => {
     mockApi.get.mockResolvedValue([
-      server({ observed_state: "stopped", desired_state: "stopped" }),
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
     ]);
     mockApi.post.mockResolvedValue(server({ observed_state: "starting" }));
     renderPage();
@@ -1296,27 +1371,40 @@ describe("DashboardPage desired/observed drift (issue #2443)", () => {
     ).not.toBeInTheDocument();
   });
 
-  it.each([null, "worker-a"])(
-    "does not mark a row that crashed under a stopped intent, which is at rest, Worker %s (#3285)",
-    async (worker) => {
-      mockApi.get.mockResolvedValue([
-        server({
-          observed_state: "crashed",
-          desired_state: "stopped",
-          assigned_worker_id: worker,
-        }),
-      ]);
-      renderPage();
+  it("does not mark a row that crashed under a stopped intent once released, which is at rest (#3285)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        observed_state: "crashed",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    ]);
+    renderPage();
 
-      await screen.findByText("survival");
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-      expect(
-        screen.queryByText(t("serverDetail.converging")),
-      ).not.toBeInTheDocument();
-    },
-  );
+    await screen.findByText("survival");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      screen.queryByText(t("serverDetail.converging")),
+    ).not.toBeInTheDocument();
+  });
+
+  // Until the release the stop is still finishing; the frames carry the
+  // release, so the mark cannot go stale (#3818).
+  it("marks a row at rest under a stopped intent while the stop still holds the Worker (#3818)", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        observed_state: "crashed",
+        desired_state: "stopped",
+        assigned_worker_id: "worker-a",
+      }),
+    ]);
+    renderPage();
+
+    await screen.findByText("survival");
+    expect(screen.getByText(t("serverDetail.converging"))).toBeInTheDocument();
+  });
 
   it("marks a drifting row in the table view too", async () => {
     mockApi.get.mockResolvedValue([

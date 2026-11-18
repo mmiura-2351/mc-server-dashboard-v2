@@ -11,6 +11,11 @@ create transaction. Reaching the servers ORM model from the community *adapter*
 layer is the same cross-context composition the servers UnitOfWork uses to reach
 the community resource-grant adapter, and keeps the community *domain* free of any
 other context (ARCHITECTURE.md Section 2.1).
+
+The :class:`UserExistenceChecker` Port is bound the same way, to a query of the
+identity ``user`` table on the same session, so a conferral of community
+ownership validates its recipient inside its own transaction, under the lock an
+account deletion waits for (issue #3217).
 """
 
 from __future__ import annotations
@@ -33,9 +38,17 @@ from mc_server_dashboard_api.community.adapters.repositories import (
 )
 from mc_server_dashboard_api.community.domain.repositories import (
     ResourceExistenceChecker,
+    UserExistenceChecker,
 )
 from mc_server_dashboard_api.community.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.community.domain.value_objects import CommunityId
+from mc_server_dashboard_api.community.domain.value_objects import (
+    CommunityId,
+    UserId,
+)
+from mc_server_dashboard_api.core.adapters.ownership_lock import (
+    lock_community_ownership,
+)
+from mc_server_dashboard_api.identity.adapters.models import UserModel
 from mc_server_dashboard_api.servers.adapters.models import ServerModel
 
 
@@ -70,6 +83,21 @@ class SqlAlchemyResourceExistenceChecker(ResourceExistenceChecker):
         return (await self._session.execute(stmt)).first() is not None
 
 
+class SqlAlchemyUserExistenceChecker(UserExistenceChecker):
+    """Check a user exists, under its community-ownership lock (issue #3217)."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def lock_and_check_exists(self, user_id: UserId) -> bool:
+        # Shared: an account deletion holds the lock exclusively from before its
+        # ownership check until it commits, so this waits for one in flight,
+        # and the read below, a new snapshot, sees whether it deleted the user.
+        await lock_community_ownership(self._session, user_id.value, shared=True)
+        stmt = select(UserModel.id).where(UserModel.id == user_id.value)
+        return (await self._session.execute(stmt)).first() is not None
+
+
 class SqlAlchemyUnitOfWork(UnitOfWork):
     """:class:`UnitOfWork` adapter over an async-SQLAlchemy session."""
 
@@ -84,6 +112,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.roles = SqlAlchemyRoleRepository(self._session)
         self.resource_grants = SqlAlchemyResourceGrantRepository(self._session)
         self.resources = SqlAlchemyResourceExistenceChecker(self._session)
+        self.users = SqlAlchemyUserExistenceChecker(self._session)
         return self
 
     async def __aexit__(

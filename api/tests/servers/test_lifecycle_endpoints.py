@@ -491,6 +491,22 @@ def test_stop_on_an_unassigned_desired_stopped_server_is_still_409() -> None:
     assert cp.dispatched == []
 
 
+def test_stop_on_an_unplaced_running_intent_withdraws_it() -> None:
+    # Issue #3815: no Worker holds the start intent yet, so the stop commits
+    # desired=stopped and answers it as any stop, with nothing dispatched.
+    server = dataclasses.replace(
+        _server(uuid.uuid4()), observed_state=ObservedState.STOPPED
+    )
+    cp = FakeControlPlane()
+
+    resp = _post_real_stop(server, cp)
+
+    assert resp.status_code == 200
+    assert resp.json()["desired_state"] == "stopped"
+    assert resp.json()["assigned_worker_id"] is None
+    assert cp.dispatched == []
+
+
 def test_restart_not_running_is_409_with_reason() -> None:
     # Issue #2441: a restart the Worker refused because it holds no live instance
     # names server_not_running, not the unclassified command_failed catch-all.

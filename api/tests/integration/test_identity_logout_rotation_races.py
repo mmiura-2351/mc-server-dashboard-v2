@@ -55,7 +55,11 @@ from mc_server_dashboard_api.identity.application.admin_delete_user import (
 from mc_server_dashboard_api.identity.application.change_password import (
     ChangePassword,
 )
-from mc_server_dashboard_api.identity.application.login import Login, LoginResult
+from mc_server_dashboard_api.identity.application.login import (
+    DummyPasswordHash,
+    Login,
+    LoginResult,
+)
 from mc_server_dashboard_api.identity.application.logout import Logout
 from mc_server_dashboard_api.identity.application.refresh_session import (
     RefreshSession,
@@ -87,7 +91,6 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
 )
 from tests.identity.fakes import (
     FakeClock,
-    FakeCommunityOwnership,
     FakeLoginAttemptStore,
     FakeTokenService,
     RecordingFailureDelay,
@@ -450,9 +453,9 @@ async def _deactivate(uow: SqlAlchemyUnitOfWork, user: UserId) -> None:
 
 
 async def _admin_delete(uow: SqlAlchemyUnitOfWork, user: UserId) -> None:
-    await AdminDeleteUser(
-        uow=uow, ownership=FakeCommunityOwnership(), clock=FakeClock(_NOW)
-    )(actor_id=UserId.new(), target_id=user)
+    await AdminDeleteUser(uow=uow, clock=FakeClock(_NOW))(
+        actor_id=UserId.new(), target_id=user
+    )
 
 
 async def _theft_response(uow: SqlAlchemyUnitOfWork, user: UserId) -> object:
@@ -677,7 +680,7 @@ def _login(uow: SqlAlchemyUnitOfWork) -> Login:
         attempts=FakeLoginAttemptStore(),
         brute_force=make_brute_force_config(),
         hasher=StubHasher(),
-        dummy_password_hash="hashed::__dummy__",
+        dummy_password_hash=DummyPasswordHash(StubHasher(), "__dummy__"),
         tokens=_TokenService("login"),
         clock=FakeClock(_NOW),
         failure_delay=RecordingFailureDelay(),

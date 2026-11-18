@@ -56,9 +56,10 @@ class ResourceGrantAlreadyExistsError(CommunityError):
 class OwnerUserNotFoundError(CommunityError):
     """The initial owner named for a community provisioning is not a known user.
 
-    Provisioning validates the owner against the :class:`UserDirectory` Port
-    (FR-COMM-2); an unknown user id raises this rather than violating the
-    ``membership.user_id`` foreign key.
+    Provisioning validates the owner through the unit of work's
+    :class:`UserExistenceChecker` (FR-COMM-2, issue #3217); an unknown user id,
+    or one whose account a concurrent deletion removed first, raises this rather
+    than violating the ``membership.user_id`` foreign key.
     """
 
 

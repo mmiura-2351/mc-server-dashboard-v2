@@ -98,8 +98,13 @@ across servers (FR-VER-3) and contain no Community data.
 │               │   ├── <backup-id>.<archive-ext>  # a retained, self-contained snapshot archive
 │               │   └── ...
 │               └── final.tar.gz                # post-delete retained working set (Section 2.1); no DB row
-└── jars/                                     # shared, content-addressed server JARs (FR-VER-3)
-    └── <sha256>.jar
+├── jars/                                     # shared, content-addressed server JARs (FR-VER-3)
+│   └── <sha256>.jar
+├── plugin-cache/                             # object backend only: content-addressed plugin/mod JAR cache
+│   └── <sha256>
+└── resource-packs/                           # object backend only: uploaded resource packs
+    └── <pack-id>/
+        └── <filename>
 ```
 
 Notes:
@@ -195,6 +200,12 @@ Notes:
   scratch over a newer publish (issue #3434).
 - On object backends the tree above is a **key prefix scheme**, not real
   directories (Section 7.3); the same logical layout applies.
+- `plugin-cache/` and `resource-packs/` exist on the object backend only, where
+  their stores share the bucket; on fs / remote-fs neither store is built, and
+  a route that needs one answers 503. They sit outside the `Storage` Port: the
+  pack and plugin rows are the source of truth for what is in them, and each is
+  reclaimed by its own GC (the resource-pack GC is in Section 4.3). The four
+  top-level prefixes are named once, in the object adapter's `KeyNamespace`.
 
 ### 2.1 Post-delete retention
 
@@ -632,11 +643,18 @@ on the object backend, the **in-progress multipart upload parts** a crash
 mid-`put_backup` (or mid-snapshot-member upload) leaves behind. Multipart parts
 never list as objects, so the prefix scan cannot
 see them; the object sweep lists them via `ListMultipartUploads` and aborts them
-via `AbortMultipartUpload`. Both reclaim paths apply an **mtime / `Initiated` age
-threshold** (1 h): a spool or upload younger than the threshold may belong to a
-live write still in flight, so it is left alone — mirroring the `incoming/`
-lease-guard discipline and keeping the periodic passes as safe as the startup
-one (the long-upload caveat is in Section 9.5).
+via `AbortMultipartUpload`. It lists them under **every top-level prefix the API
+uploads to**, not only the ones the `Storage` adapter keys under, because the
+resource-pack and plugin-cache stores upload via multipart into the same bucket
+(issue #3277). Those prefixes are `communities/` (snapshot members, restore
+members, backups, the post-delete `final.tar.gz`), `jars/` (`put_jar`),
+`plugin-cache/` and `resource-packs/`. The object adapter's `KeyNamespace` names
+them once: every store builds its keys from it and the sweep walks all of it, so
+a prefix added there is swept with no further change. Both reclaim paths apply
+an **mtime / `Initiated` age threshold** (1 h): a spool or upload younger than
+the threshold may belong to a live write still in flight, so it is left alone —
+mirroring the `incoming/` lease-guard discipline and keeping the periodic
+passes as safe as the startup one (the long-upload caveat is in Section 9.5).
 
 `Initiated` is **optional** in the S3 `ListMultipartUploads` response, and
 SeaweedFS 4.33 omits it. When it is absent the adapter age-gates the upload by
@@ -656,6 +674,54 @@ The fs prune's `.final.*.tmp` siblings are not the sweep's: every prune removes
 them when it starts, regardless of age. Only a prune writes them, and it holds
 the in-process server lock for its whole run, so none can belong to a live
 prune.
+
+**Resource-pack orphans** (issue #3277). A stored resource pack whose
+`resource_packs` row is gone is never served, since the row is the source of
+truth, but the multipart sweep cannot see it either: it is a complete object.
+Two use cases can leave one behind. Each orders its two writes so that a
+failure between them leaves an unserved blob rather than a row whose blob is
+gone:
+
+- `DeleteResourcePack` commits the row's delete before it removes the blob
+  (#1962). A store outage on the blob delete is logged, the route answers 204,
+  and a repeated DELETE finds no row and never reaches the store.
+- `UploadResourcePack` stores the blob before it commits the row (#2458). A
+  failed commit leaves the blob with no row, and so does an upload the store
+  completed but whose response was lost.
+
+A **resource-pack GC** reclaims them. It is a servers-side use case, not part
+of `sweep`, because it reads the pack rows and the `Storage` adapter has no
+database. It mirrors the plugin-cache GC:
+
+1. List every blob under `resource-packs/`, with the pack id its key names and
+   its store time. A key not shaped `<pack-id>/<filename>` names no pack and is
+   left alone.
+2. Read the pack rows. The read follows the listing, so a row committed by then
+   is seen. A blob whose pack has a row is live.
+3. Spare any blob younger than a **1 h safety window**. An upload in flight has
+   stored its blob and not yet committed its row, which is exactly an orphan's
+   state, told apart only by age. The window covers the whole upload as well as
+   the commit, since a store may stamp a multipart object with the time the
+   upload began. That rests on throughput, not on a bound: a pack goes up as one
+   part, and below about 75 KB/s a 256 MiB pack takes longer than an hour. Such
+   an upload is left to the re-read in step 4 and its residual race.
+4. Re-read that pack's row immediately before deleting its blobs, and keep them
+   if the row is there. This catches a row committed after the read in step 2
+   (the plugin-cache GC's #1404 pattern). It narrows the race to the gap between
+   the re-read and the delete without closing it. Losing that race would take an
+   upload whose commit lands more than the safety window after its blob was
+   stored.
+
+It runs as an API lifespan task on the storage sweep's cadence
+(`storage_sweep.interval_seconds`, CONFIGURATION.md Section 5.15), with its
+first pass one interval after startup. It is gated on the resource pack store
+existing, not on the control plane. On fs / remote-fs there is no resource pack
+store, so no blob to reclaim, and the GC does not run.
+
+A bucket must belong to exactly one database. This GC, like the plugin-cache and
+JAR GCs, diffs the bucket against the database it is configured with, so an API
+pointed at another database's bucket treats that database's objects as orphans
+and deletes them once they are older than the safety window (#3870).
 
 ### 4.4 Single-file writes
 

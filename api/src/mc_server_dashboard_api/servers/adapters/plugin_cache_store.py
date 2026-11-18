@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.plugin_cache_store import (
     PluginCacheStore,
 )
 from mc_server_dashboard_api.storage.adapters.object_store import (
+    KeyNamespace,
     S3ClientFactory,
     shielded_exit,
 )
@@ -45,7 +46,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 
 
 def _key(sha256: str) -> str:
-    return f"plugin-cache/{sha256}"
+    return f"{KeyNamespace.PLUGIN_CACHE}{sha256}"
 
 
 class ObjectPluginCacheStore(PluginCacheStore):
@@ -93,7 +94,7 @@ class ObjectPluginCacheStore(PluginCacheStore):
             raise PluginCacheStorageUnavailableError(key) from exc
 
     async def list_entries(self) -> list[CacheEntry]:
-        prefix = "plugin-cache/"
+        prefix = KeyNamespace.PLUGIN_CACHE
         try:
             async with self._client_factory() as client:
                 objs = await client.list_objects(prefix)

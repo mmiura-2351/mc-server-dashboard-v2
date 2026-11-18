@@ -111,6 +111,7 @@ export const en = {
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "common.toastRepeated": "Raised {count} times",
   "common.showPassword": "Show password",
   "common.hidePassword": "Hide password",
   "common.resizeColumn": "Drag to resize, double-click to reset",
@@ -393,6 +394,7 @@ export const en = {
   "serverDetail.installLog.tooLarge":
     "The install log is too large to show here. Download logs/forge-install.log from the Files tab.",
   "serverDetail.installLog.error": "Could not load the install log.",
+  "serverDetail.installLog.stale": "The log below is the copy loaded earlier.",
   "serverDetail.converging": "applying…",
   "serverDetail.noWorker": "no host assigned",
   "serverDetail.worker": "Host",
@@ -449,6 +451,8 @@ export const en = {
     "The server's console connection (RCON) failed, so the command may not have run. Check the console output before sending it again.",
   // Lifecycle controls.
   "serverDetail.start": "Start",
+  "serverDetail.startAwaitsRelease":
+    "Waiting for the previous stop to release the server…",
   "serverDetail.startCrashed": "Restart",
   "serverDetail.stop": "Stop",
   "serverDetail.stopGraceful": "Stop (graceful)",

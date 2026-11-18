@@ -119,6 +119,7 @@ export const ja: Record<TranslationKey, string> = {
   // UX primitives (WEBUI_SPEC.md Section 7.4)
   "common.cancel": "キャンセル",
   "common.close": "閉じる",
+  "common.toastRepeated": "{count} 回発生",
   "common.showPassword": "パスワードを表示",
   "common.hidePassword": "パスワードを非表示",
   "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",
@@ -353,6 +354,7 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.installLog.tooLarge":
     "インストールログが大きすぎるため、ここには表示できません。「ファイル」タブから logs/forge-install.log をダウンロードしてください。",
   "serverDetail.installLog.error": "インストールログを読み込めませんでした。",
+  "serverDetail.installLog.stale": "下のログは前回読み込んだ内容です。",
   "serverDetail.converging": "反映中…",
   "serverDetail.noWorker": "ホスト未割り当て",
   "serverDetail.worker": "ホスト",
@@ -406,6 +408,8 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーのコンソール接続（RCON）でエラーが発生したため、コマンドが実行されていない可能性があります。再送信する前にコンソールの出力を確認してください。",
   // Lifecycle controls.
   "serverDetail.start": "起動",
+  "serverDetail.startAwaitsRelease":
+    "前回の停止でサーバーが切り離されるのを待っています…",
   "serverDetail.startCrashed": "再起動",
   "serverDetail.stop": "停止",
   "serverDetail.stopGraceful": "停止（通常）",
