@@ -1433,22 +1433,23 @@ _GZIP_HEADER = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\xff"
 def _unreadable_archive(shape: str) -> bytes:
     """A stored archive whose bytes no longer read back as a tar.gz (issue #3230).
 
-    One shape per way ``tarfile`` reports it, so every exception the adapters
-    translate is pinned by a real archive rather than by a raised stand-in.
+    One shape per way the read reports it, so every exception the adapters
+    translate is pinned by a real archive rather than by a raised stand-in. The
+    adapters decompress with ``gzip.GzipFile`` (issue #3798).
     """
 
     if shape == "not_gzip":
-        # Not even a gzip stream (``ReadError``).
+        # Not even a gzip stream (``BadGzipFile``).
         return b"not a gzip stream " * 16
     if shape == "bad_method":
         # A gzip magic naming a compression method that is not deflate
-        # (``CompressionError`` from stream-mode reads).
+        # (``BadGzipFile``).
         return b"\x1f\x8b\x07\x00" + b"\x00" * 60
     # One member large enough that damage partway lands inside its body.
     tar = tar_bytes({"world/region/r.0.0.mca": bytes(range(256)) * 1000})
     if shape == "truncated":
         # The stream stops mid-deflate, short of its end-of-stream marker
-        # (``EOFError`` from ``r:gz``, ``ReadError`` from ``r|gz``).
+        # (``EOFError``).
         archive = gzip.compress(tar)
         return archive[: len(archive) // 2]
     if shape == "rotted_body":
@@ -1459,7 +1460,7 @@ def _unreadable_archive(shape: str) -> bytes:
         return _GZIP_HEADER + body + b"\xff" * 64
     if shape == "split_member":
         # A complete gzip member holding only the first part of the tar, followed
-        # by bytes that are not another member (``BadGzipFile`` from ``r:gz``).
+        # by bytes that are not another member (``BadGzipFile``).
         return gzip.compress(tar[:65536]) + b"not a gzip member" * 4
     assert shape == "split_at_a_tar_member"
     # The same, its first gzip member ending where the tar member's data does:
