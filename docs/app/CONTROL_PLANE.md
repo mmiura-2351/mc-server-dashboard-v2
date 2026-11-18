@@ -570,7 +570,7 @@ directories named this way.
 | Command | Meaning | Result payload | Req. ref |
 |---|---|---|---|
 | `StartServer` | Launch the server (after a preceding hydrate). Carries the driver, JAR relpath, MC version (Worker picks the Java runtime), launch mode (`jar` is the default JAR launch; `forge-argsfile` launches Forge via its generated args file, running a supervised installer first when the working set is uninstalled), optional `memory_limit_bytes` (per-server memory ceiling; 0/unset = driver default), and optional `cpu_millis` (soft CPU allocation in millicores; 0/unset = driver default). The "after a preceding hydrate" is enforced, not assumed: a launch whose working set is not held at the scratch root is refused `SERVER_NOT_FOUND` rather than launched into an empty directory (Section 7). The check is the presence of the generation marker `.mcsd_generation`, so a scratch emptied in place is refused as well as an absent one, and it guards `RestartServer`'s relaunch too — both launches go through the same code path. | none | FR-SRV-2, FR-EXE-5, ARCHITECTURE.md Section 7.3 |
-| `StopServer` | Stop the server; graceful stop triggers an event-driven snapshot. `force` skips graceful. The API also re-sends it, unchanged, to converge a server whose stop intent already stands but which is still assigned to this Worker: the reconciler does so once its grace window lapses, and an operator stop of such a server does so at once, through the same per-server action (CONFIGURATION.md Section 5.6). | none | FR-SRV-2, FR-DATA-7 |
+| `StopServer` | Stop the server; graceful stop triggers an event-driven snapshot. `force` skips graceful. The API also re-sends it, unchanged, to converge a server whose stop intent already stands but which is still assigned to this Worker: the reconciler does so once its grace window lapses, and an operator stop of such a server does so at once, through the same per-server action (CONFIGURATION.md Section 5.6). It is not sent for a server no Worker holds yet (Notes below). | none | FR-SRV-2, FR-DATA-7 |
 | `RestartServer` | Stop then start in place. The relaunch takes the same working-set guard as `StartServer`, so a restart over a scratch destroyed or emptied out of band is refused `SERVER_NOT_FOUND` once the stop has confirmed; the server is left down and the reconciler re-launches it with a hydrate (Section 7). | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
 | `HydrateTrigger` | Pull the working set from the data plane before launch; carries the transfer URL + one-time token. | none | FR-DATA-4 |
@@ -691,6 +691,23 @@ Notes:
   so a config edit made while the server runs is kept.
   The count lives in the API process. This holds because the API runs as a
   single instance (REQUIREMENTS.md NFR-SCALE-1).
+- **A stop withdraws a start intent no Worker holds yet.** A server can be
+  `desired=running` with no Worker assigned while the reconciler retries its
+  placement: no Worker can take it, or a placement failed before it sent
+  `StartServer` and gave its Worker back. A stop of such a server sends no
+  command, because there is no Worker to tell (issue #3815). It commits
+  `desired=stopped`, checking as it writes that the server is still
+  unassigned, adds one to the count as any stop does, and answers as any stop
+  does. A placement races it on the same row. If the placement's write lands
+  between the stop's read and its write, the stop answers
+  `409 transition_conflict`; a stop that reads the server after that write
+  finds it assigned and stops it as usual. If the stop lands first, the
+  placement's write finds the server no longer `desired=running` and
+  unassigned: it releases its placement reservation and sends nothing. A
+  placement that reads the server only after the stop finds no intent to
+  place. The reconciler counts neither toward its backoff (CONFIGURATION.md
+  Section 5.6). A user start needs the server `desired=stopped`, so it can
+  place the server only once the stop has landed.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
