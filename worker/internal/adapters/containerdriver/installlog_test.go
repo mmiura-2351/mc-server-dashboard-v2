@@ -89,10 +89,10 @@ func TestInstallLogCreatedInsideWorkingSet(t *testing.T) {
 func TestInstallLogIsEmptiedForEachStart(t *testing.T) {
 	dir := t.TempDir()
 
-	captureInstallLog(t, dir, "first start\n")
-	captureInstallLog(t, dir, "second start\n")
+	captureInstallLog(t, dir, "an earlier start, which printed more\n")
+	captureInstallLog(t, dir, "this start\n")
 
-	if got, want := readInstallLog(t, dir), "second start\n"; got != want {
+	if got, want := readInstallLog(t, dir), "this start\n"; got != want {
 		t.Fatalf("install log = %q, want %q", got, want)
 	}
 }

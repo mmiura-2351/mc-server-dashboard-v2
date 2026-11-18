@@ -73,8 +73,11 @@ func TestForgeInstallLogHoldsEveryAttemptOfTheLatestStartOnly(t *testing.T) {
 	shrinkInstallBackoff(t)
 	dir := t.TempDir()
 	docker := newForgeFakeDocker()
+	// The first start prints more, so none of it can hide under what the second
+	// one writes over it.
 	scriptInstallOutputs(docker,
-		"first start, attempt 1\n", "first start, attempt 2\n", "first start, attempt 3\n",
+		"first start, attempt 1, printing more\n", "first start, attempt 2, printing more\n",
+		"first start, attempt 3, printing more\n",
 		"second start, attempt 1\n", "second start, attempt 2\n", "second start, attempt 3\n")
 	d := forgeDriver(docker)
 
