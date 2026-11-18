@@ -448,8 +448,10 @@ files with 64-character names already pass 8 Mi), so they allow 8 Mi plus
 twice, as the name and as its PAX `path` record, and a few short records
 (`mtime`; `size`, `uid`, `gid`, `uname` or `gname` when out of the ustar
 fields' range): under 9 Ki characters for a 4095-byte name, Linux's
-`PATH_MAX`. So every backup they write passes, whatever its member count, and so
-does every archive the gate admits. Measured at that bound, a walk of 1,000
+`PATH_MAX`, which bounds every name the fs writer reads from disk and the
+Worker packs. So every backup they write of such names passes, whatever its
+member count, and so does every archive the gate admits. An object store's key
+is bounded by the store's own key limit instead (1024 bytes on S3). Measured at that bound, a walk of 1,000
 members peaks at 24 MiB with ASCII values and 95 MiB with UCS-4 ones. Past any
 of these limits restore and the probe raise `ArchiveUnreadableError`. A sparse
 member's map is not bounded yet (issue #3869). The snapshot ingest applies none
