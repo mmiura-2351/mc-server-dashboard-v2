@@ -101,10 +101,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return () => setToastZone(null);
   }, []);
 
-  // WEBUI_SPEC.md 7.4: a toast removed while it holds focus, dismissed or
-  // dropped by the cap, hands focus on to the next toast, else the one before,
-  // else back where focus came from, else to the open modal or `main`. Never
-  // to the page body.
+  // WEBUI_SPEC.md 7.4: a toast removed while it holds focus, dismissed, timed
+  // out or dropped by the cap, hands focus on to the next toast, else the one
+  // before, else back where focus came from, else to the open modal or `main`.
+  // Never to the page body.
   const handOffFocus = useCallback((node: HTMLElement) => {
     const neighbour = (
       node.nextElementSibling ?? node.previousElementSibling

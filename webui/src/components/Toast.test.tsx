@@ -344,16 +344,20 @@ describe("Toast", () => {
 
   it("does not pause once a click on × hands focus on to the next toast", () => {
     pointerFocus();
-    renderToasts();
+    renderToasts(<button type="button">Page</button>);
     show("Saved", "success"); // 3.2 s
     show("Failed", "error");
+    const page = screen.getByRole("button", { name: "Page" });
 
+    act(() => page.focus());
     act(() => dismissButton("Failed").focus());
     fireEvent.click(dismissButton("Failed"));
 
     expect(document.activeElement).toBe(dismissButton("Saved"));
     advance(3200);
     expect(screen.queryByText("Saved")).not.toBeInTheDocument();
+    // Timing out with focus on it, it hands focus on like a dismiss.
+    expect(document.activeElement).toBe(page);
   });
 
   it("resumes once focus leaves the stack with the last toast", () => {
