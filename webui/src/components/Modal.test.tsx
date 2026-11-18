@@ -142,6 +142,206 @@ describe("Modal", () => {
   });
 });
 
+// Focus outside the topmost dialog, on the page body or the page behind,
+// re-enters it on the next Tab rather than walking the page (WEBUI_SPEC.md 7.4).
+describe("Modal focus from outside the dialog", () => {
+  const controls = (
+    <>
+      <button type="button">First</button>
+      <button type="button">Last</button>
+    </>
+  );
+
+  // Puts focus on the page body, where a browser leaves it after a click on
+  // text that takes no focus.
+  function focusBody() {
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+  }
+
+  it("moves Tab from the page body to the dialog's first control", () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        {controls}
+      </Modal>,
+    );
+    focusBody();
+
+    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "First" }),
+    );
+  });
+
+  it("moves Shift+Tab from the page body to the dialog's last control", () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        {controls}
+      </Modal>,
+    );
+    focusBody();
+
+    expect(
+      fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true }),
+    ).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Last" }),
+    );
+  });
+
+  it("moves Tab from the page behind the dialog into it", () => {
+    render(
+      <>
+        <button type="button">Behind</button>
+        <Modal open={true} title="Title" onClose={() => {}}>
+          {controls}
+        </Modal>
+      </>,
+    );
+    const behind = screen.getByRole("button", { name: "Behind" });
+    behind.focus();
+
+    expect(fireEvent.keyDown(behind, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "First" }),
+    );
+  });
+
+  it("leaves Tab between the dialog's own controls to the browser", () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        {controls}
+      </Modal>,
+    );
+    const first = screen.getByRole("button", { name: "First" });
+    first.focus();
+
+    expect(fireEvent.keyDown(first, { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(first);
+  });
+
+  it("moves Tab from the page body into the topmost of stacked dialogs", () => {
+    render(
+      <>
+        <Modal open={true} title="History" onClose={() => {}}>
+          <button type="button">Outer body</button>
+        </Modal>
+        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
+          <button type="button">Inner body</button>
+        </Modal>
+      </>,
+    );
+    focusBody();
+
+    expect(fireEvent.keyDown(document.body, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Inner body" }),
+    );
+  });
+
+  it("moves Tab from a dialog below the topmost one into the topmost", () => {
+    render(
+      <>
+        <Modal open={true} title="History" onClose={() => {}}>
+          <button type="button">Outer body</button>
+        </Modal>
+        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
+          <button type="button">Inner body</button>
+        </Modal>
+      </>,
+    );
+    const outer = screen.getByRole("button", { name: "Outer body" });
+    outer.focus();
+
+    expect(fireEvent.keyDown(outer, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Inner body" }),
+    );
+  });
+});
+
+// A dialog that disables the control holding focus, as a confirm does while
+// its action runs, keeps focus: it goes to the dialog, never to the page body
+// (WEBUI_SPEC.md 7.4). The test DOM, like Firefox, leaves focus on the disabled
+// control; Chromium drops it to the body a frame later.
+function BusyFooter() {
+  const [busy, setBusy] = useState(false);
+  return (
+    <>
+      <button type="button" onClick={() => setBusy(true)}>
+        Start elsewhere
+      </button>
+      <button type="button" disabled={busy} onClick={() => setBusy(true)}>
+        Save
+      </button>
+    </>
+  );
+}
+
+describe("Modal focus when its focused control is disabled", () => {
+  // The dialog hears about the change on a microtask.
+  async function settle() {
+    await act(async () => {});
+  }
+
+  it("moves focus to the dialog, unscrolled, when the focused control is disabled", async () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        <BusyFooter />
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog");
+    const focus = vi.spyOn(dialog, "focus");
+    const save = screen.getByRole("button", { name: "Save" });
+    save.focus();
+
+    fireEvent.click(save);
+    await settle();
+
+    expect(save).toBeDisabled();
+    expect(document.activeElement).toBe(dialog);
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+  });
+
+  it("leaves focus where it is when a control without it is disabled", async () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        <BusyFooter />
+      </Modal>,
+    );
+    const elsewhere = screen.getByRole("button", { name: "Start elsewhere" });
+    elsewhere.focus();
+
+    fireEvent.click(elsewhere);
+    await settle();
+
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(document.activeElement).toBe(elsewhere);
+  });
+
+  // The Files history drawer renders its rollback confirm inside its own body,
+  // so the outer dialog sees the inner one's changes too.
+  it("moves focus to the topmost dialog when a dialog nested inside another disables it", async () => {
+    render(
+      <Modal open={true} title="History" onClose={() => {}}>
+        <button type="button">Outer body</button>
+        <Modal open={true} title="Confirm rollback" onClose={() => {}}>
+          <BusyFooter />
+        </Modal>
+      </Modal>,
+    );
+    const save = screen.getByRole("button", { name: "Save" });
+    save.focus();
+
+    fireEvent.click(save);
+    await settle();
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("dialog", { name: "Confirm rollback" }),
+    );
+  });
+});
+
 // The toast stack stays reachable while a dialog is open (WEBUI_SPEC.md 7.4):
 // Tab runs through the dialog, then the toasts, then wraps.
 let raise: (message: string) => void;
@@ -257,5 +457,40 @@ describe("Modal focus trap with toasts showing", () => {
     pressTab();
 
     expect(document.activeElement).toBe(toastButtons()[0]);
+  });
+
+  it("leaves Tab between toasts to the browser", () => {
+    renderWithToasts(controls);
+
+    toastButtons()[0].focus();
+
+    expect(fireEvent.keyDown(toastButtons()[0], { key: "Tab" })).toBe(true);
+    expect(document.activeElement).toBe(toastButtons()[0]);
+  });
+
+  // In a browser a click on a toast's text leaves focus on the page body;
+  // the test DOM does not move it, so it is put there by hand.
+  it("keeps Shift+Tab within the dialog and the toasts after a click on a toast's text", () => {
+    renderWithToasts(controls);
+    toastButtons()[0].focus();
+
+    fireEvent.click(screen.getByText("Failed 1"));
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+    pressTab(true);
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Last" }),
+    );
+  });
+
+  it("moves Tab from the page body to a dialog with no controls, not to a toast", () => {
+    renderWithToasts(<p>Body</p>);
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+
+    pressTab();
+
+    expect(document.activeElement).toBe(screen.getByRole("dialog"));
   });
 });
