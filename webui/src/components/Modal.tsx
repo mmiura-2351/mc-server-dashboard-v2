@@ -123,16 +123,13 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // Shift+Tab. The control may scroll into view inside the dialog; the
     // page's scroll the Tab made is undone. Focus a script or the pointer
     // moves is left alone: a confirm may close the dialog and focus behind it
-    // in any order, and the keydown branch below takes the next Tab.
+    // in any order, and the keydown branch below takes the next Tab. Only the
+    // topmost dialog records a Tab, so only it pulls.
     const isOutside = (node: Node | null) =>
       !dialog.contains(node) && !toastZone?.contains(node);
     const onFocusIn = () => {
       const active = document.activeElement;
-      if (
-        lastTab === null ||
-        dialogStack.at(-1) !== dialog ||
-        !isOutside(active)
-      ) {
+      if (lastTab === null || !isOutside(active)) {
         return;
       }
       const inDialog = focusableWithin(dialog);
