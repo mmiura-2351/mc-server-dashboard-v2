@@ -490,6 +490,12 @@ no live server row references (STORAGE.md Section 3.2). It is gated on the contr
 plane like the snapshot/reconciler loops, and a platform admin can also
 trigger a sweep on demand (`POST /versions/jar-pool/gc`).
 
+Each sweep logs every JAR it reclaims at INFO and ends with one summary line, at
+DEBUG when it had nothing to do. A JAR whose delete fails is logged at WARNING and
+skipped, and the sweep goes on; a store that gives no answer at all ends it. The
+plugin-cache and resource-pack GCs do the same (STORAGE.md Section 3.2, "Record
+and failures").
+
 The first sweep runs soon after startup, after a random delay, uniform between 0
 and min(`jar_gc.interval_seconds`, 600) seconds. Later sweeps follow the interval.
 An API that restarts more often than the interval (on every deploy, say) still

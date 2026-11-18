@@ -33,6 +33,14 @@ database: in a bucket another database also uses, that database's packs are name
 by no row here, and each is the only copy of a user upload. Each pass therefore
 asks the bucket's owner marker first and is refused, with an ERROR, unless it
 names this installation (STORAGE.md Section 4.3, issue #3870).
+
+**Record and failures.** Each reclaimed blob is logged at INFO with its pack id,
+key, size and age, since it was the only copy of a user upload, and each pass ends
+with one summary line, at DEBUG when the pass neither reclaimed nor failed anything.
+A pack whose delete fails is logged at WARNING and skipped, and the pass goes on:
+one pack that keeps failing must not starve every pack after it (issue #3871). A
+store that gives no answer at all (:class:`ResourcePackStorageUnreachableError`)
+ends the pass instead, as does a cancellation.
 """
 
 from __future__ import annotations
@@ -42,6 +50,9 @@ import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.errors import (
+    ResourcePackStorageUnreachableError,
+)
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
@@ -55,6 +66,21 @@ GC_SAFETY_WINDOW = dt.timedelta(hours=1)
 
 
 @dataclass(frozen=True)
+class ResourcePackGcResult:
+    """What a GC pass scanned and reclaimed (issue #3871).
+
+    ``scanned`` is the number of blobs listed, ``deleted`` the orphans reclaimed,
+    ``freed_bytes`` their combined on-store size, and ``failed`` the orphans whose
+    delete failed and were skipped.
+    """
+
+    scanned: int
+    deleted: int
+    freed_bytes: int
+    failed: int
+
+
+@dataclass(frozen=True)
 class RunResourcePackGc:
     """Sweep the resource-pack blobs: delete unreferenced, old-enough packs."""
 
@@ -63,17 +89,20 @@ class RunResourcePackGc:
     clock: Clock
     ownership: StoreOwnership
 
-    async def __call__(self) -> None:
+    async def __call__(self) -> ResourcePackGcResult:
         refusal = await self.ownership.refusal()
         if refusal is not None:
             _LOG.error("resource-pack GC refused: %s", refusal)
-            return
+            return ResourcePackGcResult(scanned=0, deleted=0, freed_bytes=0, failed=0)
+        started = self.clock.now()
         entries = await self.store.list_entries()
         async with self.uow:
             live = {pack.id for pack in await self.uow.resource_packs.list_all()}
         now = self.clock.now()
         cutoff = now - GC_SAFETY_WINDOW
-        reclaimed = 0
+        deleted = 0
+        freed_bytes = 0
+        failed = 0
         # The window is judged per blob, while ``store.delete`` removes every blob
         # under the pack id. The two agree because each upload puts one blob under
         # a freshly minted id; a second blob per pack would need the window judged
@@ -90,18 +119,46 @@ class RunResourcePackGc:
             async with self.uow:
                 if await self.uow.resource_packs.get_by_id(entry.pack_id) is not None:
                     continue
-            await self.store.delete(entry.pack_id)
-            reclaimed += 1
+            try:
+                await self.store.delete(entry.pack_id)
+            except ResourcePackStorageUnreachableError:
+                # Not this pack but the store: every later delete would fail the
+                # same way, so the pass ends here.
+                raise
+            except Exception as exc:  # noqa: BLE001 - one pack must not end the pass
+                failed += 1
+                _LOG.warning(
+                    "resource-pack GC could not delete pack %s (%s), skipped it: %s",
+                    entry.pack_id.value,
+                    entry.key,
+                    exc,
+                    exc_info=True,
+                )
+                continue
+            deleted += 1
+            freed_bytes += entry.size_bytes
             # The blob was the only copy of a user upload: say what went.
             _LOG.info(
-                "resource-pack GC reclaimed pack %s (%s, stored %s ago): no row "
-                "names it",
+                "resource-pack GC reclaimed pack %s (%s, %d bytes, stored %s ago): "
+                "no row names it",
                 entry.pack_id.value,
                 entry.key,
+                entry.size_bytes,
                 now - entry.modified_at,
             )
-        _LOG.info(
-            "resource-pack GC pass: %d blob(s) listed, %d reclaimed",
+        _LOG.log(
+            logging.INFO if deleted or failed else logging.DEBUG,
+            "resource-pack GC pass: %d blob(s) listed, %d reclaimed (%d bytes), "
+            "%d failed, in %.1fs",
             len(entries),
-            reclaimed,
+            deleted,
+            freed_bytes,
+            failed,
+            (self.clock.now() - started).total_seconds(),
+        )
+        return ResourcePackGcResult(
+            scanned=len(entries),
+            deleted=deleted,
+            freed_bytes=freed_bytes,
+            failed=failed,
         )

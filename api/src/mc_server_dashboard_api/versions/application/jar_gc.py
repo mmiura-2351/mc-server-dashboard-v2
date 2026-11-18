@@ -37,18 +37,31 @@ database: on a store another database also uses, that database's JARs are
 referenced by no row here. Each pass therefore asks the store's owner marker first
 and raises :class:`StoreNotOwnedError` unless it names this installation (STORAGE.md
 Section 4.3, issue #3870).
+
+**Record and failures.** Each reclaimed JAR is logged at INFO with its key, size and
+age, and each pass ends with one summary line, at DEBUG when the pass neither
+reclaimed nor failed anything. A JAR whose delete fails is logged at WARNING and
+skipped, and the pass goes on: one JAR that keeps failing must not starve every JAR
+after it (issue #3871). A store that gives no answer at all
+(:class:`JarPoolUnreachableError`) ends the pass instead, as does a cancellation.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.versions.domain.clock import Clock
-from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
+from mc_server_dashboard_api.versions.domain.errors import (
+    JarPoolUnreachableError,
+    StoreNotOwnedError,
+)
 from mc_server_dashboard_api.versions.domain.jar_pool import JarPool
 from mc_server_dashboard_api.versions.domain.jar_references import LiveJarReferences
 from mc_server_dashboard_api.versions.domain.store_ownership import StoreOwnership
+
+_LOG = logging.getLogger(__name__)
 
 # Never delete a JAR younger than this. It must exceed the window in which
 # StartServer has put a JAR into the pool but not yet committed the server row
@@ -62,13 +75,15 @@ GC_SAFETY_WINDOW = dt.timedelta(hours=1)
 class JarGcResult:
     """What a GC pass scanned and reclaimed (the manual endpoint's response, #293).
 
-    ``scanned`` is the pool size examined, ``deleted`` the orphans reclaimed, and
-    ``freed_bytes`` their combined on-store size.
+    ``scanned`` is the pool size examined, ``deleted`` the orphans reclaimed,
+    ``freed_bytes`` their combined on-store size, and ``failed`` the orphans whose
+    delete failed and were skipped (issue #3871).
     """
 
     scanned: int
     deleted: int
     freed_bytes: int
+    failed: int
 
 
 @dataclass(frozen=True)
@@ -84,11 +99,14 @@ class RunJarPoolGc:
         refusal = await self.ownership.refusal()
         if refusal is not None:
             raise StoreNotOwnedError(f"jar-pool GC refused: {refusal}")
+        started = self.clock.now()
         entries = await self.pool.list_entries()
         live = await self.references.live()
-        cutoff = self.clock.now() - GC_SAFETY_WINDOW
+        now = self.clock.now()
+        cutoff = now - GC_SAFETY_WINDOW
         deleted = 0
         freed_bytes = 0
+        failed = 0
         for entry in entries:
             if entry.sha256 in live:
                 continue
@@ -105,9 +123,43 @@ class RunJarPoolGc:
             fresh_live = await self.references.live()
             if entry.sha256 in fresh_live:
                 continue
-            await self.pool.delete(entry.sha256)
+            try:
+                await self.pool.delete(entry.sha256)
+            except (JarPoolUnreachableError, StoreNotOwnedError):
+                # Not this JAR but the store: every later delete would fail the
+                # same way, so the pass ends here.
+                raise
+            except Exception as exc:  # noqa: BLE001 - one JAR must not end the pass
+                failed += 1
+                _LOG.warning(
+                    "jar-pool GC could not delete jar %s, skipped it: %s",
+                    entry.sha256,
+                    exc,
+                    exc_info=True,
+                )
+                continue
             deleted += 1
             freed_bytes += entry.size_bytes
+            _LOG.info(
+                "jar-pool GC reclaimed jar %s (%d bytes, stored %s ago): no server "
+                "references it",
+                entry.sha256,
+                entry.size_bytes,
+                now - entry.modified_at,
+            )
+        _LOG.log(
+            logging.INFO if deleted or failed else logging.DEBUG,
+            "jar-pool GC pass: %d jar(s) listed, %d reclaimed (%d bytes), %d failed, "
+            "in %.1fs",
+            len(entries),
+            deleted,
+            freed_bytes,
+            failed,
+            (self.clock.now() - started).total_seconds(),
+        )
         return JarGcResult(
-            scanned=len(entries), deleted=deleted, freed_bytes=freed_bytes
+            scanned=len(entries),
+            deleted=deleted,
+            freed_bytes=freed_bytes,
+            failed=failed,
         )

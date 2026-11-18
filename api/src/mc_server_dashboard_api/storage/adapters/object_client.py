@@ -36,6 +36,7 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
+    ObjectStoreUnreachableError,
 )
 
 # Stream/multipart chunk size: 8 MiB respects the S3 5 MiB minimum for non-final
@@ -61,7 +62,9 @@ _UPLOAD_FAILURE_ERRORS = (
 # The transport half of the tuple above, on its own: the request never got a usable
 # HTTP response back (connection refused, connect/read timeout, connection closed).
 # Used by the READ paths, which cannot take the ``ClientError`` half wholesale — see
-# :func:`_translating_backend_faults`.
+# :func:`_translating_backend_faults` — and by ``delete_object``. Both raise
+# :class:`ObjectStoreUnreachableError` for it: the store gave no answer at all, so a
+# GC pass ends rather than skipping one key after another (issue #3871).
 _TRANSPORT_FAILURE_ERRORS = (
     botocore.exceptions.ConnectionError,
     botocore.exceptions.HTTPClientError,
@@ -114,7 +117,7 @@ def _translating_backend_faults(operation: str, key: str) -> Iterator[None]:
             ) from exc
         raise
     except _TRANSPORT_FAILURE_ERRORS as exc:
-        raise ObjectStoreUnavailableError(
+        raise ObjectStoreUnreachableError(
             f"object store {operation} failed for {key}"
         ) from exc
 
@@ -289,9 +292,16 @@ class _Aioboto3S3Client:
         # so there is no NotFoundError to preserve: translate only a botocore
         # transport/backend failure to a StorageError at this boundary (issue #2273),
         # mirroring upload_multipart (#2270), so no raw botocore type crosses the Port.
+        #
+        # The two halves stay apart (issue #3871): a store that answered, even with a
+        # 5xx or a refusal, failed this key; one that gave no answer is unreachable.
         try:
             await self._client.delete_object(Bucket=self._bucket, Key=key)
-        except _UPLOAD_FAILURE_ERRORS as exc:
+        except _TRANSPORT_FAILURE_ERRORS as exc:
+            raise ObjectStoreUnreachableError(
+                f"object store delete failed for {key}"
+            ) from exc
+        except ClientError as exc:
             raise ObjectStoreUnavailableError(
                 f"object store delete failed for {key}"
             ) from exc

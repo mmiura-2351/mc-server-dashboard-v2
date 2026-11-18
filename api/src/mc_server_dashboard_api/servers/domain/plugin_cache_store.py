@@ -61,4 +61,8 @@ class PluginCacheStore(abc.ABC):
 
     @abc.abstractmethod
     async def delete(self, sha256: str) -> None:
-        """Remove a cached blob by content key. Idempotent (no error if absent)."""
+        """Remove a cached blob by content key. Idempotent (no error if absent).
+
+        Raises ``PluginCacheStorageUnreachableError``, the narrower type, when the
+        store gave no answer at all (issue #3871).
+        """

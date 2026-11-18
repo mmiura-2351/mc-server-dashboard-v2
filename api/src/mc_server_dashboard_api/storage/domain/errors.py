@@ -139,6 +139,32 @@ class ObjectStoreUnavailableError(StorageUnavailableError):
     """
 
 
+class StorageUnreachableError(StorageUnavailableError):
+    """The store gave no answer at all, so it is not one object failing (#3871).
+
+    The narrower half of :class:`StorageUnavailableError`. A store that answered,
+    with a fault of its own or a refusal, may well serve the next object; one that
+    did not answer will not, and every further request waits out the same timeouts.
+    That is the difference a GC pass acts on: it skips an object whose delete failed
+    and goes on, but ends the pass on this type.
+
+    The object client raises it as :class:`ObjectStoreUnreachableError`. The fs
+    adapter's ``delete_jar`` raises it for an errno that says the device or the
+    remote-fs mount's transport is gone (``_STORE_UNREACHABLE_ERRNOS``).
+    """
+
+
+class ObjectStoreUnreachableError(ObjectStoreUnavailableError, StorageUnreachableError):
+    """The object store gave no HTTP response at all (#3871).
+
+    Raised by the object client for a transport failure (connection refused, a
+    connect or read timeout, a dropped connection) once botocore's own retries are
+    spent, on every read and on ``delete_object``. The writes that upload still
+    raise the wider :class:`ObjectStoreUnavailableError` for it. A subclass of both
+    parents, so every handler of the wider object-store type still catches it.
+    """
+
+
 class ArchiveUnreadableError(StorageError):
     """A stored backup archive's bytes could not be read back in full (issue #2371).
 
