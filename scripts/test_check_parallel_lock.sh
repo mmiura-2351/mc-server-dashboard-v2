@@ -96,30 +96,58 @@ fail=0
 ok()        { echo "  PASS: $1"; pass=$((pass + 1)); }
 fail_test() { echo "  FAIL: $1"; fail=$((fail + 1)); }
 
-# Poll for a file to appear, up to a generous ceiling. Used instead of a fixed
-# sleep wherever the expectation is "this happens", so a slow CI runner costs
-# latency rather than a false red. The negative expectation ("this does NOT
-# happen yet") has no such formulation and pays a fixed wait below.
-await_file() {
-	local path=$1 limit=${2:-100} i=0
-	while [ "$i" -lt "$limit" ]; do
-		[ -e "$path" ] && return 0
+# The ceiling of every wait below for something that has to happen -- a run
+# getting past the lock, printing a line, exiting, dying -- in polls of 0.1 s:
+# 120 s, the bound the Worker tests give a wait on filesystem work (#3637). It
+# only keeps a wedged run from hanging the gate, so it must never be what a
+# slow run loses to (#3788). The suite pins that each of these happens, not how
+# soon: no latency is asserted, the lock's handoff included. Every run here
+# works on disk: the lock-file write, the log rotation and the stub's touch go
+# to the suite's temp dir, which is on the disk unless TMPDIR says otherwise,
+# and every command a run spawns is exec'd from the disk. Under IO load each of
+# those can wait seconds, and one wait can cover more than one run: before the
+# copy in 9 reports its first assertion it inits two repositories, takes a
+# holder run to its stub and a nested run to its marker, and after the release
+# the four queued waiters pass the lock one at a time, in an order flock does
+# not fix. The old 10 s ceiling failed three of these waits under heavy IO
+# load.
+#
+# The ceiling outlasts the 60 s after which a waiter announces its holder
+# again, as "still waiting", so a check on what a waiter says when it starts to
+# wait looks for its first announcement, not for the needle anywhere. A passing
+# run pays none of the ceiling, and a wait on a run stops once that run has
+# exited, so a red pays it only for a run that is still there and never does
+# what is awaited, such as a waiter that never names its holder.
+ceiling=1200
+
+# Poll until the command "${@:2}" succeeds, up to the ceiling, or until run $1
+# has exited. Used instead of a fixed sleep wherever the expectation is "this
+# happens", so a slow host costs latency rather than a false red. The negative
+# expectation ("this does NOT happen yet") has no such formulation and pays a
+# fixed wait below. A run that has exited does nothing more, so the poll stops
+# there, after one last try: the run may have done it just before it exited.
+# Bash reaps its own background children as they exit, so `kill -0` failing
+# is the signal that the run is gone, as in reap_run below.
+await() {
+	local pid=$1 i=0
+	shift
+	while [ "$i" -lt "$ceiling" ]; do
+		"$@" && return 0
+		kill -0 "$pid" 2> /dev/null || { "$@"; return; }
 		sleep 0.1
 		i=$((i + 1))
 	done
 	return 1
 }
 
-# The same, for a line that has to appear in a run's output rather than a file
-# that has to appear on disk.
+# Await, for run $1, a file $2 that has to appear on disk.
+await_file() {
+	await "$1" test -e "$2"
+}
+
+# Await, for run $1, a line containing $2 that has to appear in its output $3.
 await_grep() {
-	local needle=$1 path=$2 limit=${3:-100} i=0
-	while [ "$i" -lt "$limit" ]; do
-		grep -qF "$needle" "$path" 2> /dev/null && return 0
-		sleep 0.1
-		i=$((i + 1))
-	done
-	return 1
+	await "$1" grep -sqF "$2" "$3"
 }
 
 # Start a run in the background and set run_pid: "$@" runs in directory $1,
@@ -177,7 +205,7 @@ stop_run() {
 # side effect, which would let the assertions after it pass on scaffolding the
 # suite itself cut short.
 reap_run() {
-	local pid=$1 limit=${2:-100} i=0
+	local pid=$1 limit=${2:-$ceiling} i=0
 	[ -n "$pid" ] || return 0
 	while [ "$i" -lt "$limit" ]; do
 		kill -0 "$pid" 2> /dev/null || { wait "$pid" 2> /dev/null || true; return 0; }
@@ -202,7 +230,7 @@ procs_under() {
 # Poll until nothing works under $1, up to a ceiling: a signalled process takes
 # a moment to die, and then to be reaped by whoever inherited it.
 await_no_procs() {
-	local dir=$1 limit=${2:-100} i=0
+	local dir=$1 limit=${2:-$ceiling} i=0
 	while [ "$i" -lt "$limit" ]; do
 		[ -z "$(procs_under "$dir")" ] && return 0
 		sleep 0.1
@@ -299,7 +327,7 @@ start_run "$holder_wt" "$work/holder.out" env \
 	bash "$ROOT/scripts/check_parallel.sh" "$holder_wt"
 holder_pid=$run_pid
 
-if ! await_file "$acquired"; then
+if ! await_file "$holder_pid" "$acquired"; then
 	fail_test "the holder run never took the lock (nothing to test against)"
 	touch "$release"
 	stop_run "$holder_pid"
@@ -324,7 +352,7 @@ fi
 		bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
 	nested_pid=$run_pid
 
-	if await_file "$nested_entered"; then
+	if await_file "$nested_pid" "$nested_entered"; then
 		ok "a nested run (MCSD_CHECK_LOCK_HELD) does not wait for the lock it already holds"
 		reap_run "$nested_pid" ||
 			fail_test "the nested run had to be stopped instead of exiting on its own"
@@ -344,20 +372,24 @@ start_run "$waiter_wt" "$work/waiter.out" env \
 	bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
 waiter_pid=$run_pid
 
+# The waiter names the holder just before it blocks, so the line is also the
+# signal that it has reached the lock (#3788). The needle is that first
+# announcement: the "still waiting" one a minute later must not stand in for it.
+if await_grep "$waiter_pid" "===   held by: $holder_wt" "$work/waiter.out"; then
+	ok "the waiting run names the holder's worktree"
+else
+	fail_test "the waiting run does not name the holder's worktree (output: $(cat "$work/waiter.out"))"
+fi
+
 # The one place a fixed wait is unavoidable: "has not proceeded" is only
-# observable by looking after enough time that it would have.
+# observable by looking after enough time that it would have. It starts once
+# the waiter is at the lock, so a slow start cannot use it up.
 sleep 2
 
 if [ -e "$waiter_entered" ]; then
 	fail_test "a second run started work while the first held the lock"
 else
 	ok "a second run does not start work while another holds the lock"
-fi
-
-if grep -qF "$holder_wt" "$work/waiter.out"; then
-	ok "the waiting run names the holder's worktree"
-else
-	fail_test "the waiting run does not name the holder's worktree (output: $(cat "$work/waiter.out"))"
 fi
 
 # The holder recorded a pid that is alive, so the dead-pid hint must be absent
@@ -398,7 +430,11 @@ dead_pid_waiter=""
 		bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
 	dead_pid_waiter=$run_pid
 
-	if await_grep "fuser -v $lock_file" "$work/dead-pid-waiter.out"; then
+	# The hint ends the line, so the first announcement is found by its prefix
+	# and the hint looked for on that line, not anywhere in the output.
+	if await_grep "$dead_pid_waiter" "===   held by: " "$work/dead-pid-waiter.out" &&
+		held=$(grep -m 1 -F "===   held by: " "$work/dead-pid-waiter.out") &&
+		[[ $held == *"fuser -v $lock_file"* ]]; then
 		ok "a waiter whose recorded holder pid is dead is pointed at fuser"
 	else
 		fail_test "a waiter whose recorded holder pid is dead prints no fuser hint (output: $(cat "$work/dead-pid-waiter.out"))"
@@ -434,7 +470,7 @@ decoy_waiters=()
 			bash "$ROOT/scripts/check_parallel.sh" "$waiter_wt"
 		decoy_waiters+=("$run_pid")
 
-		if await_grep "held by: $decoy_wt" "$decoy_out"; then
+		if await_grep "$run_pid" "===   held by: $decoy_wt" "$decoy_out"; then
 			if grep -qF 'fuser -v' "$decoy_out"; then
 				fail_test "a decoy pid in the worktree path faked a dead holder [$decoy_tail]"
 			else
@@ -447,12 +483,23 @@ decoy_waiters=()
 }
 
 # ---------------------------------------------------------------------------
+# 1, again, for every waiter queued above, just before the release. The first
+# has now waited through assertions 5 and 6 as well, a window the 2 s one above
+# cannot match under load, and the dead-pid and decoy waiters had none at all.
+entered=$(ls "$waiter_entered" "$dead_pid_entered" "$work"/decoy-entered-* 2> /dev/null)
+if [ -n "$entered" ]; then
+	fail_test "a queued run started work while the first held the lock: ${entered//$'\n'/ }"
+else
+	ok "no queued run starts work while another holds the lock"
+fi
+
+# ---------------------------------------------------------------------------
 # 3. Releasing the lock lets the waiter through.
 touch "$release"
 reap_run "$holder_pid" ||
 	fail_test "the holder run had to be stopped: it did not exit after the lock was released, so the lock below was freed by this suite rather than by the holder"
 
-if await_file "$waiter_entered"; then
+if await_file "$waiter_pid" "$waiter_entered"; then
 	ok "the waiting run proceeds once the holder releases the lock"
 	# Bounded for the same reason as the failure branch below: each of these
 	# runs can only finish by getting past the lock.
@@ -518,9 +565,9 @@ STUB
 	start_run "$stop_dir" /dev/null env SUITE_PID="$$" bash "$stop_dir/run"
 	stop_pid=$run_pid
 
-	if await_file "$stop_dir/spawned"; then
+	if await_file "$stop_pid" "$stop_dir/spawned"; then
 		stop_run "$stop_pid"
-		if await_no_procs "$stop_dir" 20; then
+		if await_no_procs "$stop_dir"; then
 			ok "a stopped run leaves nothing behind, however deep its process tree"
 		else
 			fail_test "a stopped run left processes behind: $(procs_under "$stop_dir" | tr '\n' ' ')"
@@ -556,10 +603,10 @@ if [ -z "${LOCK_SUITE_COPY:-}" ]; then
 	# Assertion 4 reports, pass or fail, after the copy's work dir exists and
 	# just before the copy queues its waiter.
 	copy_work=""
-	if await_grep "a nested run" "$work/copy.out"; then
+	if await_grep "$copy_pid" "a nested run" "$work/copy.out"; then
 		copy_work=$(echo "$copy_tmp"/*)
 	fi
-	if [ -n "$copy_work" ] && await_grep "held by:" "$copy_work/waiter.out"; then
+	if [ -n "$copy_work" ] && await_grep "$copy_pid" "held by:" "$copy_work/waiter.out"; then
 		kill -KILL "$copy_pid" 2> /dev/null || true
 		wait "$copy_pid" 2> /dev/null || true
 		if await_no_procs "$copy_tmp"; then
