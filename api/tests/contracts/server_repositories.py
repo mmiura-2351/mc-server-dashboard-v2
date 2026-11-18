@@ -665,11 +665,14 @@ class ServerRepositoryContract:
             None,
         )
 
-    async def test_a_worker_disconnect_clears_the_last_crash(
+    async def test_a_worker_disconnect_keeps_the_last_crash(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
         contract_community_id: CommunityId,
     ) -> None:
+        # Issue #3885: the Worker has already forgotten a crashed instance, so
+        # its disconnect tells nothing new about it. The row keeps the crash and
+        # its stamp, as the API-startup reset does.
         item = server(contract_community_id)
         assert item.assigned_worker_id is not None
         async with server_repository_harness.open() as tx:
@@ -683,11 +686,48 @@ class ServerRepositoryContract:
         async with server_repository_harness.open() as tx:
             row = await tx.repository.get_by_id(item.id)
         assert row is not None
-        assert (row.observed_state, row.crash_reason, row.crash_detail) == (
-            ObservedState.UNKNOWN,
-            None,
-            None,
+        assert (
+            row.observed_state,
+            row.observed_at,
+            row.crash_reason,
+            row.crash_detail,
+        ) == (
+            ObservedState.CRASHED,
+            _NOW,
+            CrashReason.FORGE_INSTALL_FAILED,
+            "forge install failed after 3 attempts",
         )
+
+    @pytest.mark.parametrize(
+        "state",
+        [state for state in ObservedState if state is not ObservedState.CRASHED],
+        ids=lambda state: state.value,
+    )
+    async def test_a_worker_disconnect_marks_any_other_state_unknown(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        state: ObservedState,
+    ) -> None:
+        # Only a crash survives the disconnect (issue #3885): every other state
+        # of the Worker's servers is invalidated to unknown, at the new stamp.
+        item = server(contract_community_id)
+        assert item.assigned_worker_id is not None
+        item.observed_state = state
+        item.crash_reason = None
+        item.crash_detail = None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            await tx.repository.mark_worker_servers_unknown(
+                item.assigned_worker_id, _LATER
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.observed_at) == (ObservedState.UNKNOWN, _LATER)
 
     @pytest.mark.parametrize(
         ("state", "reason", "worker", "at"),

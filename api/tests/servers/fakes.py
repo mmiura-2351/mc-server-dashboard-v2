@@ -1028,7 +1028,10 @@ class FakeServerRepository(ServerRepository):
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
         for server in self.by_id.values():
-            if server.assigned_worker_id == worker_id:
+            if (
+                server.assigned_worker_id == worker_id
+                and server.observed_state is not ObservedState.CRASHED
+            ):
                 _observe(server, ObservedState.UNKNOWN, observed_at)
 
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:

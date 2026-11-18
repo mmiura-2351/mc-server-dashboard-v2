@@ -524,7 +524,8 @@ expected (a server can be `desired=running, observed=crashed`); reconciliation
 reports observed state). The values (`starting` / `running` / `stopping` /
 `stopped` / `restarting` / `crashed` / `unknown`) mirror the control-plane
 `ServerState` enum ([`CONTROL_PLANE.md`](CONTROL_PLANE.md)) exactly. `unknown` has
-two producers: the API infers it when the owning Worker disconnects,
+two producers: the API infers it when the owning Worker disconnects, for every
+server of that Worker except a crashed one, which stays `crashed` (issue #3885),
 and a Worker reports it when it cannot currently confirm an instance's fate.
 `desired=running` with `observed=crashed` or `unknown` is closed by the
 reconciler restarting the server on its assigned Worker while that Worker is
@@ -544,9 +545,10 @@ startable.
 
 **The last crash.** `crash_reason` and `crash_detail` ride the observed-state
 write: the write that records `crashed` stores the report's reason and detail,
-and the next write of any other state clears both, the `unknown` a Worker
-disconnect writes included, under the same ownership and freshness guards
-(issue #3281). So the server read and the status snapshot can
+and the next write of any other state clears both, under the same ownership
+and freshness guards (issue #3281). A Worker disconnect, and so a graceful API
+restart, keeps both, because it leaves a crashed server `crashed` (issue #3885).
+So the server read and the status snapshot can
 explain a crash to a client that missed its live frame, and the reconciler can
 tell a crash that recurs on every attempt from one a restart may fix. A stop of
 a crashed server keeps both, as it keeps `observed=crashed`.
@@ -556,9 +558,9 @@ permanently pinned to a Worker (FR-WRK-6). The column is null when stopped/unpla
 set on placement (FR-WRK-3), and cleared when a stop releases the server, so it
 can be re-placed after hydrate (FR-WRK-4), or when a failed start is undone
 (`StartServer._compensate`, `_unassign`). A Worker disconnect does not clear it:
-the API marks the Worker's servers `observed=unknown` and they stay assigned to
-it. A server whose Worker never comes back is released by an operator stop and
-re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
+the API marks the Worker's servers `observed=unknown` (a crashed one stays
+`crashed`) and they stay assigned to it. A server whose Worker never comes back
+is released by an operator stop and re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,
 "A Worker that never reconnects"; whether the API should do it on its own is
 issue #3809).
 The server row survives the Worker; the Worker holds no authoritative state. The

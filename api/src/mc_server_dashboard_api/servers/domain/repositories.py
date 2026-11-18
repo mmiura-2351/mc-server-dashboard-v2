@@ -294,7 +294,12 @@ class ServerRepository(abc.ABC):
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
-        """Set observed=unknown for all servers assigned to ``worker_id`` (FR-WRK-4)."""
+        """Set observed=unknown for the servers assigned to ``worker_id`` (FR-WRK-4).
+
+        A ``crashed`` server keeps its state, stamp and stored crash (issue
+        #3885): the Worker has already forgotten the crashed instance, so the
+        disconnect tells nothing new about it.
+        """
 
     @abc.abstractmethod
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:

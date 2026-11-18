@@ -1200,6 +1200,98 @@ async def test_worker_restart_that_swept_the_orphan_is_restarted_by_the_reconcil
     assert healed.assigned_worker_id == WorkerId(worker)
 
 
+@pytest.mark.parametrize(
+    ("reason", "restarted"),
+    [
+        ("forge_install_out_of_memory", False),
+        ("forge_install_java_incompatible", False),
+        ("forge_install_failed", True),
+        ("", True),
+    ],
+    ids=["out-of-memory", "java-incompatible", "install-failed", "unclassified"],
+)
+async def test_crash_survives_a_worker_disconnect_and_reconnect(
+    engine: AsyncEngine, reason: str, restarted: bool
+) -> None:
+    """start -> crashed -> Worker disconnects -> reconnects -> reconciler tick.
+
+    Issue #3885. The disconnect keeps the crash and its reason: the Worker has
+    already forgotten the crashed instance, so it reports nothing for it on
+    reconnect, and the row reads as it did before. A crash the Worker does not
+    retry stays held; any other crash is restarted on the same Worker, as it
+    would have been without the disconnect.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id = server.id
+    community = server.community_id
+
+    worker = uuid.uuid4()
+    await _start_server_use_case(
+        engine, FakeControlPlane(place_to=WorkerId(worker)), clock
+    )(community_id=community, server_id=server_id)
+    sink = _sink(engine, clock)
+    await sink.record_observed_state(
+        server_id=str(server_id.value),
+        worker_id=str(worker),
+        state="crashed",
+        detail="the installer failed",
+        reason=reason,
+    )
+    crashed = await _load(engine, server_id)
+    assert crashed is not None
+
+    await sink.mark_worker_servers_unknown(worker_id=str(worker))
+    after_disconnect = await _load(engine, server_id)
+    assert after_disconnect is not None
+    assert (
+        after_disconnect.observed_state,
+        after_disconnect.observed_at,
+        after_disconnect.crash_reason,
+        after_disconnect.crash_detail,
+        after_disconnect.assigned_worker_id,
+    ) == (
+        ObservedState.CRASHED,
+        crashed.observed_at,
+        crashed.crash_reason,
+        "the installer failed",
+        WorkerId(worker),
+    )
+    assert after_disconnect.crash_not_restarted() is not restarted
+
+    # While the Worker is away the reconnect owns the server: nothing is sent.
+    away = FakeControlPlane(connected={WorkerId(worker): False})
+    await _reconciler_tick(engine, away, clock)
+    assert away.dispatched == []
+
+    # The Worker is back and reports nothing for the forgotten instance.
+    back = FakeControlPlane(connected={WorkerId(worker): True})
+    await _reconciler_tick(engine, back, clock)
+    if not restarted:
+        assert back.dispatched == []
+        held = await _load(engine, server_id)
+        assert held is not None
+        assert held.observed_state is ObservedState.CRASHED
+        assert held.crash_not_restarted()
+        return
+    assert back.dispatched == [
+        ("hydrate", WorkerId(worker), server_id),
+        ("start", WorkerId(worker), server_id),
+    ]
+    await sink.record_observed_state(
+        server_id=str(server_id.value), worker_id=str(worker), state="running"
+    )
+    healed = await _load(engine, server_id)
+    assert healed is not None
+    assert (healed.observed_state, healed.crash_reason, healed.crash_detail) == (
+        ObservedState.RUNNING,
+        None,
+        None,
+    )
+    assert healed.assigned_worker_id == WorkerId(worker)
+
+
 # --- Timed: which grace a crashed / orphan-swept restart waits (#3387) -----
 
 # The stock graces (CONFIGURATION.md Section 5.6).

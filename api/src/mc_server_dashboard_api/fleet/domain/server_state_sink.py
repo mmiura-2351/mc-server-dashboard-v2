@@ -59,8 +59,10 @@ class ServerStateSink(abc.ABC):
         """Set observed=unknown for every server assigned to ``worker_id``.
 
         Invoked when the worker disconnects: its servers' observed state is no
-        longer trustworthy (FR-WRK-4). Each server whose state this changes is
-        relayed to subscribed clients as a live status event, once committed.
+        longer trustworthy (FR-WRK-4). A ``crashed`` server is the exception and
+        keeps its state and stored crash, since the worker had already forgotten
+        it (issue #3885). Each server whose state this changes is relayed to
+        subscribed clients as a live status event, once committed.
         """
 
     @abc.abstractmethod

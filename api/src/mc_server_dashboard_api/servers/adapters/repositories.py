@@ -594,8 +594,14 @@ class SqlAlchemyServerRepository(ServerRepository):
         # even against a row with a newer observed_at — that fresher report came from
         # the now-disconnected worker and is exactly the untrustworthy data this
         # write exists to invalidate.
+        # A crashed row is left alone (issue #3885), as the startup reset leaves
+        # it: the Worker has already forgotten the crashed instance, so the row
+        # stays truthful, and its stored crash keeps explaining it.
         await self._write_observed_state(
-            [ServerModel.assigned_worker_id == worker_id.value],
+            [
+                ServerModel.assigned_worker_id == worker_id.value,
+                ServerModel.observed_state != ObservedState.CRASHED.value,
+            ],
             ObservedState.UNKNOWN,
             observed_at,
         )

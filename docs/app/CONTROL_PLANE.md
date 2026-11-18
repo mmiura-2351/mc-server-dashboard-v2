@@ -514,8 +514,10 @@ Section 5.1), which is set comfortably above the interval (FR-WRK-2).
 
 A stream ends on a clean close, a transport error, or a missed-heartbeat
 timeout. On disconnect the API marks the Worker's servers `unknown` and keeps
-their assignment (FR-WRK-4), and the reconciler does not restart a
-`desired=running` one until the Worker reconnects. If it does not come back, an
+their assignment (FR-WRK-4). A crashed server keeps `crashed` and its stored
+crash instead, since the Worker has already forgotten that instance (issue
+#3885). The reconciler does not restart a
+`desired=running` server until the Worker reconnects. If it does not come back, an
 operator stop and then a start moves each server to another eligible Worker
 after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an
 automatic recovery is the open issue #3809). The Worker is responsible for

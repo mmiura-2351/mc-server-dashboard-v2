@@ -532,16 +532,12 @@ async def test_worker_disconnect_publishes_unknown_for_each_changed_server(
     await world.sink().mark_worker_servers_unknown(worker_id=str(worker))
 
     # One frame per server the disconnect changed: none for the row already
-    # unknown, none for the other worker's server.
-    assert sorted(await _states(watching), key=str) == sorted(
-        [
-            (str(running.id.value), "unknown"),
-            (str(crashed.id.value), "unknown"),
-        ],
-        key=str,
-    )
-    # All of them after the one commit: no transaction is open across a publish.
-    assert world.journal == ["write", "commit", "publish", "publish"]
+    # unknown, none for the other worker's server, and none for the crashed
+    # one, which keeps its crash (issue #3885).
+    assert await _states(watching) == [(str(running.id.value), "unknown")]
+    assert await world.observed(crashed) is ObservedState.CRASHED
+    # After the one commit: no transaction is open across a publish.
+    assert world.journal == ["write", "commit", "publish"]
 
 
 async def test_worker_disconnect_frame_has_the_worker_path_payload_shape(
