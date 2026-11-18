@@ -5,12 +5,14 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { t } from "../i18n/index.ts";
+import { isFocusVisible } from "./focusVisible.ts";
 import { setToastZone, topmostDialog } from "./Modal.tsx";
 
 // Self-built toast primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
@@ -86,8 +88,8 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const raisesRef = useRef(0);
   const zoneRef = useRef<HTMLDivElement>(null);
-  // The pointer or focus anywhere in the zone pauses every countdown, so no
-  // toast closes, or slides, out from under the one being read.
+  // The pointer or keyboard focus anywhere in the zone pauses every countdown,
+  // so no toast closes, or slides, out from under the one being read.
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   // The element focus came into the stack from, to hand it back to.
@@ -111,10 +113,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       neighbour.focus();
       return;
     }
-    // Focus leaves the stack here, so where it came from is used up.
+    // Focus leaves the stack here, so where it came from is used up. It is
+    // never taken back behind an open modal.
     const returnTo = returnFocusRef.current;
     returnFocusRef.current = null;
-    for (const target of [returnTo, topmostDialog()]) {
+    const dialog = topmostDialog();
+    const back = dialog === null || dialog.contains(returnTo) ? returnTo : null;
+    for (const target of [back, dialog]) {
       if (target) {
         target.focus();
         if (document.activeElement === target) {
@@ -129,7 +134,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // out of the zone without a blur or mouseleave reaching it. Re-read focus
   // whenever the stack changes, and drop hover once the zone is empty.
   useEffect(() => {
-    setFocused(zoneRef.current?.contains(document.activeElement) === true);
+    setFocused(keyboardFocusIn(zoneRef.current));
     if (toasts.length === 0) {
       setHovered(false);
     }
@@ -180,7 +185,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         onPointerEnter={() => setHovered(true)}
         onPointerLeave={() => setHovered(false)}
         onFocus={(event) => {
-          setFocused(true);
+          setFocused(keyboardFocusIn(event.currentTarget));
           if (relatedIsOutside(event)) {
             returnFocusRef.current = event.relatedTarget;
           }
@@ -206,6 +211,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         ))}
       </div>
     </ToastContext.Provider>
+  );
+}
+
+// Whether keyboard focus is in `zone`. The focus a click or a tap leaves on a
+// button shows no ring, and holds neither the countdowns nor the scroll
+// (WEBUI_SPEC.md 7.4).
+function keyboardFocusIn(zone: Element | null): boolean {
+  const active = document.activeElement;
+  return (
+    active !== null && zone?.contains(active) === true && isFocusVisible(active)
   );
 }
 
@@ -237,6 +252,7 @@ function ToastItem({
   const isError = toast.variant === "error";
   const remainingRef = useRef(autoDismissMs(toast.message));
   const ref = useRef<HTMLDivElement>(null);
+  const messageId = useId();
 
   // A layout effect's cleanup runs while the node is still in the document,
   // so focus is handed on before the browser would drop it to the body.
@@ -250,15 +266,12 @@ function ToastItem({
   }, [onRemoveFocused]);
 
   // A toast raised, or raised again, comes into view in case the stack
-  // overflows and scrolls; not while focus is in the stack, so a focused
-  // toast is not scrolled away.
+  // overflows and scrolls; not while keyboard focus is in the stack, so a
+  // focused toast is not scrolled away.
   // biome-ignore lint/correctness/useExhaustiveDependencies: `toast.raisedAt` marks a raise; re-run on each one, and only then.
   useEffect(() => {
     const node = ref.current;
-    if (
-      node !== null &&
-      !node.parentElement?.contains(document.activeElement)
-    ) {
+    if (node !== null && !keyboardFocusIn(node.parentElement)) {
       node.scrollIntoView({ block: "nearest" });
     }
   }, [toast.raisedAt]);
@@ -281,7 +294,9 @@ function ToastItem({
       role={isError ? "alert" : "status"}
       className={`toast ${toast.variant}`}
     >
-      <span className="toast-message">{toast.message}</span>
+      <span id={messageId} className="toast-message">
+        {toast.message}
+      </span>
       {toast.count > 1 && (
         <span className="toast-count">
           <span aria-hidden="true">{toast.count}</span>
@@ -294,6 +309,7 @@ function ToastItem({
         type="button"
         className="toast-dismiss"
         aria-label={t("common.close")}
+        aria-describedby={messageId}
         onClick={() => onDismiss(toast.id)}
         onKeyDown={(event) => {
           // Stop here: Modal and Popover close on an Escape at the document.

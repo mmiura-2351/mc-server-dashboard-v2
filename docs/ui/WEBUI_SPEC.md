@@ -1095,15 +1095,19 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   plus 100 ms per character of its message, clamped to 3.2–12 s. It counts
   characters, not words, because Japanese has no word breaks; about 10
   characters a second suits Japanese and leaves English time to spare. The
-  pointer or focus anywhere in the toast stack pauses every countdown, so no
-  toast closes or slides out from under the one being read; each resumes with
-  the time it had left. On a touch screen only a finger held on the stack
-  pauses it, since a touch pointer leaves when the finger lifts.
+  pointer or keyboard focus anywhere in the toast stack pauses every
+  countdown, so no toast closes or slides out from under the one being read;
+  each resumes with the time it had left. Keyboard focus is focus the browser
+  shows (`:focus-visible`): the focus a click or a tap leaves on a dismiss
+  button shows none and does not pause the stack, so after a pointer dismiss
+  the other toasts keep counting down. On a touch screen only a finger held on
+  the stack pauses it, since a touch pointer leaves when the finger lifts.
 - **Toast accessibility.** An error toast is a `role="alert"`, any other a
   `role="status"`, with no explicit `aria-live`: the role already sets it, and
   repeating it double-announces in VoiceOver. The dismiss button is in the tab
   order and at least 24×24 px, and Escape dismisses the toast whose button has
-  focus.
+  focus. The button is described by its toast's message, so it reads as more
+  than "Close", the name the modal's backdrop shares.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast
@@ -1113,9 +1117,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   else in the modal closes the modal. When a toast holding focus goes,
   dismissed or dropped by the stack cap, focus moves to the next toast's
   dismiss button, or the one before when it was the last. With no toast left,
-  focus returns to the element it came into the stack from; failing that, to
-  the open modal, or else to the page's `main` region. It never drops to the
-  page body while any of these exists.
+  focus returns to the element it came into the stack from, unless that is
+  behind an open modal; failing that, to the open modal, or else to the page's
+  `main` region. It never drops to the page body while any of these exists.
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while
@@ -1124,7 +1128,7 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   never wider than the screen less 2rem, and its message wraps anywhere; the
   stack is at most the screen's height less 2rem and scrolls beyond that, so
   every toast stays reachable on a phone. A toast raised, or raised again,
-  scrolls into view, unless focus is in the stack.
+  scrolls into view, unless keyboard focus is in the stack.
 - A failed read retries only what can clear on its own — a network failure, a
   5xx, 408 or 429 — up to three times; any other 4xx is the API's answer and is
   surfaced at once instead of after the backoff.
