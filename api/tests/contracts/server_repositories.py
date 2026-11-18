@@ -683,12 +683,19 @@ class ServerRepositoryContract:
         # does: a newer stamp would hold back a restart that a later write has
         # re-armed (``Server.crash_not_restarted``). Under a stopped intent the
         # stamp moves to the disconnect, so the release waits a full grace from
-        # it, for the Worker to come back and take the final snapshot.
+        # it, for the Worker to come back and take the final snapshot. Another
+        # Worker's crash is not this disconnect's: its stamp stays.
         item = server(contract_community_id)
         assert item.assigned_worker_id is not None
         item.desired_state = desired
+        elsewhere = server(contract_community_id, name="elsewhere")
+        assert elsewhere.assigned_worker_id != item.assigned_worker_id
+        elsewhere.desired_state = desired
+        elsewhere.game_port = 25566
+        elsewhere.bedrock_port = 19133
         async with server_repository_harness.open() as tx:
             await tx.repository.add(item)
+            await tx.repository.add(elsewhere)
             await tx.commit()
         async with server_repository_harness.open() as tx:
             await tx.repository.mark_worker_servers_unknown(
@@ -697,6 +704,12 @@ class ServerRepositoryContract:
             await tx.commit()
         async with server_repository_harness.open() as tx:
             row = await tx.repository.get_by_id(item.id)
+            other = await tx.repository.get_by_id(elsewhere.id)
+        assert other is not None
+        assert (other.observed_state, other.observed_at) == (
+            ObservedState.CRASHED,
+            _NOW,
+        )
         assert row is not None
         assert (
             row.observed_state,

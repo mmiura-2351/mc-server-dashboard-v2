@@ -525,6 +525,14 @@ async def test_worker_disconnect_publishes_unknown_for_each_changed_server(
     worker, other_worker = uuid.uuid4(), uuid.uuid4()
     running = await world.server("running", worker=worker, reported="running")
     crashed = await world.server("crashed", worker=worker, reported="crashed")
+    # Crashed under a stop intent whose dispatch failed: the disconnect moves
+    # only its stamp.
+    stopping = await world.server("stopping", worker=worker, reported="running")
+    with pytest.raises(WorkerUnavailableError):
+        await world.stop_server(FakeControlPlane(unavailable_kinds={"stop"}))(
+            community_id=world.community, server_id=stopping.id
+        )
+    await world.report(stopping, worker, "crashed")
     await world.server("unknown", worker=worker, reported="unknown")
     await world.server("elsewhere", worker=other_worker, reported="running")
     watching = world.watch_all()
@@ -532,10 +540,11 @@ async def test_worker_disconnect_publishes_unknown_for_each_changed_server(
     await world.sink().mark_worker_servers_unknown(worker_id=str(worker))
 
     # One frame per server the disconnect changed: none for the row already
-    # unknown, none for the other worker's server, and none for the crashed
+    # unknown, none for the other worker's server, and none for either crashed
     # one, which keeps its crash (issue #3885).
     assert await _states(watching) == [(str(running.id.value), "unknown")]
     assert await world.observed(crashed) is ObservedState.CRASHED
+    assert await world.observed(stopping) is ObservedState.CRASHED
     # After the one commit: no transaction is open across a publish.
     assert world.journal == ["write", "commit", "publish"]
 
@@ -1278,10 +1287,16 @@ async def test_observed_state_writes_lock_server_rows_in_id_order(
     world.locking_selects.clear()
 
     await world.sink().mark_worker_servers_unknown(worker_id=str(worker))
+    disconnect = list(world.locking_selects)
     await ResetUnverifiableObservedStates(uow=world.uow(), clock=world.clock)()
 
-    # The disconnect locks twice: the rows it marks unknown, then the crashed
-    # rows under a stopped intent whose stamp it moves (issue #3885).
+    # The disconnect takes every lock it needs in its first statement, the
+    # crashed rows under a stopped intent whose stamp it moves included (issue
+    # #3885). Its write's own locking read then re-reads only those rows, so it
+    # never asks for a lower id after a higher one.
+    assert len(disconnect) == 2
+    assert "server.desired_state" in disconnect[0]
+    assert "WHERE server.id IN" in disconnect[1]
     assert len(world.locking_selects) == 3
     for statement in world.locking_selects:
         assert "ORDER BY server.id" in statement

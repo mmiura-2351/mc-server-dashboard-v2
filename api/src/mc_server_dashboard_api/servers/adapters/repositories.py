@@ -597,14 +597,6 @@ class SqlAlchemyServerRepository(ServerRepository):
         # A crashed row keeps its state (issue #3885), as the startup reset leaves
         # it: the Worker has already forgotten the crashed instance, so the row
         # stays truthful, and its stored crash keeps explaining it.
-        await self._write_observed_state(
-            [
-                ServerModel.assigned_worker_id == worker_id.value,
-                ServerModel.observed_state != ObservedState.CRASHED.value,
-            ],
-            ObservedState.UNKNOWN,
-            observed_at,
-        )
         # Under a stopped intent the crashed row still takes the new stamp, and
         # only the stamp: its release then waits a full grace from the
         # disconnect, so a Worker back within it can still take the final
@@ -612,23 +604,32 @@ class SqlAlchemyServerRepository(ServerRepository):
         # stored crash; and not under a running intent, where a newer stamp
         # would hold back a restart a later write re-armed
         # (Server.crash_not_restarted). The state is unchanged, so no frame.
-        stamped = (
-            (
-                await self._session.execute(
-                    select(ServerModel.id)
-                    .where(
-                        ServerModel.assigned_worker_id == worker_id.value,
-                        ServerModel.observed_state == ObservedState.CRASHED.value,
+        # Every row either write touches is locked first, in one statement in id
+        # order. Two id-ordered sweeps could still deadlock with another
+        # id-ordered locker (mark_sync_pending's FOR KEY SHARE), as the second
+        # would ask for a lower id after a higher one.
+        crashed = ObservedState.CRASHED.value
+        locked = (
+            await self._session.execute(
+                select(ServerModel.id, ServerModel.observed_state)
+                .where(
+                    ServerModel.assigned_worker_id == worker_id.value,
+                    or_(
+                        ServerModel.observed_state != crashed,
                         ServerModel.desired_state == DesiredState.STOPPED.value,
-                    )
-                    # The same lock order as _write_observed_state.
-                    .order_by(ServerModel.id)
-                    .with_for_update()
+                    ),
                 )
+                .order_by(ServerModel.id)
+                .with_for_update()
             )
-            .scalars()
-            .all()
-        )
+        ).all()
+        invalidated = [row.id for row in locked if row.observed_state != crashed]
+        stamped = [row.id for row in locked if row.observed_state == crashed]
+        if invalidated:
+            # Its own locking read re-reads only rows held above.
+            await self._write_observed_state(
+                [ServerModel.id.in_(invalidated)], ObservedState.UNKNOWN, observed_at
+            )
         if stamped:
             await self._session.execute(
                 update(ServerModel)
@@ -742,9 +743,9 @@ class SqlAlchemyServerRepository(ServerRepository):
                 # reset_unverifiable_observed_states (API restart) deliberately
                 # leaves it alone as still-truthful. Nothing else flags the row
                 # either — is_at_rest() reads true — so the assignment stands and
-                # every later start 409s on the unassigned-only CAS, for as long as the
-                # owning worker stays connected. A disconnect does not rescue it
-                # either: it keeps a crashed row crashed (issue #3885).
+                # every later start 409s on the unassigned-only CAS. A disconnect
+                # does not rescue it either: it keeps a crashed row crashed (issue
+                # #3885).
                 and_(
                     ServerModel.desired_state == stopped,
                     ServerModel.observed_state == ObservedState.CRASHED.value,
