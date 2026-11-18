@@ -55,6 +55,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
@@ -510,10 +511,16 @@ class FleetControlPlaneAdapter(ControlPlane):
             # so the assignment is released as before. A disconnect that ended the
             # session while this command awaited its answer is flagged apart from a
             # Worker that was not connected at all: the command may have run
-            # (issue #3781).
+            # (issue #3781). Either disconnect is a Worker that is not connected,
+            # unlike a timeout, which the client is told apart (issue #3820).
             raise WorkerUnavailableError(
                 str(worker_id.value),
                 upload_may_be_live=isinstance(exc, CommandTimedOutError),
                 session_ended_in_flight=isinstance(exc, SessionEndedError),
+                worker_state=(
+                    UnavailableWorkerState.NO_ANSWER
+                    if isinstance(exc, CommandTimedOutError)
+                    else UnavailableWorkerState.NOT_CONNECTED
+                ),
             ) from exc
         return _to_outcome(result)

@@ -446,10 +446,11 @@ still alive, step 2 starts a second live instance of the same world elsewhere.
 Nothing fences the old one; the API only drops the old Worker's status reports
 for the server once that Worker no longer owns it (issue #3809).
 
-1. **Stop it.** The stop answers `503 worker_unavailable`, because there is no
-   Worker to send it to, but the stop intent stands: `StopServer` commits
-   `desired=stopped` before it dispatches and reverts nothing on a failed
-   dispatch. The server is then released from the Worker with no final
+1. **Stop it.** The stop answers `503 worker_unavailable` with
+   `worker_state: "not_connected"` ([`AUTH_API.md`](AUTH_API.md) Section 2),
+   because there is no Worker to send it to, but the stop intent stands:
+   `StopServer` commits `desired=stopped` before it dispatches and reverts
+   nothing on a failed dispatch. The server is then released from the Worker with no final
    snapshot, by the reconciler once `grace_seconds` lapses, or at once by a
    second `stop` (for a stopped intent whose Worker is disconnected,
    `stopped_intent_action` selects `clear_stale_assignment`).

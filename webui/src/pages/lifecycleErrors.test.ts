@@ -2,6 +2,7 @@
 // DOM-free logic test; runs under Node to skip per-file jsdom setup (issue #1734).
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/client.ts";
+import { en } from "../i18n/en.ts";
 import { lifecycleErrorMessage } from "./lifecycleErrors.ts";
 
 describe("lifecycleErrorMessage", () => {
@@ -252,6 +253,79 @@ describe("lifecycleErrorMessage", () => {
       "dashboard.lifecycle.restartUnconfirmed",
     );
   });
+
+  // A Worker that is not connected gets no automatic recovery: the reconciler
+  // skips its servers until it returns, so the server stays where it is until
+  // the Worker comes back or the operator moves it (issue #3820).
+  it("maps a 503 worker_unavailable from an offline Worker on stop to the offline-stop message", () => {
+    const error = new ApiError(503, {
+      reason: "worker_unavailable",
+      worker_state: "not_connected",
+    });
+    expect(lifecycleErrorMessage(error, "stop")).toBe(
+      "dashboard.lifecycle.stopWorkerOffline",
+    );
+  });
+
+  it("maps a 503 worker_unavailable from an offline Worker on restart to the offline-restart message", () => {
+    const error = new ApiError(503, {
+      reason: "worker_unavailable",
+      worker_state: "not_connected",
+    });
+    expect(lifecycleErrorMessage(error, "restart")).toBe(
+      "dashboard.lifecycle.restartWorkerOffline",
+    );
+  });
+
+  // A Worker that did not answer in time is connected and may still finish the
+  // command, so the unconfirmed messages stay (issue #3820).
+  it.each([
+    ["stop", "dashboard.lifecycle.stopUnconfirmed"],
+    ["restart", "dashboard.lifecycle.restartUnconfirmed"],
+  ] as const)(
+    "keeps the unconfirmed message for a 503 worker_unavailable no_answer on %s",
+    (action, expected) => {
+      const error = new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "no_answer",
+      });
+      expect(lifecycleErrorMessage(error, action)).toBe(expected);
+    },
+  );
+
+  // Moving a server off a lost Worker starts it elsewhere, and nothing fences
+  // an instance still alive on the old host, so the offline copy names the
+  // precondition CONFIGURATION.md 5.6 sets (issue #3820).
+  it.each([
+    "dashboard.lifecycle.stopWorkerOffline",
+    "dashboard.lifecycle.restartWorkerOffline",
+  ] as const)("%s moves the server only once the old host is down", (key) => {
+    expect(en[key]).toMatch(/only once you know the old host is down/i);
+  });
+
+  // The reconciler restarts a server that stays down only while its Worker is
+  // connected, so the unconfirmed-restart copy must not promise more (issue
+  // #3820).
+  it("conditions the unconfirmed-restart promise on a connected host", () => {
+    expect(en["dashboard.lifecycle.restartUnconfirmed"]).toMatch(
+      /if it stays down.*connected/i,
+    );
+  });
+
+  // Start and the verb-agnostic call keep their message for an offline Worker:
+  // the offline copy is about a stop or restart intent that stands.
+  it.each([undefined, "start"] as const)(
+    "keeps the worker-unavailable message for an offline Worker on %s",
+    (action) => {
+      const error = new ApiError(503, {
+        reason: "worker_unavailable",
+        worker_state: "not_connected",
+      });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "dashboard.lifecycle.workerUnavailable",
+      );
+    },
+  );
 
   // Start is ambiguous: a pre-dispatch unavailable compensates back to stopped
   // (nothing pending), a post-dispatch one does not, and both arrive as a bare
