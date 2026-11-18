@@ -111,12 +111,19 @@ function InstallLogPanel({
     retry: false,
   });
 
-  if (query.isPending) {
-    return <div>{t("serverDetail.installLog.loading")}</div>;
+  if (query.data === undefined) {
+    return (
+      <div>
+        {t(
+          query.isError
+            ? loadErrorKey(query.error)
+            : "serverDetail.installLog.loading",
+        )}
+      </div>
+    );
   }
-  if (query.isError) {
-    return <div>{t(loadErrorKey(query.error))}</div>;
-  }
+  // A failed refetch keeps the log loaded earlier, in the same place so the
+  // view keeps its scroll position, under a banner that says so (#3818).
   const tail = tailLines(
     decodeBase64Text(query.data.content_base64, {
       path: INSTALL_LOG_PATH,
@@ -126,6 +133,11 @@ function InstallLogPanel({
   );
   return (
     <>
+      {query.isError && (
+        <div role="alert">
+          {t(loadErrorKey(query.error))} {t("serverDetail.installLog.stale")}
+        </div>
+      )}
       {tail.truncated && (
         <div>
           {t("serverDetail.installLog.truncated", {

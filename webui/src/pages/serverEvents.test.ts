@@ -117,6 +117,59 @@ describe("parseServerFrame", () => {
     ).toEqual({ kind: "snapshot", state: "crashed", desiredState: "running" });
   });
 
+  it("parses the assignment a status frame carries (#3818)", () => {
+    expect(
+      parseServerFrame(frame("status", { assigned_worker_id: null })),
+    ).toEqual({
+      kind: "status",
+      assignedWorkerId: null,
+      detail: "",
+      reason: "",
+    });
+    expect(
+      parseServerFrame(
+        frame("status", { desired_state: "running", assigned_worker_id: "w1" }),
+      ),
+    ).toEqual({
+      kind: "status",
+      desiredState: "running",
+      assignedWorkerId: "w1",
+      detail: "",
+      reason: "",
+    });
+  });
+
+  it("leaves the assignment out of a status frame that does not carry it", () => {
+    expect(
+      parseServerFrame(frame("status", { state: "running" })),
+    ).not.toHaveProperty("assignedWorkerId");
+    expect(
+      parseServerFrame(frame("status", { assigned_worker_id: 7 })),
+    ).toBeNull();
+  });
+
+  it("parses the assignment a snapshot frame carries (#3818)", () => {
+    expect(
+      parseServerFrame(
+        frame("snapshot", {
+          state: "stopped",
+          desired_state: "stopped",
+          assigned_worker_id: "w1",
+        }),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      state: "stopped",
+      desiredState: "stopped",
+      assignedWorkerId: "w1",
+    });
+    expect(
+      parseServerFrame(
+        frame("snapshot", { state: "stopped", assigned_worker_id: null }),
+      ),
+    ).toEqual({ kind: "snapshot", state: "stopped", assignedWorkerId: null });
+  });
+
   it("drops a snapshot frame without a state", () => {
     expect(parseServerFrame(frame("snapshot", {}))).toBeNull();
     expect(

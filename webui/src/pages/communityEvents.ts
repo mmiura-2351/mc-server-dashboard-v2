@@ -22,6 +22,7 @@ import {
   EventsSocketClient,
   wsOrigin,
 } from "./eventsSocket.ts";
+import { assignmentOf } from "./serverEvents.ts";
 
 // Re-exported for the existing tests / callers that import it from here.
 export { backoffDelayMs };
@@ -29,22 +30,26 @@ export { backoffDelayMs };
 /**
  * A STATUS frame from the community stream (`_community_frame` in events.py).
  * It sets the server state fields it carries: an observed transition carries
- * `state`, a change of the server's intent carries `desiredState` (#3428).
+ * `state`, a change of the server's intent carries `desiredState` (#3428), and
+ * a placement or release carries `assignedWorkerId`, `null` once released
+ * (#3818).
  */
 export interface StatusEvent {
   serverId: string;
   state?: string;
   desiredState?: string;
+  assignedWorkerId?: string | null;
 }
 
 /**
  * One server of the status snapshot: its observed state and, when the API
- * reports it, its desired state (#3428).
+ * reports them, its desired state (#3428) and assigned Worker (#3818).
  */
 export interface SnapshotEntry {
   serverId: string;
   state: string;
   desiredState?: string;
+  assignedWorkerId?: string | null;
 }
 
 /**
@@ -135,7 +140,12 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     state?: unknown;
     desired_state?: unknown;
   };
-  if (typeof state !== "string" && typeof desired_state !== "string") {
+  const assignedWorkerId = assignmentOf(payload);
+  if (
+    typeof state !== "string" &&
+    typeof desired_state !== "string" &&
+    assignedWorkerId === undefined
+  ) {
     return null;
   }
   return {
@@ -143,6 +153,7 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     serverId: server_id,
     ...(typeof state === "string" && { state }),
     ...(typeof desired_state === "string" && { desiredState: desired_state }),
+    ...(assignedWorkerId !== undefined && { assignedWorkerId }),
   };
 }
 
@@ -179,9 +190,9 @@ function parseNotification(
 }
 
 /**
- * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state}]}`
- * payload. A malformed entry rejects the whole frame: a partial snapshot would
- * misreport the community's server set.
+ * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state,
+ * assigned_worker_id}]}` payload. A malformed entry rejects the whole frame: a
+ * partial snapshot would misreport the community's server set.
  */
 function parseSnapshot(payload: unknown): CommunityFrame | null {
   if (typeof payload !== "object" || payload === null) {
@@ -201,10 +212,12 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
     if (typeof server_id !== "string" || typeof state !== "string") {
       return null;
     }
+    const assignedWorkerId = assignmentOf(entry as object);
     parsed.push({
       serverId: server_id,
       state,
       ...(typeof desired_state === "string" && { desiredState: desired_state }),
+      ...(assignedWorkerId !== undefined && { assignedWorkerId }),
     });
   }
   return { kind: "snapshot", servers: parsed };

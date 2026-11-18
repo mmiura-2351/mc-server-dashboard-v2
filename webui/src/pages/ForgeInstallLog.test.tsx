@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import {
   afterEach,
   beforeEach,
@@ -40,6 +46,7 @@ function renderLog() {
       <ForgeInstallLog communityId="c1" serverId="s1" />
     </QueryClientProvider>,
   );
+  return client;
 }
 
 function open() {
@@ -157,6 +164,37 @@ describe("ForgeInstallLog", () => {
     expect(
       await screen.findByText(t("serverDetail.installLog.error")),
     ).toBeInTheDocument();
+  });
+
+  // A refetch (window focus, an invalidation) that fails keeps the log the
+  // operator is reading, scrolled where they left it, and says it is the
+  // copy loaded earlier (#3818).
+  it("keeps the last good log in place with an error banner when a refetch fails", async () => {
+    mockApi.get.mockResolvedValueOnce(fileBody("Downloading\nboom\n"));
+    const client = renderLog();
+    open();
+    const view = await screen.findByRole("log");
+    view.scrollTop = 7;
+
+    mockApi.get.mockRejectedValueOnce(new ApiError(503, {}));
+    await act(() => client.refetchQueries());
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `${t("serverDetail.installLog.error")} ${t("serverDetail.installLog.stale")}`,
+    );
+    expect(screen.getByRole("log")).toBe(view);
+    expect(view.textContent).toContain("boom");
+    expect(view.scrollTop).toBe(7);
+
+    // The next good read clears the banner; the view is still the same one.
+    mockApi.get.mockResolvedValueOnce(fileBody("Downloading\nboom\n"));
+    await act(() => client.refetchQueries());
+
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole("log")).toBe(view);
+    expect(view.scrollTop).toBe(7);
   });
 
   it("closes again", async () => {

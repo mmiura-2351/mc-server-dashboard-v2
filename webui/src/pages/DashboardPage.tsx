@@ -36,6 +36,7 @@ import {
   type ObservedState,
   STATE_BUCKETS,
   type StateBucket,
+  startAwaitsRelease,
   statePill,
   statesForBucket,
 } from "./serverState.ts";
@@ -696,15 +697,19 @@ function StatePill({ state }: { state: ObservedState }) {
 
 // The desired/observed drift affordance for a list row (issue #2443). Mirrors
 // the detail page header's rule and string exactly (ServerDetailPage's
-// `Header`, `converging`): until the observed state reaches the intent, show
-// an "applying…" hint. Without it a pending intent is invisible on the
+// `Header`, `converging`): until the server converges on the intent, show an
+// "applying…" hint. Without it a pending intent is invisible on the
 // list — e.g. a stop whose dispatch failed leaves desired=stopped while the
 // process keeps running, yet the row would otherwise show only a green pill.
 // The mark rides on the row wherever the observed state's bucket passes the
 // filter; it does not change which rows `filterServers` keeps.
 function DriftPill({ server }: { server: ServerResponse }) {
   if (
-    !converging(normalizeState(server.observed_state), server.desired_state)
+    !converging(
+      normalizeState(server.observed_state),
+      server.desired_state,
+      server.assigned_worker_id !== null,
+    )
   ) {
     return null;
   }
@@ -948,24 +953,23 @@ interface ActionProps {
 
 // One lifecycle button. Rendered only when permitted (controls render from
 // permissions, WEBUI_SPEC.md 7.3); disabled while a request is in flight or the
-// action does not apply to the current state.
+// action does not apply to the current state. A Start held only by the Worker
+// the previous stop still holds says so (#3818).
 function Action({ action, server, state, pending, can, onRun }: ActionProps) {
   if (!can(`server:${action}`, { serverId: server.id })) {
     return null;
   }
-  const disabled =
-    pending ||
-    !actionApplies(
-      action,
-      state,
-      normalizeState(server.desired_state),
-      server.assigned_worker_id !== null,
-    );
+  const desired = normalizeState(server.desired_state);
+  const assigned = server.assigned_worker_id !== null;
+  const disabled = pending || !actionApplies(action, state, desired, assigned);
+  const held =
+    action === "start" && startAwaitsRelease(state, desired, assigned);
   return (
     <button
       type="button"
       className={`btn sm${action === "start" ? " success" : ""}`}
       disabled={disabled}
+      title={held ? t("serverDetail.startAwaitsRelease") : undefined}
       onClick={() => onRun(action)}
     >
       {t(

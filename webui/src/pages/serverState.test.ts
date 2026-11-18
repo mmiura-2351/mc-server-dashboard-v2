@@ -11,6 +11,7 @@ import {
   type ObservedState,
   STATE_BUCKETS,
   type StateBucket,
+  startAwaitsRelease,
   statePill,
   statesForBucket,
 } from "./serverState.ts";
@@ -115,6 +116,16 @@ describe("actionApplies", () => {
     expect(actionApplies("start", "stopped", "stopped")).toBe(true);
   });
 
+  // A stop holds the assignment until its final snapshot settles and the
+  // Worker is released; the API refuses a start until then (409
+  // transition_conflict, the unassigned-only compare-and-set, #3818).
+  it("start does not apply while a worker is still assigned", () => {
+    for (const state of ["stopped", "crashed", "unknown"] as const) {
+      expect(actionApplies("start", state, "stopped", true)).toBe(false);
+      expect(actionApplies("start", state, "stopped", false)).toBe(true);
+    }
+  });
+
   it("stop/restart for normally running server with desired", () => {
     expect(actionApplies("stop", "running", "running")).toBe(true);
     expect(actionApplies("restart", "running", "running")).toBe(true);
@@ -148,6 +159,24 @@ describe("actionApplies", () => {
       expect(actionApplies("restart", state, "running", true)).toBe(true);
       expect(actionApplies("restart", state, "running", false)).toBe(false);
     }
+  });
+});
+
+describe("startAwaitsRelease", () => {
+  // The one case the controls show a disabled Start with the reason: Start
+  // would apply but for the Worker the previous stop still holds (#3818).
+  it("holds Start at rest under a stopped intent while a worker is assigned", () => {
+    for (const state of ["stopped", "crashed", "unknown"] as const) {
+      expect(startAwaitsRelease(state, "stopped", true)).toBe(true);
+      expect(startAwaitsRelease(state, "stopped", false)).toBe(false);
+    }
+  });
+
+  it("does not hold a Start that would not apply anyway", () => {
+    expect(startAwaitsRelease("running", "stopped", true)).toBe(false);
+    expect(startAwaitsRelease("stopping", "stopped", true)).toBe(false);
+    expect(startAwaitsRelease("crashed", "running", true)).toBe(false);
+    expect(startAwaitsRelease("running", "running", true)).toBe(false);
   });
 });
 
@@ -185,29 +214,37 @@ describe("atRest", () => {
 });
 
 describe("converging", () => {
-  // The "applying…" hint (WEBUI_SPEC.md 6.4): shown until the observed state
-  // has reached the intent. A stopped intent is reached by any at-rest state,
-  // so a server that crashed under it is settled (#3285).
-  const cases: Array<[string, ObservedState, boolean]> = [
-    ["running", "running", false],
-    ["running", "starting", true],
-    ["running", "stopping", true],
-    ["running", "restarting", true],
-    ["running", "stopped", true],
-    ["running", "crashed", true],
-    ["running", "unknown", true],
-    ["stopped", "stopped", false],
-    ["stopped", "crashed", false],
-    ["stopped", "unknown", false],
-    ["stopped", "running", true],
-    ["stopped", "starting", true],
-    ["stopped", "stopping", true],
-    ["stopped", "restarting", true],
+  // The "applying…" hint (WEBUI_SPEC.md 6.4): shown until the server has
+  // converged on its intent. A stopped intent is reached by any at-rest state
+  // (a server that crashed under it is settled, #3285) once no Worker is
+  // assigned; while one is, the stop is still finishing (#3818).
+  const cases: Array<[string, ObservedState, boolean, boolean]> = [
+    ["running", "running", true, false],
+    ["running", "starting", true, true],
+    ["running", "stopping", true, true],
+    ["running", "restarting", true, true],
+    ["running", "stopped", true, true],
+    ["running", "crashed", true, true],
+    ["running", "unknown", true, true],
+    ["stopped", "stopped", false, false],
+    ["stopped", "crashed", false, false],
+    ["stopped", "unknown", false, false],
+    ["stopped", "stopped", true, true],
+    ["stopped", "crashed", true, true],
+    ["stopped", "unknown", true, true],
+    ["stopped", "running", true, true],
+    ["stopped", "running", false, true],
+    ["stopped", "starting", true, true],
+    ["stopped", "stopping", true, true],
+    ["stopped", "restarting", true, true],
   ];
 
-  it.each(cases)("desired=%s observed=%s -> %s", (desired, state, expected) => {
-    expect(converging(state, desired)).toBe(expected);
-  });
+  it.each(cases)(
+    "desired=%s observed=%s assigned=%s -> %s",
+    (desired, state, assigned, expected) => {
+      expect(converging(state, desired, assigned)).toBe(expected);
+    },
+  );
 });
 
 describe("bucketOf", () => {

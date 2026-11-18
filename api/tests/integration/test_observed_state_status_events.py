@@ -8,7 +8,8 @@ and a client kept the pre-write state until its next snapshot.
 
 Every ``desired_state`` change does too (#3428): a dashboard that never
 learned of a start or stop made elsewhere offered the actions of the old
-intent.
+intent. So does every change of the assignment (#3818): a dashboard holding a
+released server's old Worker offered a Start the API refuses.
 
 Each test drives one write path over a real PostgreSQL row through the real
 adapters -- the repository, the unit of work, the control-plane state sink --
@@ -48,6 +49,9 @@ from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventSubscription,
     RealTimeEvent,
 )
+from mc_server_dashboard_api.servers.adapters.late_snapshot_result_sink import (
+    ServersLateSnapshotResultSink,
+)
 from mc_server_dashboard_api.servers.adapters.repositories import (
     StatusEventsNotWiredError,
 )
@@ -66,6 +70,12 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.startup_reset import (
     ResetUnverifiableObservedStates,
+)
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
+from mc_server_dashboard_api.servers.application.unrecorded_stops import (
+    UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
@@ -210,8 +220,8 @@ class _World:
     def assert_published_after_commit(self) -> None:
         """No status event was published over an uncommitted state write.
 
-        The journal reads ``write`` (an UPDATE of ``observed_state`` or
-        ``desired_state``), ``commit``
+        The journal reads ``write`` (an UPDATE of ``observed_state``,
+        ``desired_state`` or ``assigned_worker_id``), ``commit``
         and ``publish`` in the order they happened; a ``publish`` whose nearest
         earlier DB activity is a ``write`` announced a state no reader could see.
         """
@@ -235,7 +245,9 @@ async def world() -> AsyncIterator[_World]:
 
     def _on_execute(_conn: object, _cursor: object, statement: str, *_: object) -> None:
         if statement.startswith("UPDATE") and (
-            "observed_state=" in statement or "desired_state=" in statement
+            "observed_state=" in statement
+            or "desired_state=" in statement
+            or "assigned_worker_id=" in statement
         ):
             journal.append("write")
         if statement.startswith("SELECT") and "FOR UPDATE" in statement:
@@ -280,6 +292,15 @@ def _intent(desired: str) -> dict[str, object]:
     """The payload of the status frame a ``desired_state`` change publishes."""
 
     return {"desired_state": desired}
+
+
+def _assigned(worker: uuid.UUID | None) -> dict[str, object]:
+    """The field a status frame carries when its write changed the assignment."""
+
+    return {"assigned_worker_id": None if worker is None else str(worker)}
+
+
+_RELEASED = _assigned(None)
 
 
 async def _states(subscription: EventSubscription) -> list[tuple[str | None, object]]:
@@ -462,14 +483,15 @@ async def test_start_converging_on_an_already_running_instance_publishes_running
     """StartServer's INVALID_STATE arm: no Worker StatusChange ever follows."""
 
     server = await world.server("survival")
+    worker = uuid.uuid4()
     watching = world.watch(server)
 
     await world.start_server(
-        FakeControlPlane(place_to=WorkerId(uuid.uuid4()), outcomes=_ALREADY_RUNNING)
+        FakeControlPlane(place_to=WorkerId(worker), outcomes=_ALREADY_RUNNING)
     )(community_id=world.community, server_id=server.id)
 
     assert [event.payload for event in await _received(watching)] == [
-        _intent("running"),
+        _intent("running") | _assigned(worker),
         _status("running"),
     ]
     assert await world.observed(server) is ObservedState.RUNNING
@@ -496,7 +518,10 @@ async def test_redispatched_start_converging_on_a_running_instance_publishes_run
 
 
 async def test_confirmed_stop_publishes_stopped(world: _World) -> None:
-    """StopServer's confirmed-stop write, when the Worker's own report is lost."""
+    """StopServer's confirmed-stop write, when the Worker's own report is lost.
+
+    The release after the final snapshot follows it (#3818).
+    """
 
     worker = uuid.uuid4()
     server = await world.server("survival", worker=worker, reported="running")
@@ -509,17 +534,18 @@ async def test_confirmed_stop_publishes_stopped(world: _World) -> None:
     assert [event.payload for event in await _received(watching)] == [
         _intent("stopped"),
         _status("stopped"),
+        _RELEASED,
     ]
     world.assert_published_after_commit()
 
 
-async def test_confirmed_stop_after_the_workers_stopped_report_publishes_only_intent(
+async def test_confirmed_stop_after_the_workers_stopped_report_repeats_no_state(
     world: _World,
 ) -> None:
     """The ordinary stop: the Worker's ``stopped`` frame already announced it.
 
     The confirmed-stop write then changes no state, so it repeats no frame;
-    only the stop intent is new.
+    only the stop intent and the release after the final snapshot are new.
     """
 
     worker = uuid.uuid4()
@@ -531,8 +557,10 @@ async def test_confirmed_stop_after_the_workers_stopped_report_publishes_only_in
     )
 
     assert [event.payload for event in await _received(watching)] == [
-        _intent("stopped")
+        _intent("stopped"),
+        _RELEASED,
     ]
+    world.assert_published_after_commit()
 
 
 async def test_stop_of_an_instance_the_worker_forgot_publishes_stopped(
@@ -553,6 +581,7 @@ async def test_stop_of_an_instance_the_worker_forgot_publishes_stopped(
     assert [event.payload for event in await _received(watching)] == [
         _intent("stopped"),
         _status("stopped"),
+        _RELEASED,
     ]
     world.assert_published_after_commit()
 
@@ -560,7 +589,8 @@ async def test_stop_of_an_instance_the_worker_forgot_publishes_stopped(
 async def test_stop_of_a_crashed_instance_leaves_the_crash_and_publishes_intent(
     world: _World,
 ) -> None:
-    """The same release keeps ``crashed`` standing: only the intent changed."""
+    """The same release keeps ``crashed`` standing: the intent and the
+    assignment changed, the observed state did not."""
 
     worker = uuid.uuid4()
     server = await world.server("survival", worker=worker, reported="crashed")
@@ -573,9 +603,11 @@ async def test_stop_of_a_crashed_instance_leaves_the_crash_and_publishes_intent(
     )(community_id=world.community, server_id=server.id)
 
     assert [event.payload for event in await _received(watching)] == [
-        _intent("stopped")
+        _intent("stopped"),
+        _RELEASED,
     ]
     assert await world.observed(server) is ObservedState.CRASHED
+    world.assert_published_after_commit()
 
 
 async def test_releasing_a_stop_wedged_at_stopping_publishes_unknown(
@@ -597,7 +629,7 @@ async def test_releasing_a_stop_wedged_at_stopping_publishes_unknown(
     ).clear_stale_assignment(community_id=world.community, server_id=server.id)
 
     assert [event.payload for event in await _received(watching)] == [
-        _status("unknown")
+        _status("unknown") | _RELEASED
     ]
     assert await world.observed(server) is ObservedState.UNKNOWN
     world.assert_published_after_commit()
@@ -616,19 +648,22 @@ async def test_start_publishes_its_intent_on_the_server_and_community_streams(
     """
 
     server = await world.server("survival")
+    worker = uuid.uuid4()
     watching = world.watch(server)
     firehose = world.bus.subscribe_all(streams=_STATUS)
 
-    await world.start_server(FakeControlPlane(place_to=WorkerId(uuid.uuid4())))(
+    await world.start_server(FakeControlPlane(place_to=WorkerId(worker)))(
         community_id=world.community, server_id=server.id
     )
 
+    # The same write placed the server: the frame carries the Worker (#3818).
+    started = _intent("running") | _assigned(worker)
     assert await _received(watching) == [
-        RealTimeEvent(stream=EventStream.STATUS, payload=_intent("running"))
+        RealTimeEvent(stream=EventStream.STATUS, payload=started)
     ]
     assert [
         (event.server_id, event.payload) for event in await _received(firehose)
-    ] == [(str(server.id.value), _intent("running"))]
+    ] == [(str(server.id.value), started)]
     world.assert_published_after_commit()
 
 
@@ -683,18 +718,17 @@ async def test_compensated_start_publishes_the_reverted_intent(world: _World) ->
     """A dispatch failure before the start was sent reverts the intent."""
 
     server = await world.server("survival")
+    worker = uuid.uuid4()
     watching = world.watch(server)
 
     with pytest.raises(WorkerUnavailableError):
         await world.start_server(
-            FakeControlPlane(
-                place_to=WorkerId(uuid.uuid4()), unavailable_kinds={"hydrate"}
-            )
+            FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"hydrate"})
         )(community_id=world.community, server_id=server.id)
 
     assert [event.payload for event in await _received(watching)] == [
-        _intent("running"),
-        _intent("stopped"),
+        _intent("running") | _assigned(worker),
+        _intent("stopped") | _RELEASED,
     ]
     world.assert_published_after_commit()
 
@@ -803,6 +837,215 @@ async def test_unit_of_work_without_the_bus_refuses_to_commit_an_intent_write(
         row = await uow.servers.get_by_id(server.id)
     assert row is not None
     assert row.desired_state is DesiredState.STOPPED
+
+
+# --- Assignment writes: the assignment frame (issue #3818) -----------------
+#
+# Every write that places or releases a server publishes the assignment it
+# left, after its commit, so a client never gates on a released Worker. A
+# release changes nothing else, so its frame carries the assignment alone.
+
+
+async def test_reconciler_placement_publishes_the_assignment_alone(
+    world: _World,
+) -> None:
+    """``place_and_start`` places a desired-running orphan; the intent stands."""
+
+    server = await world.server("survival")
+    async with world.uow() as uow:
+        await _write_running_intent(uow, server)
+        await uow.commit()
+    worker = uuid.uuid4()
+    watching = world.watch(server)
+
+    await world.start_server(
+        FakeControlPlane(place_to=WorkerId(worker))
+    ).place_and_start(community_id=world.community, server_id=server.id)
+
+    assert [event.payload for event in await _received(watching)] == [_assigned(worker)]
+    world.assert_published_after_commit()
+
+
+async def test_undone_placement_publishes_the_release(world: _World) -> None:
+    """``place_and_start``'s pre-dispatch failure undoes only the assignment."""
+
+    server = await world.server("survival")
+    async with world.uow() as uow:
+        await _write_running_intent(uow, server)
+        await uow.commit()
+    worker = uuid.uuid4()
+    watching = world.watch(server)
+
+    with pytest.raises(WorkerUnavailableError):
+        await world.start_server(
+            FakeControlPlane(place_to=WorkerId(worker), unavailable_kinds={"hydrate"})
+        ).place_and_start(community_id=world.community, server_id=server.id)
+
+    assert [event.payload for event in await _received(watching)] == [
+        _assigned(worker),
+        _RELEASED,
+    ]
+    world.assert_published_after_commit()
+
+
+async def _wedged_stop(world: _World, worker: uuid.UUID, reported: str) -> Server:
+    """A server left at (stopped, ``reported``, assigned to ``worker``).
+
+    Its stop never reached the Worker, which then reported ``reported``.
+    """
+
+    server = await world.server("survival", worker=worker, reported="running")
+    with pytest.raises(WorkerUnavailableError):
+        await world.stop_server(FakeControlPlane(unavailable_kinds={"stop"}))(
+            community_id=world.community, server_id=server.id
+        )
+    assert await world.report(server, worker, reported)
+    return server
+
+
+@pytest.mark.parametrize("wedged_at", ["stopped", "crashed", "unknown"])
+async def test_stale_assignment_release_publishes_the_release(
+    world: _World, wedged_at: str
+) -> None:
+    """``clear_stale_assignment`` with the Worker gone: the row is released only."""
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, wedged_at)
+    watching = world.watch(server)
+
+    await world.stop_server(
+        FakeControlPlane(connected={WorkerId(worker): False})
+    ).clear_stale_assignment(community_id=world.community, server_id=server.id)
+
+    assert [event.payload for event in await _received(watching)] == [_RELEASED]
+    assert await world.observed(server) is ObservedState(wedged_at)
+    world.assert_published_after_commit()
+
+
+async def test_late_final_snapshot_release_publishes_the_release(
+    world: _World,
+) -> None:
+    """The late-snapshot sink, as the composition root wires it to the bus."""
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    sink = ServersLateSnapshotResultSink(
+        create_session_factory(world.engine),
+        control_plane=FakeControlPlane(),
+        clock=world.clock,
+        stop_convergence=StopConvergenceGuard(),
+        unrecorded_stops=UnrecordedStops(),
+        real_time_events=world.bus,
+    )
+    watching = world.watch(server)
+
+    await sink.clear_held_assignment_on_late_snapshot(
+        server_id=str(server.id.value),
+        worker_id=str(worker),
+        succeeded=True,
+        message=None,
+    )
+
+    assert [event.payload for event in await _received(watching)] == [_RELEASED]
+    world.assert_published_after_commit()
+
+
+async def test_release_under_an_unchanged_state_publishes_the_assignment_alone(
+    world: _World,
+) -> None:
+    """An unassigning write that repeats the state still announces the release."""
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "unknown")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        assert await uow.servers.record_observed_state(
+            server.id,
+            ObservedState.UNKNOWN,
+            world.clock.now(),
+            unassign=True,
+            expected_worker=WorkerId(worker),
+        )
+        await uow.commit()
+
+    assert [event.payload for event in await _received(watching)] == [_RELEASED]
+
+
+async def test_release_guarded_off_another_workers_row_publishes_nothing(
+    world: _World,
+) -> None:
+    """A clear that matched no row released nothing, so it announces nothing.
+
+    Its caller commits whatever the write returned; a frame here would tell
+    clients a Worker still holding the server had let it go.
+    """
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        assert not await uow.servers.clear_assignment_after_final_snapshot(
+            server.id, WorkerId(uuid.uuid4())
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
+
+
+async def test_stale_release_guarded_off_a_newer_report_publishes_nothing(
+    world: _World,
+) -> None:
+    """The stale-stop clear matched no row: a report landed since its read.
+
+    ``observed_at`` moved (issue #3766), so the clear released nothing and
+    announces nothing.
+    """
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    async with world.uow() as uow:
+        row = await uow.servers.get_by_id(server.id)
+    assert row is not None and row.observed_at is not None
+    read_at = row.observed_at - dt.timedelta(seconds=1)
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        assert not await uow.servers.clear_stale_assignment(
+            server.id, WorkerId(worker), observed_at=read_at
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
+
+
+async def test_lost_lifecycle_compare_and_set_publishes_nothing(
+    world: _World,
+) -> None:
+    """A compare-and-set that matched no row changed neither intent nor Worker.
+
+    Here it expected another Worker than the one the row holds, as a failed
+    start's revert does once a newer placement has moved the row on.
+    """
+
+    worker = uuid.uuid4()
+    server = await world.server("survival", worker=worker, reported="running")
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        row = await uow.servers.get_by_id(server.id)
+        assert row is not None
+        row.desired_state = DesiredState.STOPPED
+        row.assigned_worker_id = None
+        assert not await uow.servers.update_lifecycle(
+            row,
+            expected_from=DesiredState.RUNNING,
+            expected_assigned_worker_id=WorkerId(uuid.uuid4()),
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
 
 
 # --- The unit of work: nothing is published for a write that did not commit --

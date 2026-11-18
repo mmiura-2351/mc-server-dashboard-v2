@@ -52,8 +52,22 @@ function intentFrame(serverId: string, desiredState: string) {
   });
 }
 
+function releaseFrame(serverId: string) {
+  return JSON.stringify({
+    stream: "status",
+    ts: "2026-06-06T00:00:00Z",
+    payload: { assigned_worker_id: null },
+    server_id: serverId,
+  });
+}
+
 function snapshotFrame(
-  servers: { server_id: string; state: string; desired_state?: string }[],
+  servers: {
+    server_id: string;
+    state: string;
+    desired_state?: string;
+    assigned_worker_id?: string | null;
+  }[],
 ) {
   return JSON.stringify({
     stream: "snapshot",
@@ -142,6 +156,69 @@ describe("parseCommunityFrame", () => {
     ).toEqual({
       kind: "snapshot",
       servers: [{ serverId: "s1", state: "crashed", desiredState: "running" }],
+    });
+  });
+
+  it("parses the assignment a status frame carries (#3818)", () => {
+    expect(parseCommunityFrame(releaseFrame("s1"))).toEqual({
+      kind: "status",
+      serverId: "s1",
+      assignedWorkerId: null,
+    });
+    expect(
+      parseCommunityFrame(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { desired_state: "running", assigned_worker_id: "w1" },
+          server_id: "s1",
+        }),
+      ),
+    ).toEqual({
+      kind: "status",
+      serverId: "s1",
+      desiredState: "running",
+      assignedWorkerId: "w1",
+    });
+  });
+
+  it("drops a status frame whose assignment is neither an id nor null", () => {
+    expect(
+      parseCommunityFrame(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: 7 },
+          server_id: "s1",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("parses each snapshot entry's assignment (#3818)", () => {
+    expect(
+      parseCommunityFrame(
+        snapshotFrame([
+          {
+            server_id: "s1",
+            state: "stopped",
+            desired_state: "stopped",
+            assigned_worker_id: "w1",
+          },
+          { server_id: "s2", state: "stopped", assigned_worker_id: null },
+        ]),
+      ),
+    ).toEqual({
+      kind: "snapshot",
+      servers: [
+        {
+          serverId: "s1",
+          state: "stopped",
+          desiredState: "stopped",
+          assignedWorkerId: "w1",
+        },
+        { serverId: "s2", state: "stopped", assignedWorkerId: null },
+      ],
     });
   });
 
@@ -324,6 +401,19 @@ describe("CommunityEventsClient", () => {
     expect(onStatus).toHaveBeenCalledWith({
       serverId: "s1",
       desiredState: "stopped",
+    });
+    client.close();
+  });
+
+  it("fires onStatus with the release a release frame carries", () => {
+    const { client, onStatus } = makeClient();
+    client.start();
+    MockWebSocket.last().open();
+
+    MockWebSocket.last().message(releaseFrame("s1"));
+    expect(onStatus).toHaveBeenCalledWith({
+      serverId: "s1",
+      assignedWorkerId: null,
     });
     client.close();
   });
