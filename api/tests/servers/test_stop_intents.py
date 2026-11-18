@@ -892,10 +892,12 @@ async def test_a_start_reads_the_counter_before_its_own_commit() -> None:
     with pytest.raises(LifecycleTransitionConflictError):
         await start(community_id=world.community, server_id=world.server_id)
 
-    # All inside the first start's commit: the stop and its release, with no
-    # snapshot since nothing had hydrated (issue #3890), then the newer start. The
-    # first start then skips its hydrate (the newer one's hydrate left the Worker
-    # holding the store's generation) and sends nothing.
+    # All inside the first start's commit: the stop and its release, then the newer
+    # start. The release takes no snapshot (issue #3890): nothing had hydrated, so
+    # the Worker's scratch is whatever it held before, which the row's mark cannot
+    # tell from a stale leftover. The first start then skips its hydrate (the newer
+    # one's hydrate left the Worker holding the store's generation) and sends
+    # nothing.
     assert world.kinds() == ["stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
