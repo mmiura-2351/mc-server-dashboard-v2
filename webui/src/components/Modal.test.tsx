@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Modal } from "./Modal.tsx";
 import { ToastProvider, useToast } from "./Toast.tsx";
@@ -181,6 +181,41 @@ const stackedDialogs = (
   </>
 );
 
+// The dialog pulls focus back once the script that moved it has run.
+async function settle() {
+  await act(async () => {});
+}
+
+// ServerDetailPage's force-stop shape: the menu item that opened the confirm
+// is gone, and confirming closes the dialog and focuses the menu's trigger.
+function CloseAndFocusBehind() {
+  const [open, setOpen] = useState(false);
+  const behindRef = useRef<HTMLButtonElement>(null);
+  return (
+    <>
+      <button type="button" ref={behindRef}>
+        Behind
+      </button>
+      {!open && (
+        <button type="button" onClick={() => setOpen(true)}>
+          Open
+        </button>
+      )}
+      <Modal open={open} title="Title" onClose={() => setOpen(false)}>
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            behindRef.current?.focus();
+          }}
+        >
+          Confirm
+        </button>
+      </Modal>
+    </>
+  );
+}
+
 // While a modal is open, focus that lands outside the topmost dialog and the
 // toast stack is pulled back into the dialog, so it never walks the page
 // behind; Tab from the page body is the browser's (WEBUI_SPEC.md 7.4).
@@ -288,6 +323,21 @@ describe("Modal focus outside the dialog", () => {
 
     expect(document.activeElement).toBe(
       screen.getByRole("button", { name: "Inner first" }),
+    );
+  });
+
+  it("lets a script that closes the dialog move focus behind it", async () => {
+    render(<CloseAndFocusBehind />);
+    const open = screen.getByRole("button", { name: "Open" });
+    open.focus();
+    fireEvent.click(open);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await settle();
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Behind" }),
     );
   });
 
@@ -417,11 +467,6 @@ function HistoryWithConfirm() {
 }
 
 describe("Modal focus when its focused control is disabled", () => {
-  // The dialog hears about the change on a microtask.
-  async function settle() {
-    await act(async () => {});
-  }
-
   it("moves focus to the dialog, unscrolled, when the focused control is disabled", async () => {
     render(
       <Modal open={true} title="Title" onClose={() => {}}>
