@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import io
 import json
+import logging
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
@@ -150,6 +151,27 @@ async def test_reclaims_the_blob_an_unacknowledged_upload_left() -> None:
     await bucket.gc()
 
     assert bucket.blob_keys() == []
+
+
+async def test_logs_each_reclaimed_blob_and_the_pass_count(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A reclaimed blob is the only copy of a user upload, so each one is logged
+    # with what an operator needs to trace it: the pack id, the key and its age.
+    bucket = _Bucket()
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await bucket.upload(_CommitFailsUnitOfWork(resource_packs=bucket.rows))
+    (orphan_key,) = bucket.blob_keys()
+    await bucket.upload()
+
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
+        await bucket.gc()
+
+    messages = [record.getMessage() for record in caplog.records]
+    (reclaimed,) = [message for message in messages if orphan_key in message]
+    assert orphan_key.split("/")[1] in reclaimed
+    assert "1:01:00" in reclaimed
+    assert "2 blob(s) listed, 1 reclaimed" in messages[-1]
 
 
 async def test_keeps_the_blob_of_a_pack_with_a_row() -> None:

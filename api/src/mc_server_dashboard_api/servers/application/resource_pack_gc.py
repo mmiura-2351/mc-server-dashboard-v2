@@ -30,6 +30,7 @@ window after its blob was stored.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
@@ -37,6 +38,8 @@ from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ResourcePackStore,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
+
+_LOG = logging.getLogger(__name__)
 
 # Never delete a blob younger than this. See module docstring.
 GC_SAFETY_WINDOW = dt.timedelta(hours=1)
@@ -54,7 +57,13 @@ class RunResourcePackGc:
         entries = await self.store.list_entries()
         async with self.uow:
             live = {pack.id for pack in await self.uow.resource_packs.list_all()}
-        cutoff = self.clock.now() - GC_SAFETY_WINDOW
+        now = self.clock.now()
+        cutoff = now - GC_SAFETY_WINDOW
+        reclaimed = 0
+        # The window is judged per blob, while ``store.delete`` removes every blob
+        # under the pack id. The two agree because each upload puts one blob under
+        # a freshly minted id; a second blob per pack would need the window judged
+        # on the pack's newest blob instead.
         for entry in entries:
             if entry.pack_id in live:
                 continue
@@ -68,3 +77,17 @@ class RunResourcePackGc:
                 if await self.uow.resource_packs.get_by_id(entry.pack_id) is not None:
                     continue
             await self.store.delete(entry.pack_id)
+            reclaimed += 1
+            # The blob was the only copy of a user upload: say what went.
+            _LOG.info(
+                "resource-pack GC reclaimed pack %s (%s, stored %s ago): no row "
+                "names it",
+                entry.pack_id.value,
+                entry.key,
+                now - entry.modified_at,
+            )
+        _LOG.info(
+            "resource-pack GC pass: %d blob(s) listed, %d reclaimed",
+            len(entries),
+            reclaimed,
+        )

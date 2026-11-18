@@ -44,8 +44,8 @@ behind:
   logged there rather than answered: the pack is already gone, and a 503 would
   invite a retry that can only find a 404. The same GC reclaims what it leaves.
 
-:meth:`list_entries` feeds that GC: every blob under the namespace, with the pack
-id its key names and its store time.
+:meth:`list_entries` feeds that GC: every blob under the namespace, with its key,
+the pack id the key names and its store time.
 """
 
 from __future__ import annotations
@@ -182,7 +182,7 @@ class ObjectResourcePackStore(ResourcePackStore):
         except ObjectStoreUnavailableError as exc:
             raise ResourcePackStorageUnavailableError(prefix) from exc
         return [
-            StoredBlob(pack_id=pack_id, modified_at=obj.last_modified)
+            StoredBlob(pack_id=pack_id, key=obj.key, modified_at=obj.last_modified)
             for obj in objects
             if (pack_id := _pack_id_of(obj.key)) is not None
         ]

@@ -230,18 +230,24 @@ async def test_delete_of_an_already_deleted_pack_is_a_no_op(
         await store.size(pack, _FILENAME)
 
 
-async def test_list_entries_names_the_pack_of_every_stored_blob(
+async def test_list_entries_names_the_pack_and_key_of_every_stored_blob(
     store: ResourcePackStore, pack: ResourcePackId
 ) -> None:
     # The orphan GC's input (issue #3277): one entry per stored blob, carrying the
-    # pack id the blob is stored under. Filtered to this test's pack, because the
-    # live arm's bucket is shared with whatever else has stored packs in it.
+    # pack id the blob is stored under and the key the GC logs a reclaim by.
+    # Filtered to this test's pack, because the live arm's bucket is shared with
+    # whatever else has stored packs in it.
     await _put(store, pack, "one.zip")
     await _put(store, pack, "two.zip")
 
-    listed = [entry.pack_id for entry in await store.list_entries()]
+    listed = {
+        (entry.pack_id, entry.key)
+        for entry in await store.list_entries()
+        if entry.pack_id == pack
+    }
 
-    assert [pack_id for pack_id in listed if pack_id == pack] == [pack, pack]
+    prefix = f"resource-packs/{pack.value}/"
+    assert listed == {(pack, prefix + "one.zip"), (pack, prefix + "two.zip")}
 
 
 async def test_list_entries_omits_a_deleted_pack(

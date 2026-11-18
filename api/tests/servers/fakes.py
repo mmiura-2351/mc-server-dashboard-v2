@@ -2416,6 +2416,8 @@ class FakeResourcePackStore(ResourcePackStore):
         return [
             StoredBlob(
                 pack_id=key[0],
+                # The adapter's key for the blob; match it.
+                key=f"resource-packs/{key[0].value}/{key[1]}",
                 modified_at=self.modified_at.get(key, _UNSTAMPED_STORE_TIME),
             )
             for key in self.blobs
