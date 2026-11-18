@@ -665,16 +665,28 @@ class ServerRepositoryContract:
             None,
         )
 
+    @pytest.mark.parametrize(
+        ("desired", "stamped"),
+        [(DesiredState.RUNNING, _NOW), (DesiredState.STOPPED, _LATER)],
+        ids=["running-intent", "stopped-intent"],
+    )
     async def test_a_worker_disconnect_keeps_the_last_crash(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
         contract_community_id: CommunityId,
+        desired: DesiredState,
+        stamped: dt.datetime,
     ) -> None:
         # Issue #3885: the Worker has already forgotten a crashed instance, so
-        # its disconnect tells nothing new about it. The row keeps the crash and
-        # its stamp, as the API-startup reset does.
+        # its disconnect tells nothing new about it, and the row keeps its crash.
+        # Under a running intent it keeps its stamp too, as the API-startup reset
+        # does: a newer stamp would hold back a restart that a later write has
+        # re-armed (``Server.crash_not_restarted``). Under a stopped intent the
+        # stamp moves to the disconnect, so the release waits a full grace from
+        # it, for the Worker to come back and take the final snapshot.
         item = server(contract_community_id)
         assert item.assigned_worker_id is not None
+        item.desired_state = desired
         async with server_repository_harness.open() as tx:
             await tx.repository.add(item)
             await tx.commit()
@@ -693,7 +705,7 @@ class ServerRepositoryContract:
             row.crash_detail,
         ) == (
             ObservedState.CRASHED,
-            _NOW,
+            stamped,
             CrashReason.FORGE_INSTALL_FAILED,
             "forge install failed after 3 attempts",
         )

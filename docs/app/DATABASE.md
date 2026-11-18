@@ -548,6 +548,9 @@ write: the write that records `crashed` stores the report's reason and detail,
 and the next write of any other state clears both, under the same ownership
 and freshness guards (issue #3281). A Worker disconnect, and so a graceful API
 restart, keeps both, because it leaves a crashed server `crashed` (issue #3885).
+Under a stopped intent it moves only that row's `observed_at` to the
+disconnect, so the release the reconciler owes it waits a full grace from
+there.
 So the server read and the status snapshot can
 explain a crash to a client that missed its live frame, and the reconciler can
 tell a crash that recurs on every attempt from one a restart may fix. A stop of

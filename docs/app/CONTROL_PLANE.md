@@ -516,7 +516,8 @@ A stream ends on a clean close, a transport error, or a missed-heartbeat
 timeout. On disconnect the API marks the Worker's servers `unknown` and keeps
 their assignment (FR-WRK-4). A crashed server keeps `crashed` and its stored
 crash instead, since the Worker has already forgotten that instance (issue
-#3885). The reconciler does not restart a
+#3885); under a stopped intent its `observed_at` moves to the disconnect, so
+its release waits a full grace from it. The reconciler does not restart a
 `desired=running` server until the Worker reconnects. If it does not come back, an
 operator stop and then a start moves each server to another eligible Worker
 after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an
@@ -1068,8 +1069,9 @@ enum mirrors exactly.
 `SERVER_STATE_UNKNOWN` is part of that set. It has two
 producers, and the wire value exists for the second:
 
-- the **API** infers it for every server assigned to a Worker whose session drops
-  (Section 4.4) — that path writes the column directly, not over this contract;
+- the **API** infers it for every server assigned to a Worker whose session drops,
+  except a crashed one (Section 4.4) — that path writes the column directly, not
+  over this contract;
 - a **Worker** asserts it when it cannot currently confirm an instance's fate —
   it neither observed a clean exit nor can it see the process (a failed-stop
   orphan under an unreachable daemon). Reporting `STOPPED` or `RUNNING` there
@@ -1091,8 +1093,9 @@ one ordering case this does not yet cover). That covers an applied
 and equally the writes the API makes without one, whose frames carry an empty
 `detail` and reason:
 
-- `unknown` for each server of a Worker whose session drops (Section 4.4), and
-  for each assigned server still in a non-terminal state at API startup;
+- `unknown` for each server of a Worker whose session drops, except a crashed
+  one, which keeps its state and publishes nothing (Section 4.4), and for each
+  assigned server still in a non-terminal state at API startup;
 - the state a lifecycle operation converges from a command's outcome —
   `running` when a start or its hydrate is refused `INVALID_STATE` (the
   instance is already live, so no `StatusChange` will follow), `stopped` when a

@@ -141,12 +141,28 @@ def _wait_for(condition: Callable[[], bool]) -> None:
         time.sleep(0.02)
 
 
-async def _seed(worker_id: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]:
-    """A crash the Worker does not retry, and a running server, on one Worker."""
+async def _seed(worker_id: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Three servers on one Worker: two crashed, and a control.
+
+    A crash the Worker does not retry under a running intent; a crash under a
+    stopped intent, still assigned (a drained Worker's crashed server); and a
+    control reading ``stopped`` under a running intent, which the API-startup
+    reset leaves alone and only the disconnect turns ``unknown``.
+    """
 
     assert _DB_URL is not None
     engine = create_async_engine(_DB_URL)
-    community_id, crashed, running = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    community_id = uuid.uuid4()
+    held, stopping, control = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    insert = text(
+        "INSERT INTO server "
+        "(id, community_id, name, mc_edition, mc_version, server_type, config, "
+        "slug, desired_state, observed_state, observed_at, assigned_worker_id, "
+        "created_at, updated_at, crash_reason, crash_detail) VALUES "
+        "(:id, :cid, :name, 'java', '1.21', 'forge', '{}'::jsonb, :slug, "
+        ":desired, :observed, now(), :wid, now() - interval '1 minute', "
+        "now() - interval '1 minute', :reason, :detail)"
+    )
     try:
         async with engine.begin() as conn:
             await conn.execute(
@@ -156,35 +172,36 @@ async def _seed(worker_id: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]:
                 ),
                 {"id": community_id},
             )
-            await conn.execute(
-                text(
-                    "INSERT INTO server "
-                    "(id, community_id, name, mc_edition, mc_version, server_type, "
-                    "config, slug, desired_state, observed_state, observed_at, "
-                    "assigned_worker_id, created_at, updated_at, crash_reason, "
-                    "crash_detail) VALUES "
-                    "(:id, :cid, 'modded', 'java', '1.21', 'forge', '{}'::jsonb, "
-                    "'k7m2p9', 'running', 'crashed', now(), :wid, "
-                    "now() - interval '1 minute', now() - interval '1 minute', "
-                    "'forge_install_out_of_memory', 'installer ran out of memory')"
+            for server_id, name, slug, desired, observed, reason, detail in (
+                (
+                    held,
+                    "modded",
+                    "k7m2p9",
+                    "running",
+                    "crashed",
+                    "forge_install_out_of_memory",
+                    "installer ran out of memory",
                 ),
-                {"id": crashed, "cid": community_id, "wid": worker_id},
-            )
-            await conn.execute(
-                text(
-                    "INSERT INTO server "
-                    "(id, community_id, name, mc_edition, mc_version, server_type, "
-                    "config, slug, desired_state, observed_state, observed_at, "
-                    "assigned_worker_id, created_at, updated_at) VALUES "
-                    "(:id, :cid, 'survival', 'java', '1.21', 'vanilla', "
-                    "'{}'::jsonb, 'q3x8v4', 'running', 'running', now(), :wid, "
-                    "now(), now())"
-                ),
-                {"id": running, "cid": community_id, "wid": worker_id},
-            )
+                (stopping, "drained", "w4n6c2", "stopped", "crashed", None, "exited"),
+                (control, "survival", "q3x8v4", "running", "stopped", None, None),
+            ):
+                await conn.execute(
+                    insert,
+                    {
+                        "id": server_id,
+                        "cid": community_id,
+                        "name": name,
+                        "slug": slug,
+                        "desired": desired,
+                        "observed": observed,
+                        "wid": worker_id,
+                        "reason": reason,
+                        "detail": detail,
+                    },
+                )
     finally:
         await engine.dispose()
-    return crashed, running
+    return held, stopping, control
 
 
 async def _observed(
@@ -215,23 +232,34 @@ def test_graceful_api_restart_keeps_a_crashed_server_crashed(
     grpc_ports: list[int],
 ) -> None:
     worker = uuid.uuid4()
-    crashed, running = asyncio.run(_seed(worker))
-    crash = asyncio.run(_observed(crashed))
+    held, stopping, control = asyncio.run(_seed(worker))
+    crash = asyncio.run(_observed(held))
     # Crashed after the row's last write, so the reconciler holds it
     # (``Server.crash_not_restarted``): both stamps must survive unchanged.
     assert crash[0] == "crashed"
     assert crash[1] is not None and crash[1] > crash[2]
+    stopped_crash = asyncio.run(_observed(stopping))
 
-    with _api_process() as (client, registry):
-        _connect_worker(client, registry, grpc_ports[-1], str(worker))
-    # The process shut down with the session open, and its teardown ran: the
-    # running server is now unknown.
-    assert asyncio.run(_observed(running))[0] == "unknown"
-    assert asyncio.run(_observed(crashed)) == crash
-
-    # The restart: the startup reset runs, and the Worker reconnects reporting
-    # nothing for the instance it has forgotten.
-    with _api_process() as (client, registry):
-        _connect_worker(client, registry, grpc_ports[-1], str(worker))
-        assert asyncio.run(_observed(crashed)) == crash
-    assert asyncio.run(_observed(crashed)) == crash
+    # Each process shuts down with the session open, so its teardown runs; the
+    # second one is the restart, whose startup reset runs and whose Worker
+    # reconnects reporting nothing for the instances it has forgotten.
+    for _ in range(2):
+        with _api_process() as (client, registry):
+            _connect_worker(client, registry, grpc_ports[-1], str(worker))
+            assert asyncio.run(_observed(held)) == crash
+        assert asyncio.run(_observed(control))[0] == "unknown"
+        assert asyncio.run(_observed(held)) == crash
+        # Under a stopped intent the crash stays too, and the teardown moves its
+        # stamp, so its release waits a full grace from the shutdown.
+        state, observed_at, updated_at, reason, detail = asyncio.run(
+            _observed(stopping)
+        )
+        assert (state, updated_at, reason, detail) == (
+            "crashed",
+            stopped_crash[2],
+            None,
+            "exited",
+        )
+        assert observed_at is not None and stopped_crash[1] is not None
+        assert observed_at > stopped_crash[1]
+        stopped_crash = (state, observed_at, updated_at, reason, detail)

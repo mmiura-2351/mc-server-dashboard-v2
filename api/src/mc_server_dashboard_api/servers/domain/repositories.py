@@ -296,9 +296,12 @@ class ServerRepository(abc.ABC):
     ) -> None:
         """Set observed=unknown for the servers assigned to ``worker_id`` (FR-WRK-4).
 
-        A ``crashed`` server keeps its state, stamp and stored crash (issue
-        #3885): the Worker has already forgotten the crashed instance, so the
-        disconnect tells nothing new about it.
+        A ``crashed`` server keeps its state and stored crash (issue #3885): the
+        Worker has already forgotten the crashed instance, so the disconnect
+        tells nothing new about it. Under a running intent it keeps its
+        ``observed_at`` too, which ``Server.crash_not_restarted`` compares;
+        under a stopped intent only that column is set to ``observed_at``, so
+        its release waits a full grace from the disconnect.
         """
 
     @abc.abstractmethod

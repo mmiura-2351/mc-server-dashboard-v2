@@ -1280,7 +1280,9 @@ async def test_observed_state_writes_lock_server_rows_in_id_order(
     await world.sink().mark_worker_servers_unknown(worker_id=str(worker))
     await ResetUnverifiableObservedStates(uow=world.uow(), clock=world.clock)()
 
-    assert len(world.locking_selects) == 2
+    # The disconnect locks twice: the rows it marks unknown, then the crashed
+    # rows under a stopped intent whose stamp it moves (issue #3885).
+    assert len(world.locking_selects) == 3
     for statement in world.locking_selects:
         assert "ORDER BY server.id" in statement
         assert statement.rstrip().endswith("FOR UPDATE")

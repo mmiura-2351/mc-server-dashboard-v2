@@ -435,7 +435,12 @@ one `crashed`, with its reason and detail, as the API's start-up reset of
 observed states does. The Worker has already forgotten the crashed instance and
 reports nothing for it when it reconnects (issue #3885). So a crash that is not
 restarted stays held across either, and any other crash is restarted once the
-Worker is back, its grace still measured from the crash.
+Worker is back, its grace still measured from the crash. Under a stopped intent
+(a drained Worker's crashed server, or a stop whose dispatch failed before the
+process died) the teardown moves only the crash's `observed_at` to the
+disconnect, so its release waits a full `grace_seconds` from the disconnect, as
+for the Worker's other servers: a Worker back within it still gets the final
+snapshot taken.
 
 The stop side needs no such detour. A server whose intent is already stopped but
 which is still assigned to a Worker — a drained Worker's server still running, or
