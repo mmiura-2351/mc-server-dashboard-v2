@@ -2207,6 +2207,33 @@ full round-trip. A fsck I/O error is best-effort (logged, transfer proceeds) so
 the fsck never wedges a snapshot; the API integrity gate is the correctness
 guarantee.
 
+**The Worker's generation marker reaches the disk after its tree.** The Worker
+records the generation a transfer leaves its working set at (the
+`X-Working-Set-Generation` above) in a `.mcsd_generation` marker in the
+working-set root and advertises it at registration, where the skip-hydrate gate
+reads it (CONTROL_PLANE.md Section 4.1). A marker newer than the tree on disk makes
+that gate boot an older world, whose next snapshot then publishes it over newer
+data. So the marker is made durable (written under a temporary name, fsynced,
+renamed, its directory fsynced) only once the tree it names is durable (issue
+#3999):
+
+- A hydrate fsyncs each file it unpacks and every directory of the tree before the
+  rename that swaps the tree in.
+- A running-id snapshot syncs the filesystem the working set lies on
+  (`syncfs(2)`) once the pack is done, while the world is still quiesced, and
+  stamps the new generation after the upload. Where `syncfs` is unavailable
+  (`ENOSYS`, or `EPERM` from a seccomp profile), it fsyncs every regular file and
+  directory of the tree instead. A sync that fails leaves the marker at its older
+  generation: the publish stands, the snapshot declares no held generation, and the
+  next start hydrates.
+- A stopped-id snapshot writes no marker; it removes the scratch.
+
+The sync covers what the pack read, not what the server writes once saving
+resumes, so a power loss can still tear those later writes; the boot region fsck
+is what catches that (CONTROL_PLANE.md Section 4.1). `syncfs` also flushes
+everything else dirty on that filesystem, the snapshot's own spool beside the
+working set included.
+
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
 split. MC 26.x pads region files to a 4096-byte sector boundary only on

@@ -43,11 +43,13 @@ import (
 // marker — a durable rename over unflushed bytes would read as gen 0, and combined
 // with the hydrate-merge interplay that "extra hydrate" is not entirely harmless
 // (issue #787). The directory is fsynced after the rename so the rename itself is
-// durable: the caller (handleHydrate) reaches this only after Hydrate has already
-// fsynced the working tree the marker describes, so the marker can never become
-// durable before that tree. A successful write also sweeps the temp siblings that
-// earlier crashed writes stranded in workingDir (sweepGenerationTemps, issue #2283),
-// so the cleanup is self-healing rather than a separate mechanism.
+// durable: a caller stamping a generation reaches this only once the working tree
+// the marker describes is durable — handleHydrate after Hydrate has fsynced the tree
+// it unpacked, the running-id snapshot after syncWorkingSet has synced the tree it
+// packed (issue #3999) — so the marker can never become durable before that tree. A
+// 0 names no tree and needs no such sync. A successful write also sweeps the temp
+// siblings that earlier crashed writes stranded in workingDir (sweepGenerationTemps,
+// issue #2283), so the cleanup is self-healing rather than a separate mechanism.
 func writeGeneration(workingDir string, gen uint64) error {
 	return writeGenerationGuarded(workingDir, gen, nil)
 }
