@@ -26,6 +26,7 @@ from mc_server_dashboard_api.storage.adapters.ownership import (
 )
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 from tests.storage.helpers import new_scope
+from tests.store_ownership import UnaskedStoreDatabase
 
 _OURS = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _THEIRS = uuid.UUID("00000000-0000-4000-8000-000000000002")
@@ -51,7 +52,7 @@ async def _object_storage(owner: uuid.UUID) -> tuple[FakeS3Store, ObjectStorage,
     store = FakeS3Store()
     store.objects[OWNER_MARKER] = _marker(owner)
     ownership = ObjectStoreOwnership(fake_s3_factory(store), bucket="mcsd")
-    await ownership.claim(_OURS)
+    await ownership.claim(_OURS, database=UnaskedStoreDatabase())
     community, server = new_scope()
     staged = (
         f"communities/{community.value}/servers/{server.value}/incoming/t1/level.dat"
@@ -87,7 +88,7 @@ async def test_object_sweep_runs_on_a_store_this_database_owns() -> None:
 async def _fs_storage(tmp_path: Path, owner: uuid.UUID) -> tuple[FsStorage, Path]:
     (tmp_path / OWNER_MARKER).write_bytes(_marker(owner))
     ownership = FsStoreOwnership(tmp_path)
-    await ownership.claim(_OURS)
+    await ownership.claim(_OURS, database=UnaskedStoreDatabase())
     community, server = new_scope()
     staged = (
         tmp_path

@@ -167,6 +167,9 @@ from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
 )
+from mc_server_dashboard_api.servers.adapters.store_references import (
+    SqlAlchemyStoreDatabase,
+)
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
 )
@@ -785,13 +788,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await storage.check_reachable(endpoint=obj.endpoint, bucket=obj.bucket)
         # Claim the store for this database before anything destructive runs
         # (STORAGE.md Section 4.3, issue #3870): write the owner marker naming
-        # this database's installation id if the store has none. Every GC and
-        # sweep below re-reads it and refuses to run unless it names this
-        # installation, so a store shared with another database is never diffed
-        # against this one. A marker naming another database does not stop the
-        # app: serving and uploads go on, only the destructive passes refuse.
+        # this database's installation id if the store has none, but only on
+        # evidence that the store is this database's (issue #3886): it is empty,
+        # or the communities and resource packs its keys name are rows here, or
+        # it holds only JARs and plugin blobs and this database is not a fresh
+        # one. Every GC and sweep below re-reads it and refuses to run unless it
+        # names this installation, so a store shared with another database is
+        # never diffed against this one. A store this API did not claim does not
+        # stop the app: serving and uploads go on, only the destructive passes
+        # refuse.
+        session_factory = create_session_factory(engine)
         await store_ownership.claim(
-            await read_installation_id(create_session_factory(engine))
+            await read_installation_id(session_factory),
+            database=SqlAlchemyStoreDatabase(session_factory),
         )
         app.state.store_ownership = store_ownership
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
