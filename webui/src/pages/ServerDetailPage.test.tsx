@@ -939,6 +939,16 @@ describe("ServerDetailPage lifecycle controls", () => {
       expect(graceful).toHaveFocus();
     });
 
+    // Shift is not a shortcut modifier: Shift+F is a capital F (#3993).
+    it("type-ahead takes a letter typed with Shift", async () => {
+      await openWith("Enter");
+      const [graceful, force] = items();
+
+      fireEvent.keyDown(graceful, { key: "F", shiftKey: true });
+
+      expect(force).toHaveFocus();
+    });
+
     // The browser's own shortcut, as Ctrl+F's find, still works (#3993).
     it.each([
       ["Ctrl+F", { key: "f", ctrlKey: true }, "Enter"],
@@ -3612,6 +3622,78 @@ describe("ServerDetailPage Console tab", () => {
     expect(input.value).toBe("say hi");
     fireEvent.keyDown(input, { key: "ArrowDown" });
     expect(input.value).toBe("");
+  });
+
+  // Enter that confirms an IME conversion, and ↑/↓ that pick a candidate, are
+  // the IME's: no half-typed command is sent, and the line stays (#4012).
+  describe("keys the IME is composing with", () => {
+    async function sendSayHi() {
+      mockApi.post.mockResolvedValue({ output: "ok" });
+      await openConsole({ observed_state: "running" });
+      const input = screen.getByPlaceholderText(
+        t("serverDetail.console.commandPlaceholder"),
+      ) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "say hi" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await screen.findByText("ok");
+      mockApi.post.mockClear();
+      return input;
+    }
+
+    it.each([{ isComposing: true }, { keyCode: 229 }])(
+      "leaves Enter to the IME, not sending the line (%o)",
+      async (composing) => {
+        await openConsole({ observed_state: "running" });
+        const input = screen.getByPlaceholderText(
+          t("serverDetail.console.commandPlaceholder"),
+        ) as HTMLInputElement;
+        fireEvent.change(input, { target: { value: "say こんにちは" } });
+
+        const notPrevented = fireEvent.keyDown(input, {
+          key: "Enter",
+          ...composing,
+        });
+        // A send would have reached the API by now.
+        await act(async () => {});
+
+        expect(mockApi.post).not.toHaveBeenCalled();
+        expect(input.value).toBe("say こんにちは");
+        expect(notPrevented).toBe(true);
+      },
+    );
+
+    it.each([{ isComposing: true }, { keyCode: 229 }])(
+      "leaves ArrowUp to the IME, not recalling history (%o)",
+      async (composing) => {
+        const input = await sendSayHi();
+        fireEvent.change(input, { target: { value: "say こんにちは" } });
+
+        const notPrevented = fireEvent.keyDown(input, {
+          key: "ArrowUp",
+          ...composing,
+        });
+
+        expect(input.value).toBe("say こんにちは");
+        expect(notPrevented).toBe(true);
+      },
+    );
+
+    it.each([{ isComposing: true }, { keyCode: 229 }])(
+      "leaves ArrowDown to the IME, not stepping through history (%o)",
+      async (composing) => {
+        const input = await sendSayHi();
+        fireEvent.keyDown(input, { key: "ArrowUp" });
+        fireEvent.change(input, { target: { value: "say hiこんにちは" } });
+
+        const notPrevented = fireEvent.keyDown(input, {
+          key: "ArrowDown",
+          ...composing,
+        });
+
+        expect(input.value).toBe("say hiこんにちは");
+        expect(notPrevented).toBe(true);
+      },
+    );
   });
 });
 
