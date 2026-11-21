@@ -978,8 +978,10 @@ const maxPackDepth = 128
 // system call takes. It is fixed rather than derived from a data root, because the
 // Worker that restores a snapshot need not be the one that packed it, and the
 // staging directory a hydrate unpacks into can lie under a root of any length. The
-// hydrate names every member relative to that directory's descriptor (unpackTar),
-// so the joined path never has to fit in PATH_MAX; the member's own path does, and
+// hydrate never joins a member's path to that directory's: it creates each member
+// one name at a time from that directory's descriptor (unpackTar), and its fsync
+// walk names each directory by its path relative to that descriptor (fsyncTree).
+// So the joined path never has to fit in PATH_MAX; the member's own path does, and
 // this limit is what guarantees it. It is no lower than what the walk accepted
 // before, PATH_MAX-2 less the length of the source root.
 const maxMemberPath = unix.PathMax - 1
