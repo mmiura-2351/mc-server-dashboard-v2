@@ -98,9 +98,6 @@ _GZIP_SOURCE_BYTES = 1024 * 1024
 class HeaderLimitError(tarfile.ReadError):
     """A walk read or kept more header than its header limits allow.
 
-    The limits hold only a walk whose :class:`EndCheckedReader` is given
-    :class:`HeaderLimits`.
-
     More than 1 MiB of headers between two members, a member with more than 32
     PAX records, or more characters held by the members handed out than the
     limits allow (issue #3810). A ``ReadError``, so a caller that refuses
@@ -238,10 +235,10 @@ class EndCheckedReader(io.RawIOBase):
     ``r|`` ``tarfile`` reads the file in whole records, so where its walk stopped
     cannot be seen from here.
 
-    With ``header_limits`` the walk is also held to them (:class:`HeaderLimits`):
-    the upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore,
-    the health check and the snapshot ingest :data:`STORAGE_HEADER_LIMITS`
-    (issues #3859, #3931).
+    The walk is also held to ``header_limits`` (:class:`HeaderLimits`): the
+    upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore, the
+    health check and the snapshot ingest :data:`STORAGE_HEADER_LIMITS` (issues
+    #3859, #3931). No walk goes without (issue #3931).
 
     - The same count bounds what the walk reads between handing out one member
       and the next to 1 MiB: the next member's header blocks and extended
@@ -264,7 +261,7 @@ class EndCheckedReader(io.RawIOBase):
     """
 
     def __init__(
-        self, stream: io.BufferedIOBase, *, header_limits: HeaderLimits | None = None
+        self, stream: io.BufferedIOBase, *, header_limits: HeaderLimits
     ) -> None:
         super().__init__()
         self._stream = stream
@@ -289,13 +286,12 @@ class EndCheckedReader(io.RawIOBase):
         return True
 
     def read(self, size: int = -1, /) -> bytes:
-        budgeted = self._header_limits is not None and self._walking
-        if budgeted:
+        if self._walking:
             allowed = _BETWEEN_MEMBERS_BYTES + 1 - self._read_since_member
             size = allowed if size < 0 else min(size, allowed)
         self._last_read = self._stream.read(size)
         self._read_since_member += len(self._last_read)
-        if budgeted and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
+        if self._walking and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
             raise HeaderLimitError(
                 f"more than {_BETWEEN_MEMBERS_BYTES} bytes of headers before a member"
             )
@@ -324,28 +320,26 @@ class EndCheckedReader(io.RawIOBase):
 
         The count of what the walk reads starts over each time the walk resumes
         after a member, which is after the caller has read that member's data.
-        With header limits, only the walk's own reads are held to the budget
-        between two members, and each member is held to what members may hold
-        before it is handed out.
+        Only the walk's own reads are held to the budget between two members, and
+        each member is held to what members may hold before it is handed out.
         """
 
         held = 0
         allowed = _HELD_CHARACTERS
         for member in tar:
-            if self._header_limits is not None:
-                records = {**tar.pax_headers, **member.pax_headers}
-                if len(records) > _PAX_RECORDS_PER_MEMBER:
-                    raise HeaderLimitError(
-                        f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
-                    )
-                held += (
-                    len(member.name)
-                    + len(member.linkname)
-                    + sum(len(key) + len(value) for key, value in records.items())
+            records = {**tar.pax_headers, **member.pax_headers}
+            if len(records) > _PAX_RECORDS_PER_MEMBER:
+                raise HeaderLimitError(
+                    f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
                 )
-                allowed += self._header_limits.characters_a_member
-                if held > allowed:
-                    raise HeaderLimitError(_held_too_much(self._header_limits))
+            held += (
+                len(member.name)
+                + len(member.linkname)
+                + sum(len(key) + len(value) for key, value in records.items())
+            )
+            allowed += self._header_limits.characters_a_member
+            if held > allowed:
+                raise HeaderLimitError(_held_too_much(self._header_limits))
             self._walking = False
             yield member
             self._read_since_member = 0
