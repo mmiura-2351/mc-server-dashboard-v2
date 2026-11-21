@@ -571,9 +571,11 @@ async def restore_backup(
     could not be read, leaving the plugin rows unreconciled (#3221). The store
     itself can also fail after it published, answering ``publish_incomplete``, or
     fail to confirm whether it published, answering ``publish_unknown`` (#3564);
-    both steps still run over that working set. Any failure
-    after the publish is audited ``error``, under ``backup:force_restore`` when a
-    forced corrupt backup was the one published (#3269).
+    both steps still run over that working set. A lifecycle lock lost after the
+    publish skips the steps, answering ``restore_incomplete``; lost before it,
+    nothing is restored and the answer is ``lifecycle_lock_lost`` (#3927). Any
+    failure after the publish is audited ``error``, under ``backup:force_restore``
+    when a forced corrupt backup was the one published (#3269).
     """
 
     try:
@@ -720,10 +722,11 @@ async def restore_backup(
             # re-run of the restore completes it.
             raise _service_unavailable("publish_incomplete") from exc
         if isinstance(exc.cause, LifecycleLockLostError):
-            # The lock was lost after the publish (issue #3927), before a step
-            # after it or at its release: the restored working set is live, and
-            # a re-run of the restore completes it.
-            raise _service_unavailable("lifecycle_lock_lost") from exc
+            # The lock was lost after the publish (issue #3927), so the steps
+            # after it were skipped. Unlike ``lifecycle_lock_lost``, which
+            # publishes nothing, the restored working set is live: a mapped 503
+            # the caller retries, since a re-run of the restore completes it.
+            raise _service_unavailable("restore_incomplete") from exc
         # Any other failure stays the unmapped 500 it was, now audited.
         raise
     if result.forced_corrupt:

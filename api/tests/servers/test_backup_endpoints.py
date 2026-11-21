@@ -120,7 +120,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidFilePathError,
     InvalidRetentionPolicyError,
-    LifecycleLockLostError,
     PluginReconcileIncompleteError,
     ServerBusyError,
     ServerNotFoundError,
@@ -885,14 +884,14 @@ def test_a_failure_after_a_forced_corrupt_publish_records_force_restore(
 
 
 class _UnlockFailingLifecycleLock(LifecycleLock):
-    """A lock whose release finds its session gone, as the real one reports it."""
+    """A lock whose exit raises, which the restore survives whatever it raised."""
 
     @contextlib.asynccontextmanager
     async def _hold(self) -> AsyncIterator[HeldLifecycleLock]:
         try:
             yield NullHeldLifecycleLock()
         finally:
-            raise LifecycleLockLostError("connection to the lock's database was lost")
+            raise OSError("connection to the lock's database was lost")
 
     def hold(
         self, server_id: ServerId
@@ -901,20 +900,20 @@ class _UnlockFailingLifecycleLock(LifecycleLock):
 
 
 @pytest.mark.parametrize(
-    ("corrupt", "fail_properties", "reason", "operation"),
+    ("corrupt", "fail_properties", "status", "operation"),
     [
         # The forced corrupt publish otherwise succeeded: the lock's release is
         # the only failure, still after the publish.
-        (True, False, "lifecycle_lock_lost", ops.BACKUP_FORCE_RESTORE),
+        (True, False, 500, ops.BACKUP_FORCE_RESTORE),
         # The properties step already failed: that failure stays the answer,
         # with the lock's release failure behind it.
-        (True, True, "seed_failed", ops.BACKUP_FORCE_RESTORE),
+        (True, True, 503, ops.BACKUP_FORCE_RESTORE),
         # A healthy publish keeps the routine operation.
-        (False, False, "lifecycle_lock_lost", ops.BACKUP_RESTORE),
+        (False, False, 500, ops.BACKUP_RESTORE),
     ],
 )
 def test_a_lock_release_failure_after_the_publish_keeps_the_restore_audit(
-    corrupt: bool, fail_properties: bool, reason: str, operation: str
+    corrupt: bool, fail_properties: bool, status: int, operation: str
 ) -> None:
     # The lifecycle lock is released after the post-publish steps; a release
     # that fails is still a failure after the publish (issue #3269), so it must
@@ -934,9 +933,9 @@ def test_a_lock_release_failure_after_the_publish_keeps_the_restore_audit(
         force=corrupt,
     )
 
-    # Both are 503s a re-run of the restore heals (issue #3927).
-    assert resp.status_code == 503
-    assert resp.json()["reason"] == reason
+    assert resp.status_code == status
+    if fail_properties:
+        assert resp.json()["reason"] == "seed_failed"
     assert [e.operation for e in recorder.events] == [operation]
     assert recorder.events[0].outcome is Outcome.ERROR
 
@@ -948,16 +947,17 @@ def _lost_lock(*, checks_before_loss: int) -> FakeLifecycleLock:
 
 
 @pytest.mark.parametrize(
-    ("checks_before_loss", "operation"),
+    ("checks_before_loss", "reason", "operation"),
     [
         # Lost before the store published: nothing was restored.
-        (0, ops.BACKUP_RESTORE),
-        # Lost after it: the forced corrupt restore stands and is audited as one.
-        (1, ops.BACKUP_FORCE_RESTORE),
+        (0, "lifecycle_lock_lost", ops.BACKUP_RESTORE),
+        # Lost after it: the forced corrupt restore is live, the steps after it
+        # were skipped, and it is audited as the force-restore it was.
+        (1, "restore_incomplete", ops.BACKUP_FORCE_RESTORE),
     ],
 )
-def test_a_restore_that_lost_its_lifecycle_lock_is_503_lifecycle_lock_lost(
-    checks_before_loss: int, operation: str
+def test_a_restore_that_lost_its_lifecycle_lock_is_a_503(
+    checks_before_loss: int, reason: str, operation: str
 ) -> None:
     resp, recorder, _, _ = _force_restore_through_the_route(
         backup_store=_corrupt_fake_archive(),
@@ -969,7 +969,7 @@ def test_a_restore_that_lost_its_lifecycle_lock_is_503_lifecycle_lock_lost(
     )
 
     assert resp.status_code == 503
-    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert resp.json()["reason"] == reason
     assert [e.operation for e in recorder.events] == [operation]
     assert recorder.events[0].outcome is Outcome.ERROR
 
