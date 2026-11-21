@@ -2962,6 +2962,32 @@ describe("Keyboard shortcuts", () => {
     expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
   });
 
+  // Only the context menu and the stop menu count: another menu in the page,
+  // one that stays mounted while hidden or one an extension adds, leaves the
+  // shortcuts working (#3971).
+  it("Delete opens the delete confirm with an unrelated menu in the page", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    const other = document.createElement("div");
+    other.setAttribute("role", "menu");
+    document.body.append(other);
+    try {
+      fireEvent.keyDown(document, { key: "Delete" });
+
+      expect(screen.getByRole("dialog")).toHaveTextContent(
+        t("files.delete.dialogTitle"),
+      );
+    } finally {
+      other.remove();
+    }
+  });
+
   it.each(["Delete", "Backspace"])(
     "%s opens and cancels delete confirmation for a selected item",
     async (key) => {
