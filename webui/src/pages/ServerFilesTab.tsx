@@ -1075,9 +1075,13 @@ export function ServerFilesTab({
   // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape, Ctrl+C, Ctrl+V, arrows.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // While a modal is open, its keys are the dialog's, not the listing's
-      // behind it (#3920).
-      if (topmostDialog() !== null) {
+      // While a modal or a page menu (the context menu, the stop menu) is
+      // open, its keys are the dialog's or the menu's, not the listing's
+      // behind it (#3920, #3971).
+      if (
+        topmostDialog() !== null ||
+        document.querySelector('[role="menu"]') !== null
+      ) {
         return;
       }
       // Skip when a text input / textarea / contenteditable is focused — the
