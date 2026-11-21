@@ -248,6 +248,23 @@ function CloseAndFocusStop({ order }: { order: CloseOrder }) {
   );
 }
 
+// A field whose blur opens a second dialog over the first, beside it.
+function BlurOpensSibling() {
+  const [upper, setUpper] = useState(false);
+  return (
+    <>
+      <Modal open={true} title="Lower" onClose={() => {}}>
+        <button type="button">Lower first</button>
+        <input aria-label="Field" onBlur={() => setUpper(true)} />
+        <button type="button">Lower last</button>
+      </Modal>
+      <Modal open={upper} title="Upper" onClose={() => {}}>
+        <button type="button">Upper first</button>
+      </Modal>
+    </>
+  );
+}
+
 // While a modal is open, a Tab that lands focus outside the topmost dialog and
 // the toast stack is pulled back into the dialog, so Tab never walks the page
 // behind. Tab from the page body is the browser's, and focus a script moves
@@ -361,6 +378,36 @@ describe("Modal focus outside the dialog", () => {
     for (const pull of outerPulls) {
       expect(pull).not.toHaveBeenCalled();
     }
+  });
+
+  // A confirm pressed while the Tab that reached it is still down: the Tab
+  // counts only until its own focus move.
+  it("leaves focus a script moves behind once the Tab has moved focus, key still down", () => {
+    const behind = renderOverPage();
+    first().focus();
+
+    expect(fireEvent.keyDown(first(), { key: "Tab" })).toBe(true);
+    // Where the browser's Tab lands, inside the dialog.
+    last().focus();
+    // The confirm's focus, before the Tab's keyup or timer.
+    behind.focus();
+
+    expect(document.activeElement).toBe(behind);
+  });
+
+  // The field's blur, at the start of the Tab's move, opens the upper dialog,
+  // which takes focus before the Tab lands.
+  it("leaves focus in a dialog that a blur opens over this one during a Tab", () => {
+    render(<BlurOpensSibling />);
+    const field = screen.getByRole("textbox", { name: "Field" });
+    field.focus();
+
+    expect(fireEvent.keyDown(field, { key: "Tab" })).toBe(true);
+    act(() => field.blur());
+
+    expect(document.activeElement).toBe(
+      screen.getByRole("dialog", { name: "Upper" }),
+    );
   });
 
   it("leaves focus that a script moves behind the dialog there", async () => {
