@@ -2901,6 +2901,45 @@ describe("Keyboard shortcuts", () => {
     );
   });
 
+  it("Escape that another handler took leaves the selection", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a.txt", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    // As a modal's Escape is when its listener ran first and closed it.
+    const take = (e: KeyboardEvent) => e.preventDefault();
+    document.addEventListener("keydown", take, true);
+
+    fireEvent.keyDown(document.body, { key: "Escape" });
+
+    document.removeEventListener("keydown", take, true);
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+  });
+
+  it("Escape in the stop menu closes it and leaves the selection", async () => {
+    // At rest but still assigned: the stop control shows beside the listing.
+    routeGet({
+      detail: server({ assigned_worker_id: "w1" }),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: `${t("serverDetail.stop")} ▾` }),
+    );
+
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
+  });
+
   it.each(["Delete", "Backspace"])(
     "%s opens and cancels delete confirmation for a selected item",
     async (key) => {
@@ -3132,6 +3171,22 @@ describe("Keyboard shortcuts with a modal open", () => {
     // A paste over a.txt would first ask to overwrite it.
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, Partial<KeyboardEventInit>]>([
+    ["Delete", { key: "Delete" }],
+    ["Ctrl+A", { key: "a", ctrlKey: true }],
+    ["ArrowDown", { key: "ArrowDown" }],
+  ])("%s from outside the dialog does nothing", async (_name, init) => {
+    await openConfirmOverSelection();
+    // Focus left on the page body, as after a click on a toast's text.
+    (document.activeElement as HTMLElement).blur();
+    expect(document.activeElement).toBe(document.body);
+
+    expect(fireEvent.keyDown(document.body, init)).toBe(true);
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).not.toBeChecked();
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("Escape closes the dialog and keeps the selection behind", async () => {
