@@ -435,6 +435,9 @@ class RunReconcilerTick:
     restart_timeout_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
+    # When this process's control-plane listener started: the first instant a
+    # Worker could register with it (issue #3916).
+    listener_started_at: dt.datetime
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
 
     async def tick(self) -> None:

@@ -98,6 +98,9 @@ _REFUSED_GRACE = 5
 # divergence age between them and prove the budget, not a grace, held the start back.
 _RESTART_BUDGET = 120
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
+# This process's control-plane listener started well before every other instant
+# here, unless a test says otherwise (issue #3916).
+_STARTED_LONG_AGO = _NOW - dt.timedelta(days=1)
 
 
 def _server(
@@ -201,6 +204,7 @@ def _reconciler(
         restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_STARTED_LONG_AGO,
     )
 
 
@@ -2887,6 +2891,7 @@ def _concurrent_reconciler(
         restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_STARTED_LONG_AGO,
     )
 
 
@@ -3006,6 +3011,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_STARTED_LONG_AGO,
     )
 
     await reconciler.tick()

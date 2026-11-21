@@ -1050,6 +1050,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 logging.getLogger(__name__).info("game_session prune loop started")
             await grpc_server.start()
+            # No Worker can have registered with this process before now, so the
+            # reconciler measures a disconnected Worker's releases from no earlier
+            # than this (issue #3916).
+            listener_started_at = ServersSystemClock().now()
             app.state.grpc_server = grpc_server
             app.state.grpc_started = True
             logging.getLogger(__name__).info(
@@ -1282,6 +1286,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 restart_timeout_seconds=settings.control.restart_timeout_seconds,
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
+                listener_started_at=listener_started_at,
             )
             # Invalidate the stale observed-state cache before the reconciler's
             # first tick (issue #224), run from inside the loop as its first
