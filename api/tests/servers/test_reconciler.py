@@ -4048,6 +4048,8 @@ async def test_a_lapse_after_the_tick_reads_the_worker_keeps_the_row(
 
     await reconciler.tick()
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+    # The release ran, on the reading, and its hold counted as a failure.
+    assert reconciler._attempts[server.id].failures == 1
 
     clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
     await reconciler.tick()
