@@ -20,6 +20,7 @@ import errno
 import hashlib
 import logging
 import os
+import random
 from pathlib import Path
 
 import pytest
@@ -551,14 +552,14 @@ async def test_a_jar_whose_unlink_fails_with_eio_does_not_starve_the_others(
     # fs reads EIO from unlink as a gone store, since a soft NFS mount reports a
     # dead server that way (issue #3906). One JAR on a bad local disk that answers
     # EIO therefore ends each pass at that JAR; the next pass starts after it
-    # (issue #3934). It is the one the directory lists first, so a pass in
-    # directory order would meet it before any other.
+    # (issue #3934). It is the lowest key, so on any filesystem the first pass
+    # ends at it before reclaiming anything, and only a pass that starts after it
+    # reaches the others.
     pool = StorageJarPool(FsStorage(tmp_path))
-    for index in range(5):
-        await pool.put(b"jar-%d" % index)
+    keys = [await pool.put(b"jar-%d" % index) for index in range(5)]
     for path in (tmp_path / "jars").iterdir():
         os.utime(path, (_old().timestamp(), _old().timestamp()))
-    bad = next((tmp_path / "jars").iterdir()).stem
+    bad = min(keys)
     unlink = Path.unlink
 
     def _unlink(self: Path, missing_ok: bool = False) -> None:
@@ -576,10 +577,10 @@ async def test_a_jar_whose_unlink_fails_with_eio_does_not_starve_the_others(
     assert [entry.sha256 for entry in await pool.list_entries()] == [bad]
 
 
-async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
-    # A pass that stops after five failed deletes in a row did not come round, so
-    # the next pass still starts after the JAR the store gave no answer for
-    # (issue #3934).
+async def test_a_pass_five_failures_in_a_row_end_resumes_after_the_fifth() -> None:
+    # A pass that stops after five failed deletes in a row ends early too, so the
+    # next pass starts after the JAR whose failure ended it, wherever the last
+    # pass started (issue #3934).
     store = _ObjectPool()
     keys = await store.seed(6)
     store.fail_deletes_of(keys[0])
@@ -594,4 +595,43 @@ async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> Non
     result = await gc()
 
     assert result.failed == 5
-    assert resume_point.key == keys[0]
+    assert resume_point.key == keys[5]
+
+
+async def test_ten_standing_failures_in_a_row_starve_no_jar_after_them() -> None:
+    # Ten JARs whose deletes keep failing, next to each other in key order: each
+    # pass stops after five of them. Each starts after the last, so the third pass
+    # reaches the JAR above them (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(11)
+    store.fail_deletes_of(*keys[:10])
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=_resume_point())
+
+    results = [await gc() for _ in range(3)]
+
+    assert [result.failed for result in results] == [5, 5, 5]
+    assert await store.keys() == keys[:10]
+
+
+async def test_a_gc_restarted_before_every_pass_still_reclaims_past_a_bad_jar() -> None:
+    # A process that ends before its next pass (one that lives under a day at the
+    # default interval) never resumes after the JAR its pass ended at. Its first
+    # pass starts at a random place in key order instead, so across restarts the
+    # JARs after that one are still reached (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(5)
+    bad = keys[1]
+    store.fail_deletes_of(bad)
+    store.faults.error = ObjectStoreUnreachableError
+    rng = random.Random(3934)
+
+    for _ in range(10):
+        restarted = _gc(
+            store.pool,
+            _FakeReferences(set()),
+            resume_point=ResumePoint(start=rng.randrange),
+        )
+        with pytest.raises(JarPoolUnreachableError):
+            await restarted()
+
+    assert await store.keys() == [bad]

@@ -563,10 +563,10 @@ async def test_a_resumed_pass_logs_where_it_starts_at_debug(
     assert "after" in resumed.getMessage()
 
 
-async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
-    # A pass that stops after five failed deletes in a row did not come round, so
-    # the next pass still starts after the blob the store gave no answer for
-    # (issue #3934).
+async def test_a_pass_five_failures_in_a_row_end_resumes_after_the_fifth() -> None:
+    # A pass that stops after five failed deletes in a row ends early too, so the
+    # next pass starts after the blob whose failure ended it, wherever the last
+    # pass started (issue #3934).
     store = _ObjectCache()
     keys = await store.seed(6)
     store.fail_deletes_of(keys[0])
@@ -581,4 +581,19 @@ async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> Non
     result = await gc()
 
     assert result.failed == 5
-    assert resume_point.key == keys[0]
+    assert resume_point.key == keys[5]
+
+
+async def test_ten_standing_failures_in_a_row_starve_no_blob_after_them() -> None:
+    # Ten blobs whose deletes keep failing, next to each other in key order: each
+    # pass stops after five of them. Each starts after the last, so the third pass
+    # reaches the blob above them (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(11)
+    store.fail_deletes_of(*keys[:10])
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=_resume_point())
+
+    results = [await gc() for _ in range(3)]
+
+    assert [result.failed for result in results] == [5, 5, 5]
+    assert await store.keys() == keys[:10]

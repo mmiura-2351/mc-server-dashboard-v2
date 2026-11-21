@@ -45,10 +45,12 @@ skipped, and the pass goes on: one JAR that keeps failing must not starve every 
 after it (issue #3871). Five failed deletes in a row end the pass, and its summary
 is then at WARNING with the reason (``gc_pass``, issue #3906). A store that gives
 no answer at all (:class:`JarPoolUnreachableError`) ends the pass at once, as does a
-cancellation; neither logs a summary. The GC's :class:`ResumePoint` keeps the JAR
-such a pass ended at, and the next pass walks the JARs in key order starting after
-it, so a failure tied in fact to that one JAR cannot starve the JARs after it
-(issue #3934). A pass that walks every JAR without one clears it.
+cancellation; neither logs a summary. A pass that ends early, on a delete that got
+no answer or at the fifth failed delete in a row, leaves the JAR it ended at in the
+GC's :class:`ResumePoint`. The next pass walks the JARs in key order starting after
+it, so failures tied in fact to those JARs cannot starve the JARs after them
+(issue #3934). A pass that walks every JAR without ending early clears it, and a
+pass without one starts at a random place in key order.
 """
 
 from __future__ import annotations
@@ -122,8 +124,7 @@ class RunJarPoolGc:
         stopped = False
         if self.resume_point.key is not None:
             _LOG.debug(
-                "jar-pool GC pass starts after jar %s, where the last pass ended on "
-                "an unreachable store",
+                "jar-pool GC pass starts after jar %s, where the last pass ended early",
                 self.resume_point.key,
             )
         for entry in self.resume_point.order(entries, lambda e: e.sha256):
@@ -164,7 +165,10 @@ class RunJarPoolGc:
                 )
                 if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_DELETES:
                     # Likely the store rather than these JARs: stop paying each
-                    # later one its retries and a WARNING (issue #3906).
+                    # later one its retries and a WARNING (issue #3906). The next
+                    # pass starts after this one, in case they are these JARs
+                    # after all (issue #3934).
+                    self.resume_point.key = entry.sha256
                     stopped = True
                     break
                 continue
@@ -179,7 +183,7 @@ class RunJarPoolGc:
                 now - entry.modified_at,
             )
         if not stopped:
-            # The pass came round without a store failure (issue #3934).
+            # The pass came round without ending early (issue #3934).
             self.resume_point.key = None
         level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(

@@ -344,9 +344,9 @@ resource-pack GC (Section 4.3) run a pass the same way:
 
 - Each object a pass reclaims is logged at INFO with its key, its size and its
   age. A resource pack's line also names its pack id. A resource pack's key is
-  logged escaped, here and in the WARNING below: it ends in the upload's
-  filename, and a pack stored before the upload refused control characters may
-  carry them (issue #3907).
+  logged escaped, here, in the WARNING below and in the DEBUG line that says
+  where a pass starts: it ends in the upload's filename, and a pack stored before
+  the upload refused control characters may carry them (issue #3907).
 - Each pass ends with one summary line: how many objects it listed, how many it
   reclaimed and their bytes, how many deletes failed, and how long it took. The
   line is at INFO when the pass reclaimed or failed anything, and at DEBUG
@@ -374,20 +374,31 @@ resource-pack GC (Section 4.3) run a pass the same way:
   and the rest can be about one file, and only skip it. `EROFS` is a
   whole-filesystem state, but each delete fails at once, so it skips the JAR too,
   and five in a row end the pass.
-- A pass that ends on a store that gave no answer remembers the key it ended at,
-  and the next pass starts after it (issue #3934). Each GC walks its listing in
-  key order, from the key after that one round to the start, so that key comes
-  last. A failure that is in fact tied to one key, such as a malformed legacy key
-  the object client cannot send or a local-disk `EIO` on one JAR, therefore no
-  longer starves the keys after it: every other orphan is reclaimed within two
-  passes. The bad key still ends each pass that reaches it, with an ERROR from the
-  loop (and, for the JAR pool, a 500 from the manual trigger), until it is fixed
-  or removed. A store that is down ends each pass at its first delete as before,
-  and the key moves on to the next orphan each pass.
-  - A pass that walks the whole listing without such a failure clears the key. A
-    pass the five-in-a-row stop ends keeps it.
+- A pass that ends early remembers the key it ended at, and the next pass starts
+  after it (issue #3934). Ending early means a delete the store gave no answer
+  to, or the fifth failed delete in a row. Each GC walks its listing in key
+  order, from the key after that one round to the start, so that key comes last.
+  The passes that end early therefore form one continuous scan round the keys:
+  each moves the scan on by at least one key, or by five at the stop.
+  - Failures that are in fact tied to keys therefore no longer starve the keys
+    after them. Examples are a malformed legacy key the object client cannot
+    send, a local-disk `EIO` on one JAR, or objects whose deletes keep being
+    refused. With one key that gets no answer, every other orphan is reclaimed
+    within two passes. Ten adjacent keys whose deletes keep failing hold back the
+    orphan above them for two passes.
+  - A key whose delete keeps failing still fails in each pass that reaches it.
+    One that gets no answer ends that pass with an ERROR from the loop (and, for
+    the JAR pool, a 500 from the manual trigger) until it is fixed or removed.
+  - A store that is down ends each pass at its first delete as before, and the
+    key moves on to the next orphan each pass.
+  - A pass that walks the whole listing without ending early clears the key.
   - The key lives in the API process's memory, so a restart forgets it. The
     periodic JAR-pool GC and its manual trigger share one.
+  - A pass with no key starts at a random place in key order. That is the first
+    pass of a process, and the pass after one that came round. At the default
+    daily intervals, an API process that lives under a day never runs the pass
+    that resumes. Its first pass still starts somewhere new, so across restarts
+    the keys after a bad one are reached too.
   - A pass that starts after a key says so in a DEBUG line.
 - A cancellation (shutdown) ends the pass at once too. A pass that ends at once
   logs no summary; the per-object INFO lines still record what it reclaimed. The

@@ -647,10 +647,10 @@ async def test_a_resumed_pass_logs_where_it_starts_at_debug(
     assert not _forged(resumed)
 
 
-async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
-    # A pass that stops after five failed deletes in a row did not come round, so
-    # the next pass still starts after the pack the store gave no answer for
-    # (issue #3934).
+async def test_a_pass_five_failures_in_a_row_end_resumes_after_the_fifth() -> None:
+    # A pass that stops after five failed deletes in a row ends early too, so the
+    # next pass starts after the pack whose failure ended it, wherever the last
+    # pass started (issue #3934).
     bucket = _Bucket()
     keys = await bucket.orphans(6)
     bucket.faults.when = lambda op, key: op == "delete_object" and key == keys[0]
@@ -663,4 +663,19 @@ async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> Non
     result = await bucket.gc()
 
     assert result.failed == 5
-    assert bucket.resume_point.key == keys[0]
+    assert bucket.resume_point.key == keys[5]
+
+
+async def test_ten_standing_failures_in_a_row_starve_no_pack_after_them() -> None:
+    # Ten packs whose deletes keep failing, next to each other in key order: each
+    # pass stops after five of them. Each starts after the last, so the third pass
+    # reaches the pack above them (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(11)
+    failing = keys[:10]
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in failing
+
+    results = [await bucket.gc() for _ in range(3)]
+
+    assert [result.failed for result in results] == [5, 5, 5]
+    assert sorted(bucket.blob_keys()) == failing
