@@ -522,6 +522,19 @@ class BackupCorruptError(ServerError):
         self.corrupt_count = corrupt_count
 
 
+class BackupTooLargeError(ServerError):
+    """A create-backup hit a working set too large to archive (issue #3859).
+
+    The seam translation of the storage ``ArchiveTooLargeError`` at create:
+    restore counts every byte of an archive's decompressed stream toward its
+    decompressed-size cap, as the upload gate does, so Storage writes no backup
+    whose stream would be past it, which could be neither restored nor uploaded
+    again. Nothing is written. The edge maps it to 409 ``working_set_too_large``:
+    the working set's own size refuses the create, and the same request succeeds
+    once it is smaller.
+    """
+
+
 class BackupUnreadableError(ServerError):
     """A backup's stored archive could not be read back in full (issue #2371).
 

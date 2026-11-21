@@ -34,6 +34,7 @@ import datetime as dt
 import enum
 import errno
 import functools
+import gzip
 import hashlib
 import io
 import logging
@@ -46,11 +47,21 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Buffer,
+    Callable,
+    Coroutine,
+    Iterator,
+)
 from pathlib import Path
+from types import TracebackType
 from typing import TYPE_CHECKING, Any, ParamSpec, Protocol, TypeVar
 
 from mc_server_dashboard_api.archive_member import (
+    STORAGE_HEADER_LIMITS,
+    CappedReader,
     EndCheckedReader,
     GzipReader,
     is_canonical_name,
@@ -106,7 +117,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.archive import (
     HeaderCheckedTarInfo,
-    archive_read_errors_as_unreadable,
+    archive_read_errors_as_verdicts,
     refuse_unrestorable_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
@@ -137,8 +148,17 @@ _SPOOL_SWEEP_MIN_AGE_S = 3600
 # bounded on the way in, but a gzip member can expand ~1000x; the cumulative
 # DECOMPRESSED bytes are counted as members are extracted so a bomb cannot fill the
 # disk (#287). 8 GiB bounds the amplification while covering a real Minecraft
-# world; a constant is intentional (no config knob requested).
+# world; a constant is intentional (no config knob requested). Every byte of the
+# decompressed stream counts, as at the upload gate, whose cap is the same 8 GiB,
+# and the backup writer stays under it (issue #3859).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
+
+# The deepest member restore and the health check take, in path components
+# (issue #3859). This adapter packs a working set with ``tarfile``'s recursive
+# ``add`` (``_add_plain``), which raises ``RecursionError`` near 1,000 levels, so a
+# deeper member would restore into a working set the server could not start
+# from, back up or be deleted with. Until the pack is iterative (issue #3931).
+_MAX_RESTORE_DEPTH = 512
 
 # The backoff of ``_under_server_lock``'s wait for the server lock (issues #3552,
 # #3569).
@@ -2170,14 +2190,18 @@ class FsStorage(Storage):
                 key = BackupKey(uuid.uuid4().hex)
             archive = backups / f"{key.value}.tar.gz"
             await self._read_leased(
-                current, self._write_backup_archive, current, archive
+                current,
+                self._write_backup_archive,
+                current,
+                archive,
+                self._max_restore_bytes,
             )
             return key
         finally:
             release()
 
     @staticmethod
-    def _write_backup_archive(source: Path, archive: Path) -> None:
+    def _write_backup_archive(source: Path, archive: Path, max_bytes: int) -> None:
         # Single-file write discipline (STORAGE.md Section 4.4): pack ``source`` into a
         # temp sibling in the same directory, fsync the tar's data blocks, atomically
         # rename it into place, then fsync the directory. A power cut mid-pack leaves
@@ -2190,7 +2214,7 @@ class FsStorage(Storage):
         os.close(fd)
         tmp = Path(tmp_name)
         try:
-            _write_tar_gz(source, tmp)
+            _write_tar_gz(source, tmp, max_bytes)
             tmp_fd = os.open(tmp, os.O_RDONLY)
             try:
                 os.fsync(tmp_fd)
@@ -4054,12 +4078,98 @@ def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
     tar.add(child, arcname=child.name, filter=_plain)
 
 
-def _write_tar_gz(directory: Path, archive: Path) -> None:
-    """Write a self-contained gzip-compressed tar of ``directory`` to ``archive``."""
+def _write_tar_gz(directory: Path, archive: Path, max_bytes: int | None = None) -> None:
+    """Write a self-contained gzip-compressed tar of ``directory`` to ``archive``.
 
-    with tarfile.open(archive, mode="w:gz") as tar:
+    With ``max_bytes``, a tar longer than that is :class:`ArchiveTooLargeError`
+    (:class:`_CappedTarGz`).
+    """
+
+    with _CappedTarGz(archive, max_bytes) as tar:
         for child in sorted(directory.iterdir(), key=lambda p: p.name):
             _add_plain(tar, directory, child)
+
+
+class _CappedTarGz:
+    """A tar written gzip-compressed to ``path``, at most ``max_bytes`` long (#3859).
+
+    Restore and the health check count every byte of a backup's tar toward
+    their decompressed-size cap, and so does the upload gate toward the same
+    figure, so a backup whose tar is longer could be neither restored nor
+    uploaded again. Each byte :attr:`tar` writes is counted as it is handed to
+    gzip, headers, padding and the end-of-archive marker included, and the write
+    that would take the tar past ``max_bytes`` is :class:`ArchiveTooLargeError`
+    instead. ``None`` writes without a cap.
+
+    Use it as ``with _CappedTarGz(path, max_bytes) as tar``, or close
+    :attr:`tar`, which writes the end-of-archive marker, and then call
+    :meth:`close`. ``tarfile`` leaves a file object it was handed open, so this
+    closes it.
+    """
+
+    def __init__(self, path: Path, max_bytes: int | None) -> None:
+        self._gz = gzip.GzipFile(path, "wb")
+        try:
+            self.tar = tarfile.open(
+                fileobj=_CountedWrites(self._gz, max_bytes), mode="w"
+            )
+        except BaseException:
+            self._gz.close()
+            raise
+
+    def close(self) -> None:
+        """Close the gzip stream.
+
+        Without :attr:`tar` closed first, as after a failure, the end-of-archive
+        marker is left out of a spool the caller removes, as ``TarFile`` leaves it
+        out. Written there, it could pass the cap and replace the failure.
+        """
+
+        self._gz.close()
+
+    def __enter__(self) -> tarfile.TarFile:
+        return self.tar
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        try:
+            if exc_type is None:
+                self.tar.close()
+        finally:
+            self.close()
+
+
+class _CountedWrites(io.RawIOBase):
+    """``stream``'s writes, counted: past ``max_bytes`` is ArchiveTooLargeError.
+
+    The one that would go past it is refused before it is written. ``None``
+    counts without a cap. :meth:`tell` is the count, where ``tarfile`` starts.
+    """
+
+    def __init__(self, stream: io.BufferedIOBase, max_bytes: int | None) -> None:
+        super().__init__()
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._written = 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data: Buffer, /) -> int:
+        size = memoryview(data).nbytes
+        if self._max_bytes is not None and self._written + size > self._max_bytes:
+            raise ArchiveTooLargeError(
+                f"backup archive exceeds {self._max_bytes} decompressed bytes"
+            )
+        self._written += size
+        return self._stream.write(data)
+
+    def tell(self) -> int:
+        return self._written
 
 
 def _warn_dropped_reserved_members(dropped: int, key: BackupKey) -> None:
@@ -4081,11 +4191,22 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     object backend shares (issue #3550): a link, special, absolute or ``..``
     member is :class:`ArchiveUnreadableError`. :func:`_plain_member_filter` then
     applies ``data_filter``'s remaining protections. On top of both, the
-    cumulative DECOMPRESSED bytes are counted as each file member is drained and
-    bounded by ``max_bytes``: a gzip member can expand ~1000x past the compressed
-    body, so the size cap aborts a bomb (:class:`ArchiveTooLargeError`) before it
-    fills the disk (#287). The count is over actual bytes read, not the forgeable
-    member header.
+    DECOMPRESSED bytes are bounded by ``max_bytes``: a gzip member can expand
+    ~1000x past the compressed body, so the size cap aborts a bomb
+    (:class:`ArchiveTooLargeError`) before it fills the disk (#287). The count is
+    over actual bytes read, not the forgeable member header. Every byte
+    decompressed counts (issue #3859), as at the upload gate: the stream is read
+    through ``CappedReader``, so headers, extended-header data, skipped data,
+    padding and the read past the end-of-archive marker count as member data
+    does. What each file member holds counts toward the same cap on its own, as
+    it is drained: for a sparse member that includes holes restore writes but
+    nothing decompresses.
+
+    The walk is held to the storage walks' header limits (issue #3859,
+    ``STORAGE_HEADER_LIMITS``): at most 1 MiB of headers between two members,
+    32 PAX records a member, and 8 Mi characters of names, link names and PAX
+    records plus 16 Ki a member. Going past one, or a chain of extended headers
+    too long for ``tarfile`` to read, is :class:`ArchiveUnreadableError`.
 
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
@@ -4098,8 +4219,11 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     only zeros may follow it, each gzip member's header, CRC32 and ISIZE must
     check, only another gzip member or zero padding may follow one, and there
     may be at most 10,000 of them (issue #3835); anything else is
-    :class:`ArchiveUnreadableError`. The zeros past the marker count toward
-    ``max_bytes`` too.
+    :class:`ArchiveUnreadableError`.
+
+    A member more than ``_MAX_RESTORE_DEPTH`` (512) levels deep is
+    :class:`ArchiveUnreadableError` (issue #3859): this adapter could not pack
+    the working set it would restore (issue #3931).
 
     A member at, or under, the reserved generation-marker root name is left out
     and counted (issue #3433): a backup stored before the name was reserved can
@@ -4112,10 +4236,15 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     dropped = 0
     try:
         with (
-            archive_read_errors_as_unreadable(),
+            archive_read_errors_as_verdicts(),
             GzipReader(open(archive, "rb")) as gz,
             tarfile.open(
-                fileobj=(stream := EndCheckedReader(gz)),
+                fileobj=(
+                    stream := EndCheckedReader(
+                        CappedReader(gz, max_bytes),
+                        header_limits=STORAGE_HEADER_LIMITS,
+                    )
+                ),
                 mode="r:",
                 tarinfo=HeaderCheckedTarInfo,
             ) as tar,
@@ -4134,9 +4263,14 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
                     dropped += 1
                     total = _drain_member_capped(tar, safe, total, max_bytes)
                     continue
+                if safe.name.count("/") + 1 > _MAX_RESTORE_DEPTH:
+                    raise ArchiveUnreadableError(
+                        f"archive holds a member more than {_MAX_RESTORE_DEPTH}"
+                        " levels deep, deeper than this store can pack again"
+                    )
                 total = _extract_member_capped(tar, safe, dest, total, max_bytes)
-            for zeros in stream.read_past_end_marker():
-                total = _counted(total, zeros, max_bytes)
+            for _zeros in stream.read_past_end_marker():
+                pass
     except tarfile.FilterError as exc:
         raise ArchiveUnreadableError(
             f"archive holds a member that cannot be restored: {exc}"
@@ -4162,14 +4296,14 @@ def _extract_member_capped(
     ``safe`` has passed :func:`_plain_member_filter` already.
     """
 
+    target = dest / safe.name
+    _make_directories(target.parent)
     if not safe.isfile():
         tar.extract(safe, dest, filter="data")
         return total
     handle = tar.extractfile(safe)
     if handle is None:  # pragma: no cover - a file member always yields a handle
         return total
-    target = dest / safe.name
-    target.parent.mkdir(parents=True, exist_ok=True)
     with handle, open(target, "wb") as out:
         while True:
             chunk = handle.read(_CHUNK)
@@ -4182,6 +4316,27 @@ def _extract_member_capped(
     os.chmod(target, safe.mode)
     os.utime(target, (safe.mtime, safe.mtime))
     return total
+
+
+def _make_directories(directory: Path) -> None:
+    """``directory.mkdir(parents=True, exist_ok=True)``, one level at a time.
+
+    ``Path.mkdir`` and ``os.makedirs`` recurse once for each missing directory,
+    so a member about 1,000 directories deep raised ``RecursionError`` (issue
+    #3859), which the restore walk reports as an archive that does not read.
+    """
+
+    pending = [directory]
+    while pending:
+        try:
+            pending[-1].mkdir()
+        except FileNotFoundError:
+            pending.append(pending[-1].parent)  # its parent first
+            continue
+        except OSError:
+            if not pending[-1].is_dir():
+                raise
+        pending.pop()
 
 
 def _drain_member_capped(

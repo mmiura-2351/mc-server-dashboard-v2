@@ -617,7 +617,7 @@ async def test_prune_failclosed_keeps_tree_when_pack_fails(
 
     import mc_server_dashboard_api.storage.adapters.fs as fs_mod
 
-    def _boom(directory: Path, archive: Path) -> None:
+    def _boom(directory: Path, archive: Path, max_bytes: int | None = None) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(fs_mod, "_write_tar_gz", _boom)

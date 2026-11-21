@@ -107,6 +107,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupRestorePartiallyPublishedError,
     BackupRestorePublicationUnknownError,
     BackupStorageUnavailableError,
+    BackupTooLargeError,
     BackupUnreadableError,
     BackupUnsettledError,
     CommandDispatchError,
@@ -368,6 +369,19 @@ async def create_backup(
             server_id,
         )
         raise _integrity_error("working_set_corrupt") from exc
+    except BackupTooLargeError as exc:
+        # The working set's archive would be past the decompressed-size cap that
+        # restore and the upload gate hold a backup to (issue #3859), so no backup
+        # was written: one past it could be neither restored nor uploaded again.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise _conflict("working_set_too_large") from exc
     await _record(
         recorder, ops.BACKUP_CREATE, authorized, community_id, backup.id.value
     )

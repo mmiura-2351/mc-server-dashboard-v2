@@ -33,6 +33,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupNotFoundError,
     BackupStorageUnavailableError,
+    BackupTooLargeError,
     BackupUnreadableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -182,6 +183,34 @@ async def test_create_against_corrupt_working_set_raises_and_writes_no_archive(
     backups = server_root / "backups"
     archives = list(backups.glob("*.tar.gz")) if backups.is_dir() else []
     assert archives == []
+
+
+async def test_create_of_a_working_set_past_the_cap_raises_and_writes_no_archive(
+    tmp_path: Path,
+) -> None:
+    """The storage ``ArchiveTooLargeError`` at create, a working set whose archive
+    would be past the decompressed-size cap (issue #3859), is translated to
+    :class:`BackupTooLargeError`, and no ``.tar.gz`` archive is written."""
+
+    storage = FsStorage(tmp_path, version_retention=10, max_restore_bytes=16 * 1024)
+    adapter = StorageBackupStoreAdapter(storage=storage)
+    community, server = _scope()
+    await _publish(storage, community, server, {"world/level.dat": bytes(32 * 1024)})
+
+    with pytest.raises(BackupTooLargeError):
+        await adapter.create_from_current(
+            community_id=community, server_id=server, storage_ref=_ref()
+        )
+
+    backups = (
+        tmp_path
+        / "communities"
+        / str(community.value)
+        / "servers"
+        / str(server.value)
+        / "backups"
+    )
+    assert list(backups.iterdir()) == []
 
 
 class _UnavailableStorage(FsStorage):

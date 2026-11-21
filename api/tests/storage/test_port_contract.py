@@ -10,11 +10,14 @@ covered in the per-adapter files.
 from __future__ import annotations
 
 import asyncio
+import functools
 import gzip
 import hashlib
 import io
+import os
 import tarfile
 import threading
+import tracemalloc
 import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -47,6 +50,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 )
 from mc_server_dashboard_api.storage.integrity.region import ReasonCode
 from tests import gzip_shapes
+from tests.servers import archive_cap_shapes
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
@@ -55,12 +59,13 @@ from tests.storage.helpers import (
     END_CHECK_TAR,
     GNU_SPARSE_FORMATS,
     GZIP_MEMBER_SPLITS,
+    HEADER_LIMITS,
     INVALID_SPARSE_LAYOUTS,
-    OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
     TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT,
+    WITHIN_THE_STORAGE_HEADER_LIMITS_FILES,
     bomb_targz,
     corrupt_region_bytes,
     drain,
@@ -72,12 +77,13 @@ from tests.storage.helpers import (
     needs_gnu_tar,
     needs_pigz,
     new_scope,
-    over_the_upload_header_limits_tar,
+    over_a_header_limit_tar,
     pigz,
     read_tar,
     region_targz,
     reserved_member_over,
     reserved_member_with_unreadable_data,
+    sparse_holes_over,
     stream_of,
     tar_bytes,
     tar_cut_in_a_sparse_extension_block,
@@ -89,6 +95,7 @@ from tests.storage.helpers import (
     unaligned_live_region_bytes,
     wait_until_contended,
     watch_lock_contention,
+    within_the_storage_header_limits_tar,
 )
 
 # --- working-set hydrate / snapshot (Section 3.1) --------------------------
@@ -1267,6 +1274,66 @@ async def test_zeros_past_the_marker_count_toward_the_restore_cap(
         await harness.storage.check_backup_health(community, server, key)
 
 
+@pytest.mark.parametrize("build", archive_cap_shapes.OVER_CAP)
+async def test_what_the_walk_decompresses_outside_member_data_counts_toward_the_cap(
+    backend: str, tmp_path: Path, build: Callable[[], bytes]
+) -> None:
+    """Restore and the health probe count every byte they decompress toward the
+    cap, as the upload gate does (issue #3859), on BOTH backends: a sparse
+    member's stored data its map takes none of, PAX data and a GNU long name.
+    Each archive decompresses past the cap while its members hold one byte at
+    most, so a backup the gate refuses is not one restore takes."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=archive_cap_shapes.CAP)
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(build(), chunk=8192)
+    )
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
+@pytest.mark.parametrize(
+    "name", ["world/sparse.dat", ".mcsd_generation-cache"], ids=["kept", "left-out"]
+)
+async def test_a_sparse_members_holes_count_toward_the_restore_cap(
+    backend: str, tmp_path: Path, name: str
+) -> None:
+    """What a member holds counts toward the cap on its own, as restore writes it
+    (issue #3859), on BOTH backends: a sparse member's holes are written but not
+    decompressed, so only that count sees them. A reserved root member restore
+    leaves out is read and counted the same way (issue #3798)."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=64 * 1024)
+    community, server = new_scope()
+    archive = gzip.compress(sparse_holes_over(1 << 20, name=name))
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.check_backup_health(community, server, key)
+
+
+async def test_a_working_set_whose_archive_is_past_the_cap_is_not_backed_up(
+    backend: str, tmp_path: Path
+) -> None:
+    """The backup writers stay under the cap restore holds a backup to (issue
+    #3859), on BOTH backends: a working set whose tar would be longer is
+    ``ArchiveTooLargeError`` at create, and no backup is written."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=16 * 1024)
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": bytes(32 * 1024)})
+
+    with pytest.raises(ArchiveTooLargeError):
+        await harness.storage.create_backup_from_current(community, server)
+    assert await harness.storage.list_backups(community, server) == []
+
+
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(10 * 10 + 30)
 async def test_restore_corrupt_backup_without_force_is_refused(
@@ -1899,22 +1966,178 @@ async def test_backup_from_each_producer_is_healthy_and_restores(
     await _restore_and_health_accept(harness, archive, END_CHECK_FILES)
 
 
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("limit", HEADER_LIMITS)
+async def test_backup_over_a_header_limit_is_unreadable(
+    harness: StorageHarness, limit: str
+) -> None:
+    """Restore and the health probe hold a backup's walk to header limits (issue
+    #3859), on BOTH backends: 2 MiB of extended headers before a member, a
+    member of 33 PAX records, and more PAX values than 8 Mi characters plus
+    16 Ki a member are each ``ArchiveUnreadableError``. Neither backup writer
+    writes such a member, and the upload gate refuses each (issue #3810)."""
+
+    await _restore_and_health_refuse(
+        harness, gzip.compress(over_a_header_limit_tar(limit))
+    )
+
+
 # 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(20 * 10 + 30)
-async def test_backup_over_the_upload_header_limits_is_healthy_and_restores(
+async def test_backup_within_the_storage_header_limits_is_healthy_and_restores(
     harness: StorageHarness,
 ) -> None:
-    """The header limits the upload doors hold a walk to (issue #3810) are not the
-    storage walks': a backup with 2 MiB of extended headers before a member, a
-    member of 33 PAX records and more than 8 Mi characters of PAX values is
-    healthy and restores on BOTH backends. Restore and the health probe have no
-    entry cap, so a large working set would reach the character limit."""
+    """The storage walks allow 16 Ki characters a member more than the upload
+    gates' 8 Mi (issue #3859): restore and the health probe have no entry cap,
+    and a backup the platform writes holds a member for every file of the
+    working set. A backup past 8 Mi but within that is healthy and restores on
+    BOTH backends."""
 
     await _restore_and_health_accept(
         harness,
-        gzip.compress(over_the_upload_header_limits_tar()),
-        OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
+        gzip.compress(within_the_storage_header_limits_tar()),
+        WITHIN_THE_STORAGE_HEADER_LIMITS_FILES,
     )
+
+
+def _name_levels_deep(levels: int) -> str:
+    """A file name of ``levels`` path components, under ``levels - 1`` directories."""
+
+    return "/".join(["d"] * (levels - 1) + ["f"])
+
+
+@pytest.mark.parametrize("levels", [513, 1100])
+async def test_a_member_past_the_fs_depth_bound_restores_on_object_only(
+    harness: StorageHarness, backend: str, levels: int
+) -> None:
+    """The object backend restores a member of any depth (issue #3859). The fs
+    backend packs a working set with ``tarfile``'s recursive ``add``, which cannot
+    pack a tree about 1,000 levels deep, so a restore would leave a server it
+    could not start, back up or delete: its restore and health probe refuse a
+    member more than 512 levels deep, naming the bound, and the live world
+    stays (until issue #3931)."""
+
+    name = _name_levels_deep(levels)
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"live"})
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(tar_bytes({name: b"deep"})))
+    )
+
+    if backend == "object":
+        health = await harness.storage.check_backup_health(community, server, key)
+        assert health.healthy
+        await harness.storage.restore_backup(community, server, key)
+        read = await harness.storage.read_file(community, server, RelPath(name))
+        assert read == b"deep"
+    else:
+        with pytest.raises(ArchiveUnreadableError, match="more than 512 levels deep"):
+            await harness.storage.check_backup_health(community, server, key)
+        with pytest.raises(ArchiveUnreadableError, match="more than 512 levels deep"):
+            await harness.storage.restore_backup(community, server, key)
+        live = await harness.storage.read_file(
+            community, server, RelPath("world/level.dat")
+        )
+        assert live == b"live"
+
+
+async def test_a_member_512_levels_deep_restores_and_is_packed_again(
+    harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member 512 levels deep, the fs bound, is healthy and restores on BOTH
+    backends (issue #3859), and the working set it leaves is hydrated, backed up
+    and pruned: the server can start, be backed up and be deleted."""
+
+    # The fs publish syncs each of the 511 directories, which this does not pin,
+    # and which would hold a gate under I/O load (issue #3651).
+    monkeypatch.setattr(os, "fsync", lambda fd: None)
+    files = {_name_levels_deep(512): b"deep"}
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(tar_bytes(files)))
+    )
+
+    assert (await harness.storage.check_backup_health(community, server, key)).healthy
+    await harness.storage.restore_backup(community, server, key)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
+    backup = await harness.storage.create_backup_from_current(community, server)
+    assert backup in await harness.storage.list_backups(community, server)
+    await harness.storage.prune_to_final_snapshot(community, server)
+
+
+# Each a chain of 500 extended headers of one kind before a member.
+_HEADER_CHAINS = archive_cap_shapes.EXTENDED_HEADER_CHAINS
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+@pytest.mark.parametrize("build", _HEADER_CHAINS)
+async def test_backup_with_a_chain_of_extended_headers_is_unreadable(
+    harness: StorageHarness, build: Callable[[], bytes]
+) -> None:
+    """``tarfile`` reads extended headers recursively, so a chain of a few
+    hundred before one member raises ``RecursionError``. Restore and the health
+    probe report it as ``ArchiveUnreadableError`` on BOTH backends (issue
+    #3859), not as a raw error."""
+
+    await _restore_and_health_refuse(harness, build())
+
+
+# 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(10 * 10 + 30)
+async def test_backup_whose_sparse_member_follows_global_records_is_unreadable(
+    harness: StorageHarness,
+) -> None:
+    """Each member counts as holding the global PAX records (issue #3859), on
+    BOTH backends: ``tarfile`` keeps them in ``TarFile.pax_headers`` but never
+    copies them into an old-GNU sparse member's own, so 60,000 of them before
+    one are past the 32 PAX records a member may hold."""
+
+    await _restore_and_health_refuse(
+        harness, archive_cap_shapes.global_records_before_a_sparse_member()
+    )
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            functools.partial(archive_cap_shapes.pax_data, 32 * archive_cap_shapes.MIB),
+            id="pax-data",
+        ),
+        pytest.param(
+            functools.partial(
+                archive_cap_shapes.gnu_longname_data, 32 * archive_cap_shapes.MIB
+            ),
+            id="gnu-longname",
+        ),
+    ],
+)
+async def test_a_headers_only_bomb_is_unreadable_in_bounded_memory(
+    harness: StorageHarness, build: Callable[[], bytes]
+) -> None:
+    """32 MiB of extended-header data before one member, a 143 KiB body, is
+    ``ArchiveUnreadableError`` at restore and at the health probe on BOTH
+    backends (issue #3859), once the walk has read 1 MiB of headers between two
+    members. ``tarfile`` holds extended-header data whole, at several times its
+    size, so without that budget each read held over 100 MiB."""
+
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(build(), chunk=8192)
+    )
+
+    for read in (harness.storage.restore_backup, harness.storage.check_backup_health):
+        tracemalloc.start()
+        try:
+            with pytest.raises(ArchiveUnreadableError):
+                await read(community, server, key)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert peak < 16 * archive_cap_shapes.MIB
 
 
 # One member per shape the single archive member rule decides (issue #3550): a
@@ -2134,6 +2357,26 @@ async def test_prune_after_restore_still_drops_working_set(
     with pytest.raises(NotFoundError):
         await drain(harness.storage.open_hydrate_source(community, server))
     assert await harness.storage.list_backups(community, server) == [key]
+
+
+# 11 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(11 * 10 + 30)
+async def test_prune_packs_a_final_archive_past_the_cap(
+    backend: str, tmp_path: Path
+) -> None:
+    """The final archive is not held to the backup cap (issue #3859), on BOTH
+    backends: nothing restores or uploads ``final.tar.gz`` again, and refusing it
+    would block the server's delete. A working set whose tar is past the cap is
+    still packed, and the working set is dropped."""
+
+    harness = build_harness(backend, tmp_path, max_restore_bytes=16 * 1024)
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": bytes(32 * 1024)})
+
+    await harness.storage.prune_to_final_snapshot(community, server)
+
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_hydrate_source(community, server))
 
 
 # --- backup transfer: open / put / size (Section 3.3, issue #281) -----------

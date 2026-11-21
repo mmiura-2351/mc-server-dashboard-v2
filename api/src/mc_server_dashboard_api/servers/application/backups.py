@@ -51,6 +51,7 @@ from pathlib import PurePosixPath
 from typing import IO
 
 from mc_server_dashboard_api.archive_member import (
+    UPLOAD_HEADER_LIMITS,
     CapExceededError,
     CappedReader,
     EndCheckedReader,
@@ -1564,7 +1565,8 @@ def _validate_backup_archive(
             tarfile.open(
                 fileobj=(
                     stream := EndCheckedReader(
-                        CappedReader(gz, max_decompressed_bytes), header_limits=True
+                        CappedReader(gz, max_decompressed_bytes),
+                        header_limits=UPLOAD_HEADER_LIMITS,
                     )
                 ),
                 mode="r:",
