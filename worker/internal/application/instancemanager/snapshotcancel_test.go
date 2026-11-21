@@ -111,9 +111,10 @@ func TestASnapshotPastItsDeadlineIsStillReportedAsAbandoned(t *testing.T) {
 
 // The cancelled snapshot logs the work's own message capped at 1 KiB, on a rune
 // boundary and marked as truncated, as the session caps the error it logs: an
-// over-limit pack error quotes a path of about 4 KiB. A shorter message is logged whole. The long fixture puts the
-// cap inside a rune: after the leading "a", byte 1024 is the second byte of an
-// "é", so a cut that did not back off to the rune's start would log half of it.
+// over-limit pack error quotes a path of about 4 KiB. A shorter message is logged
+// whole. The long fixture puts the cap inside a rune: after the leading "a", byte
+// 1024 is the second byte of an "é", so a cut that did not back off to the rune's
+// start would log half of it.
 func TestACancelledSnapshotCapsTheDetailItLogs(t *testing.T) {
 	for _, detail := range []string{"short", "a" + strings.Repeat("é", 1000)} {
 		h := &syncSlogHandler{}
