@@ -456,17 +456,17 @@ its backups pass alike only while every key is at most 4095 bytes, which
 nothing enforces yet (issue #3931). A walk of 1,000 members holding all the
 characters the limit allows, 8 Mi plus 16 Ki a member, peaks at 24 MiB with
 ASCII values and at 95 MiB with UCS-4 ones. Past any of these limits restore
-and the probe raise `ArchiveUnreadableError`. On fs they also refuse a member
-more than 512 levels deep, as `ArchiveUnreadableError` whose message names the
-bound: the fs adapter packs a working set with `tarfile`'s recursive `add`,
-which cannot pack a tree about 1,000 levels deep, so the restore would leave a
-server that could not be started, backed up or deleted. The bound stays until
-that pack is iterative (issue #3931); the object backend has none. A sparse
-member's map is not bounded yet (issue #3869). The snapshot ingest applies none
-of these limits and no decompressed-size cap. All three refuse a chain of
-extended headers too long for `tarfile`, which reads them recursively: a few
-hundred before one member (`ArchiveUnreadableError` at restore and the probe,
-issue #3859). The gate runs off the event loop thread
+and the probe raise `ArchiveUnreadableError`. They take a member at any depth
+the path length allows, on fs as on object: the fs adapter creates a member's
+directories, and packs a working set for hydrate, backup create and prune, one
+level at a time (issue #3859). `tarfile.add` and `Path.mkdir` recursed once a
+level and raised `RecursionError` for a tree about 1,000 levels deep. The fs
+files API's writes and the snapshot ingest still create directories that way
+(issue #3931). A sparse member's map is not bounded yet (issue #3869). The
+snapshot ingest applies none of these limits and no decompressed-size cap. All
+three refuse a chain of extended headers too long for `tarfile`, which reads
+them recursively: a few hundred before one member (`ArchiveUnreadableError` at
+restore and the probe, issue #3859). The gate runs off the event loop thread
 (issue #3801), on a pool of two threads that it shares with the files upload's
 extract and the server import (issues #3843, #3912), so a slow archive cannot
 hold the default executor that the fs backend and the sweep run on. The plugin
@@ -565,10 +565,7 @@ now is any of them while every object key is at most 4095 bytes: the writers
 stay under the cap, and within the header limits for names of that length.
 Nothing enforces that bound on keys yet (issue #3931), so a backup the object
 writer packs of longer keys can pass the character limit and read as
-`ArchiveUnreadableError`. On fs a stored backup holding a member more than 512
-levels deep reads as `ArchiveUnreadableError` too, and so would one the fs
-writer packs of a working set that deep, which a Worker snapshot or the files
-API can still publish (issue #3931).
+`ArchiveUnreadableError`.
 
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
