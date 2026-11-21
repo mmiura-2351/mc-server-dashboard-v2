@@ -733,6 +733,20 @@ describe("Modal focus on a scroller with no control in it", () => {
     );
   });
 
+  it("does not stop on a scroller that tabindex -1 takes out of the Tab order", () => {
+    renderDialog(
+      <div data-testid="minus" tabIndex={-1}>
+        {disabledRows}
+      </div>,
+      doneButton,
+    );
+    overflow(screen.getByTestId("minus"), "y");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(done());
+  });
+
   it("does not stop on a box that clips its overflow", () => {
     renderDialog(<div data-testid="clip">{disabledRows}</div>, doneButton);
     overflow(screen.getByTestId("clip"), "y", "hidden");
