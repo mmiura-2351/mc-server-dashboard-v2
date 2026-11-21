@@ -1652,6 +1652,12 @@ export interface paths {
          *     past that is 503 ``upload_busy``, refused before its body is read into memory,
          *     with nothing written; sending it again shortly is the remedy. An upload without
          *     ``extract`` is never refused this way.
+         *
+         *     **A name no file can carry (issue #3922).** The part's filename names the file
+         *     written under ``path``, so one that is blank, carries a control character, a
+         *     lone surrogate or a Unicode noncharacter, contains ``/`` or ``\``, or is over
+         *     255 bytes in UTF-8 is 422 ``invalid_filename``, refused before a slot is taken
+         *     or the body read. The path rules above still apply to the name that passes.
          */
         post: operations["upload_file_api_communities__community_id__servers__server_id__files_upload_post"];
         delete?: never;
@@ -1722,6 +1728,12 @@ export interface paths {
         /**
          * Install Plugin
          * @description Install a plugin jar via multipart upload (plugin:manage).
+         *
+         *     The jar's filename names its file in the server's content directory, so a
+         *     name no file can carry is 422 ``invalid_filename``, refused before the body is
+         *     read (issue #3922): one that is blank, carries a control character, a lone
+         *     surrogate or a Unicode noncharacter, contains ``/`` or ``\``, or is over 255
+         *     bytes in UTF-8.
          */
         post: operations["install_plugin_api_communities__community_id__servers__server_id__plugins_post"];
         delete?: never;
@@ -2469,9 +2481,10 @@ export interface paths {
          * Public Download Resource Pack
          * @description Public download endpoint for Minecraft clients (no auth, issue #1176).
          *
-         *     Validates that ``filename`` matches the stored filename (404 otherwise). The
-         *     response declares the pack's exact size as ``Content-Length``, which the game
-         *     client shows as download progress.
+         *     Validates that ``filename`` matches the stored filename (404 otherwise). It is
+         *     the rest of the path, so a stored name with a ``/`` matches too, escaped or not
+         *     (issue #3922). The response declares the pack's exact size as
+         *     ``Content-Length``, which the game client shows as download progress.
          *
          *     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
          *     headers and no body, so a resumable-download client — this is the
@@ -2493,9 +2506,10 @@ export interface paths {
          * Public Download Resource Pack
          * @description Public download endpoint for Minecraft clients (no auth, issue #1176).
          *
-         *     Validates that ``filename`` matches the stored filename (404 otherwise). The
-         *     response declares the pack's exact size as ``Content-Length``, which the game
-         *     client shows as download progress.
+         *     Validates that ``filename`` matches the stored filename (404 otherwise). It is
+         *     the rest of the path, so a stored name with a ``/`` matches too, escaped or not
+         *     (issue #3922). The response declares the pack's exact size as
+         *     ``Content-Length``, which the game client shows as download progress.
          *
          *     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
          *     headers and no body, so a resumable-download client — this is the
@@ -2545,6 +2559,10 @@ export interface paths {
         /**
          * Upload Resource Pack
          * @description Upload a resource pack (server:update in any community, issue #1176).
+         *
+         *     The display name is stored stripped. Stripped, one that is empty, over 200
+         *     characters, or carries a control character or a lone surrogate is 422
+         *     ``invalid_display_name`` (issue #3922).
          */
         post: operations["upload_resource_pack_api_resource_packs_post"];
         delete?: never;
