@@ -3,8 +3,9 @@ name: sanity
 # WHY this workflow is intentionally UNFILTERED (no `paths:` filter).
 #
 # Every other workflow (api, docs, proto, worker) is path-filtered, so a PR that
-# touches only an unfiltered path (e.g. compose.yaml -- PR #195 precedent)
-# triggers none of them and reports zero checks. Once branch protection requires
+# touches only an unfiltered path (e.g. .env.example; the PR #195 precedent was
+# compose.yaml, which api.yml has run on since #3929) triggers none of them and
+# reports zero checks. Once branch protection requires
 # a status context, such a PR can never satisfy it and can never merge (the #284
 # residual: enabling "Require branches to be up to date"). This workflow runs on
 # EVERY pull_request and push to main, so the required `check` context is always

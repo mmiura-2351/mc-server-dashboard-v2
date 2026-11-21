@@ -7,6 +7,8 @@ on:
       - "proto/contract/**"
       - "proto/mcsd/**"
       - "Makefile"
+      # Run by the migration guard step below.
+      - "scripts/check_migrations.py"
       - "scripts/check_api_benchmark_collection.py"
       - "scripts/refresh_python_lock.py"
       - ".github/dependabot.yml"
@@ -31,6 +33,8 @@ on:
       - "proto/contract/**"
       - "proto/mcsd/**"
       - "Makefile"
+      # Run by the migration guard step below.
+      - "scripts/check_migrations.py"
       - "scripts/check_api_benchmark_collection.py"
       - "scripts/refresh_python_lock.py"
       - ".github/dependabot.yml"
