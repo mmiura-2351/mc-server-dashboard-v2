@@ -446,8 +446,8 @@ the accepted subprotocol (RFC 6455). The `Authorization: Bearer` header is also
 honored for non-browser clients. Close codes mirror REST: 4400 bad `streams`,
 4401 unauthenticated, 4403 forbidden, 4404 not found / not a member.
 A database read the socket cannot get answered — a transient database error
-(refused or lost connection, exhausted pool, server starting up or shutting
-down), or no answer in time (a frozen database) — is none of those: the
+(refused or lost connection, exhausted pool, server full, starting up or
+shutting down), or no answer in time (a frozen database) — is none of those: the
 socket is closed with the standard **1013** (Try Again Later) and the API logs
 one WARNING line, no traceback. At the handshake the socket is refused with it
 before accept, like the denials above, so a browser sees a failed handshake.
