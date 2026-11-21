@@ -50,3 +50,28 @@ def server_error(
     )
     assert type(wrapped) is sqlalchemy.exc.DBAPIError
     return wrapped
+
+
+def interface_error(
+    error: asyncpg.InterfaceError, *, invalidated: bool = False
+) -> sqlalchemy.exc.InterfaceError:
+    """What SQLAlchemy over asyncpg raises when the driver itself refuses ``error``.
+
+    The 2.1 dialect maps asyncpg's ``InterfaceError`` to its own, which has no
+    SQLSTATE, and SQLAlchemy wraps that in ``sqlalchemy.exc.InterfaceError``
+    (#4010). "another operation is in progress" on a live connection is a
+    concurrency bug; "connection is closed" comes with ``invalidated``.
+    """
+
+    # The dialect's ``InterfaceError.__init__`` is untyped.
+    orig = AsyncAdapt_asyncpg_dbapi.InterfaceError(error.args[0], error)  # type: ignore[no-untyped-call]
+    orig.__cause__ = error
+    wrapped = sqlalchemy.exc.DBAPIError.instance(
+        None,
+        None,
+        orig,
+        AsyncAdapt_asyncpg_dbapi.Error,
+        connection_invalidated=invalidated,
+    )
+    assert type(wrapped) is sqlalchemy.exc.InterfaceError
+    return wrapped

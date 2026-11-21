@@ -98,15 +98,15 @@ class DatabaseConnectError(Exception):
 # connect with an error that reaches the caller as the generic ``DBAPIError``,
 # its SQLSTATE on ``orig`` (``_OUTAGE_SQLSTATES``). A connection lost mid-query,
 # to a terminated backend or a server shutdown or crash, is the generic
-# ``DBAPIError`` too, with the connection invalidated. asyncpg's own outage
-# classes count for an error that reaches a caller untranslated; through
-# SQLAlchemy 2.1 none does.
+# ``DBAPIError`` or its ``InterfaceError`` ("connection is closed") too, with the
+# connection invalidated. No ``DBAPIError`` subclass is an outage by type
+# (#4010): an ``InterfaceError`` on a live connection is a concurrency bug or a
+# bad connect argument. asyncpg's own outage classes count for an error that
+# reaches a caller untranslated; through SQLAlchemy 2.1 none does.
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     DatabaseConnectError,
     OSError,
     sqlalchemy.exc.TimeoutError,
-    sqlalchemy.exc.OperationalError,
-    sqlalchemy.exc.InterfaceError,
     asyncpg.PostgresConnectionError,
     asyncpg.OperatorInterventionError,
     asyncpg.TooManyConnectionsError,

@@ -23,7 +23,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     is_transient_database_error,
 )
-from tests.core.fakes import server_error
+from tests.core.fakes import interface_error, server_error
 
 
 def _dbapi(cls: type[sqlalchemy.exc.DBAPIError], *, invalidated: bool) -> Exception:
@@ -37,15 +37,14 @@ def _dbapi(cls: type[sqlalchemy.exc.DBAPIError], *, invalidated: bool) -> Except
         pytest.param(TimeoutError(), id="connect-timeout"),
         pytest.param(sqlalchemy.exc.TimeoutError("pool"), id="pool-timeout"),
         pytest.param(
-            _dbapi(sqlalchemy.exc.OperationalError, invalidated=False),
-            id="operational",
-        ),
-        pytest.param(
-            _dbapi(sqlalchemy.exc.InterfaceError, invalidated=False), id="interface"
-        ),
-        pytest.param(
             _dbapi(sqlalchemy.exc.DBAPIError, invalidated=True),
             id="connection-invalidated",
+        ),
+        pytest.param(
+            interface_error(
+                asyncpg.InterfaceError("connection is closed"), invalidated=True
+            ),
+            id="interface-connection-closed",
         ),
         pytest.param(asyncpg.CannotConnectNowError("starting up"), id="starting-up"),
         pytest.param(asyncpg.AdminShutdownError("shutting down"), id="shutting-down"),
@@ -72,6 +71,21 @@ def test_outage_shapes_are_transient(exc: Exception) -> None:
         pytest.param(
             _dbapi(sqlalchemy.exc.DBAPIError, invalidated=False),
             id="dbapi-live-connection",
+        ),
+        # Neither type is an outage by itself (#4010): the 2.1 dialect maps
+        # nothing to ``OperationalError``, and an ``InterfaceError`` on a live
+        # connection is a fault of the caller or its configuration.
+        pytest.param(
+            _dbapi(sqlalchemy.exc.OperationalError, invalidated=False),
+            id="operational-live-connection",
+        ),
+        pytest.param(
+            interface_error(
+                asyncpg.InterfaceError(
+                    "cannot perform operation: another operation is in progress"
+                )
+            ),
+            id="interface-another-operation",
         ),
         pytest.param(ValueError("bug"), id="bug"),
     ],

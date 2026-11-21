@@ -3,8 +3,9 @@
 The problem handler maps it once, for every route: an engine that refuses the
 connect, a server that is full, starting up or shutting down, and a connection
 lost mid-query are "retry later", answered 503 with ``Retry-After`` and logged
-as one rate-limited WARNING line, the traceback at DEBUG. Any other database
-error, a protocol violation included, stays a 500 with its traceback.
+as one WARNING line per cause, rate-limited, the traceback at DEBUG. Any other
+database error, a protocol violation or a driver error on a live connection
+included, stays a 500 with its traceback.
 
 The route is ``GET /api/users/me``: authenticating its caller is the first thing
 that reads the database, as it is for most routes.
@@ -22,6 +23,7 @@ import pytest
 import sqlalchemy.exc
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 
 from mc_server_dashboard_api import http_problem
 from mc_server_dashboard_api.app import create_app
@@ -32,7 +34,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from tests.client_utils import enter_client
-from tests.core.fakes import server_error
+from tests.core.fakes import interface_error, server_error
 from tests.identity.fakes import (
     FakeClock,
     FakeTokenService,
@@ -61,7 +63,16 @@ _INTERNAL = {
 def _no_recent_outage_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     # The limiter is process-wide, so another test's outage would hold this
     # one's WARNING back.
-    monkeypatch.setattr(http_problem, "_last_outage_warning", None, raising=False)
+    monkeypatch.setattr(http_problem, "_outage_warnings", {})
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The handler's own clock, so a slow request cannot move a boundary."""
+
+    now = [1000.0]
+    monkeypatch.setattr(http_problem, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    return now
 
 
 @pytest.fixture
@@ -130,6 +141,13 @@ def _get_me(client: TestClient, error: Exception) -> tuple[int, object, str | No
             ),
             id="08003-invalidated",
         ),
+        # A connection the driver found closed: lost, as SQLAlchemy says.
+        pytest.param(
+            interface_error(
+                asyncpg.InterfaceError("connection is closed"), invalidated=True
+            ),
+            id="interface-invalidated",
+        ),
     ],
 )
 def test_an_outage_answers_503_with_one_warning(
@@ -178,6 +196,16 @@ def test_an_outage_answers_503_with_one_warning(
             ),
             id="programming",
         ),
+        # Two operations at once on one connection: a concurrency bug, on a
+        # connection that is fine.
+        pytest.param(
+            interface_error(
+                asyncpg.InterfaceError(
+                    "cannot perform operation: another operation is in progress"
+                )
+            ),
+            id="interface-live-connection",
+        ),
     ],
 )
 def test_another_database_error_stays_a_500_with_its_traceback(
@@ -191,13 +219,8 @@ def test_another_database_error_stays_a_500_with_its_traceback(
 
 
 def test_an_outage_warns_at_most_every_30_seconds(
-    client: TestClient,
-    logs: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, logs: pytest.LogCaptureFixture, clock: list[float]
 ) -> None:
-    # The handler's own clock, so a slow request cannot move the boundary.
-    now = [1000.0]
-    monkeypatch.setattr(http_problem, "time", SimpleNamespace(monotonic=lambda: now[0]))
     full = server_error(asyncpg.TooManyConnectionsError("too many clients"))
 
     for _ in range(3):
@@ -205,15 +228,70 @@ def test_an_outage_warns_at_most_every_30_seconds(
     assert len(_records(logs, logging.WARNING)) == 1
 
     # Just short of 30 s after the WARNING the outage is still the same one.
-    now[0] = 1029.999
+    clock[0] = 1029.999
     assert _get_me(client, full)[0] == 503
     assert len(_records(logs, logging.WARNING)) == 1
 
-    now[0] = 1030.0
+    clock[0] = 1030.0
     assert _get_me(client, full)[0] == 503
     assert len(_records(logs, logging.WARNING)) == 2
     # Every one of them left its traceback at DEBUG.
     assert len(_records(logs, logging.DEBUG)) == 5
+
+
+def test_a_new_cause_inside_the_window_is_named(
+    client: TestClient, logs: pytest.LogCaptureFixture, clock: list[float]
+) -> None:
+    full = server_error(asyncpg.TooManyConnectionsError("too many clients"))
+    starting = server_error(asyncpg.CannotConnectNowError("starting up"))
+
+    for error in (full, starting, full, starting):
+        assert _get_me(client, error)[0] == 503
+        clock[0] += 1
+
+    warnings = [r.getMessage() for r in _records(logs, logging.WARNING)]
+    assert len(warnings) == 2
+    assert "too many clients" in warnings[0]
+    assert "starting up" in warnings[1]
+
+
+def test_the_warning_names_the_cause_and_not_the_statement(
+    client: TestClient, logs: pytest.LogCaptureFixture
+) -> None:
+    # SQLAlchemy renders the statement and its parameters on the lines after
+    # the cause; they can carry a caller's data.
+    error = asyncpg.TooManyConnectionsError("sorry, too many clients already")
+    orig = AsyncAdapt_asyncpg_dbapi.Error(error.args[0], error)  # type: ignore[no-untyped-call]
+    wrapped = sqlalchemy.exc.DBAPIError.instance(
+        "SELECT * FROM app_user WHERE email = $1",
+        ("someone@example.com",),
+        orig,
+        AsyncAdapt_asyncpg_dbapi.Error,
+    )
+    assert "[SQL:" in str(wrapped)
+
+    assert _get_me(client, wrapped)[0] == 503
+
+    [warning] = _records(logs, logging.WARNING)
+    message = warning.getMessage()
+    assert "DBAPIError" in message
+    assert "sorry, too many clients already" in message
+    assert "[SQL:" not in message
+    assert "app_user" not in message
+    assert "someone@example.com" not in message
+
+
+def test_the_causes_remembered_are_bounded(
+    client: TestClient, logs: pytest.LogCaptureFixture, clock: list[float]
+) -> None:
+    # Each cause is named once inside its window, however many there are; only
+    # the latest 16 are kept.
+    for i in range(20):
+        error = server_error(asyncpg.TooManyConnectionsError(f"too many {i}"))
+        assert _get_me(client, error)[0] == 503
+
+    assert len(_records(logs, logging.WARNING)) == 20
+    assert len(http_problem._outage_warnings) == 16
 
 
 def _refused_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:

@@ -82,11 +82,14 @@ INTERNAL_ERROR_REASON = "internal_error"
 DATABASE_UNAVAILABLE_REASON = "database_unavailable"
 _DATABASE_RETRY_AFTER_SECONDS = 5
 
-# An outage fails every request until it ends, so it is logged at WARNING at
+# An outage fails every request until it ends, so each of its causes (the
+# exception's type and the first line of its message) is logged at WARNING at
 # most once in this many seconds, with no traceback; each request's traceback
-# is logged at DEBUG.
+# is logged at DEBUG. Only the causes warned about last are remembered, so a
+# run of distinct causes cannot grow the map.
 _OUTAGE_WARNING_INTERVAL_SECONDS = 30.0
-_last_outage_warning: float | None = None
+_OUTAGE_CAUSES_REMEMBERED = 16
+_outage_warnings: dict[tuple[str, str], float] = {}
 
 
 def _title_for(status_code: int) -> str:
@@ -302,21 +305,27 @@ def _is_database_outage(exc: Exception) -> bool:
 
 
 def _log_database_outage(request: Request, exc: Exception) -> None:
-    """Log an outage's request: a WARNING at most every 30 s, the traceback at DEBUG."""
+    """Log an outage's request: a WARNING per cause at most every 30 s, the
+    traceback at DEBUG."""
 
-    global _last_outage_warning
+    # The message's first line names the cause; a ``DBAPIError`` renders its
+    # statement and parameters on the lines after it, which stay out.
+    cause = (type(exc).__name__, str(exc).partition("\n")[0])
     now = time.monotonic()
-    if (
-        _last_outage_warning is None
-        or now - _last_outage_warning >= _OUTAGE_WARNING_INTERVAL_SECONDS
-    ):
-        _last_outage_warning = now
+    last = _outage_warnings.get(cause)
+    if last is None or now - last >= _OUTAGE_WARNING_INTERVAL_SECONDS:
+        # Re-inserted, so the first key is always the one warned about longest
+        # ago.
+        _outage_warnings.pop(cause, None)
+        _outage_warnings[cause] = now
+        while len(_outage_warnings) > _OUTAGE_CAUSES_REMEMBERED:
+            del _outage_warnings[next(iter(_outage_warnings))]
         _logger.warning(
-            "database unavailable serving %s %s (%s): answered 503; the next "
-            "such requests for %g s are logged at DEBUG only",
+            "database unavailable serving %s %s (%s: %s): answered 503; this "
+            "cause's next requests for %g s are logged at DEBUG only",
             request.method,
             request.url.path,
-            type(exc).__name__,
+            *cause,
             _OUTAGE_WARNING_INTERVAL_SECONDS,
         )
     _logger.debug(

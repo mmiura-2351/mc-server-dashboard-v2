@@ -160,10 +160,14 @@ branches on exactly one contract:
   the connection was lost mid-request. It carries `Retry-After: 5` and no
   other member; retrying later is the remedy.
   A write whose connection was lost during its commit may have been applied
-  even so, as with any request that gets no answer. The API logs the outage as
-  one WARNING line at most every 30 s, with each request's traceback at DEBUG.
-  Any other database failure, a protocol violation (SQLSTATE `08P01`) among
-  them, stays a `500 internal_error` with its traceback logged.
+  even so, as with any request that gets no answer. The API logs each cause of
+  the outage (the error's type and the first line of its message) as one
+  WARNING line at most every 30 s, with each request's traceback at DEBUG.
+  Any other database failure, a protocol violation (SQLSTATE `08P01`) and a
+  driver error on a live connection among them, stays a `500 internal_error`
+  with its traceback logged. An outage during a lifecycle-lock check answers
+  `503 lifecycle_lock_lost` instead ([`DATABASE.md`](DATABASE.md) Section 7),
+  which is retryable as well.
 
 Reason codes the `/auth/*` endpoints emit:
 
