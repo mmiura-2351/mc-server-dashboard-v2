@@ -8,7 +8,7 @@ client can put in it any character, a lone surrogate included.
 
 from __future__ import annotations
 
-import unicodedata
+from mc_server_dashboard_api.name_characters import is_refused_name_character
 
 # The longest name an upload may carry, in UTF-8 bytes. A plugin or a file is
 # written under this name on the server's filesystem, where ``NAME_MAX`` is 255.
@@ -52,7 +52,7 @@ def is_refused_filename_character(c: str) -> bool:
     :func:`is_valid_upload_filename` for why.
     """
 
-    return c in "/\\" or unicodedata.category(c) in ("Cc", "Cs") or _is_noncharacter(c)
+    return c in "/\\" or is_refused_name_character(c) or _is_noncharacter(c)
 
 
 def _is_noncharacter(c: str) -> bool:

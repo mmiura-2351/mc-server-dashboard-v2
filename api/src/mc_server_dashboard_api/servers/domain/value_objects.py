@@ -11,10 +11,10 @@ layer, DATABASE.md Section 7). The enums mirror DATABASE.md's CHECK-constrained
 from __future__ import annotations
 
 import enum
-import unicodedata
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.name_characters import is_refused_name_character
 from mc_server_dashboard_api.servers.domain.errors import InvalidServerNameError
 
 # The reserved ``config`` key under which a server's resolved JAR content address
@@ -88,7 +88,7 @@ class ServerName:
         trimmed = value.strip()
         if not trimmed:
             raise InvalidServerNameError("server name must not be blank")
-        if any(unicodedata.category(c) in ("Cc", "Cs") for c in trimmed):
+        if any(is_refused_name_character(c) for c in trimmed):
             raise InvalidServerNameError(
                 "server name must carry no control character or lone surrogate"
             )

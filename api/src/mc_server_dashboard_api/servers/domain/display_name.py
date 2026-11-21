@@ -7,7 +7,7 @@ declares, so a client can put in it any character, a lone surrogate included.
 
 from __future__ import annotations
 
-import unicodedata
+from mc_server_dashboard_api.name_characters import is_refused_name_character
 
 # The longest display name an upload may carry, in characters, once stripped.
 MAX_DISPLAY_NAME_LENGTH = 200
@@ -28,7 +28,7 @@ def checked_display_name(display_name: str) -> str | None:
     if (
         name == ""
         or len(name) > MAX_DISPLAY_NAME_LENGTH
-        or any(unicodedata.category(c) in ("Cc", "Cs") for c in name)
+        or any(is_refused_name_character(c) for c in name)
     ):
         return None
     return name
