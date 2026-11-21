@@ -2361,7 +2361,21 @@ export interface paths {
          *     assignment that starts uploading after the placement is refused the same way:
          *     its scratch stays on the Worker, and the store wins. An upload that passed
          *     this check before the placement was marked still commits, since the
-         *     commit-time fence stays keyed on the Worker id.
+         *     commit-time fence stays keyed on the Worker id, unless the placement's
+         *     hydrate is served first (below).
+         *
+         *     A hydrate of the server served after the guard read refuses the commit (409
+         *     ``hydrated_during_upload``, issue #3950). The lost-response allowance rests
+         *     on the publisher's working set still being the tree it published from, and a
+         *     hydrate is what replaces that tree. A Worker's command can end before the
+         *     API's commit of its upload does (its transfer deadline, a dropped stream, a
+         *     restart), and a start can then hydrate that Worker before the commit's flip.
+         *     The Worker runs on the older generation, and the late commit would leave the
+         *     store on a branch the Worker's run is not on: its next publish would replace
+         *     that branch through the allowance, and a later hydrate would roll the run
+         *     back to it. So the guard reads the generation and a count of the hydrates
+         *     served in one locked read, and the commit re-checks the count under the
+         *     per-server lock, where every hydrate's lease is ordered against the flip.
          *
          *     The content-integrity gate uses the single region rule set (issue #927): a
          *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on

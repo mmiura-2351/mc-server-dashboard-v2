@@ -91,6 +91,7 @@ from mc_server_dashboard_api.storage.adapters.fs import (
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     ArchiveUnreadableError,
+    HydratedDuringUploadError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -117,6 +118,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     PublisherFence,
     SnapshotHandle,
     Storage,
+    UploadBase,
     WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -472,6 +474,10 @@ class ObjectStorage(Storage):
         # (e.g. a conditional-write/compare-and-set on the pointer) or it silently
         # reopens this race.
         self._server_locks: dict[str, asyncio.Lock] = {}
+        # The hydrate sources served per server prefix (issue #3950), counted and
+        # read only under that server's lock. In process only, like the lock: an
+        # upload never outlives the process that received it.
+        self._hydrates_served: dict[str, int] = {}
 
     async def check_reachable(self, *, endpoint: str, bucket: str) -> None:
         """Probe the object store with a lightweight listing, failing fast.
@@ -881,6 +887,15 @@ class ObjectStorage(Storage):
         try:
             async with self._client_factory() as client:
                 server_prefix = self._server_prefix(community_id, server_id)
+                # Counted under the server lock before the lease (issue #3950), so a
+                # hydrate that finds nothing published counts too. The world it
+                # serves is the one the locked re-verify below pins, which comes
+                # after this, so a commit either flipped before this count or sees
+                # it.
+                async with self._server_lock(community_id, server_id):
+                    self._hydrates_served[server_prefix] = (
+                        self._hydrates_served.get(server_prefix, 0) + 1
+                    )
                 snapshot_prefix = await self._lease_live_snapshot(
                     client, community_id, server_id
                 )
@@ -983,6 +998,7 @@ class ObjectStorage(Storage):
         publisher: str | None = None,
         expected_base: int | None = None,
         publisher_fence: PublisherFence | None = None,
+        expected_hydrates: int | None = None,
     ) -> int:
         h = _as_object_handle(handle)
         if h.consumed:
@@ -1065,6 +1081,20 @@ class ObjectStorage(Storage):
                         if await self._read_pointer(client, server_prefix) is None:
                             raise PrunedStoreError(expected_base, current)
                         raise StaleGenerationError(expected_base, current)
+                # A hydrate of the server served since the guard read (issue #3950)
+                # gave a Worker the store as it stood before this publish: discard
+                # this upload, packed before it, as the refusals above do.
+                if (
+                    expected_hydrates is not None
+                    and self._hydrates_served.get(server_prefix, 0) != expected_hydrates
+                ):
+                    await _delete_prefix(client, new_prefix)
+                    await _delete_prefix(client, incoming)
+                    self._release_staging(incoming)
+                    h.consumed = True
+                    raise HydratedDuringUploadError(
+                        "the server was hydrated during the upload"
+                    )
                 # Missing-region gate (issue #854): the structural check above only
                 # sees objects that EXIST — a vanished region object would publish
                 # silently and MC would regenerate the chunks. Compare the staged
@@ -1200,6 +1230,16 @@ class ObjectStorage(Storage):
     ) -> int:
         async with self._server_lock(community_id, server_id):
             return await self.current_generation(community_id, server_id)
+
+    async def settled_upload_base(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> UploadBase:
+        server_prefix = self._server_prefix(community_id, server_id)
+        async with self._server_lock(community_id, server_id):
+            return UploadBase(
+                generation=await self.current_generation(community_id, server_id),
+                hydrates=self._hydrates_served.get(server_prefix, 0),
+            )
 
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId

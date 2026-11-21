@@ -66,6 +66,7 @@ from mc_server_dashboard_api.http_body_limit import (
 )
 from mc_server_dashboard_api.http_problem import problem, validation_problem
 from mc_server_dashboard_api.storage.domain.errors import (
+    HydratedDuringUploadError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -510,7 +511,21 @@ async def publish_snapshot(
     assignment that starts uploading after the placement is refused the same way:
     its scratch stays on the Worker, and the store wins. An upload that passed
     this check before the placement was marked still commits, since the
-    commit-time fence stays keyed on the Worker id.
+    commit-time fence stays keyed on the Worker id, unless the placement's
+    hydrate is served first (below).
+
+    A hydrate of the server served after the guard read refuses the commit (409
+    ``hydrated_during_upload``, issue #3950). The lost-response allowance rests
+    on the publisher's working set still being the tree it published from, and a
+    hydrate is what replaces that tree. A Worker's command can end before the
+    API's commit of its upload does (its transfer deadline, a dropped stream, a
+    restart), and a start can then hydrate that Worker before the commit's flip.
+    The Worker runs on the older generation, and the late commit would leave the
+    store on a branch the Worker's run is not on: its next publish would replace
+    that branch through the allowance, and a later hydrate would roll the run
+    back to it. So the guard reads the generation and a count of the hydrates
+    served in one locked read, and the commit re-checks the count under the
+    per-server lock, where every hydrate's lease is ordered against the flip.
 
     The content-integrity gate uses the single region rule set (issue #927): a
     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
@@ -560,8 +575,9 @@ async def publish_snapshot(
         # publish / restore performed by storage internals, which read
         # ``current`` under the same lock themselves).
         #
-        # The read is ``settled_generation``, taken under the per-server
-        # lock (issue #3564). Every mutation of the published working set
+        # The read is ``settled_upload_base``, whose generation is
+        # ``settled_generation``'s, taken under the per-server lock (issue
+        # #3564). Every mutation of the published working set
         # (a commit's flip and bump, a restore's bump and flip, an at-rest
         # edit's write and bump, a prune) runs whole under that lock, so this
         # observation can never land inside one: it waits for a mutation in
@@ -570,7 +586,11 @@ async def publish_snapshot(
         # refuses. An unlocked read could see a restore's bump without its
         # flip, or an edit's write without its bump, and adopt a base that
         # still matches once that mutation finishes.
-        current = await storage.settled_generation(*scope)
+        #
+        # The same read counts the hydrates served for the server, which the
+        # commit re-checks under that lock (issue #3950, see the docstring).
+        upload_base = await storage.settled_upload_base(*scope)
+        current = upload_base.generation
         expected_base: int | None = current
         if base_generation is not None:
             if base_generation < current:
@@ -584,6 +604,19 @@ async def publish_snapshot(
                 # the lag is a lost publish-response and the publish is
                 # allowed to self-heal (issue #847 bug 3). Nothing was
                 # staged yet, so a refused ``current/`` is untouched.
+                #
+                # The allowance is sound because that Worker's working set
+                # is still the tree it published current from (issue
+                # #3950). Its marker falls behind its own publish when the
+                # response is lost, when the Worker abandons the upload at
+                # its deadline, or when the marker write fails, and none of
+                # those replaces the tree. A hydrate does replace it. One
+                # served after the publish committed serves that generation
+                # or a later one. One served while the publish was still
+                # committing makes the commit refuse it
+                # (``hydrated_during_upload``), so that publish is not
+                # current. A stamp the #2284 identity guard skips is of the
+                # first kind, since its publish committed.
                 current_publisher = await storage.current_publisher(*scope)
                 if (
                     current_publisher is not None
@@ -667,6 +700,7 @@ async def publish_snapshot(
                 publisher=publisher,
                 expected_base=expected_base,
                 publisher_fence=publisher_fence,
+                expected_hydrates=upload_base.hydrates,
             )
             # Stamp the new authoritative generation on the response (issue #763): the
             # Worker records the header as the generation its scratch is now at (the
@@ -789,6 +823,21 @@ async def publish_snapshot(
                     "base_generation": exc.expected_base,
                     "current": exc.current,
                 },
+            ) from None
+        except HydratedDuringUploadError:
+            # A hydrate of the server was served after the guard read (issue
+            # #3950): the hydrated Worker runs on the store as it stood before this
+            # publish, and commit_snapshot already discarded the staging.
+            _logger.warning(
+                "snapshot publish refused: server %s was hydrated during the "
+                "upload (guard base %d, publisher %s)",
+                server_id,
+                current,
+                publisher,
+            )
+            raise problem(
+                status.HTTP_409_CONFLICT,
+                "hydrated_during_upload",
             ) from None
         except PublisherFencedError:
             # The publisher stopped being the assigned worker while the commit's

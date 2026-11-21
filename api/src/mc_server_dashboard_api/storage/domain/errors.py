@@ -286,6 +286,17 @@ class PublisherFencedError(StorageError):
     """
 
 
+class HydratedDuringUploadError(StorageError):
+    """A hydrate of the server was served during the upload window (issue #3950).
+
+    ``commit_snapshot`` refuses, under the per-server lock, an upload whose guard
+    read came before a hydrate source of the same server was served. That hydrate
+    gave a Worker the store as it stood then, and the upload was packed before
+    it, so the Worker's working set does not contain what the upload would
+    publish. The staging is discarded and the generation is not bumped.
+    """
+
+
 class RestorePartiallyPublishedError(StorageError):
     """A restore published the backup, then a later step inside it failed (#3564).
 
