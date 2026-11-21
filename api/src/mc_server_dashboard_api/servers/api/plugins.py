@@ -87,6 +87,9 @@ from mc_server_dashboard_api.servers.application.plugins import (
 from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogVersion as CatalogVersionDomain,
 )
+from mc_server_dashboard_api.servers.domain.display_name import (
+    checked_display_name,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
@@ -115,10 +118,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, Se
 router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
-
-# Upper bound for a plugin's display name (applies to the user-facing upload
-# endpoint; catalog installs use the project title from the trusted catalog).
-_MAX_DISPLAY_NAME_LENGTH = 200
 
 
 class PluginResponse(BaseModel):
@@ -491,28 +490,29 @@ async def install_plugin(
     """Install a plugin jar via multipart upload (plugin:manage).
 
     The jar's filename names its file in the server's content directory, so a
-    name no file can carry is 422 ``invalid_filename``, refused before the upload
-    is read into memory (Starlette has spooled it by then, issue #3922): one that
-    is blank, carries a control character, a lone surrogate or a Unicode
-    noncharacter, contains ``/`` or ``\\``, or is over 255 bytes in UTF-8.
+    name no file can carry is 422 ``invalid_filename``: one that is blank,
+    carries a control character, a lone surrogate or a Unicode noncharacter,
+    contains ``/`` or ``\\``, or is over 255 bytes in UTF-8. The display name is
+    stored stripped, under the resource-pack upload's rule (issue #3957).
+    Stripped, one that is empty, over 200 characters, or carries a control
+    character or a lone surrogate is 422 ``invalid_display_name``. Both are
+    refused before the upload is read into memory (Starlette has spooled it by
+    then, issue #3922), the filename first.
     """
-
-    display_name = display_name.strip()
-    if not display_name:
-        raise _unprocessable("invalid_display_name")
-    if len(display_name) > _MAX_DISPLAY_NAME_LENGTH:
-        raise _unprocessable("invalid_display_name")
 
     filename = file.filename or ""
     if not is_valid_upload_filename(filename):
         raise _unprocessable("invalid_filename")
+    stored_name = checked_display_name(display_name)
+    if stored_name is None:
+        raise _unprocessable("invalid_display_name")
     content = await _read_capped_upload(file)
     try:
         plugin = await use_case(
             community_id=CommunityId(community_id),
             server_id=ServerId(server_id),
             filename=filename,
-            display_name=display_name,
+            display_name=stored_name,
             content=content,
             installed_by=authorized.user_id.value,
         )

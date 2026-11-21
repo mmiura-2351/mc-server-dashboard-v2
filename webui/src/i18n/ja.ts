@@ -1802,7 +1802,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.unsupportedServerType":
     "このサーバータイプは{nouns}に対応していません。",
   "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
-  "plugins.error.invalidDisplayName": "表示名が無効です。",
+  "plugins.error.invalidDisplayName":
+    "このファイル名は{noun}の表示名に使用できません。.jar を除いた部分が1〜200文字になるようにファイル名を変更して、再度アップロードしてください。",
   "plugins.error.bedrockPortRangeExhausted":
     "Bedrock のポート範囲に空きポートがありません。しばらくしてからもう一度お試しください。",
   "plugins.error.bedrockPortTaken":

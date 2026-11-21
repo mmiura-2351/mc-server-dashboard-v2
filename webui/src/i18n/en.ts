@@ -1912,7 +1912,8 @@ export const en = {
   "plugins.error.unsupportedServerType":
     "This server type does not support {nouns}.",
   "plugins.error.invalidSide": "Invalid side for this server type.",
-  "plugins.error.invalidDisplayName": "The display name is invalid.",
+  "plugins.error.invalidDisplayName":
+    "This file name cannot be used as the {noun}'s display name. Rename the file so its name before .jar is 1 to 200 characters long, then upload it again.",
   "plugins.error.bedrockPortRangeExhausted":
     "No free port is available in the Bedrock port range. Please try again later.",
   "plugins.error.bedrockPortTaken":

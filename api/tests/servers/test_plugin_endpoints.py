@@ -536,6 +536,21 @@ def test_install_plugin_stores_a_display_name_stripped(
     assert [call["display_name"] for call in install.calls] == [stored]
 
 
+def test_install_plugin_names_the_filename_before_the_display_name() -> None:
+    # The Web UI sends the file's name, less ``.jar``, as the display name, so a
+    # file name both rules refuse is answered as the file name the user can fix.
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        b'"a\nb.jar"',
+        fields={"display_name": b"a\nb"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+
+
 def test_install_plugin_refuses_the_display_name_before_reading_the_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
