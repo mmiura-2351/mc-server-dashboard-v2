@@ -4,7 +4,7 @@ import { t } from "../i18n/index.ts";
 // Self-built modal primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
 // The backdrop is a sibling button behind the dialog so clicking it closes the
 // modal, while clicks inside the dialog never reach it. Escape is handled via a
-// document-level listener while open, and focus moves into the dialog on mount.
+// window-level listener while open, and focus moves into the dialog on mount.
 //
 // Accessibility hardening (#408):
 // - Focus restore: the element focused when the dialog opened is refocused on
@@ -19,6 +19,9 @@ import { t } from "../i18n/index.ts";
 // - Stacked dialogs: a module-level stack tracks open dialogs so Escape closes
 //   only the topmost one (the Files history drawer + rollback confirm is a live
 //   stacked case).
+// - Layers inside a dialog: the window hears a key after every listener on the
+//   document, so a popover inside the dialog takes Escape first and marks it
+//   handled, and the dialog leaves a handled Escape alone (#3971).
 
 // Module-level registry of open dialogs, ordered by open time. The last entry
 // is the topmost; only it reacts to Escape and traps Tab. Each Modal instance
@@ -111,7 +114,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
   onCloseRef.current = onClose;
 
   // Runs once per open → close: register on the stack, capture the trigger for
-  // focus restore, move focus into the dialog, and listen on the document for
+  // focus restore, move focus into the dialog, and listen on the window for
   // Escape (topmost only) and Tab (focus trap). Cleanup restores trigger focus.
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -183,6 +186,10 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         return;
       }
       if (event.key === "Escape") {
+        // An inner layer, as a popover in the dialog, has taken it (#3971).
+        if (event.defaultPrevented) {
+          return;
+        }
         // Handled, so a page listener that runs after this one, once the
         // dialog has closed, leaves the Escape alone (#3920).
         event.preventDefault();
@@ -238,7 +245,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         }
       }
     };
-    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keydown", onKeyDown);
     const onKeyUp = (event: KeyboardEvent) => {
       if (event.key === "Tab") {
         lastTab = null;
@@ -249,7 +256,7 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     return () => {
       observer.disconnect();
       document.removeEventListener("focusin", onFocusIn);
-      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDown);
       document.removeEventListener("keyup", onKeyUp);
       const slot = dialogStack.indexOf(dialog);
       if (slot !== -1) {
