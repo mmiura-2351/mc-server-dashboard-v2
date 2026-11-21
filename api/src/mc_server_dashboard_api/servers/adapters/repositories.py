@@ -365,6 +365,13 @@ class SqlAlchemyServerRepository(ServerRepository):
             values["assigned_worker_id"] = None
         # A release owes no hydrate, and a running instance's working set is the
         # one its snapshots will capture, whatever the store holds (issue #3890).
+        # The write is stamped on receipt, so one residue is accepted (r2 review,
+        # question 3): the Worker's event channel outlives a session, and a
+        # ``running`` queued while it was disconnected, for an instance that has
+        # ended since, is delivered after the reconnect, ahead of its terminal
+        # event. It clears the mark of a placement on that Worker only if the
+        # placement commits between the registration and the drain of that
+        # queue, a window of milliseconds.
         if unassign or observed_state is ObservedState.RUNNING:
             values["awaiting_hydrate"] = False
         # Monotonic guard (issue #216): drop a write stamped no later than the row's
@@ -581,17 +588,33 @@ class SqlAlchemyServerRepository(ServerRepository):
             self._stage_release(server_id)
         return cleared
 
-    async def set_awaiting_hydrate(
-        self, server_id: ServerId, worker_id: WorkerId, *, awaiting: bool
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
     ) -> bool:
         stmt = (
             update(ServerModel)
             .where(
                 ServerModel.id == server_id.value,
                 ServerModel.assigned_worker_id == worker_id.value,
-                ServerModel.awaiting_hydrate != awaiting,
+                ServerModel.updated_at == updated_at,
+                ServerModel.awaiting_hydrate.is_(True),
             )
-            .values(awaiting_hydrate=awaiting)
+            .values(awaiting_hydrate=False)
+        )
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount == 1
+
+    async def mark_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.id == server_id.value,
+                ServerModel.assigned_worker_id == worker_id.value,
+                ServerModel.awaiting_hydrate.is_(False),
+            )
+            .values(awaiting_hydrate=True)
         )
         result = await self._session.execute(stmt)
         return cast("CursorResult[Any]", result).rowcount == 1

@@ -1034,8 +1034,24 @@ class FakeServerRepository(ServerRepository):
         server.awaiting_hydrate = False
         return True
 
-    async def set_awaiting_hydrate(
-        self, server_id: ServerId, worker_id: WorkerId, *, awaiting: bool
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #3890): only while worker_id holds
+        # the row as the caller read it, and only a change counts.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.assigned_worker_id != worker_id
+            or server.updated_at != updated_at
+            or not server.awaiting_hydrate
+        ):
+            return False
+        server.awaiting_hydrate = False
+        return True
+
+    async def mark_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId
     ) -> bool:
         # Mirror the real adapter's guard (issue #3890): only while worker_id holds
         # the row, and only a change counts.
@@ -1043,10 +1059,10 @@ class FakeServerRepository(ServerRepository):
         if (
             server is None
             or server.assigned_worker_id != worker_id
-            or server.awaiting_hydrate is awaiting
+            or server.awaiting_hydrate
         ):
             return False
-        server.awaiting_hydrate = awaiting
+        server.awaiting_hydrate = True
         return True
 
     async def mark_worker_servers_unknown(
