@@ -61,7 +61,7 @@ func TestMainFailsFastOnMissingConfig(t *testing.T) {
 		main()
 		return
 	}
-	stderr, code := runChild(t)
+	stderr, code := runChild(t, nil)
 	if code != 1 {
 		t.Errorf("main() with no config exited %d, want 1", code)
 	}
@@ -77,8 +77,9 @@ const childEnv = "MCSD_TEST_CHILD"
 // runChild runs t again in a child process of the test binary, for a test that
 // exits or changes process-wide state. The child sees no MCD_* or GRPC_GO_*
 // variable but those in env, so the ambient environment cannot steer it. It
-// returns what the child wrote to stderr and its exit code.
-func runChild(t *testing.T, env ...string) (string, int) {
+// returns what the child wrote to stderr and its exit code. t must be a
+// top-level test: the child runs t whole.
+func runChild(t *testing.T, env map[string]string) (string, int) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
 	for _, kv := range os.Environ() {
@@ -86,7 +87,9 @@ func runChild(t *testing.T, env ...string) (string, int) {
 			cmd.Env = append(cmd.Env, kv)
 		}
 	}
-	cmd.Env = append(cmd.Env, env...)
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
 	cmd.Env = append(cmd.Env, childEnv+"="+t.Name())
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -103,7 +106,8 @@ func isChild(t *testing.T) bool {
 }
 
 // runFromEnv runs the Worker as main does, from the configuration the environment
-// gives and with a logger over os.Stderr as it is at the call.
+// gives and with a logger over os.Stderr as it is at the call. It leaves routeLogs
+// to main: grpclog's logger is not safe to change while another test's grpc runs.
 func runFromEnv(ctx context.Context) error {
 	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
 	if err != nil {

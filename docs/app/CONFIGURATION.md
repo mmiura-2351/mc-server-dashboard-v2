@@ -1088,6 +1088,20 @@ decodes back to the same text: DEL in either format, and the C1 controls and the
 bidi controls U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069 in
 `json`. The relay's log does the same ([`RELAY.md`](RELAY.md) Section 13).
 
+Every line the Worker writes goes through that handler, so each follows
+`log.format` and the escaping above:
+
+- its own records;
+- the lines of Go's standard `log` package, as `INFO` records, so `log.level=warn`
+  or `error` drops them;
+- grpc-go's lines. They keep grpc's own default: only errors are written, unless
+  `GRPC_GO_LOG_SEVERITY_LEVEL` is `warning` or `info`; any other value writes
+  none. `GRPC_GO_LOG_VERBOSITY_LEVEL` sets grpc's verbosity as before, and
+  `log.level` then filters what is left. `GRPC_GO_LOG_FORMATTER` has no effect;
+- the error the Worker exits on, as an `ERROR` record `worker failed`. When the
+  configuration itself fails to load, no `log.format` is known yet, so that
+  record is `text`.
+
 The Worker captures each running server's console output and streams it to the
 API as `LogLine` events (FR-MON-2), and samples basic per-server runtime metrics
 (CPU and resident memory; CPU in thousandths of a core) on the

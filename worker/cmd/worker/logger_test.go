@@ -5,9 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+
+	"google.golang.org/grpc/grpclog"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 )
@@ -104,5 +111,189 @@ func TestEscapingWriterAddsNoAllocationToAPlainRecord(t *testing.T) {
 				t.Errorf("allocations per record = %v through the writer, %v without", got, base)
 			}
 		})
+	}
+}
+
+// hostile is text a log line must not carry raw (issue #3960): ESC, a C0
+// control, which slog escapes itself, and U+202E and DEL, which escapingWriter
+// escapes.
+const hostile = "\x1b[31m\u202e\x7f"
+
+// assertNoRawControls checks that out carries none of hostile's controls raw.
+func assertNoRawControls(t *testing.T, out string) {
+	t.Helper()
+	for _, r := range []rune{0x1b, 0x202e, 0x7f} {
+		if strings.ContainsRune(out, r) {
+			t.Errorf("%U written raw: %q", r, out)
+		}
+	}
+}
+
+// jsonRecords decodes each line of out as a json record, and fails t for a line
+// that is not one.
+func jsonRecords(t *testing.T, out string) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for line := range strings.Lines(out) {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Errorf("not a json record: %q", line)
+			continue
+		}
+		recs = append(recs, rec)
+	}
+	return recs
+}
+
+// hasRecord reports whether recs holds a record at level with message msg.
+func hasRecord(recs []map[string]any, level, msg string) bool {
+	return slices.ContainsFunc(recs, func(rec map[string]any) bool {
+		return rec["level"] == level && rec["msg"] == msg
+	})
+}
+
+// TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler pins what main sets up
+// before it dials (issue #3960): the standard log package's lines and grpc-go's
+// are records of the configured format, escaped like any other, and grpc keeps
+// its own default of writing only errors unless GRPC_GO_LOG_SEVERITY_LEVEL asks
+// for more. It runs in a child, since it changes the process's loggers.
+func TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler(t *testing.T) {
+	if isChild(t) {
+		routeLogs(newLogger(config.LogConfig{Level: "debug", Format: os.Getenv("MCSD_TEST_LOG_FORMAT")}))
+		log.Print("stdlib" + hostile)
+		grpclog.Component("probe").Error("grpc error" + hostile)
+		grpclog.Component("probe").Info("grpc info")
+		return
+	}
+	for _, tc := range []struct {
+		format, severity string
+		wantInfo         bool
+	}{
+		{"json", "", false},
+		{"text", "", false},
+		{"json", "info", true},
+	} {
+		out, code := runChild(t, map[string]string{
+			"MCSD_TEST_LOG_FORMAT":       tc.format,
+			"GRPC_GO_LOG_SEVERITY_LEVEL": tc.severity,
+		})
+		if code != 0 {
+			t.Errorf("%s: child exited %d", tc.format, code)
+		}
+		assertNoRawControls(t, out)
+		var stdlib, grpcError, grpcInfo bool
+		if tc.format == "json" {
+			recs := jsonRecords(t, out)
+			stdlib = hasRecord(recs, "INFO", "stdlib"+hostile)
+			grpcError = hasRecord(recs, "ERROR", "[probe] grpc error"+hostile)
+			grpcInfo = hasRecord(recs, "INFO", "[probe] grpc info")
+		} else {
+			stdlib = strings.Contains(out, " level=INFO msg="+strconv.Quote("stdlib"+hostile)+"\n")
+			grpcError = strings.Contains(out, " level=ERROR msg="+strconv.Quote("[probe] grpc error"+hostile)+"\n")
+			grpcInfo = strings.Contains(out, "grpc info")
+		}
+		if !stdlib || !grpcError || grpcInfo != tc.wantInfo {
+			t.Errorf("log.format=%s GRPC_GO_LOG_SEVERITY_LEVEL=%q: stdlib record %v, grpc error "+
+				"record %v, grpc info record %v; want true, true, %v. Output:\n%s",
+				tc.format, tc.severity, stdlib, grpcError, grpcInfo, tc.wantInfo, out)
+		}
+	}
+}
+
+// TestMainSendsGRPCLogsThroughTheHandler pins that main sets up the grpc logger
+// before it dials (issue #3960). Asked for its info lines, grpc logs the channel
+// the dial creates; boot then fails on an unsupported docker host, and each line
+// written on the way is a json record, grpc's among them.
+func TestMainSendsGRPCLogsThroughTheHandler(t *testing.T) {
+	if isChild(t) {
+		main()
+		return
+	}
+	env := bootEnv(t.TempDir(), "tcp://127.0.0.1:2375", "127.0.0.1:1")
+	env["MCD_WORKER_LOG_LEVEL"] = "info"
+	env["GRPC_GO_LOG_SEVERITY_LEVEL"] = "info"
+	out, code := runChild(t, env)
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	recs := jsonRecords(t, out)
+	if !slices.ContainsFunc(recs, func(rec map[string]any) bool {
+		msg, _ := rec["msg"].(string)
+		return strings.HasPrefix(msg, "[core] ")
+	}) {
+		t.Errorf("no grpc record in:\n%s", out)
+	}
+}
+
+// TestMainLogsAFatalErrorThroughTheConfiguredLogger: once main has built the
+// logger, it logs the error it exits on through it (issue #3960), here a dial
+// that cannot read a CA file whose path holds controls.
+func TestMainLogsAFatalErrorThroughTheConfiguredLogger(t *testing.T) {
+	if isChild(t) {
+		main()
+		return
+	}
+	caFile := filepath.Join(t.TempDir(), "ca"+hostile+".pem")
+	env := bootEnv(t.TempDir(), "unix:///no-such-docker.sock", "127.0.0.1:1")
+	env["MCD_WORKER_API_TLS_INSECURE"] = "false"
+	env["MCD_WORKER_API_TLS_CA_FILE"] = caFile
+	out, code := runChild(t, env)
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	assertNoRawControls(t, out)
+	if !slices.ContainsFunc(jsonRecords(t, out), func(rec map[string]any) bool {
+		err, _ := rec["error"].(string)
+		return rec["level"] == "ERROR" && rec["msg"] == "worker failed" && strings.Contains(err, caFile)
+	}) {
+		t.Errorf("no ERROR record \"worker failed\" naming %q in:\n%s", caFile, out)
+	}
+}
+
+// TestMainLogsAConfigErrorAsAnEscapedTextRecord: before a configuration is
+// loaded there is no log.format to follow, so main writes the error it exits on
+// as a text record (issue #3960), escaped like any other: here a config path
+// that holds controls.
+func TestMainLogsAConfigErrorAsAnEscapedTextRecord(t *testing.T) {
+	if isChild(t) {
+		main()
+		return
+	}
+	path := filepath.Join(t.TempDir(), "worker"+hostile+".toml")
+	out, code := runChild(t, map[string]string{configPathEnv: path})
+	if code != 1 {
+		t.Errorf("exit code %d, want 1", code)
+	}
+	assertNoRawControls(t, out)
+	head, quoted, _ := strings.Cut(strings.TrimSuffix(out, "\n"), " error=")
+	msg, err := strconv.Unquote(quoted)
+	if !strings.HasSuffix(head, ` level=ERROR msg="worker failed"`) || err != nil || !strings.Contains(msg, path) {
+		t.Errorf("want one text record at ERROR whose error names %q, got:\n%s", path, out)
+	}
+}
+
+// TestGRPCLoggerFatalLogsAnErrorAndExits keeps grpc's contract for Fatal: the
+// record is an error, and the process exits 1 after it.
+func TestGRPCLoggerFatalLogsAnErrorAndExits(t *testing.T) {
+	if isChild(t) {
+		g := newGRPCLogger(newLogger(config.LogConfig{}), os.Getenv)
+		switch os.Getenv("MCSD_TEST_FATAL") {
+		case "Fatal":
+			g.Fatal("grpc fatal")
+		case "Fatalln":
+			g.Fatalln("grpc", "fatal")
+		case "Fatalf":
+			g.Fatalf("grpc %s", "fatal")
+		}
+		return
+	}
+	for _, call := range []string{"Fatal", "Fatalln", "Fatalf"} {
+		out, code := runChild(t, map[string]string{"MCSD_TEST_FATAL": call})
+		if code != 1 {
+			t.Errorf("%s: exit code %d, want 1", call, code)
+		}
+		if !hasRecord(jsonRecords(t, out), "ERROR", "grpc fatal") {
+			t.Errorf("%s: no ERROR record \"grpc fatal\" in:\n%s", call, out)
+		}
 	}
 }
