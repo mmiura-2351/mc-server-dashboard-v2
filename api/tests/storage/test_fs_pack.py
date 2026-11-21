@@ -76,7 +76,9 @@ def _ordinary_tree(root: Path) -> Path:
     (root / "world/latest").symlink_to("level.dat")
     (root / "world/regions").symlink_to("region", target_is_directory=True)
     os.mkfifo(root / "world/pipe")
-    os.mknod(root / "world/socket", stat.S_IFSOCK | 0o600)
+    # Listed right after an empty directory, which the walk enters and finds
+    # nothing in: the filter never sees a socket to say it is not one to enter.
+    os.mknod(root / "world/empty.sock", stat.S_IFSOCK | 0o600)
     # Deepest first, so setting a directory's mtime is not undone below it.
     paths = sorted(root.rglob("*"), key=lambda p: -len(p.parts))
     for offset, path in enumerate(paths):
