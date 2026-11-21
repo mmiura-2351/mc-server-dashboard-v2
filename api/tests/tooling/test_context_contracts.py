@@ -15,11 +15,12 @@ each list to the packages on disk, plus the extra inward packages the
 contracts' comments document.
 
 So are each context's layered contract's ``layers`` and its adapters
-contract's ``source_modules`` (issue #3991). These tests derive both from the
-packages on disk as well: the layers are whichever of ``api``,
-``application`` and ``domain`` the context has, and the adapters contract
-covers its inward packages. Everywhere here, a package exists when its
-directory has an ``__init__.py``.
+contract's ``source_modules`` and ``forbidden_modules`` (issue #3991). These
+tests hold them to the packages on disk as well: the layers are whichever of
+``api``, ``application`` and ``domain`` the context has, and the adapters
+contract covers its inward packages and forbids only the context's own
+``adapters``. Everywhere here, a package exists when its directory has an
+``__init__.py``.
 """
 
 from __future__ import annotations
@@ -196,3 +197,15 @@ def test_the_adapters_contracts_cover_exactly_the_inward_packages_on_disk() -> N
     )
 
     assert listed == expected
+
+
+def test_every_adapters_contract_forbids_exactly_its_own_adapters() -> None:
+    drift: dict[str, list[str]] = {}
+    for contract in _contracts():
+        if "not import adapters" not in contract["name"]:
+            continue
+        context = contract["name"].partition(" ")[0]
+        if contract["forbidden_modules"] != [f"{PACKAGE}.{context}.adapters"]:
+            drift[context] = contract["forbidden_modules"]
+
+    assert drift == {}

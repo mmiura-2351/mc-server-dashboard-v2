@@ -260,7 +260,8 @@ include_external_packages = true
 # `tests/tooling/test_context_contracts.py` holds each list to that `ls` and
 # repeats the deliberate omissions, so an omission changes in both. It also
 # derives each context's `layers` and adapters-contract `source_modules` from
-# the packages on disk, so those hand-written lists are checked too.
+# the packages on disk, and holds that contract's `forbidden_modules` to the
+# context's own `adapters`, so those hand-written lists are checked too.
 [[tool.importlinter.contracts]]
 name = "core context layers (domain <- application <- api; adapters at the edge)"
 type = "layers"
@@ -722,6 +723,7 @@ forbidden_modules = [
 # contract over it would name layers that do not exist — asserting nothing
 # while reading as coverage (issue #2579). It is already enumerated as a
 # forbidden sibling in every other context's cross-context contract. The moment
-# it gains a `domain/` or `application/` package it gets the same three
-# contracts as its siblings plus a source entry in the contract above; this
-# note is the record of when that is due.
+# it gains a `domain/` or `application/` package it gets a layered and a
+# cross-context contract plus a source entry in the contract above, and the
+# adapters contract once it also has an `adapters/` package; this note is the
+# record of when that is due.
