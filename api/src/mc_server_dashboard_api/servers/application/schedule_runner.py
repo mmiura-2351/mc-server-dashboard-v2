@@ -29,10 +29,11 @@ Outcome taxonomy (owner-confirmed):
   answer. Neither proves the command left the API, since one dropped unsent from
   the outbound queue looks the same, so both err toward unknown. A start whose
   intent still stands after the error: an unreachable Worker, a lost answer or a
-  ``BUSY`` refusal at the start command, after which the reconciler re-sends the
-  start once the assigned Worker is connected (it skips the row while that
-  Worker is gone). A stop the Worker refused ``BUSY``, whose intent stands too,
-  which the reconciler converges (issue #3799). Audited and notified like a
+  ``BUSY`` refusal at the start command, or a hydrate refused ``BUSY``,
+  ``UNAVAILABLE`` or ``EXPIRED`` (issue #3890), after which the reconciler
+  re-sends the start once the assigned Worker is connected (it skips the row
+  while that Worker is gone). A stop the Worker refused ``BUSY``, whose intent
+  stands too, which the reconciler converges (issue #3799). Audited and notified like a
   failure, under its own title, and never retried. It shares the failing edge,
   but a failure after an unknown notifies once more as an escalation; an unknown
   after a failure stays silent.
@@ -141,6 +142,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
     BackupStorageUnavailableError,
+    BackupTooLargeError,
     BackupUnsettledError,
     CommandDispatchError,
     InvalidLifecycleTransitionError,
@@ -299,6 +301,8 @@ def _failure_detail(exc: ServerError) -> str:
         return "no eligible worker"
     if isinstance(exc, BackupCorruptError):
         return "backup corrupt"
+    if isinstance(exc, BackupTooLargeError):
+        return "backup too large"
     if isinstance(exc, BackupStorageUnavailableError):
         return "storage unavailable"
     return "action failed"
@@ -350,8 +354,9 @@ class ActionResult:
     detail: str | None
     community_id: CommunityId | None
     # Whether a FAILURE outcome is worth the one-shot backup retry (#2250). False
-    # only for a provably deterministic failure (a corrupt working set) whose
-    # re-archive can never succeed; True for infra/unexpected faults that may heal.
+    # only for a provably deterministic failure (a corrupt working set, or one too
+    # large to archive, #3859) whose re-archive can never succeed; True for
+    # infra/unexpected faults that may heal.
     retryable: bool = True
 
 
@@ -428,7 +433,9 @@ class ExecuteScheduleAction:
                 outcome,
                 _failure_detail(exc),
                 community_id,
-                retryable=not isinstance(exc, BackupCorruptError),
+                retryable=not isinstance(
+                    exc, (BackupCorruptError, BackupTooLargeError)
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - every execution error is a run outcome
             # An unexpected error (a Storage/OS failure mid-archive, a DB error
@@ -464,9 +471,10 @@ class ExecuteScheduleAction:
         intent is reverted and the start will not happen. Once the start command
         is reached, an unreachable Worker, a lost answer (a timeout or a
         disconnect) or a ``BUSY`` refusal leaves the intent and assignment
-        standing, and the reconciler re-sends the start once the assigned Worker
-        is connected (it skips the row while that Worker is gone). The row tells
-        these apart.
+        standing, and so does a hydrate refused ``BUSY``, ``UNAVAILABLE`` or
+        ``EXPIRED`` (issue #3890). The reconciler re-sends the start once the
+        assigned Worker is connected (it skips the row while that Worker is gone).
+        The row tells these apart.
 
         A stop the Worker refused ``BUSY`` can: :class:`StopServer` never reverts
         its intent, so ``desired=stopped`` stands, which the reconciler

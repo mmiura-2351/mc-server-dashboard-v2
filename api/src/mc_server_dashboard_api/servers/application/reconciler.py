@@ -39,7 +39,11 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   second live instance on another Worker. For the same reason it keeps the
   assignment, sends no start and records observed=running when the placed Worker
   refuses the hydrate ``INVALID_STATE``, because it already runs the server (issue
-  #3865); that counts as success, not toward the backoff.
+  #3865); that counts as success, not toward the backoff. It also keeps the
+  assignment, and records observed=unknown, when that Worker refuses the hydrate
+  ``BUSY``, ``UNAVAILABLE`` or ``EXPIRED``, which leaves an instance there possible
+  (issue #3890). The refusal is handled below as any start's is, and the next tick
+  past the grace takes ``redispatch_start`` to that same Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final
@@ -114,6 +118,14 @@ cannot occur on a re-dispatch to the SAME connected Worker. Every other path
 (``place_and_start``, a non-held ``redispatch_start`` that will hydrate, and both
 stop-side actions) keeps the full ``grace_seconds``, preserving the #822
 duplicate-start and #847 stale-snapshot floors.
+
+A row whose assigned Worker is not connected is measured from no earlier than the
+instant this process's control-plane listener started (issue #3916). The first
+tick runs as the API starts, before any Worker has registered with it, so without
+that floor a stopped-intent row whose grace lapsed while no API ran would be
+released without its final snapshot or its stop, though its Worker is back seconds
+later. Every Worker thus gets a full grace to re-register after any API start,
+graceful or a crash. A connected Worker's rows are measured as before.
 
 That held predicate used to be near-dead: the held inventory was frozen at Worker
 registration, so every server placed since reported nothing held and took the full
@@ -435,6 +447,9 @@ class RunReconcilerTick:
     restart_timeout_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
+    # When this process's control-plane listener started: the first instant a
+    # Worker could register with it (issue #3916).
+    listener_started_at: dt.datetime
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
 
     async def tick(self) -> None:
@@ -665,7 +680,18 @@ class RunReconcilerTick:
         return max(server.updated_at, server.observed_at or server.updated_at)
 
     def _within_grace(self, server: Server, now: dt.datetime, grace: int) -> bool:
-        return (now - self._since(server)) < dt.timedelta(seconds=grace)
+        since = self._since(server)
+        # A Worker this process does not see connected may only not have registered
+        # with it yet: the first tick runs as the API starts. So the release of such
+        # a Worker's row is measured from no earlier than the listener start (issue
+        # #3916), and a Worker back within a grace of it still gets the final
+        # snapshot or the stop.
+        worker_id = server.assigned_worker_id
+        if worker_id is not None and not self.control_plane.is_worker_connected(
+            worker_id=worker_id
+        ):
+            since = max(since, self.listener_started_at)
+        return (now - since) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:
         """Map a candidate to its reconciling action, or ``None`` to skip."""

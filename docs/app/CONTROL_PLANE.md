@@ -519,7 +519,13 @@ timeout. On disconnect the API marks the Worker's servers `unknown` and keeps
 their assignment (FR-WRK-4). A crashed server keeps `crashed` and its stored
 crash instead, since the Worker has already forgotten that instance (issue
 #3885); under a stopped intent its `observed_at` moves to the disconnect, so
-its release waits a full grace from it. The reconciler does not restart a
+its release waits a full grace from it. An API start is the same case for every
+Worker: none has registered with the new process when the reconciler's first
+tick runs. So the reconciler releases a stopped-intent server whose Worker is not
+connected only once a full grace has passed since the later of the server's own
+stamps and the start of this process's control-plane listener (issue #3916). A
+Worker that re-registers within it, after a graceful restart or a crash, still
+gets the final snapshot or the stop. The reconciler does not restart a
 `desired=running` server until the Worker reconnects. If it does not come back, an
 operator stop and then a start moves each server to another eligible Worker
 after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an
@@ -702,7 +708,8 @@ Notes:
   reverts both. Such a server comes from an earlier release, or would come
   from the automatic re-placement that issue #3809 weighs. While it lasts, the
   reconciler keeps retrying its placement: no Worker can take it, or a
-  placement fails before it sends `StartServer` and gives its Worker back. A
+  placement fails before it sends `StartServer` and gives its Worker back (a
+  hydrate refusal that does not rule out an instance keeps it, below). A
   stop of such a server sends no command, because there is no Worker to tell
   (issue #3815). It commits `desired=stopped`, checking as it writes that the
   server is still unassigned, adds one to the count as any stop does, and
@@ -729,9 +736,10 @@ Notes:
   answers `409 invalid_transition`, as a start of a running server does: it
   launched nothing, and the instance may run an older working set than the
   store's. The reconciler's placement of a server with no Worker counts it as
-  done, not as a failure. A hydrate refused for any other reason still gives
-  the Worker back. If placement picks a Worker that does not run the server, no
-  hydrate is refused and nothing reveals the instance (issue #3740).
+  done, not as a failure. A hydrate refused `BUSY`, `UNAVAILABLE` or `EXPIRED`
+  keeps the Worker too (the next note); any other refusal gives it back. If
+  placement picks a Worker that does not run the server, no hydrate is refused
+  and nothing reveals the instance (issue #3740).
   From then on the instance's working set is the server's: its snapshots,
   including the final one of a stop, publish it over the store. An at-rest
   file edit or a backup restore made while the instance ran under a record
@@ -745,6 +753,85 @@ Notes:
   instance has it. So is one whose last group was detached or deleted, if an
   earlier start that never launched already cleared the mark that change left:
   nothing owes that file any more.
+- **A hydrate refusal that does not rule out an instance keeps the server on
+  that Worker too.** The Worker rules out an instance of the server only once
+  its reservation check (`reserve()`) and its check for a container it does not
+  track have both passed (issue #3890). A `HydrateTrigger` refused before that
+  leaves an instance there possible, which placement cannot see either:
+  - `BUSY`: another command holds the server's reservation (a start or a stop
+    may be in flight), or a failed-stop orphan may still be alive.
+  - `UNAVAILABLE`: a container of the server the Worker does not track may be
+    running against the working set; it could not be ended, or the daemon
+    could not say.
+  - `EXPIRED`: the session answered before the Worker looked at the server.
+    The hydrate waited past its budget, behind the concurrency cap or behind
+    another command for the server.
+
+  So the server stays `desired=running` on that Worker and no `StartServer` is
+  sent. A user start answers the refusal as it always has
+  (`409 worker_busy`, `503 worker_unavailable`, `409 command_expired`), and so
+  does the reconciler's placement, which counts it toward the backoff only for
+  `UNAVAILABLE` (CONFIGURATION.md Section 5.6). The API records
+  `observed=unknown`, guarded on that Worker and stamped with the instant the
+  start placed the server there, so a report the Worker sent while the hydrate
+  waited stands. The value the server carried was not reported by this Worker,
+  which reports nothing on a server no record names. With `unknown`, the
+  reconciler re-sends the start to that Worker once its grace lapses, even
+  where the server read a stale `running`. A stop whose dispatch fails is sent
+  again rather than released under the instance on the strength of a stale
+  `stopped`. In the same write the API owes again the player-file marks the
+  start cleared before its hydrate, for a launch that did not happen, and every
+  group-managed file, as for an `INVALID_STATE` hydrate (the previous note). If
+  the Worker turns out to run the server, the re-sent start keeps that instance
+  without owing anything (issue #3901), and its snapshots publish its own
+  player files, so the next start after a stop regenerates them. Once the
+  reservation, orphan, leftover or queue clears, the re-sent start hydrates and
+  launches there. If the Worker's session ends instead, the server waits for it
+  as any of its servers does, until an operator stop releases it (Section 4.4).
+  Every other answer to a hydrate gives the Worker back. `TRANSFER_FAILED`
+  comes after both checks passed, with the reservation held through the
+  transfer. The one site that answers it before them needs a Worker with no
+  data-plane client, which a deployed Worker always has. `FILE_ACCESS_DENIED`
+  (a server id that is not a canonical UUID), and the session's `INTERNAL`
+  (an unsupported kind, an oversized result) and `SERVER_NOT_FOUND` (an empty
+  server id), cannot answer a hydrate the API sends. A hydrate that gets no
+  answer (a timeout or an ended session) also gives the Worker back. A user
+  start that replays a launch refused for a missing working set (Section 7)
+  sends its hydrate after a start, and handles a refusal of it as it would a
+  refused start: `UNAVAILABLE` and `EXPIRED` give the Worker back there.
+- **Nothing publishes a snapshot from a Worker that has not hydrated the
+  server.** A Worker kept by the previous note has not hydrated the server, and
+  its scratch may be a leftover older than the store: a previous run's that no
+  final snapshot published, since overtaken by a run on another Worker, a backup
+  restore or an at-rest file edit. Publishing it would replace the store's
+  newer working set. So the write that places a server on a Worker for a start
+  marks it `awaiting_hydrate` (DATABASE.md Section 7), and while the mark is
+  set:
+  - the periodic snapshot skips the server but keeps it due, so the first tick
+    after the mark clears takes it;
+  - a final snapshot is not taken, whether a stop, a replayed stop or the
+    release of a stale assignment asks for it, and the stop releases the
+    server: the store's working set stands, as it did when such a start gave
+    the Worker back, and the next start's hydrate replaces the scratch;
+  - the data plane refuses every publish from that Worker, although it is the
+    assigned one, whatever base the publish declares, or none (STORAGE.md
+    Section 8). That includes a late final snapshot of the Worker's previous
+    assignment that starts uploading after the new placement: its scratch stays
+    on the Worker, and the store wins again.
+
+  The mark clears once the Worker holds the store's working set: its hydrate
+  succeeded, or the generation it holds is at least the store's, so the start
+  skips the hydrate. If the Worker then refuses a start that skipped its
+  hydrate because the working set is not on its disk (Section 7), the mark is
+  set again for the hydrate that start replays. Only the start whose placement
+  it is clears the mark: if a stop released the server during a start's
+  hydrate and a newer start placed it on the same Worker, the older start
+  leaves the newer placement's mark. A `running` report from the Worker clears
+  it too, as does an `INVALID_STATE` hydrate: from then on the instance's
+  working set is the server's (the note before last). A release clears it with
+  the assignment. The mark is stored with the server, so it also covers a start
+  whose API process stopped between the commit and the hydrate, and a start
+  cancelled while a hydrate it sent was refused.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
@@ -798,7 +885,9 @@ Notes:
   only by trusting clock agreement, which the protocol avoids.
 
   Since `EXPIRED` means the command was not applied, it is a refusal. A user
-  start that is answered `EXPIRED` is compensated, as any refused start is. An
+  start whose `StartServer` is answered `EXPIRED` is compensated, as any
+  refused start is. One whose `HydrateTrigger` is answered `EXPIRED` keeps its
+  Worker, since the answer does not rule out an instance there (above). An
   expired stop leaves the stop intent standing, and the reconciler replays it
   after the short refused-stop grace when the `EXPIRED` answer arrived in time.
   That answer comes once the server's lane frees, usually as the command ahead
@@ -1107,9 +1196,11 @@ and equally the writes the API makes without one, whose frames carry an empty
   assigned server still in a non-terminal state at API startup;
 - the state a lifecycle operation converges from a command's outcome —
   `running` when a start or its hydrate is refused `INVALID_STATE` (the
-  instance is already live, so no `StatusChange` will follow), `stopped` when a
-  stop is confirmed or answered `SERVER_NOT_FOUND`, and `unknown` when a stop
-  left at `stopping` under a disconnected Worker is released.
+  instance is already live, so no `StatusChange` will follow), `unknown` when
+  a start or a placement keeps the Worker that refused its hydrate `BUSY`,
+  `UNAVAILABLE` or `EXPIRED` (Section 5), `stopped` when a stop is confirmed
+  or answered `SERVER_NOT_FOUND`, and `unknown` when a stop left at `stopping`
+  under a disconnected Worker is released.
 
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —
@@ -1142,8 +1233,8 @@ classes a Worker can hit:
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
 | `COMMAND_DROPPED` | A `ServerCommand` was written to RCON and the game server closed the connection (EOF or reset) before a single response byte arrived. Vanilla does that, without running the command, to a packet that did not arrive in one read, which is what a command near the length limit meets on a path that splits it (Section 3.1). A server that ran the command and then crashed before answering looks the same on the wire, so **whether the command ran is uncertain**: the user checks the console output and the server's state before retrying. A reply cut short — some response bytes arrived, then the connection ended — is not this code but `INTERNAL`, since the server was answering. It is kept apart from `INTERNAL` — RCON could not be opened or authenticated, the round trip timed out, or the reply was cut short — so the user can tell a dropped command from a server that cannot be reached. The API answers it `409 command_dropped`. |
 | `SERVER_PROPERTIES_UNREADABLE` | The server's `server.properties` cannot be read as it is: it is not a regular file (a symbolic link, a FIFO, socket, device or directory — something the server's own code can put at the name) or it is larger than the Worker's 4 MiB read cap ([`SECURITY.md`](SECURITY.md) Section 6). Every command that needs the file answers it: a `StartServer` and a `RestartServer`'s relaunch (the driver publishes its ports; no container is created), a `ServerCommand` (RCON's password is in it, so nothing is dialled), a running `SnapshotTrigger` (it cannot quiesce the world over RCON, so it is refused rather than packed live) and a `TunnelDial` (the dial resolves its game port). The message names the refusal and the file's path on the Worker but never its content; the API keeps it log-only and answers `409 server_properties_unreadable`. A graceful `StopServer` is **not** refused: its pre-stop save-off/save-all flush cannot open RCON, so the Worker logs one `WARN` saying the final save-all was skipped and the driver falls back to its stop signal: SIGTERM, then SIGKILL once the world has gone the 30 s idle window unwritten or the stop's 360 s cap has passed ([`CONFIGURATION.md`](CONFIGURATION.md) Section 6.3). **No save is guaranteed then**: the server's own shutdown save normally completes inside that wait, but a server killed after the idle window or at the cap is left with a partial save (issue #3436). The stop answers success and the skipped flush is not reported to the API. |
-| `EXPIRED` | The command's `expires_after` ran out before it started (Section 5, "Expiry"), so the Worker **did not apply it**. It was still waiting behind an earlier command for the same server or for a slot of the concurrency cap, and the API had already stopped waiting for it. The session layer answers it before the command reaches the instancemanager, so it is the same for every kind the API stamps an expiry on. Unlike `BUSY`, nothing is wrong with the server's state; the command only waited too long. Most `EXPIRED` answers arrive after the dispatch timed out and are dropped. One that arrives in time is a refusal: a user start compensates and an expired stop keeps its intent. An expired start or hydrate sent by the reconciler does not count toward its backoff. The API answers it `409 command_expired`, so a client can say the command was not run and can be retried; the file routes keep their catch-all `409 command_failed`. |
-| `UNAVAILABLE` | The Worker could not apply the command because its execution backend did not cooperate, and **no other command holds the id**. A `StartServer`, or a `RestartServer`'s relaunch, answers it when the Docker daemon did not answer a container create or start within its bound, did not list the server's containers within the quiescence window, or when the driver could not remove a container a failed start of the server left behind, or found one of the server's containers still running. A `HydrateTrigger` and a stopped-id `SnapshotTrigger` answer it when the driver cannot rule out such a container running against the working set (the hydrate first tries to end the ones it recorded). The command did not complete successfully: a start the bound cut short may still have run its container, which the driver then removes or records as a leftover for the server's next start, but no instance is tracked. It is distinct from `DRIVER_UNAVAILABLE`, which says the driver is not offered at all, and from `BUSY`: `BUSY` clears once the command holding the id settles, while this needs the daemon or the leftover to recover, which nothing promises. So the reconciler counts an `UNAVAILABLE` start or hydrate toward its backoff, and does not re-send it every tick. A user start compensates. The API answers it `503 worker_unavailable`, the reason a Worker that did not answer at all gets: a transient condition the client retries. Unlike that case, a lifecycle route adds no `worker_state` member to it ([`AUTH_API.md`](AUTH_API.md) Section 2), since the Worker is connected and answered. |
+| `EXPIRED` | The command's `expires_after` ran out before it started (Section 5, "Expiry"), so the Worker **did not apply it**. It was still waiting behind an earlier command for the same server or for a slot of the concurrency cap, and the API had already stopped waiting for it. The session layer answers it before the command reaches the instancemanager, so it is the same for every kind the API stamps an expiry on. Unlike `BUSY`, nothing is wrong with the server's state; the command only waited too long. Most `EXPIRED` answers arrive after the dispatch timed out and are dropped. One that arrives in time is a refusal: a user start compensates, unless it was the hydrate that expired, which keeps the Worker (Section 5), and an expired stop keeps its intent. An expired start or hydrate sent by the reconciler does not count toward its backoff. The API answers it `409 command_expired`, so a client can say the command was not run and can be retried; the file routes keep their catch-all `409 command_failed`. |
+| `UNAVAILABLE` | The Worker could not apply the command because its execution backend did not cooperate, and **no other command holds the id**. A `StartServer`, or a `RestartServer`'s relaunch, answers it when the Docker daemon did not answer a container create or start within its bound, did not list the server's containers within the quiescence window, or when the driver could not remove a container a failed start of the server left behind, or found one of the server's containers still running. A `HydrateTrigger` and a stopped-id `SnapshotTrigger` answer it when the driver cannot rule out such a container running against the working set (the hydrate first tries to end the ones it recorded). The command did not complete successfully: a start the bound cut short may still have run its container, which the driver then removes or records as a leftover for the server's next start, but no instance is tracked. It is distinct from `DRIVER_UNAVAILABLE`, which says the driver is not offered at all, and from `BUSY`: `BUSY` clears once the command holding the id settles, while this needs the daemon or the leftover to recover, which nothing promises. So the reconciler counts an `UNAVAILABLE` start or hydrate toward its backoff, and does not re-send it every tick. A user start compensates, unless it was the hydrate that was refused: that container may still be running, so the server keeps that Worker (Section 5). The API answers it `503 worker_unavailable`, the reason a Worker that did not answer at all gets: a transient condition the client retries. Unlike that case, a lifecycle route adds no `worker_state` member to it ([`AUTH_API.md`](AUTH_API.md) Section 2), since the Worker is connected and answered. |
 | `INTERNAL` | An unclassified failure applying the command. |
 
 A registration refusal is reported differently, since it predates any command:

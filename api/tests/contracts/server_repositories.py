@@ -315,6 +315,7 @@ class ServerRepositoryContract:
         changed.observed_at = _LATER
         changed.assigned_worker_id = None
         changed.backup_retention = {"nested": {"keep": 7}}
+        changed.awaiting_hydrate = True
         async with server_repository_harness.open() as tx:
             await tx.repository.update(changed)
             await tx.commit()
@@ -337,6 +338,7 @@ class ServerRepositoryContract:
         )
         assert stored.assigned_worker_id == item.assigned_worker_id
         assert stored.backup_retention == {"nested": {"keep": 2}}
+        assert stored.awaiting_hydrate is False
 
     async def test_lifecycle_update_is_guarded_and_writes_only_lifecycle_fields(
         self,
@@ -818,6 +820,246 @@ class ServerRepositoryContract:
             item.crash_reason,
             item.crash_detail,
         )
+
+    async def test_a_placement_owes_its_hydrate_and_its_undo_owes_none(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #3890: the write that places a server on a Worker marks the
+        # hydrate that Worker owes, and the write that undoes the placement
+        # clears it with the assignment.
+        worker = WorkerId(uuid.uuid4())
+        item = server(contract_community_id)
+        item.desired_state = DesiredState.STOPPED
+        item.assigned_worker_id = None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        placed = deepcopy(item)
+        placed.desired_state = DesiredState.RUNNING
+        placed.assigned_worker_id = worker
+        async with server_repository_harness.open() as tx:
+            assert await tx.repository.update_lifecycle(
+                placed,
+                expected_from=DesiredState.STOPPED,
+                expected_assigned_worker_id=None,
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.assigned_worker_id, row.awaiting_hydrate) == (worker, True)
+
+        undone = deepcopy(placed)
+        undone.desired_state = DesiredState.STOPPED
+        undone.assigned_worker_id = None
+        async with server_repository_harness.open() as tx:
+            assert await tx.repository.update_lifecycle(
+                undone,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=worker,
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.assigned_worker_id, row.awaiting_hydrate) == (None, False)
+
+    @pytest.mark.parametrize("stored_mark", [True, False], ids=["owed", "cleared"])
+    async def test_a_lifecycle_update_that_keeps_the_worker_keeps_the_mark(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        stored_mark: bool,
+    ) -> None:
+        # Issue #3890: a stop, drain or restart read the row before a hydrate
+        # moved the mark. Writing back what it read would undo that hydrate.
+        item = server(contract_community_id)
+        item.awaiting_hydrate = stored_mark
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        stale = deepcopy(item)
+        stale.awaiting_hydrate = not stored_mark
+        stale.desired_state = DesiredState.STOPPED
+        async with server_repository_harness.open() as tx:
+            assert await tx.repository.update_lifecycle(
+                stale,
+                expected_from=DesiredState.RUNNING,
+                expected_assigned_worker_id=item.assigned_worker_id,
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.desired_state, row.awaiting_hydrate) == (
+            DesiredState.STOPPED,
+            stored_mark,
+        )
+
+    @pytest.mark.parametrize(
+        ("holder", "read", "stored_mark", "applies"),
+        [
+            ("w1", "as-stored", True, True),
+            ("w1", "as-stored", False, False),
+            ("w2", "as-stored", True, False),
+            (None, "as-stored", True, False),
+            ("w1", "older", True, False),
+        ],
+        ids=["clear", "already-clear", "other-worker", "unassigned", "re-placed"],
+    )
+    async def test_the_mark_is_cleared_only_for_the_placement_read(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        holder: str | None,
+        read: str,
+        stored_mark: bool,
+        applies: bool,
+    ) -> None:
+        # Issue #3890: a start clears the mark once worker w1 holds the store's
+        # working set. The write asserts the row as the start read it, so it never
+        # touches another Worker's placement, nor a newer placement on w1, whose
+        # write moved ``updated_at`` (r2 review).
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.assigned_worker_id = None if holder is None else workers[holder]
+        item.awaiting_hydrate = stored_mark
+        item.updated_at = _LATER
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            changed = await tx.repository.clear_awaiting_hydrate(
+                item.id,
+                workers["w1"],
+                updated_at=_LATER if read == "as-stored" else _NOW,
+            )
+            await tx.commit()
+        assert changed is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert row.awaiting_hydrate is (False if applies else stored_mark)
+
+    @pytest.mark.parametrize(
+        ("holder", "stored_mark", "applies"),
+        [
+            ("w1", False, True),
+            ("w1", True, False),
+            ("w2", False, False),
+            (None, False, False),
+        ],
+        ids=["mark", "already-marked", "other-worker", "unassigned"],
+    )
+    async def test_the_mark_is_set_again_only_while_the_worker_holds_the_row(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        holder: str | None,
+        stored_mark: bool,
+        applies: bool,
+    ) -> None:
+        # Issue #3890: a skipped hydrate the Worker disproves owes it again (#2499).
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.assigned_worker_id = None if holder is None else workers[holder]
+        item.awaiting_hydrate = stored_mark
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            changed = await tx.repository.mark_awaiting_hydrate(item.id, workers["w1"])
+            await tx.commit()
+        assert changed is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert row.awaiting_hydrate is (True if applies else stored_mark)
+
+    @pytest.mark.parametrize(
+        ("desired", "state", "unassign", "observed_at", "mark_after"),
+        [
+            (DesiredState.RUNNING, ObservedState.RUNNING, False, _LATER, False),
+            (DesiredState.RUNNING, ObservedState.UNKNOWN, False, _LATER, True),
+            (DesiredState.RUNNING, ObservedState.STARTING, False, _LATER, True),
+            (DesiredState.RUNNING, ObservedState.RUNNING, False, _NOW, True),
+            (DesiredState.STOPPED, ObservedState.STOPPED, True, _LATER, False),
+            (DesiredState.STOPPED, ObservedState.STOPPED, False, _LATER, True),
+        ],
+        ids=[
+            "running",
+            "unknown",
+            "starting",
+            "dropped-running",
+            "release",
+            "stopped-kept",
+        ],
+    )
+    async def test_a_running_report_or_a_release_clears_the_mark(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        desired: DesiredState,
+        state: ObservedState,
+        unassign: bool,
+        observed_at: dt.datetime,
+        mark_after: bool,
+    ) -> None:
+        # Issue #3890: a running instance's working set is what its snapshots
+        # capture, and a release owes no hydrate. Only a write that lands counts.
+        item = server(contract_community_id)
+        item.desired_state = desired
+        item.awaiting_hydrate = True
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            await tx.repository.record_observed_state(
+                item.id,
+                state,
+                observed_at,
+                unassign=unassign,
+                expected_worker=item.assigned_worker_id,
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert row.awaiting_hydrate is mark_after
+
+    @pytest.mark.parametrize("release", ["final-snapshot", "stale"])
+    async def test_a_stop_release_clears_the_mark(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        release: str,
+    ) -> None:
+        # Issue #3890: the mark goes with the assignment it was about.
+        item = server(contract_community_id)
+        item.desired_state = DesiredState.STOPPED
+        item.awaiting_hydrate = True
+        worker = item.assigned_worker_id
+        assert worker is not None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            if release == "final-snapshot":
+                cleared = await tx.repository.clear_assignment_after_final_snapshot(
+                    item.id, worker
+                )
+            else:
+                cleared = await tx.repository.clear_stale_assignment(
+                    item.id, worker, observed_at=item.observed_at
+                )
+            await tx.commit()
+        assert cleared
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.assigned_worker_id, row.awaiting_hydrate) == (None, False)
 
     async def test_missing_updates_do_not_insert(
         self,

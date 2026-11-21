@@ -606,6 +606,7 @@ async def test_drain_converges_through_reconciler_with_final_snapshot() -> None:
         restart_timeout_seconds=630,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_T0,
     )
     await reconciler.tick()
 

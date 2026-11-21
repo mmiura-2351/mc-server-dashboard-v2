@@ -235,6 +235,7 @@ async def test_reconciler_skips_a_row_an_operator_stop_is_converging() -> None:
         restart_timeout_seconds=120,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_LONG_AGO,
     )
     operator = asyncio.create_task(
         _stop_server(repo, cp, guard)(
@@ -529,6 +530,7 @@ async def test_a_lost_final_snapshot_result_still_converges() -> None:
         restart_timeout_seconds=120,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_LONG_AGO,
     )
     await _abandon_a_final_snapshot(repo, server, worker)
 
@@ -557,6 +559,7 @@ def _ticker(repo: FakeServerRepository, worker: _Worker) -> RunReconcilerTick:
         restart_timeout_seconds=120,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_LONG_AGO,
     )
 
 

@@ -2320,6 +2320,18 @@ export interface paths {
          *     fence is permissive when no worker is assigned (``None``): the held-assignment
          *     final-snapshot window and the post-clear no-replacement case must still land.
          *
+         *     A placement whose Worker has not hydrated the server yet (``awaiting_hydrate``,
+         *     issue #3890) accepts no publish from that Worker at all, before the upload (409
+         *     ``publisher_awaiting_hydrate``): its scratch may be a leftover older than the
+         *     store, whatever base it declares. No base (a scratch whose generation marker
+         *     reads 0), a stale base, one whose ``current`` it published itself and the
+         *     current one are all refused, and so is a publish that does not name its Worker,
+         *     which cannot be told from it. A late final snapshot of that Worker's previous
+         *     assignment that starts uploading after the placement is refused the same way:
+         *     its scratch stays on the Worker, and the store wins. An upload that passed
+         *     this check before the placement was marked still commits, since the
+         *     commit-time fence stays keyed on the Worker id.
+         *
          *     The content-integrity gate uses the single region rule set (issue #927): a
          *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
          *     every snapshot source. The earlier source-keyed strict/live split (issue #923)

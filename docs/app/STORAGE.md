@@ -413,7 +413,7 @@ depend on a Worker.
 
 | Operation | Purpose | Notes |
 |---|---|---|
-| `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (REQUIREMENTS.md Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. |
+| `create_backup_from_current(community_id, server_id) -> BackupKey` | Archive the authoritative `current/` into `backups/` | The **stopped-server** path (REQUIREMENTS.md Section 6.9). For a **running** server the Worker quiesces the live world (save-off → save-all → settle-wait) and commits an on-demand snapshot (`commit_snapshot`) → then the application calls this; `Storage` only ever archives the authoritative copy. The writer counts the tar it writes, every byte of the stream restore will decompress, and a working set whose tar would pass the decompressed-size cap (8 GiB) raises `ArchiveTooLargeError` with nothing written (issue #3859): restore and the upload gate count the same stream toward the same cap, so such a backup could be neither restored nor uploaded again. The servers seam answers `409 working_set_too_large`. |
 | `list_backups(community_id, server_id) -> [BackupKey]` | Enumerate a server's backups | Metadata (label, timestamp, size) lives in the DB (DATABASE.md); this returns the keys. |
 | `restore_backup(community_id, server_id, BackupKey, force=False)` | Atomically republish a backup into `current/` | Atomic publish (Section 4). Caller must ensure the server is **stopped** (FR-BAK-4); `Storage` enforces atomicity, the application enforces the stop precondition. A restore replaces `current/`, so it **bumps the working-set generation** like a `commit_snapshot` — otherwise a same-Worker scratch with `held == store` would skip the post-restore hydrate on the next start and boot the PRE-restore world. The publisher is stamped with the `api-restore` sentinel (no producing Worker), so the publish-time guard (Section 8) treats an in-flight stale snapshot from a real Worker as a different-publisher publish and refuses it, closing the restore-clobber window. The extracted backup is validated through the integrity gate: a corrupt backup is refused with `IntegrityCheckError` (carrying the `WorkingSetReport`); `current/` is left untouched. Quarantining the backup is an application-layer concern — the caller receives the report and decides what to do. `force=True` (the `?force=true` API override, operator-only) publishes despite corruption and returns the `WorkingSetReport` so the caller can quarantine and audit. An archive whose bytes do not read back as a `tar.gz` at all — truncated, or damaged gzip/tar framing — raises `ArchiveUnreadableError` whatever `force` says, with `current/` untouched (Section 7.3, `UNREADABLE` vs. `QUARANTINED`). A restore **bypasses the missing-region gate (Section 4.5) by design**: that gate diffs a staged set against the prior `current/` to catch a Worker accidentally dropping live regions, but a backup is a **complete, self-consistent set captured as a whole** — it is the authoritative replacement, not an incremental delta over `current/`, so a backup that legitimately holds fewer regions than the current world (an older/smaller world being restored) is exactly the intended operation and must not be refused. The structural `.mca` integrity gate applies regardless (a backup cannot be *internally* corrupt); only the prior-set partial-loss comparison is skipped. **Restore marker↔flip window:** unlike `commit_snapshot`, the generation/publisher marker is written *before* the `current` flip (Section 2 generation marker), so a failure between the two leaves the prior world live at the advanced generation with the `api-restore` publisher: holders of the old generation hydrate it again and an in-flight stale snapshot is refused. The accepted cost: a stopped Worker's unpublished scratch progress is displaced and lost by that hydrate on its next start. The per-server lock serializes the window so no concurrent publish can interleave. A failure *after* the flip — the fs parent-dir fsync, an object pointer write the store applied but whose response was lost — leaves the restored world live at the advanced generation and raises `RestorePartiallyPublishedError` carrying the `WorkingSetReport` and the failure as its `cause`. The caller treats it as a published restore whose later step failed: it quarantines a forced corrupt backup, runs its post-restore steps over the live working set, and audits a forced corrupt restore as published (#3564). On fs a replace of `current` that returned is a known flip, so a failure after it is reported as published with no re-read. A replace that raised may still have renamed (a remote filesystem such as NFS can apply a rename and report it failed), so one read of the link settles it: naming the restored snapshot, it published; naming the prior one, it did not and the failure is re-raised; anything else, or a failed read, is `RestorePublicationUnknownError`. On the object backend a failed pointer write is confirmed by re-reading the pointer (up to 3 reads with a short backoff); when no read answers, `RestorePublicationUnknownError` (same fields) says the restore may have published, and the caller handles it the same way. The copied snapshot is never deleted once its pointer write was attempted. On both backends a failed staging cleanup (on fs, its path probe can itself raise on a failing mount) is logged rather than raised over the outcome on its way out, and the sweep reclaims what is left. |
 | `delete_backup(community_id, server_id, BackupKey)` | Remove a backup archive | Idempotent. |
@@ -447,25 +447,52 @@ block, such as a GNU sparse map that takes more data than the member stores,
 makes `tarfile` seek back to the next header, and all three refuse that seek. A
 read that stays within the block's padding seeks back to no header and is still
 accepted (issue #3828). Restore and the probe
-read every member's data, a left-out reserved member's (below) included, and
-count it and the zeros past the marker toward the decompressed-size cap, so a
-backup whose member data ends within about 10 KiB of the cap (`tarfile`'s
-record padding) is refused too. The gate's cap counts every byte it
-decompresses, headers, extended-header data and skipped member data included
-(issue #3810, `archive_member.CappedReader`). The gate also holds its walk to
-header limits (`EndCheckedReader`'s `header_limits`): it refuses more than
-1 MiB of headers before a member, extended headers included, since `tarfile`
-holds those whole, and members that hold more than 32 PAX records each or 8 Mi
-characters of names, link names and PAX records in all, since `tarfile` keeps
-every member with its names and a copy of the global records; the refusal's
-detail names the limit. GNU tar writes one PAX record a user xattr, so a member
-with more than about 30 xattrs is refused; real server data carries a handful
-at most. A sparse member's map is not bounded yet (issue #3869). Restore, the
-probe and the snapshot ingest do not apply these limits: they have no entry
-cap, and a large working set would reach the character limit (131,072 files
-with 64-character names do). The gate also refuses a chain of extended headers
-too long for `tarfile`, which reads them recursively: a few hundred before one
-member. The gate runs off the event loop thread
+read every member's data, a left-out reserved member's (below) included. The
+gate, restore and the probe count every byte they decompress toward one
+decompressed-size cap, 8 GiB: headers, extended-header data, skipped member
+data, padding and the zeros past the marker as well as member data (issues
+#3810, #3859, `archive_member.CappedReader`). What each member holds counts
+toward the same cap on its own, which for a sparse member includes the holes
+restore writes but nothing decompresses. Both backup writers count the same
+stream as they write it and write no backup past the cap (the
+`create_backup_from_current` row above), so a backup the platform writes, or
+restores, uploads again as far as the cap goes; the gate's entry cap
+(10,000), its 512 MiB body limit and its character limit below are its own.
+All three hold the walk to header limits (`EndCheckedReader`'s
+`header_limits`): they refuse more than 1 MiB of headers before a member,
+extended headers included, since `tarfile` holds those whole, and members that
+hold more than 32 PAX records each, global ones included, since `tarfile` keeps
+every member with a copy of the global records. GNU tar writes one PAX record a
+user xattr, so a member with more than about 30 xattrs is refused; real server
+data carries a handful at most. The members may also hold only so many
+characters of names, link names and PAX records in all: the gate allows 8 Mi,
+which its entry cap keeps out of a real archive's reach, and its refusal's
+detail names the limit. Restore and the probe have no entry cap, and a backup
+the platform writes holds a member for every file of the working set (with
+64-character names, about 96,000 files from the fs writer already pass 8 Mi,
+and 131,072 from the object writer), so they allow 8 Mi plus 16 Ki a member
+(issue #3859). A member the backup writers write holds its name twice, as the
+name and as its PAX `path` record, and a few short records (`mtime`; `size`,
+`uid`, `gid`, `uname` or `gname` when out of the ustar fields' range): under
+9 Ki characters for a 4095-byte name, Linux's `PATH_MAX`, which bounds every
+name the fs writer reads from disk and the Worker packs. So every backup the
+fs writer writes passes, whatever its member count, and so does every archive
+the gate admits. The object writer's names are the snapshot's object keys, so
+its backups pass alike only while every key is at most 4095 bytes, which
+nothing enforces yet (issue #3931). A walk of 1,000 members holding all the
+characters the limit allows, 8 Mi plus 16 Ki a member, peaks at 24 MiB with
+ASCII values and at 95 MiB with UCS-4 ones. Past any of these limits restore
+and the probe raise `ArchiveUnreadableError`. They take a member at any depth
+the path length allows, on fs as on object: the fs adapter creates a member's
+directories, and packs a working set for hydrate, backup create and prune, one
+level at a time (issue #3859). `tarfile.add` and `Path.mkdir` recursed once a
+level and raised `RecursionError` for a tree about 1,000 levels deep. The fs
+files API's writes and the snapshot ingest still create directories that way
+(issue #3931). A sparse member's map is not bounded yet (issue #3869). The
+snapshot ingest applies none of these limits and no decompressed-size cap. All
+three refuse a chain of extended headers too long for `tarfile`, which reads
+them recursively: a few hundred before one member (`ArchiveUnreadableError` at
+restore and the probe, issue #3859). The gate runs off the event loop thread
 (issue #3801), on a pool of two threads that it shares with the files upload's
 extract and the server import (issues #3843, #3912), so a slow archive cannot
 hold the default executor that the fs backend and the sweep run on. The plugin
@@ -542,9 +569,29 @@ it also admitted any number of gzip members, a gzip member header whose CRC
 does not match and one that sets a reserved flag bit. Restore and the probe
 now refuse all three the same way. No producer the platform runs or tests
 writes any of them. A writer that puts at most 64 KiB of tar in each gzip
-member, as BGZF does, passes 10,000 members at about 620 MiB of tar. Both backup writers use `tarfile`'s `w:gz`, the Worker's pack closes its
+member, as BGZF does, passes 10,000 members at about 620 MiB of tar. Both
+backup writers use `tarfile` over one gzip stream, the Worker's pack closes its
 tar writer on every path, and GNU tar, pigz, Go `archive/tar` and Python
 `tarfile` archives read whole.
+
+**Backups stored before restore counted every byte.** Until issue #3859
+restore and the probe counted member data and the zeros past the marker only,
+held no header limits, and took a chain of extended headers as a raw error. So
+a stored backup now reads as `ArchiveTooLargeError` (`UNREADABLE` at the next
+sweep) if its decompressed stream passes 8 GiB though its member data does
+not, and as `ArchiveUnreadableError` if it holds more than 1 MiB of headers
+before a member, a member with more than 32 PAX records (global ones included,
+such as GNU tar's `--xattrs` on a file with about 30 xattrs or more), members
+holding more than 8 Mi characters plus 16 Ki a member, or a chain of extended
+headers `tarfile` cannot read. The gate admitted all of them until PR #3840
+(issue #3810): it counted drained member data and the zeros past the marker
+only, so an upload stored before then can be the first too, as can a backup
+the platform wrote of a working set near 8 GiB. No backup the platform writes
+now is any of them while every object key is at most 4095 bytes: the writers
+stay under the cap, and within the header limits for names of that length.
+Nothing enforces that bound on keys yet (issue #3931), so a backup the object
+writer packs of longer keys can pass the character limit and read as
+`ArchiveUnreadableError`.
 
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
@@ -1829,8 +1876,8 @@ way restore does, discarding the bytes: bytes the store can produce can still ho
 nothing restore can stage. A member the archive member rule (Section 3.3)
 refuses raises `ArchiveUnreadableError`, and so does an archive that does not
 read to its end the way restore reads it (One archive member rule, Section 3.3);
-members inflating past the restore decompressed-size
-cap raise `ArchiveTooLargeError`, as in restore. It does not stage members or
+an archive decompressing past the restore decompressed-size
+cap raises `ArchiveTooLargeError`, as in restore. It does not stage members or
 region-fsck — that stays fs-only, above.
 
 The spool has an operational cost that operators on this backend must provision
@@ -1877,7 +1924,7 @@ describe a file: a negative size, or a sparse map entry with a negative offset
 or length, one past the real size, or entries that overlap or are out of order,
 issue #3802) or
 hold a member the extraction refuses, and `ArchiveTooLargeError` when the
-members inflate past the decompressed-size cap. Neither can be overridden, so the servers seam translates
+archive decompresses past the decompressed-size cap. Neither can be overridden, so the servers seam translates
 both to `BackupUnreadableError`, for the restore and for the sweep's probe alike.
 The restore answers the same 409 and records `UNREADABLE` on the row — the verdict the sweep would have reached,
 just as a refused corrupt restore records `QUARANTINED` — so the next attempt is
@@ -2024,7 +2071,7 @@ whatever path the API emits:
 | Method & path | Meaning | Success | Errors |
 |---|---|---|---|
 | `GET /api/data-plane/communities/{c}/servers/{s}/working-set` | Hydrate: stream the authoritative working set as a tar (with the resolved `server.jar` injected when present). Response always carries `X-Working-Set-Generation: <n>` (the generation of the snapshot served; 0 when no snapshot has been published). | `200` tar body | `204` no published snapshot *and* no resolved JAR (Worker starts from an empty dir, generation header still present); `401` |
-| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <uuid>` (the publishing Worker, canonicalised so any spelling of its UUID compares equal to the assigned worker id), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `422` `invalid_archive` (the byte-complete body does not read as a plain, uncompressed tar — a compressed body included — does not end at its end-of-archive marker with only zeros after it, holds a member whose data runs past its last 512-byte block, or carries a member ingest refuses: an absolute, `..` or non-canonical name on both backends, or a link on fs (the object backend leaves a link member out)); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune ran under the per-server lock during the upload window, so the commit's re-check found the generation advanced and no live snapshot, or the prune had removed the spool or staging itself, before the commit or under one of its lock-free steps — the delete wins and the staging is discarded); `409` `publisher_not_assigned` (the `X-Worker-Id` publisher is not the server's assigned Worker while another one is, checked after the upload stream and again under the per-server lock immediately before the publish; the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
+| `POST /api/data-plane/communities/{c}/servers/{s}/snapshot` | Snapshot: stream a tar into staging and atomically publish it. The request MAY carry `X-Working-Set-Base-Generation: <n>` (the store generation this set was hydrated from) and `X-Worker-Id: <uuid>` (the publishing Worker, canonicalised so any spelling of its UUID compares equal to the assigned worker id), both read by the publish-time generation guard; a never-hydrated Worker omits them and the guard stays permissive. The content-integrity gate uses the single region rule set (below): a non-4096-aligned tail is the normal on-disk format of a 26.x world, not corruption (byte-precise per-chunk bounds), on any source — no request header declares a snapshot source. On success the response carries `X-Working-Set-Generation: <n>` (the new generation minted by the publish). | `204` | `400` length mismatch / incomplete; `400` `empty_snapshot` (staged an empty working set); `422` `invalid_archive` (the byte-complete body does not read as a plain, uncompressed tar — a compressed body included — does not end at its end-of-archive marker with only zeros after it, holds a member whose data runs past its last 512-byte block, or carries a member ingest refuses: an absolute, `..` or non-canonical name on both backends, or a link on fs (the object backend leaves a link member out)); `409` `stale_generation` + `base_generation` + `current` (the declared base is older than the store's current generation AND that current was published by a *different* Worker — an A→B→A stale-scratch publish; a same-Worker lag is a lost response and is allowed to self-heal, and so is the lag of the server's assigned Worker behind an old Worker's late final snapshot, issue #1703); `409` `publisher_awaiting_hydrate` (the server's assigned Worker has not hydrated it under this assignment, its row reading `awaiting_hydrate`, issue #3890: every publish from that Worker is refused before the upload, whatever base it declares or none, and so is one that names no Worker; a late final snapshot of its previous assignment that starts uploading after the placement is refused too, and the store wins); `409` `deleted_during_upload` + `base_generation` + `current` (a concurrent delete's retention prune ran under the per-server lock during the upload window, so the commit's re-check found the generation advanced and no live snapshot, or the prune had removed the spool or staging itself, before the commit or under one of its lock-free steps — the delete wins and the staging is discarded); `409` `publisher_not_assigned` (the `X-Worker-Id` publisher is not the server's assigned Worker while another one is, checked after the upload stream and again under the per-server lock immediately before the publish; the staging is discarded); `411` no `Content-Length`; `413` over the size cap; `422` `working_set_corrupt` + `corrupt_count` (integrity gate refused the staged set); `422` `working_set_incomplete` + `affected_count` + `directories` + `truncated` (the missing-region gate refused a staged set that dropped some-but-not-all region files of a still-live dimension; `directories` is a **bounded** per-directory list of the lost `.mca` names — `{directory, missing[]}`, capped — so the operator can drive the recovery in Section 4.5, `truncated` flags that the list was capped); `401` |
 
 **`X-Worker-Id` trust.** The `X-Worker-Id` the guard reads is **not**
 authenticated within the shared-credential data plane: any Worker holding the

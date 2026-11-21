@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.application.groups import (
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
 from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
     InvalidLifecycleTransitionError,
 )
 from mc_server_dashboard_api.servers.domain.groups import GroupId, GroupKind
@@ -297,17 +298,13 @@ async def test_start_after_an_at_rest_edit_writes_nothing_more(world: _World) ->
         assert await uow.groups.list_sync_pending(world.server_id) == []
 
 
-# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(16 * 10 + 30)
-@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
-async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
-    world: _World, by: str
-) -> None:
-    # Issue #3865. The start regenerates the owed file and clears its mark, then
-    # the Worker refuses the hydrate: it already runs the server, on a working set
-    # with the old file, which its snapshots will publish. The server is kept on
-    # that Worker, and the change is owed again in the same transaction. Once the
-    # only op group is detached or deleted, the cleared mark is all that says so.
+async def _operator_removed_while_running(world: _World, by: str) -> None:
+    """Remove the only operator while the server runs, then stop it again.
+
+    ``by`` says how: the player leaves the op group, or the group, the server's
+    only op group, is detached or deleted.
+    """
+
     player = uuid.uuid4()
     group_id = await _attached_op_group(world, player)
     await _set_state(world.engine, world.server_id, "running")
@@ -329,6 +326,20 @@ async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
             group_id=group_id,
         )
     await _set_state(world.engine, world.server_id, "stopped")
+
+
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
+@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
+async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
+    world: _World, by: str
+) -> None:
+    # Issue #3865. The start regenerates the owed file and clears its mark, then
+    # the Worker refuses the hydrate: it already runs the server, on a working set
+    # with the old file, which its snapshots will publish. The server is kept on
+    # that Worker, and the change is owed again in the same transaction. Once the
+    # only op group is detached or deleted, the cleared mark is all that says so.
+    await _operator_removed_while_running(world, by)
     cp = FakeControlPlane(
         place_to=_WORKER,
         outcomes={
@@ -356,3 +367,44 @@ async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
     assert server is not None
     assert server.assigned_worker_id == _WORKER
     assert server.observed_state is ObservedState.RUNNING
+
+
+# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(16 * 10 + 30)
+@pytest.mark.parametrize("by", ["remove_player", "detach_group", "delete_group"])
+async def test_a_start_kept_on_a_busy_worker_leaves_the_change_owed(
+    world: _World, by: str
+) -> None:
+    # Issue #3890. The start regenerates the owed file and clears its mark, then
+    # the Worker refuses the hydrate BUSY: another command of the server holds the
+    # id there and may still launch it, on a working set with the old file. The
+    # server is kept on that Worker with nothing launched, so the change is owed
+    # again in the transaction that records observed=unknown.
+    await _operator_removed_while_running(world, by)
+    cp = FakeControlPlane(
+        place_to=_WORKER,
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", "command_in_flight"),
+                message="instancemanager: a lifecycle command is already in flight",
+            )
+        },
+    )
+
+    with pytest.raises(CommandDispatchError):
+        await StartServer(
+            uow=world.uow(),
+            control_plane=cp,
+            clock=FakeClock(_NOW + dt.timedelta(minutes=1)),
+            jar_provisioner=FakeJarProvisioner(),
+            store_generation=StorageGenerationReader(storage=world.storage),
+            file_store=world.files,
+        )(community_id=world.community_id, server_id=world.server_id)
+
+    async with world.uow() as uow:
+        owed = await uow.groups.list_sync_pending(world.server_id)
+        server = await uow.servers.get_by_id(world.server_id)
+    assert [mark.kind for mark in owed] == [GroupKind.OP]
+    assert server is not None
+    assert server.assigned_worker_id == _WORKER
+    assert server.observed_state is ObservedState.UNKNOWN

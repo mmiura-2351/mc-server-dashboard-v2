@@ -12,7 +12,9 @@ servers layer: ``NotFoundError`` -> :class:`BackupNotFoundError`,
 ``StorageUnavailableError`` -> :class:`BackupStorageUnavailableError` (#2270),
 and ``ArchiveUnreadableError`` -> :class:`BackupUnreadableError` (#2371), as is
 ``ArchiveTooLargeError`` (#3237): an archive past the decompressed-size cap can
-never be restored either, override or not.
+never be restored either, override or not. At create, ``ArchiveTooLargeError``
+-> :class:`BackupTooLargeError` instead (#3859): the working set is too large to
+archive, and nothing was written.
 
 The ``StorageUnavailableError`` translation covers every method that reaches the
 store, so one outage yields one storage type at the seam and one status at the edge
@@ -46,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupRestorePartiallyPublishedError,
     BackupRestorePublicationUnknownError,
     BackupStorageUnavailableError,
+    BackupTooLargeError,
     BackupUnreadableError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -105,6 +108,10 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupCorruptError(
                 str(server_id.value), corrupt_count=len(exc.report.corrupt)
             ) from exc
+        except ArchiveTooLargeError as exc:
+            # The working set's archive would be past the decompressed-size cap
+            # restore and the upload gate hold it to (#3859): none was written.
+            raise BackupTooLargeError(str(server_id.value)) from exc
         except StorageUnavailableError as exc:
             # The object store surfaced a transport/backend failure during the archive
             # upload (issue #2270): a botocore ClientError (e.g. the SeaweedFS 500
