@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { Modal } from "./Modal.tsx";
 import { clampPopoverOffset, Popover } from "./Popover.tsx";
 
 function renderPopover() {
@@ -85,6 +86,45 @@ describe("Popover", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByText("panel content")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("leaves Escape to a modal opened over it", () => {
+    const onClose = vi.fn();
+    const page = (modalOpen: boolean) => (
+      <>
+        <Popover label="Menu">
+          <p>panel content</p>
+        </Popover>
+        <Modal open={modalOpen} title="Title" onClose={onClose}>
+          <p>Body</p>
+        </Modal>
+      </>
+    );
+    const { rerender } = render(page(false));
+    fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+    // As an EULA prompt opens over the dashboard's open state filter.
+    rerender(page(true));
+
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("panel content")).toBeInTheDocument();
+  });
+
+  it("closes on Escape inside the topmost dialog", () => {
+    render(
+      // A dialog that stays open on Escape, as a busy one may.
+      <Modal open={true} title="Title" onClose={() => {}}>
+        <Popover label="Menu">
+          <p>panel content</p>
+        </Popover>
+      </Modal>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(screen.queryByText("panel content")).not.toBeInTheDocument();
   });
 
   it("keeps the panel within the viewport when the trigger sits near the right edge", () => {

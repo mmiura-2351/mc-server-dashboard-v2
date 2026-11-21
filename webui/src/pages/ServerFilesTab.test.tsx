@@ -3053,6 +3053,118 @@ describe("Keyboard shortcuts", () => {
   });
 });
 
+// ── Keyboard shortcuts with a modal open (issue #3920) ───────────────────────
+
+// A key pressed while a modal is open is the dialog's: the listing behind it
+// neither acts on its selection nor takes the key from the browser.
+describe("Keyboard shortcuts with a modal open", () => {
+  // Opens the bulk delete confirm over a listing with a.txt selected and b.txt
+  // not, and returns the dialog, which holds focus.
+  async function openConfirmOverSelection({ copyFirst = false } = {}) {
+    routeGet({
+      detail: server(),
+      list: listing([
+        { name: "a.txt", kind: "file" },
+        { name: "b.txt", kind: "file" },
+      ]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/a\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+    if (copyFirst) {
+      fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+      await screen.findByText(t("files.copied"));
+    }
+    fireEvent.click(
+      screen.getByRole("button", { name: t("files.bulk.delete") }),
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(document.activeElement).toBe(dialog);
+    return dialog;
+  }
+
+  it.each(["ArrowDown", "ArrowUp"])(
+    "%s leaves focus in the dialog",
+    async (key) => {
+      const dialog = await openConfirmOverSelection();
+
+      expect(fireEvent.keyDown(dialog, { key })).toBe(true);
+      expect(document.activeElement).toBe(dialog);
+    },
+  );
+
+  it.each(["Delete", "Backspace"])(
+    "%s opens no delete confirm for the selection behind",
+    async (key) => {
+      const dialog = await openConfirmOverSelection();
+
+      expect(fireEvent.keyDown(dialog, { key })).toBe(true);
+      expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    },
+  );
+
+  it("F2 opens no rename dialog for the selection behind", async () => {
+    const dialog = await openConfirmOverSelection();
+
+    expect(fireEvent.keyDown(dialog, { key: "F2" })).toBe(true);
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  });
+
+  it("Ctrl+A selects nothing behind", async () => {
+    const dialog = await openConfirmOverSelection();
+
+    expect(fireEvent.keyDown(dialog, { key: "a", ctrlKey: true })).toBe(true);
+    expect(screen.getByRole("checkbox", { name: "b.txt" })).not.toBeChecked();
+  });
+
+  it("Ctrl+C copies nothing from behind", async () => {
+    const dialog = await openConfirmOverSelection();
+
+    expect(fireEvent.keyDown(dialog, { key: "c", ctrlKey: true })).toBe(true);
+    expect(screen.queryByText(t("files.copied"))).not.toBeInTheDocument();
+  });
+
+  it("Ctrl+V pastes nothing behind", async () => {
+    const dialog = await openConfirmOverSelection({ copyFirst: true });
+
+    expect(fireEvent.keyDown(dialog, { key: "v", ctrlKey: true })).toBe(true);
+    // A paste over a.txt would first ask to overwrite it.
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+  });
+
+  it("Escape closes the dialog and keeps the selection behind", async () => {
+    const dialog = await openConfirmOverSelection();
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+  });
+
+  it("Escape closes a dialog opened over the context menu, not the menu", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+    fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+    // The menu takes no keys but Escape, so Delete opens the confirm over it.
+    fireEvent.keyDown(document, { key: "Delete" });
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+});
+
 // ── Navigation history (issue #1475) ────────────────────────────────────────
 
 describe("ServerFilesTab navigation history", () => {
