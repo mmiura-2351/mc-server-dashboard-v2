@@ -19,6 +19,8 @@ import re
 from fnmatch import fnmatchcase
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -37,11 +39,39 @@ def _repo_files(source: str) -> set[str]:
     }
 
 
-def _filter_paths(trigger: str) -> set[str]:
+def _filter_paths(trigger: str) -> list[str]:
     workflow = (ROOT / ".github/workflows/api.yml").read_text()
     block = re.search(rf"^  {trigger}:\n((?:    .*\n)+)", workflow, re.MULTILINE)
     assert block is not None, trigger
-    return set(re.findall(r'^      - "([^"]+)"$', block[1], re.MULTILINE))
+    return re.findall(r'^      - "([^"]+)"$', block[1], re.MULTILINE)
+
+
+def _listed(path: str, patterns: list[str]) -> bool:
+    return any(fnmatchcase(path, pattern) for pattern in patterns)
+
+
+@pytest.mark.parametrize(
+    ("patterns", "path", "listed"),
+    [
+        # Names no tracked file, so the scan does not read this module's own cases.
+        (["x.yml"], "x.yml", True),
+        (["x.yml"], "x.yml.orig", False),
+        # `*` stays within one path segment; `**` crosses `/`.
+        (["web/*"], "web/x.ts", True),
+        (["web/*"], "web/src/x.ts", False),
+        (["web/**"], "web/src/x.ts", True),
+        # `**/` matches no directory too.
+        (["**/x.ts"], "x.ts", True),
+        # The last pattern that matches decides, and a `!` one excludes.
+        (["x.yml", "!x.yml"], "x.yml", False),
+        (["web/**", "!web/*.json", "web/a.json"], "web/a.json", True),
+        (["web/**", "!web/*.json"], "web/src/a.json", True),
+    ],
+)
+def test_a_filter_lists_a_path_as_github_matches_it(
+    patterns: list[str], path: str, listed: bool
+) -> None:
+    assert _listed(path, patterns) is listed
 
 
 def test_the_api_workflow_runs_on_every_repo_file_an_api_test_reads() -> None:
@@ -51,10 +81,6 @@ def test_the_api_workflow_runs_on_every_repo_file_an_api_test_reads() -> None:
 
     assert read - {".github/workflows/api.yml"}, "the scan found no file it guards"
     for trigger in ("pull_request", "push"):
-        listed = _filter_paths(trigger)
-        unlisted = sorted(
-            path
-            for path in read
-            if not any(fnmatchcase(path, pattern) for pattern in listed)
-        )
+        patterns = _filter_paths(trigger)
+        unlisted = sorted(path for path in read if not _listed(path, patterns))
         assert unlisted == [], trigger
