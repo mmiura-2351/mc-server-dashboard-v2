@@ -441,7 +441,8 @@ process died) the teardown moves only the crash's `observed_at` to the
 disconnect, so its release waits a full `grace_seconds` from the disconnect, as
 for the Worker's other servers: a Worker back within it still gets the final
 snapshot taken. After an API restart, graceful or a crash, the wait runs from
-the new process's start instead (the `reconciler.grace_seconds` row below).
+no earlier than the new process's start (the `reconciler.grace_seconds` row
+below).
 
 The stop side needs no such detour. A server whose intent is already stopped but
 which is still assigned to a Worker — a drained Worker's server still running, or
