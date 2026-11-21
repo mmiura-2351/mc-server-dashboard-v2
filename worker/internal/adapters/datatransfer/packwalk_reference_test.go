@@ -3,6 +3,7 @@ package datatransfer
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -198,7 +199,7 @@ func TestPackOfAQuiescentWorkingSetIsByteIdenticalToThePathBasedWalk(t *testing.
 		t.Fatalf("reference pack: %v", err)
 	}
 	h := &capturingHandler{}
-	if err := packTar(root, &got, slog.New(h)); err != nil {
+	if err := packTar(context.Background(), root, &got, slog.New(h)); err != nil {
 		t.Fatalf("packTar: %v", err)
 	}
 

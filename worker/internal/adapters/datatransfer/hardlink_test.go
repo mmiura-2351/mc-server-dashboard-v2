@@ -69,11 +69,14 @@ func TestSnapshotRoundTripCarriesNoHardLink(t *testing.T) {
 	}
 
 	var archive bytes.Buffer
-	if err := packTar(src, &archive, slog.Default()); err != nil {
+	if err := packTar(context.Background(), src, &archive, slog.Default()); err != nil {
 		t.Fatalf("pack: %v", err)
 	}
 	dest := filepath.Join(base, "dest")
-	if err := unpackTar(&archive, dest); err != nil {
+	if err := os.Mkdir(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := unpackTar(&archive, openDirFd(t, dest)); err != nil {
 		t.Fatalf("unpack: %v", err)
 	}
 
