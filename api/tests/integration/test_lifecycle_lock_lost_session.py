@@ -76,7 +76,7 @@ async def test_a_held_lock_confirms_it_is_held(engine: AsyncEngine) -> None:
 
 
 async def test_a_lock_whose_session_ended_reports_itself_lost(
-    engine: AsyncEngine,
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
     server_id = ServerId(uuid.uuid4())
     lock = PgLifecycleLock(engine=engine)
@@ -88,6 +88,10 @@ async def test_a_lock_whose_session_ended_reports_itself_lost(
                 await held.ensure_held()
             # Lost stays lost, although the dead connection now fails differently.
             await held.ensure_held()
+
+    # The body already raised the loss, so the release has nothing to unlock and
+    # nothing to report.
+    assert _release_warnings(caplog) == []
 
     # The ended session released it: another holder takes it at once.
     async with lock.hold(server_id) as held:
@@ -118,9 +122,58 @@ async def test_a_loss_only_the_release_finds_is_logged_and_the_hold_ends_normall
     async with lock.hold(server_id):
         await terminate_lock_session(engine, server_id)
 
-    assert len(_release_warnings(caplog)) == 1
+    [warning] = _release_warnings(caplog)
+    # The text names what the release met, since a failing unlock on a live
+    # session logs the same way.
+    assert warning.exc_info is not None
+    assert type(warning.exc_info[1]).__name__ in warning.getMessage()
     async with lock.hold(server_id) as held:
         await held.ensure_held()
+
+
+async def test_a_healthy_release_unlocks_and_pools_the_connection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # On a pool of one, the next hold reuses the connection only if the release
+    # neither failed nor closed it, and no session may still hold the key then.
+    assert _DB_URL is not None
+    engine = create_async_engine(_DB_URL, pool_size=1, max_overflow=0)
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+    try:
+        async with lock.hold(server_id) as held:
+            first = await _backend_pid(held)
+        assert await _sessions_holding(engine, server_id) == 0
+        async with lock.hold(server_id) as held:
+            second = await _backend_pid(held)
+            await held.ensure_held()
+    finally:
+        await engine.dispose()
+
+    assert second == first
+    assert _release_warnings(caplog) == []
+
+
+async def test_a_release_whose_session_no_longer_held_the_key_is_logged(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A live session that stopped holding the key answers the unlock with
+    # false: the same loss, found only at the release.
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+
+    async with lock.hold(server_id) as held:
+        await _release_by_hand(held, server_id)
+
+    [warning] = _release_warnings(caplog)
+    assert "no longer held" in warning.getMessage()
+
+
+async def _backend_pid(held: HeldLifecycleLock) -> int:
+    assert isinstance(held, lifecycle_lock_mod._PgHeldLifecycleLock)
+    pid = await held._conn.scalar(text("SELECT pg_backend_pid()"))
+    assert isinstance(pid, int)
+    return pid
 
 
 async def test_the_release_never_replaces_what_the_body_raised(

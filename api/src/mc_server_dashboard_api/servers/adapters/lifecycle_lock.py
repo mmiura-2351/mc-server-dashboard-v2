@@ -162,7 +162,7 @@ class _PgHeldLifecycleLock(HeldLifecycleLock):
             # the loss was already raised: there is nothing left to release.
             return
         try:
-            await self._conn.execute(
+            unlocked = await self._conn.scalar(
                 text("SELECT pg_advisory_unlock(:key)"), {"key": self._key}
             )
         except BaseException as exc:
@@ -175,9 +175,21 @@ class _PgHeldLifecycleLock(HeldLifecycleLock):
             if not isinstance(exc, Exception):
                 raise
             _LOG.warning(
-                "the lifecycle lock's session ended before its release; writes "
-                "made after the last check ran in the window that check leaves",
+                "the lifecycle lock's release failed with %s, so its connection "
+                "was closed; writes made after the last check ran in the window "
+                "that check leaves",
+                type(exc).__name__,
                 exc_info=exc,
+                extra={"server_id": str(self._server_id.value)},
+            )
+            return
+        if not unlocked:
+            # A live session that no longer held the key: the same loss, found
+            # only here, and answered the same way.
+            _LOG.warning(
+                "the lifecycle lock's session no longer held the lock at its "
+                "release; writes made after the last check ran in the window that "
+                "check leaves",
                 extra={"server_id": str(self._server_id.value)},
             )
 
