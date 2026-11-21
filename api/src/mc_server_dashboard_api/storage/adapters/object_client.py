@@ -113,17 +113,22 @@ def _translating_backend_faults(operation: str, key: str) -> Iterator[None]:
     except ClientError as exc:
         if _is_backend_fault(exc):
             raise ObjectStoreUnavailableError(
-                f"object store {operation} failed for {key}"
+                f"object store {operation} failed for {key!r}"
             ) from exc
         raise
     except _TRANSPORT_FAILURE_ERRORS as exc:
         raise ObjectStoreUnreachableError(
-            f"object store {operation} failed for {key}"
+            f"object store {operation} failed for {key!r}"
         ) from exc
 
 
 class _Aioboto3S3Client:
-    """Implements :class:`S3Client` over one aioboto3 client and a fixed bucket."""
+    """Implements :class:`S3Client` over one aioboto3 client and a fixed bucket.
+
+    An error that names a key names it repr'd (issues #3907, #3922). Such an
+    error reaches a log in a traceback, which keeps its line breaks, so in the
+    ``text`` format a raw newline in a key would start a line of its own.
+    """
 
     def __init__(self, client: Any, bucket: str) -> None:
         # ``client`` is an aioboto3 S3 client (untyped: aiobotocore ships no stubs,
@@ -152,7 +157,7 @@ class _Aioboto3S3Client:
                 )
             except ClientError as exc:
                 if _is_not_found(exc) or _is_no_such_bucket(exc):
-                    raise NotFoundError(f"object not found: {key}") from exc
+                    raise NotFoundError(f"object not found: {key!r}") from exc
                 raise
         return _iter_body(resp["Body"])
 
@@ -164,7 +169,7 @@ class _Aioboto3S3Client:
             await self._client.put_object(Bucket=self._bucket, Key=key, Body=body)
         except _UPLOAD_FAILURE_ERRORS as exc:
             raise ObjectStoreUnavailableError(
-                f"object store put failed for {key}"
+                f"object store put failed for {key!r}"
             ) from exc
 
     async def put_object_if_absent(self, key: str, body: bytes) -> bool:
@@ -180,14 +185,14 @@ class _Aioboto3S3Client:
                 return False
             if _is_unsupported(exc):
                 raise ConditionalPutUnsupportedError(
-                    f"object store rejected a conditional put for {key}"
+                    f"object store rejected a conditional put for {key!r}"
                 ) from exc
             raise ObjectStoreUnavailableError(
-                f"object store put failed for {key}"
+                f"object store put failed for {key!r}"
             ) from exc
         except _UPLOAD_FAILURE_ERRORS as exc:
             raise ObjectStoreUnavailableError(
-                f"object store put failed for {key}"
+                f"object store put failed for {key!r}"
             ) from exc
         return True
 
@@ -246,7 +251,7 @@ class _Aioboto3S3Client:
                 raise
         except _UPLOAD_FAILURE_ERRORS as exc:
             raise ObjectStoreUnavailableError(
-                f"object store upload failed for {key}"
+                f"object store upload failed for {key!r}"
             ) from exc
 
     async def _upload_part(
@@ -284,7 +289,7 @@ class _Aioboto3S3Client:
                 )
             except ClientError as exc:
                 if _is_not_found(exc) or _is_no_such_bucket(exc):
-                    raise NotFoundError(f"object not found: {src_key}") from exc
+                    raise NotFoundError(f"object not found: {src_key!r}") from exc
                 raise
 
     async def delete_object(self, key: str) -> None:

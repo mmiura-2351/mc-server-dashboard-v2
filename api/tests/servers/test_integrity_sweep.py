@@ -37,10 +37,13 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    LifecycleLockLostError,
     ServerBusyError,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
+    NullHeldLifecycleLock,
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -105,11 +108,11 @@ class _BusyLifecycleLock(LifecycleLock):
         self.acquisitions = 0
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         self.acquisitions += 1
         if self.acquisitions in self.busy:
             raise ServerBusyError(str(server_id.value))
-        yield
+        yield NullHeldLifecycleLock()
 
 
 class _DeletingLifecycleLock(LifecycleLock):
@@ -125,10 +128,10 @@ class _DeletingLifecycleLock(LifecycleLock):
         self.backup = backup
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         self.store.archives.discard(self.backup.storage_ref)
         self.uow.backups.by_id.pop(self.backup.id, None)
-        yield
+        yield NullHeldLifecycleLock()
 
 
 def _wire(
@@ -464,7 +467,8 @@ async def test_dangling_row_is_still_condemned_under_the_lifecycle_lock() -> Non
 
     summary = await sweep()
 
-    assert lock.events == [(sid, "acquire"), (sid, "release")]
+    # The verdict is written after a check that the lock still holds (#3927).
+    assert lock.events == [(sid, "acquire"), (sid, "check"), (sid, "release")]
     assert uow.backups.by_id[dangling.id].health is BackupHealth.UNREADABLE
     assert summary.backups_dangling == 1
     marks = [e for e in audit.events if e.operation == BACKUP_MARK_UNREADABLE]
@@ -537,3 +541,26 @@ async def test_backup_deleted_before_its_lock_is_taken_gets_no_verdict() -> None
     assert audit.events == []
     assert summary.backups_dangling == 0
     assert summary.backups_healthy == 0
+
+
+@pytest.mark.parametrize("ref", ["good", "bad", "missing"])
+async def test_a_sweep_that_lost_the_lock_writes_no_verdict(ref: str) -> None:
+    # The lock is what keeps a backup still being published out of the check
+    # (issue #3220); one lost during the probe leaves no verdict safe to write
+    # (issue #3927), healthy or condemning.
+    sid = ServerId.new()
+    backup = _backup(sid, ref, health=BackupHealth.UNKNOWN)
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    sweep, uow, store, audit = _wire(
+        servers=[_server(sid)], backups=[backup], lifecycle_lock=lock
+    )
+    store.corrupt_refs.add("bad")
+    if ref == "missing":
+        store.archives.discard(ref)
+
+    with pytest.raises(LifecycleLockLostError):
+        await sweep()
+
+    assert uow.backups.by_id[backup.id].health is BackupHealth.UNKNOWN
+    assert audit.events == []

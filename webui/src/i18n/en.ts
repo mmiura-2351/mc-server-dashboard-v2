@@ -931,6 +931,8 @@ export const en = {
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
   "files.error.nameTooLong": "The name is too long.",
+  "files.error.invalidFilename":
+    "This file name cannot be used. Rename the file so its name has no control characters, / or \\, and is not too long, then upload it again.",
   // Platform-managed server.properties refusals (issues #2623, #2812, #2846).
   // `{key}` is the offending key from the 422's `key` extension member. Both
   // messages are worded for every door that raises them — save, delete, rename,
@@ -1898,6 +1900,8 @@ export const en = {
   "plugins.error.busy": "Another operation is in progress. Please wait.",
   "plugins.error.invalidPath":
     "Invalid file. Only .jar files can be uploaded as {nouns}.",
+  "plugins.error.invalidFilename":
+    "This file name cannot be used for a {noun}. Rename the file so its name has no control characters, / or \\, and is not too long, then upload it again.",
   "plugins.error.tooLarge":
     "The file is too large. Maximum upload size is 512 MB.",
   "plugins.error.catalogUpstreamFailed":
@@ -2005,7 +2009,9 @@ export const en = {
   "resourcePacks.error.tooLarge": "That file exceeds the 256 MiB upload limit.",
   "resourcePacks.error.uploadFailed": "Could not upload the resource pack.",
   "resourcePacks.error.invalidFilename":
-    "This file name cannot be used for a resource pack. Rename the file so its name has no control characters, / or \\ and is at most 255 bytes, then upload it again.",
+    "This file name cannot be used for a resource pack. Rename the file so its name has no control characters, / or \\, and is not too long, then upload it again.",
+  "resourcePacks.error.invalidDisplayName":
+    "This display name cannot be used. Enter a name of up to 200 characters with no control characters.",
   "resourcePacks.error.deleteFailed": "Could not delete the resource pack.",
   "resourcePacks.error.inUse":
     "This resource pack is assigned to one or more servers and cannot be deleted.",

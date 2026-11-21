@@ -165,6 +165,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     InvalidVersionIdError,
+    LifecycleLockLostError,
     PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
@@ -176,6 +177,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UploadBusyError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
 router = APIRouter(route_class=RequestBodyLimitRoute)
@@ -490,6 +494,16 @@ async def write_file(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_WRITE,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
@@ -663,6 +677,16 @@ async def rollback_file(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_ROLLBACK,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_file(recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id)
 
 
@@ -747,9 +771,18 @@ async def upload_file(
     past that is 503 ``upload_busy``, refused before its body is read into memory,
     with nothing written; sending it again shortly is the remedy. An upload without
     ``extract`` is never refused this way.
+
+    **A name no file can carry (issue #3922).** The part's filename names the file
+    written under ``path``, so one that is blank, carries a control character, a
+    lone surrogate or a Unicode noncharacter, contains ``/`` or ``\\``, or is over
+    255 bytes in UTF-8 is 422 ``invalid_filename``, refused before a slot is taken
+    or the upload is read into memory (Starlette has spooled it by then). The path
+    rules above still apply to the name that passes.
     """
 
     filename = file.filename or ""
+    if not is_valid_upload_filename(filename):
+        raise _unprocessable("invalid_filename")
     try:
         with admission.slot() if extract else nullcontext():
             content = await _read_capped_upload(file)
@@ -796,6 +829,16 @@ async def upload_file(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_UPLOAD,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except ServerFileStorageUnavailableError as exc:
         raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_UPLOAD, authorized, community_id, server_id)
@@ -1156,6 +1199,16 @@ async def rename_file(
             recorder, ops.FILE_RENAME, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_RENAME,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_file(recorder, ops.FILE_RENAME, authorized, community_id, server_id)
 
 
@@ -1220,6 +1273,16 @@ async def delete_file(
             recorder, ops.FILE_DELETE, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_DELETE,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_file(recorder, ops.FILE_DELETE, authorized, community_id, server_id)
 
 
@@ -1287,6 +1350,16 @@ async def make_directory(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_MKDIR,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except ServerFileStorageUnavailableError as exc:
         raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_MKDIR, authorized, community_id, server_id)
@@ -1393,13 +1466,19 @@ async def _record_file_failure(
     authorized: AuthUser,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
+    *,
+    outcome: Outcome = Outcome.DENIED,
 ) -> None:
-    """Record a refused file op (DENIED — server unsettled), targeting the server."""
+    """Record a failed file op, targeting the server.
+
+    A refusal (server unsettled or busy) is DENIED; a lifecycle lock lost before
+    the write it guards (issue #3927) is an ERROR.
+    """
 
     await recorder.record(
         AuditEvent(
             operation=operation,
-            outcome=Outcome.DENIED,
+            outcome=outcome,
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=ops.TARGET_FILE,

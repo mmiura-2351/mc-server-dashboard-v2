@@ -1066,6 +1066,127 @@ async def test_restore_bumps_generation_and_records_sentinel_publisher(
     )
 
 
+class _Refused(Exception):
+    """What a test fence raises to refuse (issue #3927)."""
+
+
+async def _lock_is_held(
+    harness: StorageHarness, community: CommunityId, server: ServerId
+) -> bool:
+    """Whether the per-server lock is held: a read that takes it cannot finish."""
+
+    try:
+        await asyncio.wait_for(
+            harness.storage.settled_generation(community, server), timeout=0.5
+        )
+    except TimeoutError:
+        return True
+    return False
+
+
+class _Fence:
+    """A caller's exclusion fence that records where it ran, then may refuse."""
+
+    def __init__(
+        self,
+        harness: StorageHarness,
+        community: CommunityId,
+        server: ServerId,
+        *,
+        refuse: bool,
+    ) -> None:
+        self._harness = harness
+        self._scope = (community, server)
+        self._refuse = refuse
+        self.under_lock: list[bool] = []
+
+    async def __call__(self) -> None:
+        self.under_lock.append(await _lock_is_held(self._harness, *self._scope))
+        if self._refuse:
+            raise _Refused
+
+
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
+async def test_restore_awaits_its_fence_once_under_the_server_lock(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    key = await harness.storage.create_backup_from_current(community, server)
+    await harness.publish(community, server, {"f": b"v2"})
+    fence = _Fence(harness, community, server, refuse=False)
+
+    await harness.storage.restore_backup(community, server, key, fence=fence)
+
+    assert fence.under_lock == [True]
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"v1"}
+
+
+# 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(20 * 10 + 30)
+async def test_restore_whose_fence_refuses_bumps_and_publishes_nothing(
+    harness: StorageHarness,
+) -> None:
+    # The fence is the caller's last check that it still holds its exclusion
+    # (issue #3927): a refusal leaves the store as the restore found it.
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"v1"})
+    key = await harness.storage.create_backup_from_current(community, server)
+    await harness.publish(community, server, {"f": b"v2"})
+    fence = _Fence(harness, community, server, refuse=True)
+
+    with pytest.raises(_Refused):
+        await harness.storage.restore_backup(community, server, key, fence=fence)
+
+    assert await harness.storage.current_generation(community, server) == 2
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"f": b"v2"}
+
+
+async def test_prune_awaits_its_fence_once_under_the_server_lock(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"w"})
+    fence = _Fence(harness, community, server, refuse=False)
+
+    await harness.storage.prune_to_final_snapshot(community, server, fence=fence)
+
+    assert fence.under_lock == [True]
+    with pytest.raises(NotFoundError):
+        await drain(harness.storage.open_hydrate_source(community, server))
+
+
+async def test_prune_whose_fence_refuses_removes_and_advances_nothing(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"w"})
+    fence = _Fence(harness, community, server, refuse=True)
+
+    with pytest.raises(_Refused):
+        await harness.storage.prune_to_final_snapshot(community, server, fence=fence)
+
+    assert await harness.storage.current_generation(community, server) == 1
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == {"world/level.dat": b"w"}
+
+
+async def test_prune_of_an_unpublished_store_whose_fence_refuses_advances_nothing(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    fence = _Fence(harness, community, server, refuse=True)
+
+    with pytest.raises(_Refused):
+        await harness.storage.prune_to_final_snapshot(community, server, fence=fence)
+
+    assert fence.under_lock == [True]
+    assert await harness.storage.current_generation(community, server) == 0
+
+
 async def _edit_write_file(
     harness: StorageHarness, community: CommunityId, server: ServerId
 ) -> int:

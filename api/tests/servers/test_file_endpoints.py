@@ -23,7 +23,7 @@ import tarfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx2
@@ -107,6 +107,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     InvalidVersionIdError,
+    LifecycleLockLostError,
     PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
@@ -140,6 +141,11 @@ from tests.identity.fakes import FakeUnitOfWork as IdentityFakeUnitOfWork
 from tests.servers import archive_cap_shapes
 from tests.servers.fakes import FakeFileStore, FakeUnitOfWork
 from tests.servers.test_files import _UNREADABLE_ARCHIVES
+from tests.servers.upload_filenames import (
+    accepted_filenames,
+    post_raw_upload,
+    refused_filenames,
+)
 from tests.storage.fake_s3 import FakeS3Store
 from tests.storage.faulty_s3 import Faults, faulty_s3_factory
 
@@ -1513,6 +1519,82 @@ def test_an_extract_holds_a_slot_until_it_ends(
         pass
 
 
+# --- the upload's filename (issue #3922) ------------------------------------
+#
+# The part's filename becomes a file name under ``path``, so the upload refuses
+# one no file can carry, as the resource-pack upload does. The path rules of the
+# use case still apply on top.
+
+
+@pytest.mark.parametrize(("filename", "charset"), refused_filenames(".txt"))
+def test_upload_refuses_an_unsafe_filename(
+    filename: bytes, charset: str | None
+) -> None:
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload?path=."),
+        filename,
+        charset=charset,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert upload.calls == []
+
+
+@pytest.mark.parametrize("filename", accepted_filenames(".txt"))
+def test_upload_accepts_a_unicode_filename(filename: str) -> None:
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4(), "/upload?path=."),
+        f'"{filename}"'.encode(),
+    )
+    assert resp.status_code == 204
+    assert [call["filename"] for call in upload.calls] == [filename]
+
+
+def test_upload_refuses_the_filename_before_reading_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b""
+
+    monkeypatch.setattr(files_api, "_read_capped_upload", read)
+    upload = _FakeUpload()
+    app = _app(member=True, allow=True, upload=upload)
+    resp = post_raw_upload(
+        _client(app), _url(uuid.uuid4(), uuid.uuid4(), "/upload?path=."), b'"a\nb"'
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert reads == []
+
+
+def test_extract_refuses_the_filename_before_taking_a_slot() -> None:
+    # A name no retry can fix is refused as such, not as a busy server.
+    upload = _FakeUpload()
+    admission = ArchiveUploadAdmission(limit=1)
+    app = _app(member=True, allow=True, upload=upload)
+    _with_admission(app, admission)
+
+    with admission.slot():
+        resp = post_raw_upload(
+            _client(app),
+            _url(uuid.uuid4(), uuid.uuid4(), "/upload?path=.&extract=true"),
+            b'"a\nb.zip"',
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert upload.calls == []
+
+
 # --- audit recording -------------------------------------------------------
 
 
@@ -1548,6 +1630,55 @@ def test_write_unsettled_records_denied_audit() -> None:
     assert resp.status_code == 409
     assert [e.operation for e in recorder.events] == [ops.FILE_WRITE]
     assert recorder.events[0].outcome is Outcome.DENIED
+
+
+@pytest.mark.parametrize(
+    ("route", "operation"),
+    [
+        ("write", ops.FILE_WRITE),
+        ("rollback", ops.FILE_ROLLBACK),
+        ("upload", ops.FILE_UPLOAD),
+        ("rename", ops.FILE_RENAME),
+        ("delete", ops.FILE_DELETE),
+        ("mkdir", ops.FILE_MKDIR),
+    ],
+)
+def test_a_lost_lifecycle_lock_is_503_and_audited_as_an_error(
+    route: str, operation: str
+) -> None:
+    # The lock was lost before the write it guards (issue #3927), as a busy lock
+    # is refused before it: both are audited.
+    recorder = RecordingAuditRecorder()
+    error = LifecycleLockLostError("x")
+    use_case: dict[str, Any] = {
+        route: _FakeUpload(error=error)
+        if route == "upload"
+        else _FakeUseCase(error=error)
+    }
+    app = _app(member=True, allow=True, recorder=recorder, **use_case)
+    client = _client(app)
+    base = _url(uuid.uuid4(), uuid.uuid4())
+    if route == "write":
+        resp = client.put(base, params={"path": "f"}, json={"content_base64": ""})
+    elif route == "rollback":
+        resp = client.post(
+            f"{base}/rollback", params={"path": "f"}, json={"version_id": "v1"}
+        )
+    elif route == "upload":
+        resp = client.post(
+            f"{base}/upload", files={"file": ("f", b"x", "application/octet-stream")}
+        )
+    elif route == "rename":
+        resp = client.post(f"{base}/rename", json={"from": "a", "to": "b"})
+    elif route == "delete":
+        resp = client.delete(base, params={"path": "f"})
+    else:
+        resp = client.post(f"{base}/directories", params={"path": "p"})
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
 
 
 def test_write_validation_failure_is_not_audited() -> None:

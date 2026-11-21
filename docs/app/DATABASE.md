@@ -574,6 +574,45 @@ table to reference (Section 7), so the API clears it on those paths, not a DB
 later design add a `worker` table, the FK (with `ON DELETE SET NULL`) can be
 introduced alongside it without changing this column's semantics.
 
+### The per-server lifecycle lock
+
+The at-rest-gated operations (a restore, a server delete, the file, plugin and
+resource-pack changes, an update, a backup's creation, upload and deletion) and a
+start's desired-state flip serialize per server on the **lifecycle lock**. It is
+a session-level advisory lock keyed by a 64-bit hash of the server id, held on a
+dedicated connection across the operation's several transactions and its storage
+writes. A waiter gives up after a few seconds with `409 server_busy`
+([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.2 sizes the pool for it).
+
+PostgreSQL releases the lock when its session ends (a dropped connection, a
+database restart, a terminated backend) and tells the holder nothing, so another
+operation on the same server can take it while the first still runs (issue
+#3927). So the holder checks that its own session still holds it, a query of
+`pg_locks` on the lock's connection, right before each write that relies on the
+lock, or before each run of such writes. A lock found lost, or a check that
+fails or gets no answer within five seconds, stops the operation before that
+write with `503 lifecycle_lock_lost`, and leaves what any failure at that point
+leaves. Closing a connection that stopped answering takes up to two seconds
+more. A restore and a server delete check inside the storage call, under the
+per-server storage lock, right before the restore's flip and the prune's first
+removal, so the slow copy or pack before them is covered too. A restore that
+loses the lock after its flip answers `503 restore_incomplete` instead, as the
+restored files are live and only the steps after the flip were skipped. An
+import whose server row is committed, and an update whose row change is, answer
+`503 seed_failed` instead, as for their other failures after that commit
+(Section 9). A route that audits a busy lock records a lost one as an `error`
+event. A loss that only the release finds is logged, not raised: every write the
+operation made followed a check that passed, so it answers as it finished, with
+its result or its own error.
+
+The lock needs a direct or session-pooled connection to PostgreSQL. Behind a
+transaction-mode pooler a session-level lock does not hold, and the check passes
+or fails by chance, so that setup is unsupported.
+
+What remains is the window from a check until the writes it guards are done: a
+lock lost there goes unnoticed, and closing it would take fencing tokens that
+neither the database writes nor the storage backends check.
+
 ### `worker` — no table (in-memory registry)
 
 **Decision: there is no durable `worker` table.** Worker registration,
@@ -1008,10 +1047,13 @@ caller. Routes that follow this rule:
 - server create, import, and update answering 503 `seed_failed` (#3483).
 
 A failure raised before the commit records no event, since nothing changed.
+A route that audits a busy lifecycle lock still records one there: `denied` for
+a busy lock and `error` for a lost one (Section 7, #3927).
 Backup restore is the exception: any failure after its publish records `error`.
 That covers 503 `seed_failed`, 503 `plugin_reconcile_incomplete`, 503
 `publish_incomplete` from a store that failed after its flip, 503
-`publish_unknown` from one that could not confirm its flip (#3564), and an
+`publish_unknown` from one that could not confirm its flip (#3564), 503
+`restore_incomplete` from a lifecycle lock lost after it (#3927), and an
 unmapped 500. When the published backup was a forced corrupt one, that `error`
 is recorded as `backup:force_restore`, not `backup:restore` (#3269).
 

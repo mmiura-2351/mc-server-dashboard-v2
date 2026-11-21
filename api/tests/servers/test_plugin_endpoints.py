@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -56,6 +57,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
+from mc_server_dashboard_api.servers.api import plugins as plugins_api
 from mc_server_dashboard_api.servers.application.catalog import (
     PluginDependencyInfo,
     PluginUpdateInfo,
@@ -81,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     FileTooLargeError,
     InvalidPluginSideError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginCacheStorageUnavailableError,
     PluginNotFoundError,
@@ -112,6 +115,11 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
+from tests.servers.upload_filenames import (
+    accepted_filenames,
+    post_raw_upload,
+    refused_filenames,
+)
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -506,6 +514,66 @@ def test_install_plugin_too_long_display_name_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_display_name"
+
+
+# The jar's name becomes a file name in the server's content directory, so an
+# install refuses one no file can carry, as the resource-pack upload does (issue
+# #3922).
+
+
+@pytest.mark.parametrize(("filename", "charset"), refused_filenames(".jar"))
+def test_install_plugin_refuses_an_unsafe_filename(
+    filename: bytes, charset: str | None
+) -> None:
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        filename,
+        fields={"display_name": b"Test"},
+        charset=charset,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert install.calls == []
+
+
+@pytest.mark.parametrize("filename", accepted_filenames(".jar"))
+def test_install_plugin_accepts_a_unicode_filename(filename: str) -> None:
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        f'"{filename}"'.encode(),
+        fields={"display_name": b"Test"},
+    )
+    assert resp.status_code == 201
+    assert [call["filename"] for call in install.calls] == [filename]
+
+
+def test_install_plugin_refuses_the_filename_before_reading_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b"jar-bytes"
+
+    monkeypatch.setattr(plugins_api, "_read_capped_upload", read)
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        b'"a\nb.jar"',
+        fields={"display_name": b"Test"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert reads == []
 
 
 # --- remove plugin ---------------------------------------------------------
@@ -1124,6 +1192,59 @@ def test_resolve_apply_busy_audit_targets_server() -> None:
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
     assert recorder.events[0].outcome is Outcome.DENIED
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+@pytest.mark.parametrize(
+    ("route", "operation", "target_type"),
+    [
+        ("install", ops.PLUGIN_INSTALL, ops.TARGET_SERVER),
+        ("resolve_apply", ops.PLUGIN_RESOLVE, ops.TARGET_SERVER),
+        ("update", ops.PLUGIN_UPDATE, ops.TARGET_PLUGIN),
+        ("remove", ops.PLUGIN_REMOVE, ops.TARGET_PLUGIN),
+        ("enable", ops.PLUGIN_ENABLE, ops.TARGET_PLUGIN),
+        ("disable", ops.PLUGIN_DISABLE, ops.TARGET_PLUGIN),
+        ("set_side", ops.PLUGIN_SET_SIDE, ops.TARGET_PLUGIN),
+    ],
+)
+def test_a_lost_lifecycle_lock_is_503_and_audited_as_an_error(
+    route: str, operation: str, target_type: str
+) -> None:
+    # The lock was lost before the write it guards (issue #3927), as a busy lock
+    # is refused before it: both are audited.
+    recorder = RecordingAuditRecorder()
+    error = LifecycleLockLostError("x")
+    key = "toggle" if route in {"enable", "disable"} else route
+    use_case: dict[str, Any] = {
+        key: _FakeInstall(error=error)
+        if route == "install"
+        else _FakeUseCase(error=error)
+    }
+    app = _app(member=True, allow=True, recorder=recorder, **use_case)
+    client = _client(app)
+    base = _url(uuid.uuid4(), uuid.uuid4())
+    plugin = f"{base}/{uuid.uuid4()}"
+    if route == "install":
+        resp = client.post(
+            base,
+            data={"display_name": "Test"},
+            files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+        )
+    elif route == "resolve_apply":
+        resp = client.post(f"{base}/resolve/apply")
+    elif route == "update":
+        resp = client.post(f"{plugin}/update", json={"version_id": "v1"})
+    elif route == "remove":
+        resp = client.delete(plugin)
+    elif route == "set_side":
+        resp = client.post(f"{plugin}/side", json={"side": "client"})
+    else:
+        resp = client.post(f"{plugin}/{route}")
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == target_type
 
 
 # --- store outage (issue #3233) --------------------------------------------
