@@ -106,6 +106,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.plugin import PluginId, ServerPlugin
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
 router = APIRouter(route_class=RequestBodyLimitRoute)
@@ -484,7 +487,14 @@ async def install_plugin(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     display_name: Annotated[str, Form()],
 ) -> PluginResponse:
-    """Install a plugin jar via multipart upload (plugin:manage)."""
+    """Install a plugin jar via multipart upload (plugin:manage).
+
+    The jar's filename names its file in the server's content directory, so a
+    name no file can carry is 422 ``invalid_filename``, refused before the body is
+    read (issue #3922): one that is blank, carries a control character, a lone
+    surrogate or a Unicode noncharacter, contains ``/`` or ``\\``, or is over 255
+    bytes in UTF-8.
+    """
 
     display_name = display_name.strip()
     if not display_name:
@@ -493,6 +503,8 @@ async def install_plugin(
         raise _unprocessable("invalid_display_name")
 
     filename = file.filename or ""
+    if not is_valid_upload_filename(filename):
+        raise _unprocessable("invalid_filename")
     content = await _read_capped_upload(file)
     try:
         plugin = await use_case(

@@ -176,6 +176,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UploadBusyError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntry, FileEntryKind
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
 router = APIRouter(route_class=RequestBodyLimitRoute)
@@ -747,9 +750,17 @@ async def upload_file(
     past that is 503 ``upload_busy``, refused before its body is read into memory,
     with nothing written; sending it again shortly is the remedy. An upload without
     ``extract`` is never refused this way.
+
+    **A name no file can carry (issue #3922).** The part's filename names the file
+    written under ``path``, so one that is blank, carries a control character, a
+    lone surrogate or a Unicode noncharacter, contains ``/`` or ``\\``, or is over
+    255 bytes in UTF-8 is 422 ``invalid_filename``, refused before a slot is taken
+    or the body read. The path rules above still apply to the name that passes.
     """
 
     filename = file.filename or ""
+    if not is_valid_upload_filename(filename):
+        raise _unprocessable("invalid_filename")
     try:
         with admission.slot() if extract else nullcontext():
             content = await _read_capped_upload(file)
