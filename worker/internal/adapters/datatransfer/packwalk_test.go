@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/testsupport/fdset"
 )
 
 // These tests pin the snapshot walk against a working set that changes under it
@@ -344,13 +346,6 @@ func TestPackRefusesASymlinkedRoot(t *testing.T) {
 // Every descriptor the walk opens is closed again, whether the pack succeeds, is
 // refused part-way down a deep tree, or skips an entry that changed under it.
 func TestPackLeavesNoDescriptorOpen(t *testing.T) {
-	openFds := func() int {
-		entries, err := os.ReadDir("/proc/self/fd")
-		if err != nil {
-			t.Skipf("no /proc/self/fd to count descriptors with: %v", err)
-		}
-		return len(entries)
-	}
 	deep := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(filepath.Join(deep, strings.Repeat("d/", maxPackDepth+1)), 0o750); err != nil {
 		t.Fatal(err)
@@ -368,7 +363,7 @@ func TestPackLeavesNoDescriptorOpen(t *testing.T) {
 	})
 	quiescent := representativeWorkingSet(t)
 
-	before := openFds()
+	before := fdset.Take(t)
 	if err := packTar(context.Background(), quiescent, io.Discard, slog.Default()); err != nil {
 		t.Fatalf("packTar: %v", err)
 	}
@@ -378,7 +373,5 @@ func TestPackLeavesNoDescriptorOpen(t *testing.T) {
 	if err := packTar(context.Background(), swapped, io.Discard, slog.Default()); err != nil {
 		t.Fatalf("packTar: %v", err)
 	}
-	if after := openFds(); after != before {
-		t.Fatalf("open descriptors: %d before, %d after", before, after)
-	}
+	fdset.RequireNoneOpenedSince(t, before)
 }

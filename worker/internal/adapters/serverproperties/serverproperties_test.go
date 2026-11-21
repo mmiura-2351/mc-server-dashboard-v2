@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/execution"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/testsupport/fdset"
 )
 
 // These tests pin the reader against what a server can plant at
@@ -293,13 +294,6 @@ func TestReadErrorMessages(t *testing.T) {
 }
 
 func TestReadLeavesNoDescriptorOpen(t *testing.T) {
-	openFds := func() int {
-		entries, err := os.ReadDir("/proc/self/fd")
-		if err != nil {
-			t.Skipf("cannot list descriptors: %v", err)
-		}
-		return len(entries)
-	}
 	regular, fifo, absent := t.TempDir(), t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(regular, FileName), []byte("a=b\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -307,13 +301,11 @@ func TestReadLeavesNoDescriptorOpen(t *testing.T) {
 	if err := unix.Mkfifo(filepath.Join(fifo, FileName), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	before := openFds()
+	before := fdset.Take(t)
 	for _, dir := range []string{regular, fifo, absent} {
 		_, _ = readWithin(t, dir)
 	}
-	if after := openFds(); after != before {
-		t.Errorf("open descriptors: %d before, %d after", before, after)
-	}
+	fdset.RequireNoneOpenedSince(t, before)
 }
 
 // Every refusal of the file itself is one condition for the callers that report

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/testsupport/fdset"
 )
 
 // Existing fixtures keep their short name; production uses scratchformat directly.
@@ -389,13 +390,6 @@ func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) 
 // Every descriptor the unpack opens on a member's path is closed again, whether
 // the unpack succeeds or a link on the path fails it, with openat2 or without it.
 func TestUnpackLeavesNoDescriptorOpen(t *testing.T) {
-	openFds := func() int {
-		entries, err := os.ReadDir("/proc/self/fd")
-		if err != nil {
-			t.Skipf("no /proc/self/fd to count descriptors with: %v", err)
-		}
-		return len(entries)
-	}
 	archive := func() io.Reader {
 		var buf bytes.Buffer
 		tw := tar.NewWriter(&buf)
@@ -432,16 +426,14 @@ func TestUnpackLeavesNoDescriptorOpen(t *testing.T) {
 			}
 			linkedFd := openDirFd(t, linked)
 
-			before := openFds()
+			before := fdset.Take(t)
 			if err := unpackTar(archive(), clean); err != nil {
 				t.Fatalf("unpackTar: %v", err)
 			}
 			if err := unpackTar(archive(), linkedFd); err == nil {
 				t.Fatal("unpackTar = nil, want the link on the members' path refused")
 			}
-			if after := openFds(); after != before {
-				t.Fatalf("open descriptors: %d before, %d after", before, after)
-			}
+			fdset.RequireNoneOpenedSince(t, before)
 		})
 	}
 }
