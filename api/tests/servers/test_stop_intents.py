@@ -46,6 +46,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import create_async_engine
 from starlette.requests import Request
 
+from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.dependencies import (
     get_set_worker_drain,
     get_start_server,
@@ -2452,10 +2453,14 @@ async def test_the_start_command_is_enqueued_before_the_dispatch_first_suspends(
         dispatch.close()
 
 
-async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
+async def test_the_http_start_stop_and_drain_share_the_app_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The counter only works if the start and the stops bump and read the same
     # instance; a construction site left on its private default fails silently.
+    monkeypatch.setenv("MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@h/db")
     app = FastAPI()
+    app.state.settings = load_settings(config_file=None)
     app.state.stop_intents = StopIntentCounter()
     app.state.start_intent_lock = StartIntentLock()
     app.state.engine = create_async_engine("postgresql+asyncpg://u:p@h/db")

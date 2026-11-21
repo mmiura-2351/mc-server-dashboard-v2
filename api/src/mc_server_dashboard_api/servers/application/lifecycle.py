@@ -178,6 +178,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotRunningError,
+    SnapshotUploadInFlightError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.groups import GroupKind, PendingGroupSync
@@ -641,6 +642,16 @@ class StartServer:
             # The intent is no longer this start's (see ``_launch``): the write that
             # moved it owns the row and its load, so there is nothing to revert.
             raise
+        except SnapshotUploadInFlightError:
+            # The wait for this Worker's upload ran out before the hydrate was sent
+            # (issue #3950). Keep the Worker, as for a hydrate refused BUSY below,
+            # so the reconciler retries the start on it. On the #2499 replay the
+            # start was sent already, which keeps the Worker as it is.
+            if not dispatch.attempted:
+                await self._record_unknown(
+                    server, worker_id, owe_again=owed_group_files
+                )
+            raise
         except Exception as exc:
             # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
             # MAY have been applied by the Worker (issue #773, mirroring #101's fix
@@ -890,6 +901,14 @@ class StartServer:
                     original=exc,
                 )
             raise
+        except SnapshotUploadInFlightError:
+            # Kept on this Worker for the next tick, as ``__call__`` keeps it
+            # (issue #3950).
+            if not dispatch.attempted:
+                await self._record_unknown(
+                    server, worker_id, owe_again=owed_group_files
+                )
+            raise
         if not outcome.success:
             if not dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
                 # The placed Worker refused the HYDRATE because it already runs an
@@ -1135,6 +1154,35 @@ class StartServer:
         """
 
         if not skip_hydrate:
+            # Wait first for this Worker's snapshot uploads of the server that are
+            # still in flight (issue #3950). The Worker's command can end at its
+            # deadline, or the Worker restart, while the API holds the whole body
+            # and goes on committing it. Hydrated before that commit, the Worker
+            # would run on the older generation, and the commit would then publish
+            # a world that run does not contain; after it, the hydrate serves it.
+            # Only this Worker's uploads: the commit-time fence refuses another
+            # Worker's while this one is assigned. Every caller runs this outside
+            # the lifecycle lock and its unit of work, and the wait holds nothing
+            # an upload needs. A skipped hydrate does not wait: the Worker runs
+            # on the tree such an upload packed, or a newer one.
+            #
+            # A wait that runs out raises before anything is sent, and the
+            # Worker is not hydrated over the upload. ``__call__`` and
+            # ``place_and_start`` keep the server on this Worker, as for a
+            # hydrate refused BUSY, and ``redispatch_start`` changes nothing, so
+            # the reconciler retries the start here without placing it again.
+            if not await self.store_generation.uploads_settled(
+                community_id=community_id, server_id=server_id, worker_id=worker_id
+            ):
+                _LOG.warning(
+                    "start of server %s did not hydrate worker %s: a snapshot "
+                    "upload of the server from that worker was still being "
+                    "received or committed when the wait for it ran out; the "
+                    "server stays on that worker, and the start is retried there",
+                    server_id.value,
+                    worker_id.value,
+                )
+                raise SnapshotUploadInFlightError(str(server_id.value))
             # Read the authoritative generation BEFORE the transfer (issue #2477): the
             # data plane serves the store's generation at PULL time, and the counter is
             # monotonic (commit_snapshot, a restore #873, an at-rest edit #889 and the

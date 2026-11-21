@@ -1414,6 +1414,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   state-changed toast, so the operator does not get a second, contradictory
   answer. Stop and restart keep the state-changed treatment for
   `invalid_transition`: neither leaves a pending intent a retry collides with.
+  A start answered `409 upload_in_flight` gets the same start-pending message:
+  its Worker was not hydrated because a snapshot upload of the server from it
+  was still in flight, and the start keeps `desired_state=running` and that
+  Worker for the reconciler to retry ([`CONTROL_PLANE.md`](../app/CONTROL_PLANE.md)
+  Section 5).
 - **Start keeps the verb-agnostic message for 503 `worker_unavailable`.** A start
   that demonstrably did not happen is compensated back to stopped, but a
   **post-dispatch** timeout or lost session is not (the start may have been

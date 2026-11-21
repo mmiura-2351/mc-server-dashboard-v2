@@ -56,7 +56,10 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandStatus,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import CommandDispatchError
+from mc_server_dashboard_api.servers.domain.errors import (
+    CommandDispatchError,
+    SnapshotUploadInFlightError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -240,7 +243,7 @@ def _server(*, desired: DesiredState, observed: ObservedState, on_a: bool) -> Se
         config={},
         desired_state=desired,
         observed_state=observed,
-        observed_at=_NOW,
+        observed_at=_NOW - dt.timedelta(minutes=1),
         assigned_worker_id=_WORKER_A if on_a else None,
         created_at=_NOW,
         updated_at=_NOW,
@@ -269,9 +272,13 @@ def _start(
 
 
 async def _stop(uow: FakeUnitOfWork, cp: FakeControlPlane, server: Server) -> None:
-    """Stop the server; its final snapshot answers at A's deadline, releasing A."""
+    """Stop the server; its final snapshot answers at A's deadline, releasing A.
 
-    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+    The stop runs before the start, so its writes are stamped earlier.
+    """
+
+    stopped_at = _NOW - dt.timedelta(seconds=30)
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(stopped_at))(
         community_id=server.community_id, server_id=server.id
     )
     assert uow.servers.by_id[server.id].assigned_worker_id is None
@@ -644,13 +651,13 @@ def test_a_start_on_another_worker_does_not_wait_and_the_late_commit_lands_after
 # 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(16 * 10 + 30)
 @_BACKENDS
-def test_a_start_whose_wait_runs_out_answers_busy_and_is_retried_on_its_worker(
+def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
     tmp_path: Path, shared_app: FastAPI, make_storage: Callable[[Path], Storage]
 ) -> None:
     # The first test's start, with A's commit held past the wait's bound. The
-    # start sends no hydrate and answers BUSY, keeping the server on A. Once the
-    # commit has landed, the retry the reconciler sends hydrates A with it,
-    # without placing the server again.
+    # start sends no hydrate and keeps the server on A, observed unknown, which
+    # the reconciler retries. Once the commit has landed, that retry hydrates A
+    # with it, without placing the server again.
     storage = make_storage(tmp_path)
     server = _server(
         desired=DesiredState.RUNNING, observed=ObservedState.RUNNING, on_a=True
@@ -683,8 +690,7 @@ def test_a_start_whose_wait_runs_out_answers_busy_and_is_retried_on_its_worker(
         )
     )
 
-    assert isinstance(error, CommandDispatchError)
-    assert error.status is CommandStatus.BUSY
+    assert isinstance(error, SnapshotUploadInFlightError)
     assert _kinds(cp) == ["stop", "snapshot"]
     assert cp.served == []
     row = uow.servers.by_id[server.id]
