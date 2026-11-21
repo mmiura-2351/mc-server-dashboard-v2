@@ -24,6 +24,9 @@ from typing import Literal
 from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
 )
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_refused_filename_character,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, ServerType
 
 
@@ -31,11 +34,15 @@ def sanitize_plugin_filename(filename: str) -> str:
     """Reduce ``filename`` to a safe basename, stripping path components.
 
     Prevents zip-slip (issue #1400): a filename like ``a\\..\\..\\evil.jar``
-    is reduced to ``evil.jar``. Raises :class:`ValueError` for filenames that
-    are empty or ``..`` after sanitization.
+    is reduced to ``evil.jar``. Each character the basename still carries that no
+    uploaded file's name may carry (a control character, a lone surrogate or a
+    noncharacter) is then replaced with ``_`` (issue #3957): a catalog's file
+    name never went through the upload rule. Raises :class:`ValueError` for
+    filenames that are empty or ``..`` after sanitization.
     """
 
-    safe = PurePosixPath(filename.replace("\\", "/")).name
+    base = PurePosixPath(filename.replace("\\", "/")).name
+    safe = "".join("_" if is_refused_filename_character(c) else c for c in base)
     if not safe or safe == "..":
         raise ValueError(f"unsafe plugin filename: {filename!r}")
     return safe

@@ -1115,6 +1115,7 @@ async def test_install_from_catalog_refuses_an_overlong_filename() -> None:
             version_id="ver-1",
         )
     assert excinfo.value.reason == "invalid_filename"
+    assert catalog.downloads == []
     assert fs.files == {}
     assert uow.commits == 0
 
@@ -1675,6 +1676,7 @@ async def test_update_plugin_refuses_an_overlong_filename() -> None:
             version_id="ver-2",
         )
     assert excinfo.value.reason == "invalid_filename"
+    assert catalog.downloads == []
     assert fs.files == {"mods/fabric-api-0.92.0.jar": b"old"}
     assert uow.commits == 0
 

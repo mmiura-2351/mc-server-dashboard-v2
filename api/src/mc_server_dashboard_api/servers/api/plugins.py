@@ -900,7 +900,11 @@ async def update_plugin(
     except CatalogChecksumMismatchError as exc:
         raise _bad_gateway("checksum_mismatch") from exc
     except InvalidFilePathError as exc:
-        raise _unprocessable("invalid_path") from exc
+        # A catalog file name the upload rule refuses even sanitized keeps its
+        # own reason (issue #3957); any other path refusal is invalid_path.
+        raise _unprocessable(
+            "invalid_filename" if exc.reason == "invalid_filename" else "invalid_path"
+        ) from exc
     except FileTooLargeError as exc:
         raise _too_large() from exc
     except PluginAlreadyExistsError as exc:
