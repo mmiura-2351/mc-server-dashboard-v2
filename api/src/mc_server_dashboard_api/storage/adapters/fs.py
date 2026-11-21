@@ -4083,6 +4083,11 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
     kept every directory member, to set its modification time once its entries
     were in; a directory's time is now the one its last entry left, as after a
     restore.
+
+    A member whose name this filesystem cannot hold under ``dest``
+    (ENAMETOOLONG) is refused as a ``FilterError`` too (issue #3931), not a raw
+    ``OSError``: the Worker packs paths of up to 4095 bytes, and the staging
+    directory's own path comes before them.
     """
 
     with (
@@ -4100,9 +4105,33 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
         ) as tar,
     ):
         for member in stream.members(tar):
-            tar.extract(member, dest, filter=_ingest_member_filter)
+            with _name_too_long_refused(member.name):
+                tar.extract(member, dest, filter=_ingest_member_filter)
         for _zeros in stream.read_past_end_marker():
             pass
+
+
+@contextlib.contextmanager
+def _name_too_long_refused(name: str) -> Iterator[None]:
+    """Refuse the member ``name`` as a ``FilterError`` if the filesystem cannot
+    hold its name (issue #3931).
+
+    A component past ``NAME_MAX``, or a path past ``PATH_MAX`` once joined to the
+    directory it is extracted into, raises ``ENAMETOOLONG``, from the filter's
+    path resolution or from the extraction, whichever reaches the name first.
+    Refused, it is a member the ingest refuses and an archive nothing can be
+    restored from, rather than a raw ``OSError``. No rule decides here which
+    names a member may have: issue #3973 does.
+    """
+
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno != errno.ENAMETOOLONG:
+            raise
+        raise tarfile.FilterError(
+            f"{name!r} has a name too long for this filesystem"
+        ) from exc
 
 
 def _ingest_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
@@ -4289,6 +4318,8 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
     holding a member the filter refuses (issue #3371): it reads, but nothing can
     be restored from it, override or not, which is the verdict that error models.
+    So does one holding a member whose name this filesystem cannot hold
+    (ENAMETOOLONG, issue #3931), which the object backend restores.
 
     The archive is read to its end (issue #3798), as the upload gate reads it: the
     tar is decompressed by ``GzipReader`` and walked through
@@ -4331,13 +4362,14 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
                 if member is None:
                     continue
                 refuse_unrestorable_member(member)
-                safe = _plain_member_filter(member, str(dest))
-                safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
-                if is_reserved_root_member(safe.name):
-                    dropped += 1
-                    total = _drain_member_capped(tar, safe, total, max_bytes)
-                    continue
-                total = _extract_member_capped(tar, safe, dest, total, max_bytes)
+                with _name_too_long_refused(member.name):
+                    safe = _plain_member_filter(member, str(dest))
+                    safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
+                    if is_reserved_root_member(safe.name):
+                        dropped += 1
+                        total = _drain_member_capped(tar, safe, total, max_bytes)
+                        continue
+                    total = _extract_member_capped(tar, safe, dest, total, max_bytes)
             for _zeros in stream.read_past_end_marker():
                 pass
     except tarfile.FilterError as exc:

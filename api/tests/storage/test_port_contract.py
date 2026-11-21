@@ -2255,6 +2255,53 @@ async def test_a_headers_only_bomb_is_unreadable_in_bounded_memory(
         assert peak < 16 * archive_cap_shapes.MIB
 
 
+def _named_past_the_name_limit(files: dict[str, bytes], *, world: bool) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        if world:
+            info = tarfile.TarInfo("world")
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("world", [False, True], ids=["file", "after-its-directory"])
+async def test_a_member_named_past_the_name_limit_restores_on_object_only(
+    backend: str, tmp_path: Path, world: bool
+) -> None:
+    """A name component of 300 bytes is past Linux's ``NAME_MAX`` of 255. The fs
+    store cannot hold it, so its restore and health check refuse the backup as
+    ``ArchiveUnreadableError`` naming the cause, not a raw ``OSError``
+    (ENAMETOOLONG), and the live world stays (issue #3931). Writing the file
+    raises it, or, once its directory is there, the member filter's resolution
+    of its path. The object store holds it as a key, so there the backup is
+    healthy and restores. Which names a backup may hold is issue #3973's to
+    decide."""
+
+    harness = build_harness(backend, tmp_path)
+    files = {f"world/{'n' * 300}.dat": b"long"}
+    archive = _named_past_the_name_limit(files, world=world)
+
+    if backend == "object":
+        await _restore_and_health_accept(harness, archive, files)
+        return
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+    too_long = "has a name too long for this filesystem"
+    with pytest.raises(ArchiveUnreadableError, match=too_long):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError, match=too_long):
+        await harness.storage.check_backup_health(community, server, key)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
 # What a storage walk of 2,000 members of 15 KiB headers may hold at its peak
 # (issue #3931): a walk that kept them would hold 30 MiB of them. Whatever the
 # member count, the object backend reads a file member 8 MiB at a time, and its

@@ -3336,6 +3336,32 @@ def test_snapshot_with_a_chain_of_extended_headers_is_refused_and_not_published(
     assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
 
 
+def _path_of_length(length: int) -> str:
+    """A relative path ``length`` bytes long, of components of at most 201."""
+
+    path = ("n" * 200 + "/") * (length // 201)
+    path += "n" * (length - len(path))
+    return path[:-1] + "n" if path.endswith("/") else path
+
+
+def test_snapshot_whose_member_path_the_fs_staging_cannot_hold_is_refused(
+    tmp_path: Path,
+) -> None:
+    # The fs ingest extracts a member by its path joined to the staging
+    # directory, so a path the Worker may pack (up to 4095 bytes, issue #3341)
+    # can join to past Linux's PATH_MAX there. That raised a raw ``OSError``
+    # (ENAMETOOLONG) and answered 500 (issue #3931); it is a refusal naming the
+    # member. Here the joined path is 4096 bytes, one past what a path may be.
+    # Which paths a snapshot may hold is issue #3973's to decide.
+    staging = FsStorage(tmp_path)._staging_dir(
+        CommunityId(uuid.uuid4()), ServerId(uuid.uuid4()), uuid.uuid4().hex
+    )
+    member = _path_of_length(4096 - len(f"{staging}/"))
+    body = _tar_bytes({member: b"long"})
+
+    assert _post_snapshot_over_a_prior(tmp_path, _fs_storage, body) == _REFUSED
+
+
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
