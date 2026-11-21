@@ -81,6 +81,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
+    ExitHookUnitOfWork,
     FakeBedrockTunnelSync,
     FakeClock,
     FakeControlPlane,
@@ -90,6 +91,7 @@ from tests.servers.fakes import (
     FakeStoreGenerationReader,
     FakeUnitOfWork,
     PlacementSequenceControlPlane,
+    session_ends_as_step_a_exits,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -1878,7 +1880,11 @@ async def test_a_stale_clear_of_a_kept_server_takes_no_snapshot(
         expected_worker=worker_id,
     )
 
-    await stop.clear_stale_assignment(community_id=community_id, server_id=server_id)
+    await stop.clear_stale_assignment(
+        community_id=community_id,
+        server_id=server_id,
+        worker_connected=True,
+    )
 
     assert [kind for kind, _, _ in cp.dispatched] == ["hydrate", "stop"]
     _assert_released_without_a_snapshot(uow, cp, server_id)
@@ -3471,7 +3477,9 @@ async def test_stale_assignment_clear_forgets_the_refusal_before_its_snapshot() 
     await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_refusals=refusals
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=True,
     )
 
     assert seen_at_snapshot == [None]
@@ -6337,7 +6345,9 @@ async def _stale_stopping_released(
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=False,
     )
     return uow, result
 
@@ -6899,7 +6909,9 @@ async def test_clear_stale_assignment_stopped_unknown_disconnected_clears() -> N
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=False,
     )
     assert result.assigned_worker_id is None
     assert cp.dispatched == []
@@ -6924,7 +6936,9 @@ async def test_clear_stale_assignment_stopped_unknown_connected_raises() -> None
         await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=False,
         )
     # Assignment kept.
     stored = uow.servers.by_id[ServerId(server_id)]
@@ -6950,7 +6964,9 @@ async def test_clear_stale_assignment_stopped_stopped_still_works() -> None:
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=True,
     )
     assert result.assigned_worker_id is None
     # The snapshot was dispatched before clearing.
@@ -6977,7 +6993,9 @@ async def test_clear_stale_assignment_stopped_stopped_disconnected_skips_snapsho
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=False,
     )
     assert result.assigned_worker_id is None
     assert cp.dispatched == []
@@ -7020,7 +7038,9 @@ async def test_clear_stale_assignment_snapshot_timeout_holds() -> None:
         await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=True,
         )
     # Assignment kept — the upload may still be live.
     stored = uow.servers.by_id[ServerId(server_id)]
@@ -7052,7 +7072,9 @@ async def test_clear_stale_assignment_snapshot_failure_still_clears() -> None:
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=True,
     )
     assert result.assigned_worker_id is None
     assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
@@ -7086,7 +7108,9 @@ async def test_clear_stale_assignment_benign_duplicate_clears(
         result = await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=True,
         )
     assert result.assigned_worker_id is None
     assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
@@ -7123,7 +7147,9 @@ async def test_clear_stale_assignment_crashed_connected_snapshots_then_clears() 
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=True,
     )
     assert result.assigned_worker_id is None
     assert ("snapshot", WorkerId(worker), ServerId(server_id)) in cp.dispatched
@@ -7151,7 +7177,9 @@ async def test_clear_stale_assignment_stopped_crashed_disconnected_skips_snapsho
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=False,
     )
     assert result.assigned_worker_id is None
     assert cp.dispatched == []
@@ -7177,7 +7205,9 @@ async def test_clear_stale_assignment_stopped_crashed_keeps_observed_crashed() -
     await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=True,
     )
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.observed_state is ObservedState.CRASHED
@@ -7207,7 +7237,9 @@ async def test_clear_stale_assignment_crashed_warn_says_snapshot_was_redriven(
         await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=True,
         )
 
     record = next(
@@ -7238,7 +7270,9 @@ async def test_clear_stale_assignment_crashed_warn_names_lost_crash_window(
         await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=False,
         )
 
     record = next(
@@ -7270,7 +7304,9 @@ async def test_clear_stale_assignment_stopping_disconnected_skips_snapshot() -> 
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=False,
     )
     assert result.assigned_worker_id is None
     assert cp.dispatched == []
@@ -7302,7 +7338,9 @@ async def test_clear_stale_assignment_stopping_converges_observed_to_unknown() -
     result = await StopServer(
         uow=uow, control_plane=cp, clock=FakeClock(_NOW)
     ).clear_stale_assignment(
-        community_id=CommunityId(community), server_id=ServerId(server_id)
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=False,
     )
     assert result.observed_state is ObservedState.UNKNOWN
     assert result.is_at_rest()
@@ -7333,9 +7371,322 @@ async def test_clear_stale_assignment_stopping_reconnected_worker_bails() -> Non
         await StopServer(
             uow=uow, control_plane=cp, clock=FakeClock(_NOW)
         ).clear_stale_assignment(
-            community_id=CommunityId(community), server_id=ServerId(server_id)
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=False,
         )
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
+
+
+# --- a Worker that drops while its row is released (issue #3963) -----------
+#
+# A caller that found the Worker connected chose the release that takes the
+# final snapshot first, or the stop first for a start that may still be
+# launching. If the Worker's session ends before that is done, the row is not
+# released: the release raises, and the row waits the disconnected-Worker grace
+# from the drop, so a Worker back within it still gets its snapshot.
+
+
+def _stale_clear(
+    uow: FakeUnitOfWork, cp: FakeControlPlane, stop_intents: StopIntentCounter
+) -> StopServer:
+    return StopServer(
+        uow=uow, control_plane=cp, clock=FakeClock(_NOW), stop_intents=stop_intents
+    )
+
+
+def _assert_kept_for_a_gone_worker(
+    excinfo: pytest.ExceptionInfo[WorkerUnavailableError],
+    uow: FakeUnitOfWork,
+    server_id: uuid.UUID,
+    worker: uuid.UUID,
+) -> None:
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_a_worker_that_drops_after_step_a_keeps_its_row(
+    observed: ObservedState,
+) -> None:
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane()
+    uow, intents = session_ends_as_step_a_exits(cp, WorkerId(worker), at=_NOW)
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, intents).clear_stale_assignment(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=True,
+        )
+
+    assert cp.dispatched == []
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_a_worker_that_drops_before_an_owed_stop_keeps_its_row(
+    observed: ObservedState,
+) -> None:
+    # A start sent here may still be launching, so a connected Worker is owed a
+    # stop first.
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane()
+    uow, intents = session_ends_as_step_a_exits(cp, WorkerId(worker), at=_NOW)
+    intents.start_sent(ServerId(server_id))
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, intents).clear_stale_assignment(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=True,
+        )
+
+    assert cp.dispatched == []
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN],
+    ids=lambda s: s.value,
+)
+async def test_a_worker_gone_since_the_caller_found_it_connected_keeps_its_row(
+    observed: ObservedState,
+) -> None:
+    # The session ended before Step A read the row. An unknown row is one whose
+    # disconnect write landed since the caller read it stopped.
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, StopIntentCounter()).clear_stale_assignment(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            worker_connected=True,
+        )
+
+    assert cp.dispatched == []
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+class _SessionGoneAtSnapshot(FakeControlPlane):
+    """The final snapshot fails because the Worker's session is gone.
+
+    ``ending`` is how, each the shape the adapter raises:
+
+    - ``in-flight``: the session ended while the snapshot awaited its answer.
+    - ``at-dispatch``: the session had ended before the snapshot was sent (a
+      drop during ``_final_snapshot``'s own row read), so nothing was queued.
+    - ``back``: a new session registered first and retired the old one's
+      commands, so the Worker reads connected again by then.
+    """
+
+    def __init__(self, *, ending: str) -> None:
+        super().__init__()
+        self._ending = ending
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        if self._ending != "back":
+            self.end_session(worker_id, at=_NOW)
+        raise WorkerUnavailableError(
+            str(worker_id.value),
+            session_ended_in_flight=self._ending != "at-dispatch",
+            worker_state=UnavailableWorkerState.NOT_CONNECTED,
+        )
+
+
+@pytest.mark.parametrize("ending", ["in-flight", "at-dispatch", "back"])
+@pytest.mark.parametrize("entry", ["reconciler", "operator"])
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_a_worker_whose_session_is_gone_at_the_snapshot_keeps_its_row(
+    observed: ObservedState, entry: str, ending: str
+) -> None:
+    community, server_id, worker = _ids()
+    cp = _SessionGoneAtSnapshot(ending=ending)
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+    stop = _stale_clear(uow, cp, StopIntentCounter())
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        if entry == "reconciler":
+            await stop.clear_stale_assignment(
+                community_id=CommunityId(community),
+                server_id=ServerId(server_id),
+                worker_connected=True,
+            )
+        else:
+            await stop(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+
+    assert [kind for kind, _, _ in cp.dispatched] == ["snapshot"]
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+async def test_a_snapshot_the_api_could_not_send_still_releases() -> None:
+    # No data-plane URL: the snapshot never left the API, and says nothing about
+    # the Worker. The release proceeds as it always has, logged loud.
+    community, server_id, worker = _ids()
+
+    class _NoDataPlane(FakeControlPlane):
+        async def snapshot(
+            self,
+            *,
+            worker_id: WorkerId,
+            community_id: CommunityId,
+            server_id: ServerId,
+            final: bool = False,
+        ) -> CommandOutcome:
+            self.dispatched.append(("snapshot", worker_id, server_id))
+            raise WorkerUnavailableError("data-plane transfer requested but ... unset")
+
+    cp = _NoDataPlane()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(community_id=community, server_id=server_id, worker_id=worker)
+    )
+
+    result = await _stale_clear(uow, cp, StopIntentCounter()).clear_stale_assignment(
+        community_id=CommunityId(community),
+        server_id=ServerId(server_id),
+        worker_connected=True,
+    )
+
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_an_operator_stop_whose_worker_drops_after_step_a_keeps_the_row(
+    observed: ObservedState,
+) -> None:
+    # The operator stop routes on Step A's own read of the Worker.
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane()
+    uow, intents = session_ends_as_step_a_exits(cp, WorkerId(worker), at=_NOW)
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, intents)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == []
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_an_operator_stop_whose_worker_drops_before_step_a_keeps_the_row(
+    observed: ObservedState,
+) -> None:
+    # The stop found the Worker connected as it read the row. The session ends as
+    # that unit of work exits, before Step A reads the row again.
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane()
+    uow = ExitHookUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+    uow.arm(lambda: cp.end_session(WorkerId(worker), at=_NOW))
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, StopIntentCounter())(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == []
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_an_operator_stop_releases_a_worker_already_gone_at_once(
+    observed: ObservedState,
+) -> None:
+    # Unchanged: the documented way to free a server from a Worker that is gone.
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane(connected={WorkerId(worker): False})
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+
+    result = await _stale_clear(uow, cp, StopIntentCounter())(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.dispatched == []
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
 
 # --- bedrock tunnel sync (issue #1602) --------------------------------------

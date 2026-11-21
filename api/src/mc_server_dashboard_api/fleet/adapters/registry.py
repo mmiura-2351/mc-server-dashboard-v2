@@ -156,7 +156,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # Ignore a teardown from a stale Session: the worker has reconnected on a
         # newer one and must stay online (CONTROL_PLANE.md Section 4.4).
         if worker is not None and self._sessions.get(worker_id) == session:
-            self._workers[worker_id] = worker.disconnect()
+            self._workers[worker_id] = worker.disconnect(self._clock.now())
 
     def is_current_session(self, worker_id: WorkerId, session: SessionToken) -> bool:
         return self._sessions.get(worker_id) == session
@@ -307,6 +307,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             registered_at=worker.registered_at,
             last_heartbeat_at=worker.last_heartbeat_at,
             status=worker.status(now=now, timeout=self._timeout),
+            offline_since=worker.offline_since(now=now, timeout=self._timeout),
             # The read view reflects the same load placement sees: committed
             # assignments plus in-flight reservations (#778).
             assigned_count=self._load(worker.id),

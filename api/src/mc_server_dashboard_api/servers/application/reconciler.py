@@ -54,7 +54,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   sink no longer unassigns). The snapshot leg dispatches to a connected Worker so the
   store generation advances before a cross-worker re-placement can hydrate; a
   disconnected Worker skips the snapshot and clears directly (same exposure as
-  before, logged loud).
+  before, logged loud). A Worker that drops while the action runs, after the tick
+  found it connected, keeps the row: the action fails, and the row then waits the
+  disconnected-Worker grace below, from the drop (issue #3963).
 - ``desired=stopped``, observed ``unknown``, still assigned (issue #1599): a stop
   interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
   sets unknown without unassigning). Connected Worker -> redispatch the stop.
@@ -127,6 +129,13 @@ released without its final snapshot or its stop, though its Worker is back secon
 later. Every Worker thus gets a full grace to re-register after any API start,
 graceful or a crash. A connected Worker's rows are measured as before.
 
+Such a row is also measured from no earlier than the instant its Worker first
+read disconnected: the end of its session, or the lapse of its heartbeats, which
+the registry reports before the teardown runs (issue #3963). The teardown's bulk
+write restamps the Worker's rows, but until it lands, or when it fails, a row
+still carries its stamp from before the drop, and a tick in that window would
+release it at once without its final snapshot.
+
 That held predicate used to be near-dead: the held inventory was frozen at Worker
 registration, so every server placed since reported nothing held and took the full
 grace unconditionally. #2477 made it answer for those servers too (a successful
@@ -176,8 +185,9 @@ snapshot can still be uploading (#847). Both stop-side floors are therefore met,
 ``redispatch_stop`` and ``clear_stale_assignment`` both take
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
 The record is dropped before every stop or final-snapshot dispatch, and any newer
-intent commit or Worker report supersedes it, with no ``EXPIRED`` exception. It is
-not persisted, so after an API restart the full grace applies again.
+intent commit or Worker report supersedes it, with no ``EXPIRED`` exception, as
+does a later disconnect of the row's Worker (issue #3963). It is not persisted, so
+after an API restart the full grace applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
@@ -667,9 +677,26 @@ class RunReconcilerTick:
         # True when a stop finished but its write failed, and that is still the most
         # recent thing known about the row (issue #3441). Superseded, and tied, the
         # same way as a refusal that is not EXPIRED: the record is made after the
-        # intent commit it follows, on the same clock.
+        # intent commit it follows, on the same clock. The drop of the row's
+        # Worker supersedes it too (issue #3963): a Worker back within a full grace
+        # of the drop still gets its final snapshot, so only a record made since
+        # the drop keeps the short grace.
         recorded_at = self.unrecorded_stops.recorded_at(server.id)
-        return recorded_at is not None and recorded_at >= self._since(server)
+        if recorded_at is None:
+            return False
+        since = self._since(server)
+        dropped_at = self._dropped_at(server)
+        if dropped_at is not None:
+            since = max(since, dropped_at)
+        return recorded_at >= since
+
+    def _dropped_at(self, server: Server) -> dt.datetime | None:
+        # The instant the row's Worker first read disconnected, while it still
+        # does (issue #3963); None for a connected Worker or an unassigned row.
+        worker_id = server.assigned_worker_id
+        if worker_id is None:
+            return None
+        return self.control_plane.worker_offline_since(worker_id=worker_id)
 
     def _since(self, server: Server) -> dt.datetime:
         # The instant the divergence is measured from: the most recent of
@@ -685,12 +712,18 @@ class RunReconcilerTick:
         # with it yet: the first tick runs as the API starts. So the release of such
         # a Worker's row is measured from no earlier than the listener start (issue
         # #3916), and a Worker back within a grace of it still gets the final
-        # snapshot or the stop.
+        # snapshot or the stop. It is also measured from no earlier than the
+        # instant the Worker first read disconnected (issue #3963): the row keeps
+        # its old stamp until the teardown's bulk write lands, and that write may
+        # fail.
         worker_id = server.assigned_worker_id
         if worker_id is not None and not self.control_plane.is_worker_connected(
             worker_id=worker_id
         ):
             since = max(since, self.listener_started_at)
+        dropped_at = self._dropped_at(server)
+        if dropped_at is not None:
+            since = max(since, dropped_at)
         return (now - since) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:
@@ -876,8 +909,12 @@ class RunReconcilerTick:
                 store_generation=store_generation,
             )
         elif action == "clear_stale_assignment":
+            worker_id = server.assigned_worker_id
             return await self.make_stop_server().clear_stale_assignment(
-                community_id=server.community_id, server_id=server.id
+                community_id=server.community_id,
+                server_id=server.id,
+                worker_connected=worker_id is not None
+                and self.control_plane.is_worker_connected(worker_id=worker_id),
             )
         else:  # redispatch_stop
             return await self.make_stop_server().redispatch_stop(

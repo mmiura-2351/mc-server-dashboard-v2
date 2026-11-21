@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -510,18 +511,20 @@ async def test_retry_refuses_while_an_abandoned_final_snapshot_is_outstanding() 
 async def test_a_lost_final_snapshot_result_still_converges() -> None:
     # Stop A is abandoned and its result never arrives: the Worker's session ends
     # instead. While the snapshot is outstanding the reconciler leaves the row
-    # alone; once the session's end drops the record, its stale-stop arm releases.
+    # alone; once the session's end drops the record, its stale-stop arm releases,
+    # a grace after the session ended (issue #3963).
     server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
     repo = FakeServerRepository()
     repo.seed(server)
     worker = _Worker(repo, server)
+    clock = FakeClock(_NOW)
     reconciler = RunReconcilerTick(
         uow=FakeUnitOfWork(servers=repo),
         make_start_server=lambda: pytest.fail("no start is owed"),
         make_stop_server=lambda: _stop_server(repo, worker.cp, worker.guard),
         control_plane=worker.cp,
         store_generation=FakeStoreGenerationReader(),
-        clock=FakeClock(_NOW),
+        clock=clock,
         stop_refusals=StopDispatchRefusals(),
         unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
@@ -539,6 +542,10 @@ async def test_a_lost_final_snapshot_result_still_converges() -> None:
     assert _assigned(repo, server) == server.assigned_worker_id
 
     worker.disconnect()
+    await asyncio.wait_for(reconciler.tick(), timeout=1)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    clock.set(_NOW + dt.timedelta(seconds=60))
     await asyncio.wait_for(reconciler.tick(), timeout=1)
     assert _assigned(repo, server) is None
 
@@ -569,7 +576,9 @@ async def test_reconnect_before_the_old_callers_timeout_does_not_hold_for_good()
     # Stop A's final snapshot is in flight when the Worker reconnects, and the new
     # session stays up. Its old session can never answer, so the snapshot must
     # not stay outstanding past A's deadline: the row has to converge without
-    # another reconnect.
+    # another reconnect. A keeps the row, since the Worker is back with the
+    # working set (issue #3963), and the next final snapshot, sent on the new
+    # session, releases it.
     server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
     repo = FakeServerRepository()
     repo.seed(server)
@@ -582,9 +591,15 @@ async def test_reconnect_before_the_old_callers_timeout_does_not_hold_for_good()
     await worker.next_command()
 
     worker.reconnect()
-    with contextlib.suppress(WorkerUnavailableError):
+    with pytest.raises(WorkerUnavailableError) as excinfo:
         await asyncio.wait_for(caller, timeout=1)
-    await asyncio.wait_for(_ticker(repo, worker).tick(), timeout=1)
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert not worker.guard.in_flight(server.id)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    tick = asyncio.create_task(_ticker(repo, worker).tick())
+    await worker.report_ok(await worker.next_command())
+    await asyncio.wait_for(tick, timeout=1)
 
     assert not worker.guard.in_flight(server.id)
     assert _assigned(repo, server) is None

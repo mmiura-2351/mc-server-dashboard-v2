@@ -43,6 +43,9 @@ from mc_server_dashboard_api.servers.application.reconciler import RunReconciler
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
+from mc_server_dashboard_api.servers.application.stop_intents import (
+    StopIntentCounter,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -83,6 +86,7 @@ from tests.servers.fakes import (
     FakeStoreGenerationReader,
     FakeUnitOfWork,
     PlacementSequenceControlPlane,
+    session_ends_as_step_a_exits,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -167,6 +171,8 @@ def _reconciler(
     stop_refusals: StopDispatchRefusals | None = None,
     unrecorded_stops: UnrecordedStops | None = None,
     listener_started_at: dt.datetime = _STARTED_LONG_AGO,
+    stop_uow: FakeUnitOfWork | None = None,
+    stop_intents: StopIntentCounter | None = None,
 ) -> RunReconcilerTick:
     stop_refusals = stop_refusals or StopDispatchRefusals()
     unrecorded_stops = unrecorded_stops or UnrecordedStops()
@@ -188,11 +194,12 @@ def _reconciler(
             file_store=FakeFileStore(seed_eula=True),
         ),
         make_stop_server=lambda: StopServer(
-            uow=uow,
+            uow=stop_uow or uow,
             control_plane=cp,
             clock=clock,
             stop_refusals=stop_refusals,
             unrecorded_stops=unrecorded_stops,
+            stop_intents=stop_intents or StopIntentCounter(),
         ),
         control_plane=cp,
         store_generation=store_reader,
@@ -1435,7 +1442,11 @@ async def test_disconnected_recovery_records_a_failed_release_only_when_finished
             control_plane=cp,
             clock=FakeClock(_NOW),
             unrecorded_stops=unrecorded,
-        ).clear_stale_assignment(community_id=server.community_id, server_id=server.id)
+        ).clear_stale_assignment(
+            community_id=server.community_id,
+            server_id=server.id,
+            worker_connected=False,
+        )
     assert cp.dispatched == []
     assert (unrecorded.recorded_at(server.id) == _NOW) is recorded
 
@@ -3684,6 +3695,201 @@ async def test_a_row_with_no_worker_is_placed_at_the_boot_tick() -> None:
     await _reconciler(uow, cp, clock, listener_started_at=_NOW).tick()
     assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+# --- a Worker that drops while its row is released (issue #3963) -----------
+#
+# A row routed on a connected Worker takes the final snapshot before its
+# release, or the stop first for a start that may still be launching. A Worker
+# whose session ends between Step A and Step B keeps its row, which then waits
+# the disconnected-Worker grace from the drop. Measured from the drop itself:
+# the rows here keep their old stamps, as they do until the teardown's bulk
+# write lands (or when it fails).
+
+_CONNECTED_LEGS = [
+    pytest.param(ObservedState.STOPPED, False, id="stopped"),
+    pytest.param(ObservedState.CRASHED, False, id="crashed"),
+    pytest.param(ObservedState.STOPPED, True, id="owed-stop"),
+]
+
+
+def _dropping_reconciler(
+    observed: ObservedState, start_sent: bool
+) -> tuple[FakeUnitOfWork, FakeControlPlane, FakeClock, Server, RunReconcilerTick]:
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    stop_uow, intents = session_ends_as_step_a_exits(
+        cp, _WORKER, at=_NOW, servers=uow.servers
+    )
+    if start_sent:
+        intents.start_sent(server.id)
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, stop_uow=stop_uow, stop_intents=intents)
+    return uow, cp, clock, server, reconciler
+
+
+@pytest.mark.parametrize(("observed", "start_sent"), _CONNECTED_LEGS)
+async def test_a_worker_that_drops_mid_release_is_released_a_grace_after_the_drop(
+    observed: ObservedState, start_sent: bool
+) -> None:
+    uow, cp, clock, server, reconciler = _dropping_reconciler(observed, start_sent)
+
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+    assert uow.servers.by_id[server.id].observed_at == _PAST_GRACE
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize(("observed", "start_sent"), _CONNECTED_LEGS)
+async def test_a_worker_back_within_a_grace_of_its_drop_is_owed_its_row(
+    observed: ObservedState, start_sent: bool
+) -> None:
+    uow, cp, clock, server, reconciler = _dropping_reconciler(observed, start_sent)
+    await reconciler.tick()
+
+    # Back on a new session, past the failure's backoff.
+    cp._connected[_WORKER] = True
+    del cp.offline_since[_WORKER]
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+
+    owed = ["stop", "snapshot"] if start_sent else ["snapshot"]
+    assert [k for k, _, _ in cp.dispatched] == owed
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+class _SessionEndsAsStepAOpens(FakeUnitOfWork):
+    """Ends the Worker's session as the release's first unit of work opens.
+
+    That is after the tick measured the row's grace on a connected Worker, and
+    before Step A reads the row (issue #3963).
+    """
+
+    def __init__(self, cp: FakeControlPlane, servers: FakeServerRepository) -> None:
+        super().__init__(servers=servers)
+        self._cp: FakeControlPlane | None = cp
+
+    async def __aenter__(self) -> FakeUnitOfWork:
+        cp, self._cp = self._cp, None
+        if cp is not None:
+            cp.end_session(_WORKER, at=_NOW)
+        return self
+
+
+@pytest.mark.parametrize(("observed", "start_sent"), _CONNECTED_LEGS)
+async def test_a_worker_that_drops_before_step_a_is_released_a_grace_after_the_drop(
+    observed: ObservedState, start_sent: bool
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    intents = StopIntentCounter()
+    if start_sent:
+        intents.start_sent(server.id)
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(
+        uow,
+        cp,
+        clock,
+        stop_uow=_SessionEndsAsStepAOpens(cp, uow.servers),
+        stop_intents=intents,
+    )
+
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_a_row_stamped_before_its_workers_drop_waits_a_grace_from_the_drop(
+    observed: ObservedState,
+) -> None:
+    # The Worker reads disconnected before the teardown's bulk write restamps
+    # its rows, and that write may fail. The row's own grace lapsed long ago.
+    dropped = _NOW - dt.timedelta(seconds=5)
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False}, offline_since={_WORKER: dropped})
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    clock.set(dropped + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(dropped + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize("drop", ["before-the-tick", "mid-release"])
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_a_drop_after_an_unrecorded_stop_waits_the_full_grace_from_it(
+    observed: ObservedState, drop: str
+) -> None:
+    # A finished stop's write failed 1 s before the Worker dropped, and the
+    # teardown's write did not land either, so the row keeps its stamp from
+    # before both. The drop is newer than the record, so the release waits the
+    # full grace from it, not the short one: the Worker may be back within it.
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    unrecorded = UnrecordedStops()
+    unrecorded.record(server.id, at=_NOW - dt.timedelta(seconds=1))
+    clock = FakeClock(_NOW)
+    if drop == "before-the-tick":
+        cp = FakeControlPlane(connected={_WORKER: False}, offline_since={_WORKER: _NOW})
+        reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+    else:
+        # The tick finds the Worker connected and the record live, so it acts
+        # after the short grace, and the Worker drops at Step A's exit.
+        cp = FakeControlPlane()
+        stop_uow, intents = session_ends_as_step_a_exits(
+            cp, _WORKER, at=_NOW, servers=uow.servers
+        )
+        reconciler = _reconciler(
+            uow,
+            cp,
+            clock,
+            unrecorded_stops=unrecorded,
+            stop_uow=stop_uow,
+            stop_intents=intents,
+        )
+
+    await reconciler.tick()
+    for elapsed in (_REFUSED_GRACE, 30, _GRACE - 1):
+        clock.set(_NOW + dt.timedelta(seconds=elapsed))
+        await reconciler.tick()
+        assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER, elapsed
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
 
 
 # --- Worker-reported unknown lands on existing arms (issue #2474) -----------
