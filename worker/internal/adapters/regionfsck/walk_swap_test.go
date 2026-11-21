@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/regioncheck"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/testsupport/fdset"
 )
 
 // These tests replace an entry between the moment the walk decides what it is and
@@ -232,18 +233,11 @@ func TestWalkerBoundsItsDepth(t *testing.T) {
 }
 
 func TestWalkerLeavesNoDescriptorOpen(t *testing.T) {
-	openFds := func() int {
-		entries, err := os.ReadDir("/proc/self/fd")
-		if err != nil {
-			t.Skipf("cannot list descriptors: %v", err)
-		}
-		return len(entries)
-	}
 	healthy := representativeWorkingSet(t)
 	swapped := t.TempDir()
 	path := write(t, filepath.Join(swapped, "a", "b", "region", "r.0.0.mca"), buildRegion(nil, 3, -1, 2))
 
-	before := openFds()
+	before := fdset.Take(t)
 	if _, err := checkWithin(t, healthy); err != nil {
 		t.Fatalf("CheckWorkingSet: %v", err)
 	}
@@ -253,7 +247,5 @@ func TestWalkerLeavesNoDescriptorOpen(t *testing.T) {
 	if report, err := checkWithin(t, swapped); err != nil || report.Skipped != 1 {
 		t.Fatalf("CheckWorkingSet = %+v, %v on a region file swapped for a FIFO; want it skipped", report, err)
 	}
-	if after := openFds(); after != before {
-		t.Errorf("open descriptors: %d before, %d after", before, after)
-	}
+	fdset.RequireNoneOpenedSince(t, before)
 }
