@@ -3892,6 +3892,175 @@ async def test_a_drop_after_an_unrecorded_stop_waits_the_full_grace_from_it(
     assert uow.servers.by_id[server.id].assigned_worker_id is None
 
 
+@pytest.mark.parametrize("after", [0, 1], ids=["tie", "after"])
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_a_record_made_since_the_drop_keeps_the_short_grace(
+    observed: ObservedState, after: int
+) -> None:
+    # A release of a Worker already gone, whose write failed: an operator's at
+    # once, or the reconciler's after the full grace. The record is no older than
+    # the drop, so the short grace stands (issues #3441, #3963).
+    dropped = _NOW
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False}, offline_since={_WORKER: dropped})
+    unrecorded = UnrecordedStops()
+    unrecorded.record(server.id, at=dropped + dt.timedelta(seconds=after))
+    clock = FakeClock(dropped + dt.timedelta(seconds=_REFUSED_GRACE - 1))
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(dropped + dt.timedelta(seconds=_REFUSED_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+# --- a finished stop's failed write is stamped as it begins (issue #3981) ---
+#
+# The record of a finished stop whose write failed carries the instant the
+# write began, by which time the Worker had answered, not the instant it
+# raised. A Worker that drops while the write fails is then newer than the
+# record, so its row waits the full grace from the drop: the stop's final
+# snapshot was never sent, and the Worker may be back with the working set.
+
+
+class _SlowFailingWrite(FakeServerRepository):
+    """The first observed-state write takes 2 s to fail; the Worker drops 1 s in."""
+
+    def __init__(self, clock: FakeClock, cp: FakeControlPlane) -> None:
+        super().__init__()
+        self._clock = clock
+        self._cp = cp
+        self._failed = False
+
+    async def record_observed_state(
+        self,
+        server_id: ServerId,
+        observed_state: ObservedState,
+        observed_at: dt.datetime,
+        *,
+        unassign: bool = False,
+        expected_worker: WorkerId | None = None,
+        detail: str = "",
+        reason: CrashReason | None = None,
+    ) -> bool:
+        if not self._failed:
+            self._failed = True
+            began = self._clock.now()
+            self._clock.set(began + dt.timedelta(seconds=1))
+            self._cp.end_session(_WORKER, at=self._clock.now())
+            self._clock.set(began + dt.timedelta(seconds=2))
+            raise ConnectionRefusedError("database is unreachable")
+        return await super().record_observed_state(
+            server_id,
+            observed_state,
+            observed_at,
+            unassign=unassign,
+            expected_worker=expected_worker,
+            detail=detail,
+            reason=reason,
+        )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [CommandStatus.OK, CommandStatus.SERVER_NOT_FOUND],
+    ids=["confirmed", "not-found"],
+)
+async def test_a_drop_while_a_finished_stops_write_fails_waits_the_full_grace(
+    answer: CommandStatus,
+) -> None:
+    # An operator stop is answered, with the Worker's own stopping report
+    # already in. The write after the answer fails, and the Worker drops during
+    # it, so the row is left (stopped, stopping, assigned).
+    clock = FakeClock(_NOW)
+    cp = FakeControlPlane(outcomes={"stop": CommandOutcome(status=answer)})
+    repo = _SlowFailingWrite(clock, cp)
+    uow = FakeUnitOfWork(servers=repo)
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.STOPPING, worker=_WORKER
+    )
+    repo.seed(server)
+    unrecorded = UnrecordedStops()
+    with pytest.raises(ConnectionRefusedError):
+        await StopServer(
+            uow=uow, control_plane=cp, clock=clock, unrecorded_stops=unrecorded
+        )(community_id=server.community_id, server_id=server.id)
+    dropped = _NOW + dt.timedelta(seconds=1)
+    assert cp.worker_offline_since(worker_id=_WORKER) == dropped
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+
+    for elapsed in (_REFUSED_GRACE, _GRACE - 1):
+        clock.set(dropped + dt.timedelta(seconds=elapsed))
+        await reconciler.tick()
+        assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER, elapsed
+
+    clock.set(dropped + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+# --- one reading of a row's Worker per tick (issue #3981) -------------------
+#
+# The registry derives a heartbeat lapse from the wall clock at each read, so
+# two reads with no await between them can still disagree. The tick reads the
+# Worker once per row, and the grace and the action both use that reading.
+
+
+class _LapsesOnceRead(FakeControlPlane):
+    """The Worker's heartbeats lapse just after the tick has read it once.
+
+    A reading is its connectivity, then its drop instant, so the lapse lands
+    right after the first read of the drop instant.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._read = False
+
+    def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        since = super().worker_offline_since(worker_id=worker_id)
+        if not self._read:
+            self._read = True
+            self.end_session(worker_id, at=_NOW)
+        return since
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_a_lapse_after_the_tick_reads_the_worker_keeps_the_row(
+    observed: ObservedState,
+) -> None:
+    # The grace was measured on a connected Worker, so the release is routed on
+    # one too, and its read after the lapse keeps the row for a grace from it.
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = _LapsesOnceRead()
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock)
+
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+    # The release ran, on the reading, and its hold counted as a failure.
+    assert reconciler._attempts[server.id].failures == 1
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
 # --- Worker-reported unknown lands on existing arms (issue #2474) -----------
 #
 # SERVER_STATE_UNKNOWN joined the wire enum, so ``unknown`` now reaches a row from a
