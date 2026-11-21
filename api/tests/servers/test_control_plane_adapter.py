@@ -797,6 +797,44 @@ def test_is_worker_connected_false_for_offline_worker() -> None:
     assert adapter.is_worker_connected(worker_id=WorkerId(worker_uuid)) is False
 
 
+# --- worker_offline_since via the registry per-id lookup (issue #3963) -------
+
+
+def test_worker_offline_since_is_the_registry_disconnect_instant() -> None:
+    worker_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    session = registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+    ended = _T0 + dt.timedelta(seconds=5)
+    clock.set(ended)
+    registry.mark_disconnected(FleetWorkerId(str(worker_uuid)), session)
+    clock.set(ended + dt.timedelta(minutes=5))
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.worker_offline_since(worker_id=WorkerId(worker_uuid)) == ended
+
+
+def test_worker_offline_since_is_none_for_a_connected_worker() -> None:
+    worker_uuid = uuid.uuid4()
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    registry.register(make_worker(worker_id=str(worker_uuid), at=_T0))
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.worker_offline_since(worker_id=WorkerId(worker_uuid)) is None
+
+
+def test_worker_offline_since_is_none_for_an_unknown_worker() -> None:
+    clock = FakeClock(_T0)
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+
+    adapter = _registry_adapter(registry)
+
+    assert adapter.worker_offline_since(worker_id=WorkerId(uuid.uuid4())) is None
+
+
 # --- held_generation bridges UUID server-id to the registry string (#763) ----
 
 

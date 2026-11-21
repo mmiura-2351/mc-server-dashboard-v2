@@ -112,6 +112,7 @@ def _snapshot(status: WorkerStatus) -> WorkerSnapshot:
         registered_at=now,
         last_heartbeat_at=now,
         status=status,
+        offline_since=None,
         assigned_count=0,
     )
 

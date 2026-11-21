@@ -775,3 +775,63 @@ def test_register_replaces_recorded_held_generations() -> None:
     registry.register(make_worker(at=_T0))
 
     assert registry.held_generation(WorkerId("worker-1"), "server-a") is None
+
+
+# --- offline_since: the instant a Worker first read offline (issue #3963) ---
+
+
+def test_a_connected_worker_is_not_offline() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+
+    snapshot = registry.get(WorkerId("worker-1"))
+
+    assert snapshot is not None
+    assert snapshot.offline_since is None
+
+
+def test_a_disconnected_worker_is_offline_since_its_disconnect() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    session = registry.register(make_worker(at=_T0))
+    ended = _T0 + dt.timedelta(seconds=5)
+    clock.set(ended)
+    registry.mark_disconnected(WorkerId("worker-1"), session)
+    clock.set(ended + dt.timedelta(minutes=5))
+
+    snapshot = registry.get(WorkerId("worker-1"))
+
+    assert snapshot is not None
+    assert snapshot.offline_since == ended
+
+
+def test_a_lapsed_worker_is_offline_since_its_lapse() -> None:
+    # Offline before any teardown has run.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    registry.register(make_worker(at=_T0))
+    clock.set(_T0 + _TIMEOUT + dt.timedelta(seconds=5))
+
+    snapshot = registry.get(WorkerId("worker-1"))
+
+    assert snapshot is not None
+    assert snapshot.offline_since == _T0 + _TIMEOUT
+
+
+def test_a_reregistered_worker_is_not_offline_any_more() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    first = registry.register(make_worker(at=_T0))
+    clock.set(_T0 + dt.timedelta(seconds=5))
+    registry.mark_disconnected(WorkerId("worker-1"), first)
+    clock.set(_T0 + dt.timedelta(seconds=10))
+    second = registry.register(make_worker(at=_T0 + dt.timedelta(seconds=10)))
+    # The first session's delayed teardown changes nothing either.
+    registry.mark_disconnected(WorkerId("worker-1"), first)
+
+    snapshot = registry.get(WorkerId("worker-1"))
+
+    assert snapshot is not None
+    assert snapshot.offline_since is None
+    assert registry.is_current_session(WorkerId("worker-1"), second)

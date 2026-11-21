@@ -86,3 +86,20 @@ class Worker:
         if self.draining:
             return WorkerStatus.DRAINING
         return WorkerStatus.ONLINE
+
+    def offline_since(
+        self, *, now: dt.datetime, timeout: dt.timedelta
+    ) -> dt.datetime | None:
+        """The instant from which :meth:`status` reads ``OFFLINE``, or ``None``.
+
+        The earlier of the end of the stream and the lapse of the heartbeats:
+        a Worker whose heartbeats lapse reads offline before its teardown marks
+        it disconnected (issue #3963). ``None`` while the Worker is live.
+        """
+
+        lapsed_at = self.last_heartbeat_at + timeout
+        if self.disconnected_at is not None:
+            return min(self.disconnected_at, lapsed_at)
+        if now - self.last_heartbeat_at > timeout:
+            return lapsed_at
+        return None

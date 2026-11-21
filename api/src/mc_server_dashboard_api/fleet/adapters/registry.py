@@ -307,6 +307,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             registered_at=worker.registered_at,
             last_heartbeat_at=worker.last_heartbeat_at,
             status=worker.status(now=now, timeout=self._timeout),
+            offline_since=worker.offline_since(now=now, timeout=self._timeout),
             # The read view reflects the same load placement sees: committed
             # assignments plus in-flight reservations (#778).
             assigned_count=self._load(worker.id),

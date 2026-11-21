@@ -1989,6 +1989,7 @@ class FakeControlPlane(ControlPlane):
         unavailable_kinds: set[str] | None = None,
         connected: dict[WorkerId, bool] | None = None,
         held: dict[tuple[WorkerId, ServerId], int] | None = None,
+        offline_since: dict[WorkerId, dt.datetime] | None = None,
     ) -> None:
         self._place_to = place_to
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
@@ -2003,6 +2004,9 @@ class FakeControlPlane(ControlPlane):
         # Worker-connectivity map for the scheduler's skip-disconnected path; a
         # worker absent here is treated as connected.
         self._connected = connected or {}
+        # The instant each Worker first read disconnected (issue #3963); a Worker
+        # absent here reads None, as one that never registered with this process.
+        self.offline_since = offline_since or {}
         # Held-working-set generation map for the skip-hydrate decision (issue #763);
         # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
@@ -2043,6 +2047,9 @@ class FakeControlPlane(ControlPlane):
 
     def is_worker_connected(self, *, worker_id: WorkerId) -> bool:
         return self._connected.get(worker_id, True)
+
+    def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        return self.offline_since.get(worker_id)
 
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int
