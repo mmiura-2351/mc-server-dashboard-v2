@@ -81,6 +81,13 @@ class _FakeReferences(LivePluginCacheReferences):
         return self._keys
 
 
+def _resume_point() -> ResumePoint:
+    """A resume point whose pass without a mark starts at the first key in key
+    order, so a pass meets the keys in the order a test seeds them (issue #3934)."""
+
+    return ResumePoint(start=lambda count: 0)
+
+
 def _old() -> dt.datetime:
     # Comfortably older than the safety window: never spared by it.
     return _NOW - GC_SAFETY_WINDOW - dt.timedelta(hours=1)
@@ -109,7 +116,7 @@ def _gc(
         references=refs,
         clock=_FixedClock(_NOW),
         ownership=ownership or FakeStoreOwnership(),
-        resume_point=resume_point or ResumePoint(),
+        resume_point=resume_point or _resume_point(),
     )
 
 
@@ -484,7 +491,7 @@ async def test_a_blob_the_store_gives_no_answer_for_starves_no_other() -> None:
     bad = keys[1]
     store.fail_deletes_of(bad)
     store.faults.error = ObjectStoreUnreachableError
-    gc = _gc(store.cache, _FakeReferences(set()), resume_point=ResumePoint())
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=_resume_point())
 
     with pytest.raises(PluginCacheStorageUnreachableError):
         await gc()
@@ -501,7 +508,7 @@ async def test_a_store_that_answers_no_delete_ends_each_pass_at_its_first() -> N
     store = _ObjectCache()
     keys = await store.seed(3)
     attempted = store.answer_no_delete()
-    resume_point = ResumePoint()
+    resume_point = _resume_point()
     gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
 
     for _ in range(7):
@@ -520,7 +527,7 @@ async def test_a_pass_that_comes_round_clears_the_resume_point() -> None:
     keys = await store.seed(3)
     store.fail_deletes_of(keys[1])
     store.faults.error = ObjectStoreUnreachableError
-    resume_point = ResumePoint()
+    resume_point = _resume_point()
     gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
     with pytest.raises(PluginCacheStorageUnreachableError):
         await gc()
@@ -540,7 +547,7 @@ async def test_a_resumed_pass_logs_where_it_starts_at_debug(
     keys = await store.seed(3)
     store.fail_deletes_of(keys[1])
     store.faults.error = ObjectStoreUnreachableError
-    gc = _gc(store.cache, _FakeReferences(set()), resume_point=ResumePoint())
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=_resume_point())
     with pytest.raises(PluginCacheStorageUnreachableError):
         await gc()
     store.faults.clear()
@@ -564,7 +571,7 @@ async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> Non
     keys = await store.seed(6)
     store.fail_deletes_of(keys[0])
     store.faults.error = ObjectStoreUnreachableError
-    resume_point = ResumePoint()
+    resume_point = _resume_point()
     gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
     with pytest.raises(PluginCacheStorageUnreachableError):
         await gc()

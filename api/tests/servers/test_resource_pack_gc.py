@@ -60,6 +60,13 @@ _T0 = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.UTC)
 _FILENAME = "pack.zip"
 
 
+def _resume_point() -> ResumePoint:
+    """A resume point whose pass without a mark starts at the first key in key
+    order, so a pass meets the keys in the order a test seeds them (issue #3934)."""
+
+    return ResumePoint(start=lambda count: 0)
+
+
 def _pack_zip() -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -80,7 +87,7 @@ class _Bucket:
         self.rows = FakeResourcePackRepository()
         # The GC's one resume point, which every pass below shares, as the
         # loop's passes do (issue #3934).
-        self.resume_point = ResumePoint()
+        self.resume_point = _resume_point()
 
     def blob_keys(self) -> list[str]:
         return [
@@ -425,7 +432,7 @@ async def test_spares_the_blob_of_an_upload_in_flight() -> None:
         store=bucket.store,
         clock=bucket.clock,
         ownership=FakeStoreOwnership(),
-        resume_point=ResumePoint(),
+        resume_point=_resume_point(),
     )()
 
     assert bucket.blob_keys() == [f"resource-packs/{pack_id.value}/{_FILENAME}"]

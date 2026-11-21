@@ -12,7 +12,9 @@ def _after(key: str) -> ResumePoint:
 
 
 def test_a_pass_with_no_resume_point_walks_the_keys_in_order() -> None:
-    assert ResumePoint().order(["d", "a", "c", "b"], str) == ["a", "b", "c", "d"]
+    walk = ResumePoint(start=lambda count: 0).order(["d", "a", "c", "b"], str)
+
+    assert walk == ["a", "b", "c", "d"]
 
 
 def test_a_resumed_pass_starts_after_the_key_and_comes_round_to_it_last() -> None:

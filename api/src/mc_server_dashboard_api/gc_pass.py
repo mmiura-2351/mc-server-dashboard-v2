@@ -19,6 +19,7 @@ root-level import contract.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Callable, Iterable
 
 MAX_CONSECUTIVE_FAILED_DELETES = 5
@@ -37,8 +38,9 @@ class ResumePoint:
     starts it empty.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, start: Callable[[int], int] = random.randrange) -> None:
         self.key: str | None = None
+        self._start = start
 
     def order[T](self, entries: Iterable[T], key_of: Callable[[T], str]) -> list[T]:
         """``entries`` in key order, starting after :attr:`key` and wrapping round.
