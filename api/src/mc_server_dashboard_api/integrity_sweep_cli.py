@@ -18,6 +18,13 @@ Usage::
 
 Configuration (database URL, storage backend) is read from the environment, the
 same ``MCD_API_*`` settings the API server uses.
+
+Exit status: 0 when the pass completed; 1 when the object store could not serve
+an archive read; 2 on a bad argument; 3 when the database driver raised an error
+mid-pass (SQLAlchemy ``DBAPIError``, such as a dropped connection or a terminated
+backend) or a server's lifecycle lock was lost. A 1 or a 3 stops the pass with a
+one-line message: verdicts already written this run are committed, and the sweep
+is safe to re-run.
 """
 
 from __future__ import annotations
@@ -27,6 +34,8 @@ import asyncio
 import logging
 import sys
 import uuid
+
+from sqlalchemy.exc import DBAPIError
 
 from mc_server_dashboard_api.app import _build_storage, _resolve_config_file
 from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSystemClock
@@ -48,6 +57,7 @@ from mc_server_dashboard_api.servers.application.integrity_sweep import (
 )
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    LifecycleLockLostError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
@@ -125,6 +135,32 @@ def main(argv: list[str]) -> int:
             f"the store is healthy.\n"
         )
         return 1
+    except LifecycleLockLostError as exc:
+        # The server's lifecycle lock was lost mid-pass (issue #3927), so the pass
+        # stopped before the verdict write the lock guarded. Like a store outage
+        # this is an operator-facing outcome, not a crash (issue #3942): one line,
+        # with the traceback at DEBUG only.
+        _LOG.debug("integrity sweep: the lifecycle lock was lost", exc_info=True)
+        sys.stderr.write(
+            f"integrity sweep aborted: the lifecycle lock on server {exc} was lost, "
+            f"so the sweep stopped. Backups already classified this run keep their "
+            f"verdict, and it is safe to re-run the sweep.\n"
+        )
+        return 3
+    except DBAPIError as exc:
+        # The database failed mid-pass: a dropped connection, a terminated backend
+        # (issue #3942). The asyncpg dialect raises a server-side error as the bare
+        # DBAPIError, so that is the class caught; any other error is a bug and
+        # keeps its traceback. ``exc.orig`` is the driver's one-line reason; the
+        # SQLAlchemy message adds the statement and a URL over several lines.
+        _LOG.debug("integrity sweep: the database failed", exc_info=True)
+        sys.stderr.write(
+            f"integrity sweep aborted: the database failed "
+            f"({type(exc).__name__}: {exc.orig}), so the sweep stopped. Backups "
+            f"already classified this run keep their verdict, and it is safe to "
+            f"re-run the sweep.\n"
+        )
+        return 3
     print(
         f"servers scanned: {summary.servers_scanned}\n"
         f"backups healthy: {summary.backups_healthy}\n"

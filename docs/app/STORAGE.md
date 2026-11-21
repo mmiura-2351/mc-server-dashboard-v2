@@ -1980,6 +1980,14 @@ Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
 config knob.
 
+**Sweep exit status.** `integrity_sweep_cli` exits 0 when the pass completed, 1
+when the store could not serve an archive read (an outage, below), 2 on a bad
+argument, and 3 when the database driver raised an error mid-pass (SQLAlchemy
+`DBAPIError`, such as a dropped connection or a terminated backend) or a server's
+lifecycle lock was lost (DATABASE.md Section 7). A 1 or a 3 stops the pass with a
+one-line message rather than a traceback: verdicts already written this run are
+committed, and the sweep re-checks every row, so re-running it is safe.
+
 **Damage vs. outage.** A body that ends early looks identical whether the object's
 bytes are damaged or the store is merely having a bad minute — and a verdict on
 the latter would condemn every backup in the deployment over one outage. The
@@ -2007,7 +2015,7 @@ backoff so a momentary fault has a chance to clear, and the two reads decide:
   object's bytes end, so it cannot corroborate the short one, and the pair stays
   `ObjectStoreUnavailableError` → `BackupStorageUnavailableError`. The sweep does
   not catch that: the pass stops, logging which backup it died on, and the CLI
-  exits non-zero with an operator-facing message rather than a traceback.
+  exits 1 with an operator-facing message rather than a traceback.
 
 Accepting disagreeing stop points trades away some outage protection: a store that
 tears down both reads mid-body, at different points, now marks the backup

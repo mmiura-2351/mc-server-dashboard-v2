@@ -8,15 +8,18 @@ database is touched.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import replace
 
 import pytest
+from sqlalchemy.exc import DBAPIError, InterfaceError
 
 from mc_server_dashboard_api import integrity_sweep_cli
 from mc_server_dashboard_api.servers.application.integrity_sweep import SweepSummary
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    LifecycleLockLostError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
@@ -114,6 +117,97 @@ def test_main_reports_a_store_outage_cleanly(
     assert "integrity sweep aborted" in err
     assert "abc123ref" in err  # names which backup the pass died on
     assert "Traceback" not in err
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        # A connection the database closed between two statements.
+        InterfaceError("SELECT 1", None, Exception("connection is closed")),
+        # A statement the database cut off in flight: the asyncpg dialect raises
+        # every server-side error as the bare DBAPIError.
+        DBAPIError(
+            "SELECT 1",
+            None,
+            Exception(
+                "connection was closed in the middle of operation: terminating "
+                "connection due to administrator command"
+            ),
+        ),
+    ],
+    ids=["connection-closed", "terminated-in-flight"],
+)
+def test_main_reports_a_database_failure_cleanly(
+    error: DBAPIError,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A database failure mid-sweep stops the pass (issue #3942). It is an
+    operator-facing outcome like a store outage, so it exits with its own status
+    and a message saying the re-run is safe; the traceback is logged at DEBUG
+    only."""
+
+    async def _fake_run(*, server_id: ServerId | None) -> SweepSummary:
+        raise error
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+    caplog.set_level(logging.DEBUG, logger=integrity_sweep_cli.__name__)
+
+    assert integrity_sweep_cli.main([]) == 3
+
+    err = capsys.readouterr().err
+    assert "integrity sweep aborted: the database failed" in err
+    assert f"{type(error).__name__}: {error.orig}" in err  # says why
+    assert "the sweep stopped" in err
+    assert "Backups already classified this run keep their verdict" in err
+    assert "safe to re-run the sweep" in err
+    assert "Traceback" not in err
+    assert [r.levelno for r in caplog.records if r.exc_info] == [logging.DEBUG]
+
+
+def test_main_reports_a_lost_lifecycle_lock_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lifecycle lock lost mid-sweep (issue #3927) stops the pass before the
+    verdict write it guarded. Like a database failure it exits 3 with a message
+    naming the server, and the traceback is logged at DEBUG only (issue #3942)."""
+
+    sid = str(uuid.uuid4())
+
+    async def _fake_run(*, server_id: ServerId | None) -> SweepSummary:
+        raise LifecycleLockLostError(sid)
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+    caplog.set_level(logging.DEBUG, logger=integrity_sweep_cli.__name__)
+
+    assert integrity_sweep_cli.main([]) == 3
+
+    err = capsys.readouterr().err
+    assert "integrity sweep aborted: the lifecycle lock on server" in err
+    assert f"server {sid} was lost" in err  # names the server it lost
+    assert "the sweep stopped" in err
+    assert "Backups already classified this run keep their verdict" in err
+    assert "safe to re-run the sweep" in err
+    assert "Traceback" not in err
+    assert [r.levelno for r in caplog.records if r.exc_info] == [logging.DEBUG]
+
+
+def test_main_lets_an_unexpected_error_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a database failure or a lost lock is an expected outcome (issue
+    #3942); any other error is a bug and keeps its traceback."""
+
+    async def _fake_run(*, server_id: ServerId | None) -> SweepSummary:
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        integrity_sweep_cli.main([])
 
 
 def test_main_rejects_an_invalid_server_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
