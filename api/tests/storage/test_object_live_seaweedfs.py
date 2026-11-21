@@ -68,6 +68,7 @@ from tests.storage.helpers import (
     region_targz,
     tar_stream,
 )
+from tests.store_ownership import UnaskedStoreDatabase
 
 # One healthy region body, reused by the readability-probe archives below.
 _REGION = healthy_region_bytes()
@@ -326,6 +327,7 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
 
         async with factory() as client:
             assert await client.list_objects("communities/") == []
+            assert await client.first_key("communities/") is None
             assert await client.list_multipart_uploads("communities/") == []
             assert await client.head_object("communities/missing") is None
             with pytest.raises(NotFoundError):
@@ -333,8 +335,10 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
 
         # On a fresh deployment the first write is the claim's conditional put of
         # the store owner marker (issue #3870), so it is what creates the bucket.
+        # A bucketless store holds no object, so a fresh database claims it
+        # without being asked whether it names any (issue #3886).
         ownership = ObjectStoreOwnership(factory, bucket=_FRESH_BUCKET)
-        await ownership.claim(uuid.UUID(int=1))
+        await ownership.claim(uuid.UUID(int=1), database=UnaskedStoreDatabase())
         assert await ownership.refusal() is None
 
         async with factory() as client:

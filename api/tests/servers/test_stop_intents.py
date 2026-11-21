@@ -75,6 +75,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
     StopServersAssignedToWorker,
 )
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    RunSnapshotCadenceTick,
+)
 from mc_server_dashboard_api.servers.application.start_intent_lock import (
     StartIntentLock,
 )
@@ -141,6 +144,9 @@ class _Repository(FakeServerRepository):
 
     ``after_next_read`` runs once, inside the next ``get_by_id``, after the row
     value has been taken: a write it makes is one the reader did not see.
+    ``before_next_clear`` runs once, inside the next ``clear_awaiting_hydrate``,
+    before its write: a write it makes lands between a start's compare and its
+    clear.
     ``pause_next_flip`` holds the next ``update_lifecycle`` at its entry, so a stop
     that has read the row waits there, just before its write. While
     ``stage_flips`` is set, an ``update_lifecycle`` that matches is held back
@@ -150,10 +156,21 @@ class _Repository(FakeServerRepository):
     def __init__(self) -> None:
         super().__init__()
         self.after_next_read: Hook | None = None
+        self.before_next_clear: Hook | None = None
         self.pause_next_flip: asyncio.Event | None = None
         self.flip_paused = asyncio.Event()
         self.stage_flips = False
         self._staged: list[tuple[Server, DesiredState, WorkerId | None, bool]] = []
+
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
+    ) -> bool:
+        hook, self.before_next_clear = self.before_next_clear, None
+        if hook is not None:
+            await hook()
+        return await super().clear_awaiting_hydrate(
+            server_id, worker_id, updated_at=updated_at
+        )
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         loaded = await super().get_by_id(server_id)
@@ -469,6 +486,9 @@ class _World:
         # which the real locks forbid. ``None`` gives each use case its own.
         self.lock: LifecycleLock = NullLifecycleLock()
         self.intent_lock: StartIntentLock | None = None
+        # The store generation the starts read; a test moves it as an at-rest edit
+        # or a restore would.
+        self.store_generation = 0
 
     def row(
         self,
@@ -511,7 +531,9 @@ class _World:
             control_plane=control_plane or self.cp,
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(generation=0),
+            store_generation=FakeStoreGenerationReader(
+                generation=self.store_generation
+            ),
             file_store=FakeFileStore(seed_eula=True),
             lifecycle_lock=self.lock,
             stop_intents=self.intents,
@@ -581,7 +603,9 @@ async def test_a_stop_that_lands_during_the_re_read_keeps_the_start_unsent() -> 
     # The window #3737 left open: the stop commits once the start's re-read has
     # taken the row, and is sent first. The Worker answers it SERVER_NOT_FOUND and
     # the stop releases the row, so a start sent now would run under (stopped,
-    # unassigned). The start sees the bump instead and sends nothing.
+    # unassigned). The start sees the bump instead and sends nothing. Nor does it
+    # clear the row's mark, since the row is no longer its own, so the release
+    # takes no snapshot (issue #3890).
     world = _World()
 
     async def stop() -> None:
@@ -592,7 +616,7 @@ async def test_a_stop_that_lands_during_the_re_read_keeps_the_start_unsent() -> 
     with pytest.raises(LifecycleTransitionConflictError):
         await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 
@@ -706,7 +730,8 @@ async def test_a_stop_runnable_at_the_compare_is_sent_after_the_start() -> None:
 async def test_a_stop_still_waiting_on_the_worker_has_already_bumped() -> None:
     # The stop is on the Worker, which has answered nothing yet, when the start
     # compares. It must have bumped before it was sent: a stop that bumped only on
-    # the answer would let the start follow it out.
+    # the answer would let the start follow it out. The start clears no mark, so
+    # the release takes no snapshot (issue #3890).
     world = _World()
     answer = asyncio.Event()
     world.cp.hold_stop_answer = answer
@@ -723,7 +748,7 @@ async def test_a_stop_still_waiting_on_the_worker_has_already_bumped() -> None:
     answer.set()
     await stops[0]
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 
@@ -740,7 +765,8 @@ async def test_a_stop_whose_commit_landed_but_raised_keeps_the_start_unsent(
     # sent. The flip still bumps. Otherwise the start would go out under the
     # stopped row, and an operator who retried the stop before the Worker's first
     # report would release the row under it: the retry takes the final snapshot
-    # and clears the assignment, and sends no stop.
+    # and clears the assignment, and sends no stop. The refused start cleared no
+    # mark, so that retry takes no snapshot (issue #3890).
     world = _World()
 
     async def ambiguous_stop() -> None:
@@ -762,7 +788,7 @@ async def test_a_stop_whose_commit_landed_but_raised_keeps_the_start_unsent(
 
     await world.stop()
 
-    assert world.kinds() == ["hydrate", "snapshot"]
+    assert world.kinds() == ["hydrate"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 
@@ -868,7 +894,9 @@ async def test_a_start_whose_server_was_re_placed_on_its_worker_is_not_sent() ->
         await world.start()
 
     # The first hydrate, the stop and its release, then the newer start. One start.
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    # The release takes no snapshot: the first start had not recorded its hydrate
+    # yet, so the row still read awaiting_hydrate (issue #3890).
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -891,9 +919,12 @@ async def test_a_start_reads_the_counter_before_its_own_commit() -> None:
         await start(community_id=world.community, server_id=world.server_id)
 
     # All inside the first start's commit: the stop and its release, then the newer
-    # start. The first start then skips its hydrate (the newer one's hydrate left
-    # the Worker holding the store's generation) and sends nothing.
-    assert world.kinds() == ["stop", "snapshot", "hydrate", "start"]
+    # start. The release takes no snapshot (issue #3890): nothing had hydrated, so
+    # the Worker's scratch is whatever it held before, which the row's mark cannot
+    # tell from a stale leftover. The first start then skips its hydrate (the newer
+    # one's hydrate left the Worker holding the store's generation) and sends
+    # nothing.
+    assert world.kinds() == ["stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -917,8 +948,9 @@ async def test_a_placement_reads_the_counter_before_its_own_commit() -> None:
             community_id=world.community, server_id=world.server_id
         )
 
-    # The placement always hydrates; it then sends nothing.
-    assert world.kinds() == ["stop", "snapshot", "hydrate", "start", "hydrate"]
+    # The release takes no snapshot, as above. The placement always hydrates; it
+    # then sends nothing.
+    assert world.kinds() == ["stop", "hydrate", "start", "hydrate"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -1065,7 +1097,7 @@ async def test_a_failed_revert_does_not_hold_back_a_newer_start(kind: str) -> No
 
     await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -1092,7 +1124,7 @@ async def test_a_failed_revert_leaves_a_newer_start_on_its_worker_alone(
 
     await _fails(world, kind)
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.incremented == [world.worker, world.worker]
@@ -1121,7 +1153,7 @@ async def test_a_failed_revert_leaves_a_newer_start_on_another_worker_alone(
 
     await _fails(world, kind)
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert [k for k, _, _ in other.dispatched] == ["hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, elsewhere)
     assert other.live == {world.server_id}
@@ -1202,7 +1234,7 @@ async def test_a_newer_start_waits_for_a_revert_in_progress(kind: str) -> None:
     await f
     await newer
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -1311,7 +1343,7 @@ async def test_a_revert_checks_its_intent_once_it_holds_the_lock(kind: str) -> N
 
     await _fails(world, kind)
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -1539,7 +1571,7 @@ async def test_a_start_whose_re_read_fails_leaves_a_newer_start_alone() -> None:
     with pytest.raises(RuntimeError, match="database unavailable"):
         await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot", "hydrate", "start"]
+    assert world.kinds() == ["hydrate", "stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
     assert world.cp.decremented == [world.worker]
@@ -2290,7 +2322,7 @@ async def test_a_stop_during_the_placement_hydrate_stops_the_placed_row() -> Non
     with pytest.raises(LifecycleTransitionConflictError):
         await world.place()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
     assert world.cp.load == ["confirm", "drop"]
@@ -2446,3 +2478,184 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
     assert stop.stop_intents is app.state.stop_intents
     assert isinstance(drain.stopper, ServersAssignedServerStopper)
     assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents
+
+
+# --- an older start and a newer placement's mark (issue #3890, r2 finding 1) --
+
+
+_KEEP_CODES = [
+    "command_in_flight",
+    "orphan_pending",
+    "untracked_container",
+    "command_expired",
+]
+
+
+def _refused(precondition: str) -> CommandOutcome:
+    return CommandOutcome(
+        status=worker_status("HydrateTrigger", precondition), message="refused"
+    )
+
+
+async def _due_tick_sends_nothing_new(world: _World) -> None:
+    """Run the periodic snapshot past its jitter; it must dispatch nothing."""
+
+    before = world.kinds()
+    clock = FakeClock(_NOW)
+    scheduler = RunSnapshotCadenceTick(
+        uow=FakeUnitOfWork(servers=world.repo),
+        control_plane=world.cp,
+        clock=clock,
+        default_interval_seconds=300,
+        min_interval_seconds=60,
+    )
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(hours=1))
+    await scheduler.tick()
+    assert world.kinds() == before
+
+
+@pytest.mark.parametrize("precondition", _KEEP_CODES)
+async def test_an_older_start_leaves_a_newer_placements_mark(precondition: str) -> None:
+    # Start T1's hydrate is in flight when a stop releases the row, without a
+    # snapshot since it is marked, and start T2 places it on the same Worker. T2's
+    # hydrate is refused, so T2 keeps the Worker, marked. T1's hydrate then
+    # answers. T1 no longer owns the row, so it clears nothing: the Worker holds
+    # T1's copy, not the store's.
+    world = _World()
+    kept_mark: list[bool] = []
+
+    async def stop_then_a_kept_start() -> None:
+        await world.stop()
+
+        async def refuse() -> CommandOutcome:
+            return _refused(precondition)
+
+        world.cp.hydrate_hooks.append(refuse)
+        with pytest.raises(CommandDispatchError):
+            await world.start()
+        kept_mark.append(world.repo.by_id[world.server_id].awaiting_hydrate)
+
+    world.after_hydrate(stop_then_a_kept_start)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    assert kept_mark == [True]
+    assert world.kinds() == ["hydrate", "stop", "hydrate"]
+    row = world.repo.by_id[world.server_id]
+    assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
+        DesiredState.RUNNING,
+        world.worker,
+        True,
+    )
+    await _due_tick_sends_nothing_new(world)
+
+
+async def test_an_older_start_after_a_stale_clear_leaves_a_newer_placements_mark() -> (
+    None
+):
+    # The r2 review's chain, with no task stalled by the test:
+    # 1. Start T1 places the server on the Worker; its hydrate is in flight.
+    # 2. The operator's stop waits behind that hydrate, and its request is
+    #    cancelled. The row reads (stopped, stopped, assigned, marked).
+    # 3. A second stop takes the stale clear: no start was sent, so it skips the
+    #    final snapshot for the mark and releases the row.
+    # 4. An at-rest edit or a restore moves the store.
+    # 5. Start T2 places the server on the same Worker, marked, and its hydrate
+    #    is refused UNAVAILABLE: kept.
+    # 6. T1's hydrate answers. T2's mark survives: the Worker still holds the copy
+    #    from before step 4.
+    world = _World()
+    guard = StopConvergenceGuard()
+    kept_mark: list[bool] = []
+
+    def stop_at(at: dt.datetime) -> StopServer:
+        return StopServer(
+            uow=FakeUnitOfWork(servers=world.repo),
+            control_plane=world.cp,
+            clock=FakeClock(at),
+            stop_intents=world.intents,
+            stop_convergence=guard,
+        )
+
+    async def during_t1_hydrate() -> None:
+        world.cp.hold_stop_answer = asyncio.Event()
+        stop = asyncio.create_task(
+            stop_at(_NOW)(community_id=world.community, server_id=world.server_id)
+        )
+        await world.cp.stop_sent.wait()
+        stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop
+        world.cp.hold_stop_answer = None
+        row = world.repo.by_id[world.server_id]
+        assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
+            DesiredState.STOPPED,
+            world.worker,
+            True,
+        )
+        await stop_at(_NOW + dt.timedelta(seconds=120)).clear_stale_assignment(
+            community_id=world.community, server_id=world.server_id
+        )
+        assert world.stored() == (DesiredState.STOPPED, None)
+        world.store_generation = 1
+
+        async def refuse() -> CommandOutcome:
+            return _refused("untracked_container")
+
+        world.cp.hydrate_hooks.append(refuse)
+        with pytest.raises(CommandDispatchError):
+            await world.start()
+        kept_mark.append(world.repo.by_id[world.server_id].awaiting_hydrate)
+
+    world.after_hydrate(during_t1_hydrate)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    assert kept_mark == [True]
+    assert world.kinds() == ["hydrate", "stop", "hydrate"]
+    row = world.repo.by_id[world.server_id]
+    assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
+        DesiredState.RUNNING,
+        world.worker,
+        True,
+    )
+    await _due_tick_sends_nothing_new(world)
+
+
+async def test_a_placement_between_the_compare_and_the_clear_keeps_its_mark() -> None:
+    # The same release and newer placement, landing after start T1's compare has
+    # passed and before its clear writes. The compare cannot see them, so the
+    # clear's own guard does: it asserts the row as T1 read it, and the newer
+    # placement's write moved ``updated_at``.
+    world = _World()
+    later = _NOW + dt.timedelta(minutes=1)
+
+    async def stop_then_a_kept_start() -> None:
+        await world.stop()
+        # The store moves, so the newer start hydrates rather than reuse the set
+        # T1's hydrate left.
+        world.store_generation = 1
+
+        async def refuse() -> CommandOutcome:
+            return _refused("untracked_container")
+
+        world.cp.hydrate_hooks.append(refuse)
+        newer = replace(world.start_server(), clock=FakeClock(later))
+        with pytest.raises(CommandDispatchError):
+            await newer(community_id=world.community, server_id=world.server_id)
+
+    async def arm() -> None:
+        world.repo.before_next_clear = stop_then_a_kept_start
+
+    world.after_hydrate(arm)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    row = world.repo.by_id[world.server_id]
+    assert (row.updated_at, row.assigned_worker_id, row.awaiting_hydrate) == (
+        later,
+        world.worker,
+        True,
+    )
+    await _due_tick_sends_nothing_new(world)

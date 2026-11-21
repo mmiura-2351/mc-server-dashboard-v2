@@ -39,7 +39,11 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   second live instance on another Worker. For the same reason it keeps the
   assignment, sends no start and records observed=running when the placed Worker
   refuses the hydrate ``INVALID_STATE``, because it already runs the server (issue
-  #3865); that counts as success, not toward the backoff.
+  #3865); that counts as success, not toward the backoff. It also keeps the
+  assignment, and records observed=unknown, when that Worker refuses the hydrate
+  ``BUSY``, ``UNAVAILABLE`` or ``EXPIRED``, which leaves an instance there possible
+  (issue #3890). The refusal is handled below as any start's is, and the next tick
+  past the grace takes ``redispatch_start`` to that same Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
   the stop.
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final

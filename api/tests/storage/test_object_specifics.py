@@ -1330,11 +1330,15 @@ async def test_backup_pack_survives_concurrent_publish_gc() -> None:
     original_write = _os_mod._write_backup_targz
 
     async def _racing_write(
-        client: S3Client, prefix: str, objs: list[S3Object], spool: "Path"
+        client: S3Client,
+        prefix: str,
+        objs: list[S3Object],
+        spool: "Path",
+        max_bytes: int | None = None,
     ) -> None:
         # A concurrent publish flips the pointer. Its GC checks _is_leased.
         await _publish(storage, community, server, {"f": b"NEW"})
-        await original_write(client, prefix, objs, spool)
+        await original_write(client, prefix, objs, spool, max_bytes)
 
     with patch.object(_os_mod, "_write_backup_targz", _racing_write):
         key = await storage.create_backup_from_current(community, server)
@@ -1493,6 +1497,26 @@ async def test_restore_single_pass_counts_cumulative_bytes() -> None:
 
     with pytest.raises(ArchiveTooLargeError):
         await storage.restore_backup(community, server, backup_key)
+
+
+async def test_a_store_fault_while_packing_a_backup_stays_the_store_fault() -> None:
+    """A store fault while the backup writer packs (issue #3859) is reported as
+    that fault, which is retried, not as ``ArchiveTooLargeError``, which is not:
+    after a failure the end-of-archive marker is left out of the spool, so it
+    cannot take a tar already near the cap past it."""
+
+    faults = Faults()
+    storage = ObjectStorage(
+        faulty_s3_factory(FakeS3Store(), faults), max_restore_bytes=16 * 1024
+    )
+    community, server = new_scope()
+    # 15.5 KiB of tar before the second member: the marker and the record's
+    # padding would take it past 16 KiB.
+    await _publish(storage, community, server, {"a": bytes(15 * 1024), "b": b"b"})
+
+    faults.when = lambda op, key: op == "get_object" and key.endswith("/b")
+    with pytest.raises(ObjectStoreUnavailableError):
+        await storage.create_backup_from_current(community, server)
 
 
 async def test_commit_refuses_when_generation_marker_removed() -> None:

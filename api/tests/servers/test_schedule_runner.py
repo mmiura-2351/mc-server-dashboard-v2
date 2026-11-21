@@ -593,6 +593,17 @@ class _CorruptBackupStore(FakeBackupArchiveStore):
         raise BackupCorruptError(str(server_id.value), corrupt_count=2)
 
 
+class _TooLargeBackupStore(FakeBackupArchiveStore):
+    """Raises BackupTooLargeError at create (a working set too large to archive)."""
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from mc_server_dashboard_api.servers.domain.errors import BackupTooLargeError
+
+        raise BackupTooLargeError(str(server_id.value))
+
+
 class _StorageUnavailableBackupStore(FakeBackupArchiveStore):
     """Raises BackupStorageUnavailableError mid-archive (the storage-outage case)."""
 
@@ -663,6 +674,33 @@ async def test_corrupt_backup_records_backup_corrupt_detail() -> None:
 
     assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
     assert _run_details(env, schedule) == ["backup corrupt"]
+
+
+async def test_too_large_backup_records_its_detail_and_is_not_retried() -> None:
+    # A working set too large to archive (issue #3859) is as deterministic as a
+    # corrupt one: re-archiving it can never succeed, so no retry is armed and no
+    # second run row follows the retry delay.
+    env = _env(backup_store=_TooLargeBackupStore())
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    # Past the retry delay, as in the corrupt case below.
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert _run_details(env, schedule) == ["backup too large"]
 
 
 async def test_storage_unavailable_records_distinct_detail() -> None:

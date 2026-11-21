@@ -545,7 +545,10 @@ class BackupStore(abc.ABC):
         (Section 3.3). When *key* is provided the archive is stored under that key
         (the caller pre-generated it so it could commit the metadata row first,
         issue #1707); when ``None`` a fresh key is minted internally.
-        Raises :class:`~.errors.NotFoundError` if nothing is published.
+        Raises :class:`~.errors.NotFoundError` if nothing is published, and
+        :class:`~.errors.ArchiveTooLargeError`, with no backup written, if the
+        archive's decompressed stream would be past the decompressed-size cap
+        restore holds it to (issue #3859).
         """
 
     @abc.abstractmethod

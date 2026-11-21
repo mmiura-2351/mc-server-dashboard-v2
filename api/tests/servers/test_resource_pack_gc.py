@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.logging import TextFormatter
 from mc_server_dashboard_api.servers.adapters.resource_pack_store import (
     ObjectResourcePackStore,
@@ -59,6 +60,13 @@ _T0 = dt.datetime(2026, 6, 20, 12, 0, tzinfo=dt.UTC)
 _FILENAME = "pack.zip"
 
 
+def _resume_point() -> ResumePoint:
+    """A resume point whose pass without a mark starts at the first key in key
+    order, so a pass meets the keys in the order a test seeds them (issue #3934)."""
+
+    return ResumePoint(start=lambda count: 0)
+
+
 def _pack_zip() -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -77,11 +85,29 @@ class _Bucket:
             faulty_s3_factory(self.backing, self.faults)
         )
         self.rows = FakeResourcePackRepository()
+        # The GC's one resume point, which every pass below shares, as the
+        # loop's passes do (issue #3934).
+        self.resume_point = _resume_point()
 
     def blob_keys(self) -> list[str]:
         return [
             key for key in self.backing.objects if key.startswith("resource-packs/")
         ]
+
+    def answer_no_delete(self) -> list[str]:
+        """Give no answer to any delete; the keys they were for, as they come."""
+
+        attempted: list[str] = []
+
+        def _fails(op: str, key: str) -> bool:
+            if op != "delete_object":
+                return False
+            attempted.append(key)
+            return True
+
+        self.faults.when = _fails
+        self.faults.error = ObjectStoreUnreachableError
+        return attempted
 
     async def upload(self, uow: FakeUnitOfWork | None = None) -> ResourcePack:
         return await UploadResourcePack(
@@ -117,6 +143,7 @@ class _Bucket:
             store=self.store,
             clock=self.clock,
             ownership=ownership or FakeStoreOwnership(),
+            resume_point=self.resume_point,
         )()
 
 
@@ -405,6 +432,7 @@ async def test_spares_the_blob_of_an_upload_in_flight() -> None:
         store=bucket.store,
         clock=bucket.clock,
         ownership=FakeStoreOwnership(),
+        resume_point=_resume_point(),
     )()
 
     assert bucket.blob_keys() == [f"resource-packs/{pack_id.value}/{_FILENAME}"]
@@ -540,3 +568,114 @@ async def test_refuses_a_bucket_another_database_owns(
         and str(ownership.refusal_reason) in rec.getMessage()
         for rec in caplog.records
     )
+
+
+async def test_a_pack_the_store_gives_no_answer_for_starves_no_other() -> None:
+    # A delete that gets no answer ends the pass (issue #3871). When that failure
+    # is in fact tied to one pack, the next pass starts after it and comes round to
+    # it last, so every other orphan is reclaimed within two passes, and the pack
+    # is still tried (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(5)
+    bad = keys[1]
+    bucket.faults.when = lambda op, key: op == "delete_object" and key == bad
+    bucket.faults.error = ObjectStoreUnreachableError
+
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+
+    assert bucket.blob_keys() == [bad]
+
+
+async def test_a_store_that_answers_no_delete_ends_each_pass_at_its_first() -> None:
+    # A store that is truly down still ends each pass at once. Each pass starts
+    # after the pack the last one ended at, so the passes take the packs in turn,
+    # and the resume point is only ever that one pack's key (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(3)
+    attempted = bucket.answer_no_delete()
+
+    for _ in range(7):
+        with pytest.raises(ResourcePackStorageUnreachableError):
+            await bucket.gc()
+
+    assert attempted == [*keys, *keys, keys[0]]
+    assert bucket.resume_point.key == keys[0]
+    assert sorted(bucket.blob_keys()) == keys
+
+
+async def test_a_pass_that_comes_round_clears_the_resume_point() -> None:
+    # A pass that walks the whole listing without a store failure leaves no resume
+    # point, so the pass after it starts at the beginning (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(3)
+    bucket.faults.when = lambda op, key: op == "delete_object" and key == keys[1]
+    bucket.faults.error = ObjectStoreUnreachableError
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+    assert bucket.resume_point.key == keys[1]
+    bucket.faults.clear()
+
+    await bucket.gc()
+
+    assert bucket.resume_point.key is None
+
+
+async def test_a_resumed_pass_logs_where_it_starts_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Where a pass starts is worth a line only when debugging (issue #3934). The
+    # key ends in the upload's filename, so it is logged escaped (issue #3907).
+    bucket = _Bucket()
+    (key,) = await bucket.orphans(1, filename=_FORGED_FILENAME)
+    bucket.faults.when = lambda op, k: op == "delete_object"
+    bucket.faults.error = ObjectStoreUnreachableError
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+    bucket.faults.clear()
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await bucket.gc()
+
+    rendered = [
+        TextFormatter().format(r) for r in caplog.records if r.levelno == logging.DEBUG
+    ]
+    (resumed,) = [line for line in rendered if repr(key) in line]
+    assert "after" in resumed
+    assert not _forged(resumed)
+
+
+async def test_a_pass_five_failures_in_a_row_end_resumes_after_the_fifth() -> None:
+    # A pass that stops after five failed deletes in a row ends early too, so the
+    # next pass starts after the pack whose failure ended it, wherever the last
+    # pass started (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(6)
+    bucket.faults.when = lambda op, key: op == "delete_object" and key == keys[0]
+    bucket.faults.error = ObjectStoreUnreachableError
+    with pytest.raises(ResourcePackStorageUnreachableError):
+        await bucket.gc()
+    bucket.faults.clear()
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in keys[1:]
+
+    result = await bucket.gc()
+
+    assert result.failed == 5
+    assert bucket.resume_point.key == keys[5]
+
+
+async def test_ten_standing_failures_in_a_row_starve_no_pack_after_them() -> None:
+    # Ten packs whose deletes keep failing, next to each other in key order: each
+    # pass stops after five of them. Each starts after the last, so the third pass
+    # reaches the pack above them (issue #3934).
+    bucket = _Bucket()
+    keys = await bucket.orphans(11)
+    failing = keys[:10]
+    bucket.faults.when = lambda op, key: op == "delete_object" and key in failing
+
+    results = [await bucket.gc() for _ in range(3)]
+
+    assert [result.failed for result in results] == [5, 5, 5]
+    assert sorted(bucket.blob_keys()) == failing

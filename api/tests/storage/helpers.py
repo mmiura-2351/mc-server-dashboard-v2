@@ -523,9 +523,9 @@ TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT: dict[str, bytes] = {
 
 
 # Files whose tar is over each header limit the upload doors hold a walk to, and
-# which the storage walks take (issue #3810): the storage walks have no entry
-# cap, so a large working set reaches the character limit (131,072 files with
-# 64-character names do). Their PAX ``comment`` records are what is held.
+# which the snapshot ingest takes (issue #3810): it has no entry cap, so a large
+# working set reaches the character limit (131,072 files with 64-character names
+# do). Their PAX ``comment`` records are what is held.
 _KIB = 1024
 OVER_THE_UPLOAD_HEADER_LIMITS_FILES = {
     "server.properties": b"k=v",
@@ -533,26 +533,74 @@ OVER_THE_UPLOAD_HEADER_LIMITS_FILES = {
     **{f"world/data/d{i}.dat": b"r" for i in range(9)},
 }
 
+# The members over each header limit, the same for the upload doors and the
+# storage walks except the characters (issue #3859).
+_OVER_A_HEADER_LIMIT: dict[str, Callable[[], list[bytes]]] = {
+    # 2 MiB of extended headers before one member, over the 1 MiB budget.
+    "budget": lambda: [
+        _member("server.properties", b"k=v", {"comment": "c" * (2048 * _KIB)})
+    ],
+    # 33 PAX records in one member, over the 32 a member may hold.
+    "records": lambda: [
+        _member(
+            "world/level.dat",
+            b"w",
+            {f"SCHILY.xattr.user.a{i:02}": "v" for i in range(33)},
+        )
+    ],
+    # 9 x 960 KiB of PAX values, over the 8 Mi characters the members may hold,
+    # and over the 16 Ki more a member the storage walks allow.
+    "characters": lambda: [
+        _member(f"world/data/d{i}.dat", b"r", {"comment": "c" * (960 * _KIB)})
+        for i in range(9)
+    ],
+}
+HEADER_LIMITS = list(_OVER_A_HEADER_LIMIT)
+
 
 @functools.cache
 def over_the_upload_header_limits_tar() -> bytes:
     """The tar of :data:`OVER_THE_UPLOAD_HEADER_LIMITS_FILES`, 10.5 MiB, built on
     first use."""
 
+    return _tar_of(*(m for build in _OVER_A_HEADER_LIMIT.values() for m in build()))
+
+
+@functools.cache
+def over_a_header_limit_tar(limit: str) -> bytes:
+    """A tar of the members over one of :data:`HEADER_LIMITS`, built on first
+    use."""
+
+    return _tar_of(*_OVER_A_HEADER_LIMIT[limit]())
+
+
+# Files whose tar holds more than the upload doors' 8 Mi characters but no more
+# than the storage walks allow, 16 Ki more a member (issue #3859).
+WITHIN_THE_STORAGE_HEADER_LIMITS_FILES = {
+    f"world/data/d{i}.dat": b"r" for i in range(9)
+}
+
+
+@functools.cache
+def within_the_storage_header_limits_tar() -> bytes:
+    """The tar of :data:`WITHIN_THE_STORAGE_HEADER_LIMITS_FILES`, 9 x 920 KiB of
+    PAX values, built on first use."""
+
     return _tar_of(
-        # 2 MiB of extended headers before one member, over the 1 MiB budget.
-        _member("server.properties", b"k=v", {"comment": "c" * (2048 * _KIB)}),
-        # 33 PAX records in one member, over the 32 a member may hold.
-        _member(
-            "world/level.dat",
-            b"w",
-            {f"SCHILY.xattr.user.a{i:02}": "v" for i in range(33)},
-        ),
-        # 9 x 960 KiB of PAX values, over the 8 Mi characters the members may hold.
         *(
-            _member(f"world/data/d{i}.dat", b"r", {"comment": "c" * (960 * _KIB)})
-            for i in range(9)
-        ),
+            _member(name, data, {"comment": "c" * (920 * _KIB)})
+            for name, data in WITHIN_THE_STORAGE_HEADER_LIMITS_FILES.items()
+        )
+    )
+
+
+def sparse_holes_over(size: int, *, name: str = "world/sparse.dat") -> bytes:
+    """An old GNU sparse member storing 512 bytes whose real size is ``size``:
+    restore writes ``size`` bytes, the rest holes nothing decompresses. At a
+    reserved root ``name``, restore reads them and leaves the member out."""
+
+    return _tar_of(
+        _old_gnu_sparse_member(name, [(0, 512), (size, 0)], size, b"D" * 512)
     )
 
 

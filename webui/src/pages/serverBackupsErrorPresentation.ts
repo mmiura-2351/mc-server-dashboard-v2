@@ -43,6 +43,11 @@ export function backupErrorPresentation(
       // credentials are in a server.properties the Worker refuses (issue
       // #3347). A stopped server's backup needs no RCON, so the message says so.
       return "backups.error.serverPropertiesUnreadable";
+    case "working_set_too_large":
+      // The server's files would make an archive past the 8 GiB backup cap
+      // (issue #3859): nothing was written, and a retry fails the same way
+      // until the files are smaller, so the generic "try again" would mislead.
+      return "backups.error.workingSetTooLarge";
     case "invalid_archive":
       return "backups.error.invalidArchive";
     case "platform_managed_path":

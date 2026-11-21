@@ -290,12 +290,14 @@ async def test_prune_never_removes_a_live_prunes_spool(
     spool_present: list[bool] = []
     real_write_tar_gz = fs_module._write_tar_gz
 
-    def gated_write_tar_gz(directory: Path, archive: Path) -> None:
+    def gated_write_tar_gz(
+        directory: Path, archive: Path, max_bytes: int | None = None
+    ) -> None:
         spool_present.append(archive.exists())
         entered.set()
         release.wait(timeout=10)
         spool_present.append(archive.exists())
-        real_write_tar_gz(directory, archive)
+        real_write_tar_gz(directory, archive, max_bytes)
 
     monkeypatch.setattr(fs_module, "_write_tar_gz", gated_write_tar_gz)
 
