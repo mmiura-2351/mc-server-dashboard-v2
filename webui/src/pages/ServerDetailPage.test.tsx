@@ -841,6 +841,28 @@ describe("ServerDetailPage lifecycle controls", () => {
     ).not.toBeInTheDocument();
   });
 
+  // An Escape that cancels an IME conversion is the IME's (#3993).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "keeps the stop menu open on an Escape the IME is composing with (%o)",
+    async (composing) => {
+      mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+      renderPage();
+
+      await screen.findByText("survival");
+      fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+
+      const notPrevented = fireEvent.keyDown(document, {
+        key: "Escape",
+        ...composing,
+      });
+
+      expect(
+        screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+      ).toBeInTheDocument();
+      expect(notPrevented).toBe(true);
+    },
+  );
+
   describe("stop menu WAI-ARIA keyboard pattern (#496)", () => {
     function items() {
       return screen.getAllByRole("menuitem");
@@ -916,6 +938,62 @@ describe("ServerDetailPage lifecycle controls", () => {
       fireEvent.keyDown(force, { key: "s" });
       expect(graceful).toHaveFocus();
     });
+
+    // The browser's own shortcut, as Ctrl+F's find, still works (#3993).
+    it.each([
+      ["Ctrl+F", { key: "f", ctrlKey: true }, "Enter"],
+      ["Ctrl+S", { key: "s", ctrlKey: true }, "ArrowUp"],
+      ["Meta+F", { key: "f", metaKey: true }, "Enter"],
+      ["Alt+F", { key: "f", altKey: true }, "Enter"],
+    ])(
+      "leaves %s to the browser, not to type-ahead",
+      async (_shortcut, init, openKey) => {
+        await openWith(openKey);
+        const focused = document.activeElement as HTMLElement;
+        expect(items()).toContain(focused);
+
+        const notPrevented = fireEvent.keyDown(focused, init);
+
+        expect(focused).toHaveFocus();
+        expect(notPrevented).toBe(true);
+      },
+    );
+
+    // A key the IME is composing with is the IME's (#3993).
+    it.each([{ isComposing: true }, { keyCode: 229 }])(
+      "leaves a letter the IME is composing with to it, not to type-ahead (%o)",
+      async (composing) => {
+        await openWith("Enter");
+        const [graceful] = items();
+
+        const notPrevented = fireEvent.keyDown(graceful, {
+          key: "f",
+          ...composing,
+        });
+
+        expect(graceful).toHaveFocus();
+        expect(notPrevented).toBe(true);
+      },
+    );
+
+    it.each([{ isComposing: true }, { keyCode: 229 }])(
+      "keeps the menu open on an Escape the IME is composing with (%o)",
+      async (composing) => {
+        await openWith("Enter");
+        const [graceful] = items();
+
+        const notPrevented = fireEvent.keyDown(graceful, {
+          key: "Escape",
+          ...composing,
+        });
+
+        expect(graceful).toHaveFocus();
+        expect(
+          screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+        ).toBeInTheDocument();
+        expect(notPrevented).toBe(true);
+      },
+    );
 
     it("Enter activates the focused item (force requires confirmation)", async () => {
       await openWith("ArrowUp"); // focuses Force stop
