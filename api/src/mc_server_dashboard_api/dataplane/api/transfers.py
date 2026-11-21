@@ -498,6 +498,18 @@ async def publish_snapshot(
     fence is permissive when no worker is assigned (``None``): the held-assignment
     final-snapshot window and the post-clear no-replacement case must still land.
 
+    A placement whose Worker has not hydrated the server yet (``awaiting_hydrate``,
+    issue #3890) accepts no publish from that Worker at all, before the upload (409
+    ``publisher_awaiting_hydrate``): its scratch may be a leftover older than the
+    store, whatever base it declares. No base (a scratch whose generation marker
+    reads 0), a stale base, one whose ``current`` it published itself and the
+    current one are all refused, and so is a publish that does not name its Worker,
+    which cannot be told from it. A late final snapshot of that Worker's previous
+    assignment that starts uploading after the placement is refused the same way:
+    its scratch stays on the Worker, and the store wins. An upload that passed
+    this check before the placement was marked still commits, since the
+    commit-time fence stays keyed on the Worker id.
+
     The content-integrity gate uses the single region rule set (issue #927): a
     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
     every snapshot source. The earlier source-keyed strict/live split (issue #923)
@@ -516,6 +528,22 @@ async def publish_snapshot(
 
     async with transfer_semaphore:
         scope = (CommunityId(community_id), ServerId(server_id))
+        # Nothing publishes from a Worker that has not hydrated its placement
+        # (issue #3890), whatever the base header says; see the docstring.
+        assigned = await assigned_worker(community_id, server_id)
+        if (
+            assigned is not None
+            and assigned.awaiting_hydrate
+            and (publisher is None or publisher == assigned.worker_id)
+        ):
+            _logger.warning(
+                "snapshot publish refused: worker %s has not hydrated server %s "
+                "under its assignment (publisher %s)",
+                assigned.worker_id,
+                server_id,
+                publisher,
+            )
+            raise problem(status.HTTP_409_CONFLICT, "publisher_awaiting_hydrate")
         # Read the store's ``current`` once here (guard time) and ALWAYS
         # thread it into ``commit_snapshot`` as ``expected_base`` (issue
         # #899/#920): the commit re-checks it AFTER the upload stream, so
@@ -565,22 +593,14 @@ async def publish_snapshot(
                     # worker (issue #1703): a re-placed worker whose base lags because
                     # the old worker's late final snapshot advanced the store is the
                     # authoritative session — refusing it would wedge the server.
-                    # That holds only once the worker has hydrated the server under
-                    # its assignment. Until then (issue #3890) its scratch may be a
-                    # leftover older than the store, so it is refused like any
-                    # other stale publisher.
+                    # An assigned worker that has not hydrated was refused above.
                     assigned = await assigned_worker(community_id, server_id)
-                    if (
-                        assigned is None
-                        or assigned.worker_id != publisher
-                        or assigned.awaiting_hydrate
-                    ):
+                    if assigned is None or assigned.worker_id != publisher:
                         _logger.warning(
                             "snapshot publish refused: stale base "
-                            "generation for server %s from a "
-                            "worker that is not the assigned one or "
-                            "has not hydrated it (publisher %s held %d, "
-                            "store at %d published by %s)",
+                            "generation for server %s from a different "
+                            "worker (publisher %s held %d, store at "
+                            "%d published by %s)",
                             server_id,
                             publisher,
                             base_generation,

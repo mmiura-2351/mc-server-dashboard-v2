@@ -11,7 +11,7 @@ a start and cleared once that Worker holds the store's working set: its hydrate
 succeeded, or its held generation is at least the store's. It is cleared too
 when the Worker reports the server ``running``, and by every release, which
 clears it with the assignment. While it is set, no snapshot is taken from that
-Worker and the data plane refuses a stale-base publish from it.
+Worker and the data plane refuses every publish from it.
 
 No backfill beyond the column default: every existing row reads ``false``,
 which is what the API assumed of an assigned Worker before this column.
