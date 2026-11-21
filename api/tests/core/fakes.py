@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 
+import asyncpg
+import sqlalchemy.exc
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
+
 
 class RecordingSleep:
     """Fake ``asyncio.sleep``: records each delay, returns at once for the first
@@ -19,3 +23,23 @@ class RecordingSleep:
         if len(self.delays) > self._returns:
             self.parked.set()
             await asyncio.Event().wait()
+
+
+def server_error(error: asyncpg.PostgresError) -> sqlalchemy.exc.DBAPIError:
+    """What SQLAlchemy over asyncpg raises when the server answers with ``error``.
+
+    Built the way the 2.1 dialect builds it (#3995): asyncpg's error becomes the
+    dialect's own ``Error``, which carries its SQLSTATE and has asyncpg's error as
+    its cause, and SQLAlchemy wraps that in the generic ``DBAPIError``, the
+    connection not invalidated. A real server refusing a connect gives this
+    shape (tests/integration/test_transient_database_error.py).
+    """
+
+    # The dialect's ``Error.__init__`` is untyped.
+    orig = AsyncAdapt_asyncpg_dbapi.Error(error.args[0], error)  # type: ignore[no-untyped-call]
+    orig.__cause__ = error
+    wrapped = sqlalchemy.exc.DBAPIError.instance(
+        None, None, orig, AsyncAdapt_asyncpg_dbapi.Error
+    )
+    assert type(wrapped) is sqlalchemy.exc.DBAPIError
+    return wrapped

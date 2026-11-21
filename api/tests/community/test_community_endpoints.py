@@ -24,6 +24,13 @@ from fastapi.testclient import TestClient
 from mc_server_dashboard_api.community.application.list_all_communities import (
     CommunityPage,
 )
+from mc_server_dashboard_api.community.application.manage_community import (
+    RenameCommunity,
+)
+from mc_server_dashboard_api.community.application.provision_community import (
+    ProvisionCommunity,
+)
+from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import (
     Community,
     CommunitySummary,
@@ -58,9 +65,15 @@ from mc_server_dashboard_api.dependencies import (
     get_rename_community,
 )
 from tests.client_utils import enter_client
+from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+
+class _FixedClock(Clock):
+    def now(self) -> dt.datetime:
+        return _NOW
 
 
 def _community(name: str = "guild") -> Community:
@@ -183,6 +196,30 @@ def test_provision_duplicate_name_returns_409() -> None:
     assert resp.status_code == 409
 
 
+# A community's name follows the server-name rule (issue #3988): the route
+# answers the use case's refusal with the existing reason.
+_REFUSED_NAMES = [
+    pytest.param("a\x1bb", id="esc"),
+    pytest.param("a\u2028b", id="u+2028"),
+    pytest.param("a\u2029b", id="u+2029"),
+]
+
+
+@pytest.mark.parametrize("name", _REFUSED_NAMES)
+def test_provision_refuses_a_name_the_rule_refuses(name: str) -> None:
+    uow = FakeAuthzUnitOfWork()
+    app = _provision_app(platform_admin=True)
+    _shared_app.dependency_overrides[get_provision_community] = lambda: (
+        ProvisionCommunity(uow=uow, clock=_FixedClock())
+    )
+    resp = _client(app).post(
+        "/api/communities", json={"name": name, "owner_user_id": str(uuid.uuid4())}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_name"
+    assert uow.communities.by_id == {}
+
+
 def test_provision_invalid_owner_id_returns_422() -> None:
     app = _provision_app(platform_admin=True, use_case=_FakeUseCase())
     client = _client(app)
@@ -278,6 +315,23 @@ def test_rename_authorized_returns_200() -> None:
     resp = client.patch(f"/api/communities/{community.id.value}", json={"name": "new"})
     assert resp.status_code == 200
     assert resp.json()["name"] == "new"
+
+
+@pytest.mark.parametrize("name", _REFUSED_NAMES)
+def test_rename_refuses_a_name_the_rule_refuses(name: str) -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = _community()
+    uow.communities.by_id[community.id] = community
+    app = _managed_app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_rename_community] = lambda: RenameCommunity(
+        uow=uow, clock=_FixedClock()
+    )
+    resp = _client(app).patch(
+        f"/api/communities/{community.id.value}", json={"name": name}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_name"
+    assert uow.communities.by_id[community.id].name == CommunityName("guild")
 
 
 def test_rename_member_without_permission_gets_403() -> None:

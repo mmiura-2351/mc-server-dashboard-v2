@@ -1,11 +1,13 @@
-"""Unit tests for the transient-database-error classification (#3313).
+"""Unit tests for the transient-database-error classification (#3313, #3995).
 
 A database outage surfaces through SQLAlchemy over asyncpg in several shapes,
 depending on when it hits: a refused connect raises the raw ``OSError``, a
 connection killed mid-query the generic ``DBAPIError`` with the connection
 invalidated, an exhausted pool SQLAlchemy's own ``TimeoutError``, and a server
-starting up or shutting down asyncpg's raw class-57 errors at connect. Each is
-"retry later"; a programming or data error is not.
+that is full, starting up or shutting down answers a connect with an error that
+reaches the caller as the generic ``DBAPIError``, its SQLSTATE on ``orig``. Each
+is "retry later"; a programming or data error, and a server that refuses the
+configured credentials or database, are not.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     is_transient_database_error,
 )
+from tests.core.fakes import server_error
 
 
 def _dbapi(cls: type[sqlalchemy.exc.DBAPIError], *, invalidated: bool) -> Exception:
@@ -73,6 +76,70 @@ def test_outage_shapes_are_transient(exc: Exception) -> None:
 )
 def test_other_errors_are_not_transient(exc: Exception) -> None:
     assert is_transient_database_error(exc) is False
+
+
+@pytest.mark.parametrize(
+    ("error", "sqlstate"),
+    [
+        pytest.param(asyncpg.PostgresConnectionError("x"), "08000", id="08000"),
+        pytest.param(asyncpg.ConnectionDoesNotExistError("x"), "08003", id="08003"),
+        pytest.param(asyncpg.ConnectionFailureError("x"), "08006", id="08006"),
+        pytest.param(asyncpg.ProtocolViolationError("x"), "08P01", id="08P01"),
+        pytest.param(
+            asyncpg.AdminShutdownError("terminating connection"), "57P01", id="57P01"
+        ),
+        pytest.param(asyncpg.CrashShutdownError("crash"), "57P02", id="57P02"),
+        pytest.param(
+            asyncpg.CannotConnectNowError("the database system is starting up"),
+            "57P03",
+            id="57P03",
+        ),
+        pytest.param(
+            asyncpg.TooManyConnectionsError("sorry, too many clients already"),
+            "53300",
+            id="53300",
+        ),
+    ],
+)
+def test_an_outage_the_server_reports_is_transient(
+    error: asyncpg.PostgresError, sqlstate: str
+) -> None:
+    assert error.sqlstate == sqlstate
+    assert is_transient_database_error(server_error(error)) is True
+
+
+@pytest.mark.parametrize(
+    ("error", "sqlstate"),
+    [
+        # A cancelled or timed-out statement, and a dropped database, are not an
+        # outage of the server.
+        pytest.param(asyncpg.QueryCanceledError("x"), "57014", id="57014"),
+        pytest.param(asyncpg.DatabaseDroppedError("x"), "57P04", id="57P04"),
+        # Out of disk or memory is not a full connection table.
+        pytest.param(asyncpg.DiskFullError("x"), "53100", id="53100"),
+        pytest.param(asyncpg.OutOfMemoryError("x"), "53200", id="53200"),
+        # Wrong credentials or database are a configuration fault: retrying
+        # does not fix them.
+        pytest.param(
+            asyncpg.InvalidAuthorizationSpecificationError("x"), "28000", id="28000"
+        ),
+        pytest.param(
+            asyncpg.InvalidPasswordError("password authentication failed"),
+            "28P01",
+            id="28P01",
+        ),
+        pytest.param(
+            asyncpg.InvalidCatalogNameError("database does not exist"),
+            "3D000",
+            id="3D000",
+        ),
+    ],
+)
+def test_another_error_the_server_reports_is_not_transient(
+    error: asyncpg.PostgresError, sqlstate: str
+) -> None:
+    assert error.sqlstate == sqlstate
+    assert is_transient_database_error(server_error(error)) is False
 
 
 async def test_an_unreachable_database_raises_a_transient_error() -> None:

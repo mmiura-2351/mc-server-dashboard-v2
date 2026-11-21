@@ -246,6 +246,38 @@ describe("CommunityRolesTab", () => {
     });
   });
 
+  // An unchanged name is left out (#3988), so a role stored with a name the
+  // rule now refuses can still have its permissions edited.
+  it("leaves an unchanged name out of the PATCH", async () => {
+    routeGet([
+      role({ id: "r1", name: "Moderator", permissions: ["server:read"] }),
+    ]);
+    mockApi.patch.mockResolvedValue(role());
+    renderPage();
+    await openRolesTab();
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: t("communitySettings.roles.edit"),
+      }),
+    );
+    fireEvent.click(screen.getByLabelText("server:start"));
+    fireEvent.click(
+      screen.getByRole("button", { name: t("communitySettings.roles.save") }),
+    );
+
+    await waitFor(() => {
+      expect(mockApi.patch).toHaveBeenCalledWith(
+        `/api/communities/${CID}/roles/r1`,
+        {
+          body: JSON.stringify({
+            permissions: ["server:read", "server:start"],
+          }),
+        },
+      );
+    });
+  });
+
   it("deletes a role after the typed confirm, with a DELETE", async () => {
     routeGet([role({ id: "r1", name: "Moderator" })]);
     mockApi.delete.mockResolvedValue(undefined);

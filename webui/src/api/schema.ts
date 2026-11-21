@@ -604,6 +604,15 @@ export interface paths {
          *     uploads at a time across the three routes. One past that is 503
          *     ``upload_busy``, refused before its body is read into memory, with no server
          *     created; sending it again shortly is the remedy.
+         *
+         *     **The name is checked first (issue #3988).** A ``name`` the server-name rule
+         *     refuses is 422 ``invalid_server_name``, before a slot is taken or the archive
+         *     is read.
+         *
+         *     **Plugin entries are checked (issue #3988).** A plugin entry of the metadata
+         *     whose ``filename`` the upload rule refuses once sanitized, or whose
+         *     ``rel_path`` is no safe relative path, is 422 ``invalid_export_metadata``,
+         *     refused before the row is created.
          */
         post: operations["import_server_api_communities__community_id__servers_import_post"];
         delete?: never;
@@ -1657,8 +1666,9 @@ export interface paths {
          *
          *     **A name no file can carry (issue #3922).** The part's filename names the file
          *     written under ``path``, so one that is blank, carries a control character, a
-         *     lone surrogate or a Unicode noncharacter, contains ``/`` or ``\``, or is over
-         *     255 bytes in UTF-8 is 422 ``invalid_filename``, refused before a slot is taken
+         *     line or paragraph separator (issue #3988), a lone surrogate or a Unicode
+         *     noncharacter, contains ``/`` or ``\``, or is over 255 bytes in UTF-8 is 422
+         *     ``invalid_filename``, refused before a slot is taken
          *     or the upload is read into memory (Starlette has spooled it by then). The path
          *     rules above still apply to the name that passes.
          */
@@ -1734,11 +1744,13 @@ export interface paths {
          *
          *     The jar's filename names its file in the server's content directory, so a
          *     name no file can carry is 422 ``invalid_filename``: one that is blank,
-         *     carries a control character, a lone surrogate or a Unicode noncharacter,
-         *     contains ``/`` or ``\``, or is over 255 bytes in UTF-8. The display name is
-         *     stored stripped, under the resource-pack upload's rule (issue #3957).
-         *     Stripped, one that is empty, over 200 characters, or carries a control
-         *     character or a lone surrogate is 422 ``invalid_display_name``. Both are
+         *     carries a control character, a line or paragraph separator, a lone surrogate
+         *     or a Unicode noncharacter, contains ``/`` or ``\``, or is over 246 bytes in
+         *     UTF-8, which leaves room for the ``.disabled`` a disabled plugin's file
+         *     carries (issue #3988). The display name is stored stripped, under the
+         *     resource-pack upload's rule (issue #3957). Stripped, one that is empty, over
+         *     200 characters, or carries a control character, a line or paragraph
+         *     separator or a lone surrogate is 422 ``invalid_display_name``. Both are
          *     refused before the upload is read into memory (Starlette has spooled it by
          *     then, issue #3922), the filename first.
          */
@@ -2568,8 +2580,8 @@ export interface paths {
          * @description Upload a resource pack (server:update in any community, issue #1176).
          *
          *     The display name is stored stripped. Stripped, one that is empty, over 200
-         *     characters, or carries a control character or a lone surrogate is 422
-         *     ``invalid_display_name`` (issue #3922).
+         *     characters, or carries a control character, a line or paragraph separator or
+         *     a lone surrogate is 422 ``invalid_display_name`` (issues #3922, #3988).
          */
         post: operations["upload_resource_pack_api_resource_packs_post"];
         delete?: never;

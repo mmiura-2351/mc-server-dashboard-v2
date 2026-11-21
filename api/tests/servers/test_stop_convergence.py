@@ -550,14 +550,16 @@ async def test_a_lost_final_snapshot_result_still_converges() -> None:
     assert _assigned(repo, server) is None
 
 
-def _ticker(repo: FakeServerRepository, worker: _Worker) -> RunReconcilerTick:
+def _ticker(
+    repo: FakeServerRepository, worker: _Worker, *, now: dt.datetime = _NOW
+) -> RunReconcilerTick:
     return RunReconcilerTick(
         uow=FakeUnitOfWork(servers=repo),
         make_start_server=lambda: pytest.fail("no start is owed"),
         make_stop_server=lambda: _stop_server(repo, worker.cp, worker.guard),
         control_plane=worker.cp,
         store_generation=FakeStoreGenerationReader(),
-        clock=FakeClock(_NOW),
+        clock=FakeClock(now),
         stop_refusals=StopDispatchRefusals(),
         unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
@@ -636,3 +638,52 @@ async def test_reconnect_before_the_old_callers_cancellation_does_not_hold() -> 
     await worker.report_ok(retry)
     assert _assigned(repo, server) is None
     assert not worker.guard.in_flight(server.id)
+
+
+@pytest.mark.parametrize("entry", ["operator", "reconciler"])
+async def test_a_reconnect_that_retires_a_stops_final_snapshot_keeps_the_row(
+    entry: str,
+) -> None:
+    # The Worker answers the stop, then reconnects while the stop's final
+    # snapshot is in flight. The new session retires the old one's commands, so
+    # the snapshot fails though the Worker is back with the working set (issue
+    # #3981). The row is kept, and the reconciler's final snapshot on the new
+    # session releases it. An operator's stop answers with the server stopped;
+    # the reconciler's replay (a drain's, say) raises.
+    server = _server(
+        desired=DesiredState.RUNNING if entry == "operator" else DesiredState.STOPPED,
+        observed=ObservedState.RUNNING,
+    )
+    repo = FakeServerRepository()
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    stop = _stop_server(repo, worker.cp, worker.guard)
+    caller = asyncio.create_task(
+        stop(community_id=server.community_id, server_id=server.id)
+        if entry == "operator"
+        else stop.redispatch_stop(community_id=server.community_id, server_id=server.id)
+    )
+    await worker.report_ok(await worker.next_command())  # the stop
+    await worker.next_command()  # its final snapshot, never answered
+
+    worker.reconnect()
+    if entry == "operator":
+        result = await asyncio.wait_for(caller, timeout=1)
+        assert result.observed_state is ObservedState.STOPPED
+        assert result.assigned_worker_id == server.assigned_worker_id
+    else:
+        with pytest.raises(WorkerUnavailableError) as excinfo:
+            await asyncio.wait_for(caller, timeout=1)
+        assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert not worker.guard.in_flight(server.id)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    # A grace after the stop recorded the server stopped.
+    tick = asyncio.create_task(
+        _ticker(repo, worker, now=_NOW + dt.timedelta(seconds=60)).tick()
+    )
+    await worker.report_ok(await worker.next_command())
+    await asyncio.wait_for(tick, timeout=1)
+
+    assert not worker.guard.in_flight(server.id)
+    assert _assigned(repo, server) is None

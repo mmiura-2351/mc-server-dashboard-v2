@@ -11,10 +11,10 @@ layer, DATABASE.md Section 7). The enums mirror DATABASE.md's CHECK-constrained
 from __future__ import annotations
 
 import enum
-import unicodedata
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.name_characters import is_refused_name_character
 from mc_server_dashboard_api.servers.domain.errors import InvalidServerNameError
 
 # The reserved ``config`` key under which a server's resolved JAR content address
@@ -74,8 +74,9 @@ class ServerName:
 
     Surrounding whitespace is trimmed. A blank name is rejected, and so is one
     that carries a control character (Unicode ``Cc``) or a lone surrogate
-    (issue #3957): the name is shown in every list and names its export's file,
-    and a lone surrogate has no UTF-8 encoding to store. The schema's
+    (issue #3957), or a line or paragraph separator (``Zl``, ``Zp``, issue
+    #3988): the name is shown in every list and names its export's file, and a
+    lone surrogate has no UTF-8 encoding to store. The schema's
     ``UNIQUE(community_id, name)`` handles uniqueness exactly.
 
     A name read back from a row is built with :meth:`stored` instead, which
@@ -88,9 +89,10 @@ class ServerName:
         trimmed = value.strip()
         if not trimmed:
             raise InvalidServerNameError("server name must not be blank")
-        if any(unicodedata.category(c) in ("Cc", "Cs") for c in trimmed):
+        if any(is_refused_name_character(c) for c in trimmed):
             raise InvalidServerNameError(
-                "server name must carry no control character or lone surrogate"
+                "server name must carry no control character, line separator "
+                "or lone surrogate"
             )
         object.__setattr__(self, "value", trimmed)
 

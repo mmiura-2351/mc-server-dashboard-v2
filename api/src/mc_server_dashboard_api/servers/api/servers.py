@@ -167,7 +167,11 @@ from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
     memory_limit_from_config,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    ServerId,
+    ServerName,
+)
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError,
     UnsupportedServerTypeError,
@@ -605,9 +609,19 @@ async def import_server(
     uploads at a time across the three routes. One past that is 503
     ``upload_busy``, refused before its body is read into memory, with no server
     created; sending it again shortly is the remedy.
+
+    **The name is checked first (issue #3988).** A ``name`` the server-name rule
+    refuses is 422 ``invalid_server_name``, before a slot is taken or the archive
+    is read.
+
+    **Plugin entries are checked (issue #3988).** A plugin entry of the metadata
+    whose ``filename`` the upload rule refuses once sanitized, or whose
+    ``rel_path`` is no safe relative path, is 422 ``invalid_export_metadata``,
+    refused before the row is created.
     """
 
     try:
+        ServerName(name)
         with admission.slot():
             content = await _read_capped_upload(file)
             server = await use_case(

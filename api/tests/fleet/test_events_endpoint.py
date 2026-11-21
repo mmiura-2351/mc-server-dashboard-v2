@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import NoReturn
 
+import asyncpg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -72,6 +73,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from tests.client_utils import enter_client
+from tests.core.fakes import server_error
 from tests.fleet.conftest import publish_burst_on_app_loop, publish_on_app_loop
 from tests.identity.fakes import make_authentication, make_user
 
@@ -1531,6 +1533,25 @@ def test_handshake_authorization_database_failure_refuses_1013(
 ) -> None:
     app = _app()
     app.dependency_overrides[get_membership_visibility] = _UnreachableVisibility  # type: ignore[attr-defined]
+    with caplog.at_level(logging.WARNING):
+        _assert_rejected(app, 1013)
+    _assert_one_line(caplog)
+
+
+class _FullDatabaseVisibility(MembershipVisibility):
+    async def is_member(self, *, user_id: UserId, community_id: CommunityId) -> bool:
+        raise server_error(
+            asyncpg.TooManyConnectionsError("sorry, too many clients already")
+        )
+
+
+def test_handshake_against_a_full_database_refuses_1013(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full server refuses the connect: an outage too, not a bug (#3995)."""
+
+    app = _app()
+    app.dependency_overrides[get_membership_visibility] = _FullDatabaseVisibility  # type: ignore[attr-defined]
     with caplog.at_level(logging.WARNING):
         _assert_rejected(app, 1013)
     _assert_one_line(caplog)

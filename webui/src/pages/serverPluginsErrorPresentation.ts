@@ -21,7 +21,6 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   server_unsettled: "plugins.error.unsettled",
   server_busy: "plugins.error.busy",
   invalid_path: "plugins.error.invalidPath",
-  invalid_filename: "plugins.error.invalidFilename",
   catalog_upstream_failed: "plugins.error.catalogUpstreamFailed",
   catalog_project_not_found: "plugins.error.catalogNotFound",
   checksum_mismatch: "plugins.error.checksumMismatch",
@@ -40,12 +39,31 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   [CREDENTIAL_REQUIRED_FOR_BODY]: "login.sessionExpired",
 };
 
-/** Select the Plugins-tab toast key for a failed operation. */
-export function pluginErrorPresentation(error: unknown): TranslationKey {
+/**
+ * Where the jar an operation installs comes from: the user's own file, or a
+ * catalog. An operation on an installed jar installs none.
+ */
+export type PluginJarSource = "upload" | "catalog";
+
+/**
+ * Select the Plugins-tab toast key for a failed operation.
+ *
+ * `invalid_filename` names the jar's file name (#3988): the user can rename an
+ * upload, but not a catalog's file.
+ */
+export function pluginErrorPresentation(
+  error: unknown,
+  jarSource: PluginJarSource,
+): TranslationKey {
   if (!(error instanceof ApiError)) {
     return "plugins.error.generic";
   }
 
+  if (error.reason === "invalid_filename") {
+    return jarSource === "upload"
+      ? "plugins.error.invalidFilename"
+      : "plugins.error.catalogInvalidFilename";
+  }
   if (error.reason !== undefined) {
     const presentation = PLUGIN_REASON_PRESENTATION[error.reason];
     if (presentation !== undefined) {
