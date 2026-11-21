@@ -498,17 +498,21 @@ class _Forwarder:
 # 4 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(4 * 10 + 30)
 @pytest.mark.usefixtures("app_log_handler_restored")
+@pytest.mark.parametrize("down_at", ["snapshot-check", "lock-acquire"])
 async def test_cli_exits_3_when_the_database_goes_down_mid_sweep(
+    down_at: str,
     engine: AsyncEngine,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Postgres going down while the sweep holds no lifecycle lock (a snapshot
-    check) stops the pass at its next query with exit 3 and one line, no
-    traceback, at the default log settings (issue #3942). The pool's reconnect is
-    refused, which asyncpg raises as a raw ``OSError``; the command's engines type
-    it. The verdict the first server's backup got stays."""
+    """Postgres going down while the sweep holds no lifecycle lock stops the pass
+    at its next query with exit 3 and one line, no traceback, at the default log
+    settings (issue #3942). The pool's reconnect is refused, which asyncpg raises
+    as a raw ``OSError``; the command's engines type it. It goes down during the
+    first server's snapshot check, so the next connect is the unit of work's, or
+    just before the second server's lock, so it is the lock engine's. The verdict
+    the first server's backup got stays."""
 
     assert _DB_URL is not None
     storage = FsStorage(tmp_path)
@@ -539,6 +543,8 @@ async def test_cli_exits_3_when_the_database_goes_down_mid_sweep(
         monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
         monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
         check = StorageBackupStoreAdapter.check_current_health
+        hold = PgLifecycleLock.hold
+        holds = 0
 
         async def _down_during_the_snapshot_check(
             self: StorageBackupStoreAdapter, **kwargs: Any
@@ -546,11 +552,25 @@ async def test_cli_exits_3_when_the_database_goes_down_mid_sweep(
             forwarder.kill()  # the sweep holds no lifecycle lock here
             return await check(self, **kwargs)
 
-        monkeypatch.setattr(
-            StorageBackupStoreAdapter,
-            "check_current_health",
-            _down_during_the_snapshot_check,
-        )
+        @contextlib.asynccontextmanager
+        async def _down_before_the_second_lock(
+            self: PgLifecycleLock, server_id: ServerId
+        ) -> AsyncIterator[HeldLifecycleLock]:
+            nonlocal holds
+            holds += 1
+            if holds == 2:
+                forwarder.kill()  # the first lock is released, the next not taken
+            async with hold(self, server_id) as held:
+                yield held
+
+        if down_at == "snapshot-check":
+            monkeypatch.setattr(
+                StorageBackupStoreAdapter,
+                "check_current_health",
+                _down_during_the_snapshot_check,
+            )
+        else:
+            monkeypatch.setattr(PgLifecycleLock, "hold", _down_before_the_second_lock)
 
         status = await asyncio.to_thread(integrity_sweep_cli.main, [])
     finally:
