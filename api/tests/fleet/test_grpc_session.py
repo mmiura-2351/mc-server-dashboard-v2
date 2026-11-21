@@ -555,6 +555,46 @@ async def test_stale_session_teardown_keeps_reconnected_worker_online(
     await call_b.done_writing()
 
 
+async def test_superseded_session_heartbeat_leaves_the_dropped_worker_offline() -> None:
+    # Session A is superseded by Session B, and B's stream ends. A's reader runs
+    # until A's watchdog next polls (timeout/3), so a heartbeat still arrives on
+    # A. It must not revive the record B's teardown marked disconnected, nor move
+    # the drop instant the reconciler's grace runs from (issue #3983).
+    clock = FakeClock(_T0)
+    h = _Harness(InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT), clock)
+    try:
+        stub = await h.start()
+        call_a = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_a.write(_register_message())
+        await call_a.read()  # ack
+
+        registered_b = _T0 + dt.timedelta(seconds=1)
+        clock.set(registered_b)
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+        await call_b.read()  # ack
+
+        dropped = _T0 + dt.timedelta(seconds=2)
+        clock.set(dropped)
+        await call_b.done_writing()
+        await _drain_to_eof(call_b)
+
+        clock.set(_T0 + dt.timedelta(seconds=3))
+        await call_a.write(_heartbeat_message())
+        # A's reader handles its messages in order, so once A's stream is drained
+        # the heartbeat has been read.
+        await call_a.done_writing()
+        await _drain_to_eof(call_a)
+
+        snapshot = h.registry.get(WorkerId(_WORKER_ID))
+        assert snapshot is not None
+        assert snapshot.status is WorkerStatus.OFFLINE
+        assert snapshot.offline_since == dropped
+        assert snapshot.last_heartbeat_at == registered_b
+    finally:
+        await h.stop()
+
+
 def _status_message(
     server_id: str, state: "pb.ServerState.ValueType"
 ) -> pb.WorkerMessage:
@@ -1653,6 +1693,61 @@ async def test_superseded_registration_cannot_divorce_control_plane_from_registr
         # C's worker is still ONLINE.
         snapshot = h.registry.list_workers()[0]
         assert snapshot.status is WorkerStatus.ONLINE
+        await call_c.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_superseded_rebuild_does_not_overwrite_the_newer_sessions_tally() -> None:
+    # Session B's tally read stalls; Session C registers and rebuilds from a
+    # fresher tally. When B's stale tally returns, it must not replace C's
+    # assignments: C's register reset the confirms and decrements the rebuild
+    # guards rely on, so a stale tally written then can count a stopped server
+    # or lose a confirmed one until the next reconnect (issue #3983).
+    gate = asyncio.Event()
+    stopped_since = "33333333-3333-3333-3333-333333333333"
+
+    class _StaleFirstTallySink(FakeServerStateSink):
+        """The first tally read stalls and returns a server stopped since."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._first_call = True
+
+        async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+            if self._first_call:
+                self._first_call = False
+                await gate.wait()
+                return {stopped_since: 512}
+            return await super().running_assignment_ids(worker_id=worker_id)
+
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_StaleFirstTallySink(),
+    )
+    worker = WorkerId(_WORKER_ID)
+    try:
+        stub = await h.start()
+        call_b = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_b.write(_register_message())
+        for _ in range(200):
+            if h.registry.list_workers():
+                break
+            await asyncio.sleep(0.01)
+        assert h.registry.list_workers(), "B should have registered"
+
+        call_c = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call_c.write(_register_message())
+        await call_c.read()  # ack: C's rebuild has run
+
+        gate.set()
+        assert await asyncio.wait_for(call_b.code(), timeout=5) == (
+            grpc.StatusCode.ABORTED
+        )
+
+        assert h.registry.list_workers()[0].assigned_count == 0
+        assert h.registry.committed_memory_mb(worker) == 0
         await call_c.done_writing()
     finally:
         await h.stop()
