@@ -215,10 +215,19 @@ func (c *Client) PackSnapshot(ctx context.Context, srcDir string) (string, func(
 		_ = os.Remove(spoolPath)
 		return "", func() {}, fmt.Errorf("datatransfer: pack: %w", err)
 	}
-	_ = spool.Close()
+	// The close can be where a write-back error such as ENOSPC is first reported,
+	// so a spool that does not close is not known to hold the whole archive.
+	if err := closeSpool(spool); err != nil {
+		_ = os.Remove(spoolPath)
+		return "", func() {}, fmt.Errorf("datatransfer: close snapshot spool: %w", err)
+	}
 	cleanup := func() { _ = os.Remove(spoolPath) }
 	return spoolPath, cleanup, nil
 }
+
+// closeSpool closes the finished spool. It is a variable so a test can make the
+// close fail; production never reassigns it.
+var closeSpool = (*os.File).Close
 
 // ctxWriter refuses every write once ctx is done, so a pack stops at its next
 // header or copy buffer.
@@ -685,9 +694,10 @@ func fsyncTree(rootFd int, rel string) error {
 
 // ignoringEINTR calls fn again for as long as it fails with EINTR, as the os
 // package does around its own system calls, and returns its first other
-// outcome. The hydrate's *at calls go through it, so a scratch filesystem that
-// interrupts them (FUSE, NFS, CIFS) fails a hydrate no more often than the os
-// calls they replaced did.
+// outcome. The hydrate's *at calls go through it, and so do the snapshot walk's
+// root open and stats, so a scratch filesystem that interrupts them (FUSE, NFS,
+// CIFS) fails a hydrate or a snapshot no more often than the os calls they
+// replaced did.
 func ignoringEINTR(fn func() error) error {
 	for {
 		if err := fn(); !errors.Is(err, unix.EINTR) {
@@ -981,7 +991,11 @@ func packTar(ctx context.Context, srcDir string, w io.Writer, log *slog.Logger) 
 	// The root is the one name resolved by path: it is the Worker's own entry in
 	// the scratch root, which the server (confined to what is beneath it) cannot
 	// replace.
-	rootFd, err := unix.Open(root, packOpenDirFlags, 0)
+	var rootFd int
+	err = ignoringEINTR(func() (err error) {
+		rootFd, err = unix.Open(root, packOpenDirFlags, 0)
+		return err
+	})
 	if errors.Is(err, unix.ENOENT) {
 		// An empty/absent working dir snapshots to an empty tar.
 		return tar.NewWriter(w).Close()
@@ -1042,7 +1056,7 @@ func walkInto(ctx context.Context, tw *tar.Writer, dirFd int, rel string, depth 
 		}
 
 		var hint unix.Stat_t
-		if err := statAt(dirFd, name, &hint); err != nil {
+		if err := ignoringEINTR(func() error { return statAt(dirFd, name, &hint) }); err != nil {
 			if errors.Is(err, unix.ENOENT) {
 				// The entry vanished between this directory's listing and the lstat
 				// (e.g. log rotation, plugin temp cleanup) — a member of the
