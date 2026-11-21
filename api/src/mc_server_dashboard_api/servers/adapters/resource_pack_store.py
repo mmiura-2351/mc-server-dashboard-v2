@@ -46,6 +46,10 @@ behind:
 
 :meth:`list_entries` feeds that GC: every blob under the namespace, with its key,
 the pack id the key names, its size and its store time.
+
+An error names its key repr'd (issue #3922): the key ends in the filename, a pack
+stored before the upload refused control characters may carry them, and a
+traceback that logs the error keeps its line breaks.
 """
 
 from __future__ import annotations
@@ -120,7 +124,7 @@ class ObjectResourcePackStore(ResourcePackStore):
             # can still be left under this key -- a completion whose response was
             # lost cannot be aborted -- but no row will name it (issues #2458,
             # #3277).
-            raise ResourcePackStorageUnavailableError(key) from exc
+            raise ResourcePackStorageUnavailableError(repr(key)) from exc
 
     def open(self, pack_id: ResourcePackId, filename: str) -> AsyncIterator[bytes]:
         return self._open_gen(pack_id, filename)
@@ -139,7 +143,7 @@ class ObjectResourcePackStore(ResourcePackStore):
             # The download routes begin the stream before writing the headers
             # (issue #2455), so that lands as their 404 rather than as a body
             # missing from an already-committed 200.
-            raise ResourcePackNotFoundError(key) from exc
+            raise ResourcePackNotFoundError(repr(key)) from exc
         except ObjectStoreUnavailableError as exc:
             # A store outage on the locating half of the read reaches the route
             # before any byte is on the wire (issue #2455), so it must arrive as
@@ -147,7 +151,7 @@ class ObjectResourcePackStore(ResourcePackStore):
             # type crossing the seam. An outage that strikes mid-body translates
             # the same way and still aborts the response — the status is committed
             # by then (issue #2337).
-            raise ResourcePackStorageUnavailableError(key) from exc
+            raise ResourcePackStorageUnavailableError(repr(key)) from exc
 
     async def delete(self, pack_id: ResourcePackId) -> None:
         prefix = _prefix(pack_id)
@@ -175,9 +179,9 @@ class ObjectResourcePackStore(ResourcePackStore):
             # the same window as the open above and answers the same route, so one
             # outage must not be a 503 or a 500 depending on which call it struck
             # (issue #2455).
-            raise ResourcePackStorageUnavailableError(key) from exc
+            raise ResourcePackStorageUnavailableError(repr(key)) from exc
         if result is None:
-            raise ResourcePackNotFoundError(key)
+            raise ResourcePackNotFoundError(repr(key))
         return result
 
     async def list_entries(self) -> list[StoredBlob]:
