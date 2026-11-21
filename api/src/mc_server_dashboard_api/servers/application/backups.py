@@ -487,14 +487,14 @@ class RestoreBackup:
                     # Refused restore (corrupt, no force): quarantine the backup so an
                     # operator sees it is corrupt, then re-raise for the edge to surface
                     # and audit. ``current`` was left untouched by Storage.
-                    await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+                    await self._mark_health(lock, backup_id, BackupHealth.QUARANTINED)
                     raise
                 except BackupUnreadableError:
                     # The restore was the read that found the archive's bytes gone
                     # (issue #3230). Record the verdict the sweep would have, so the
                     # next attempt is refused up front instead of re-reading the
                     # archive; a sweep that later reads it back sound revises it.
-                    await self._mark_health(backup_id, BackupHealth.UNREADABLE)
+                    await self._mark_health(lock, backup_id, BackupHealth.UNREADABLE)
                     raise
                 except BackupRestorePartiallyPublishedError as exc:
                     # The store published the backup, then failed before its
@@ -570,10 +570,10 @@ class RestoreBackup:
             # backup IS corrupt, so quarantine it; the edge audits the forced
             # corrupt restore. Quarantine BEFORE the properties re-apply, so a
             # failure there cannot leave a known-corrupt backup unmarked.
-            await self._mark_health(backup_id, BackupHealth.QUARANTINED)
-        # The properties re-apply is an in-place working-set write and the plugin
-        # reconcile rewrites rows from that working set: both rely on the lock
-        # (issue #3927), unlike the verdict about the backup above.
+            await self._mark_health(lock, backup_id, BackupHealth.QUARANTINED)
+        # The properties re-apply is an in-place working-set write that relies on
+        # the lock (issue #3927). The plugin reconcile, which rewrites rows from
+        # that working set, checks again before its commit.
         await lock.ensure_held()
         await self._reapply_platform_properties(
             community_id=community_id, server_id=server_id, server=server
@@ -581,6 +581,7 @@ class RestoreBackup:
         # Reconcile plugin rows against the restored filesystem (#1336).
         if self.file_store is not None:
             await _reconcile_plugins(
+                lock,
                 uow=self.uow,
                 file_store=self.file_store,
                 cache=self.cache,
@@ -590,7 +591,12 @@ class RestoreBackup:
                 server=server,
             )
 
-    async def _mark_health(self, backup_id: BackupId, health: BackupHealth) -> None:
+    async def _mark_health(
+        self, lock: HeldLifecycleLock, backup_id: BackupId, health: BackupHealth
+    ) -> None:
+        # A verdict is written under the lock, as the integrity sweep writes its
+        # own (issue #3927).
+        await lock.ensure_held()
         async with self.uow:
             await self.uow.backups.update_health(backup_id, health)
             await self.uow.commit()
@@ -649,6 +655,7 @@ class RestoreBackup:
 
 
 async def _reconcile_plugins(
+    lock: HeldLifecycleLock,
     *,
     uow: UnitOfWork,
     file_store: FileStore,
@@ -682,6 +689,10 @@ async def _reconcile_plugins(
     A listed jar whose read fails any other way raises it too (issue #3269): the
     jar is not known to be bad, only unread, so skipping it would report a partial
     reconciliation as complete. The transaction is discarded, not committed.
+
+    The commit rewrites rows from the restored working set, so it runs only
+    after ``lock`` confirms the lifecycle lock is still held (issue #3927): the
+    listing and the jar reads before it can take long on a large modpack.
     """
 
     try:
@@ -810,6 +821,7 @@ async def _reconcile_plugins(
             changed = True
 
         if changed:
+            await lock.ensure_held()
             await uow.commit()
 
 
