@@ -614,25 +614,78 @@ async def test_ten_standing_failures_in_a_row_starve_no_jar_after_them() -> None
     assert await store.keys() == keys[:10]
 
 
-async def test_a_gc_restarted_before_every_pass_still_reclaims_past_a_bad_jar() -> None:
+async def test_a_gc_restarted_before_every_pass_soon_reclaims_past_a_bad_jar() -> None:
     # A process that ends before its next pass (one that lives under a day at the
     # default interval) never resumes after the JAR its pass ended at. Its first
     # pass starts at a random place in key order instead, so across restarts the
-    # JARs after that one are still reached (issue #3934).
+    # JARs after that one are still reached (issue #3934). It also walks up or
+    # down at random, so even the orphan right after the bad JAR, among forty
+    # listed, is reached in each restart with a chance of one half, not one in
+    # forty (issue #3965).
+    store = _ObjectPool()
+    keys = await store.seed(40)
+    bad = keys[19]
+    orphans = {keys[20], keys[24], keys[18]}
+    live = set(keys) - orphans - {bad}
+    store.fail_deletes_of(bad)
+    store.faults.error = ObjectStoreUnreachableError
+    rng = random.Random(3965)
+
+    for _ in range(10):
+        restarted = _gc(
+            store.pool,
+            _FakeReferences(live),
+            resume_point=ResumePoint(
+                start=rng.randrange, descending=lambda: rng.random() < 0.5
+            ),
+        )
+        with pytest.raises(JarPoolUnreachableError):
+            await restarted()
+
+    assert set(await store.keys()) == live | {bad}
+
+
+async def test_a_pass_after_one_that_walked_down_to_a_bad_jar_walks_up_after_it() -> (
+    None
+):
+    # A pass with no mark may walk down from its start (issue #3965). When it ends
+    # at a JAR that gets no answer, the next pass walks up from after that JAR as
+    # any resumed pass does, whatever the direction picker says, and reaches the
+    # JARs the first pass never did.
     store = _ObjectPool()
     keys = await store.seed(5)
     bad = keys[1]
     store.fail_deletes_of(bad)
     store.faults.error = ObjectStoreUnreachableError
-    rng = random.Random(3934)
+    resume_point = ResumePoint(start=lambda count: 3, descending=lambda: True)
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
 
-    for _ in range(10):
-        restarted = _gc(
-            store.pool,
-            _FakeReferences(set()),
-            resume_point=ResumePoint(start=rng.randrange),
-        )
-        with pytest.raises(JarPoolUnreachableError):
-            await restarted()
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+    assert await store.keys() == [keys[0], bad, keys[4]]
+    assert resume_point.key == bad
 
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
     assert await store.keys() == [bad]
+
+
+async def test_a_pass_after_a_downward_stop_walks_up_after_the_fifth() -> None:
+    # A pass that walks down and stops after five failed deletes in a row leaves
+    # the fifth, the lowest of them, as its mark. The next pass walks up from
+    # after it: it meets the other four again, then goes on past them and comes
+    # round (issue #3965).
+    store = _ObjectPool()
+    keys = await store.seed(7)
+    store.fail_deletes_of(*keys[1:6])
+    resume_point = ResumePoint(start=lambda count: 5, descending=lambda: True)
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
+
+    stopped = await gc()
+    assert (stopped.deleted, stopped.failed) == (0, 5)
+    assert resume_point.key == keys[1]
+
+    resumed = await gc()
+    assert (resumed.deleted, resumed.failed) == (2, 5)
+    assert resume_point.key is None
+    assert await store.keys() == keys[1:6]

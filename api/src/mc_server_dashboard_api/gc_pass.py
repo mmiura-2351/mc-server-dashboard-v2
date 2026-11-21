@@ -34,20 +34,23 @@ def _coin_flip() -> bool:
 
 
 class ResumePoint:
-    """Where a GC's next pass starts (issue #3934).
+    """Where a GC's next pass starts (issues #3934, #3965).
 
     ``key`` is the listing key of the object whose failed delete ended the last
     pass early, or ``None``. That is a delete the store gave no answer to, or the
-    fifth failed delete in a row. Passes that end early therefore form one
-    continuous scan round the keys. The GC clears the key when a pass walks the
-    whole listing without ending early.
+    fifth failed delete in a row. A pass with a key walks up from after it, so the
+    passes after one that ends early form one continuous scan round the keys. The
+    GC clears the key when a pass walks the whole listing without ending early.
 
     It lives in process memory only: each GC is wired with one instance, which
     every use case object that runs that GC shares (the JAR-pool loop and its
     manual trigger), and an API restart starts it empty. A pass with no key starts
-    at a place in key order that ``start`` picks, given the number of keys: at
-    random by default, so a process that ends before its next pass, or restarts,
-    does not start every pass at the same key.
+    at a place in key order that ``start`` picks, given the number of keys, and
+    walks down from it when ``descending`` says so, up otherwise, wrapping round
+    either way. Both pick at random by default, so a process that ends before its
+    next pass, or restarts, does not walk every pass the same way: with one key
+    that ends every pass, such a pass reaches any other key with a chance of one
+    half, wherever that key lies.
     """
 
     def __init__(
@@ -64,8 +67,9 @@ class ResumePoint:
 
         The object at :attr:`key` comes last, after every other, so one that keeps
         failing cannot starve the rest. With no :attr:`key`, the walk starts where
-        ``start`` picks. Sorting, not the listing's own order, makes "after" mean
-        the same on every pass: the fs pool lists in directory order.
+        ``start`` picks, and goes down from there instead when ``descending`` says
+        so. Sorting, not the listing's own order, makes "after" mean the same on
+        every pass: the fs pool lists in directory order.
         """
 
         walk = sorted(entries, key=key_of)
@@ -73,6 +77,8 @@ class ResumePoint:
             return walk
         if self.key is None:
             first = self._start(len(walk))
+            if self._descending():
+                return walk[first::-1] + walk[:first:-1]
         else:
             first = bisect.bisect_right(walk, self.key, key=key_of)
         return walk[first:] + walk[:first]

@@ -33,7 +33,8 @@ a delete that got no answer or at the fifth failed delete in a row, leaves the b
 it ended at in the GC's :class:`ResumePoint`. The next pass walks the blobs in key
 order starting after it, so failures tied in fact to those blobs cannot starve the
 blobs after them (issue #3934). A pass that walks every blob without ending early
-clears it, and a pass without one starts at a random place in key order.
+clears it, and a pass without one starts at a random place in key order and walks
+up or down from it at random (issue #3965).
 """
 
 from __future__ import annotations
