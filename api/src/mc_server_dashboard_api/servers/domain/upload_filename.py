@@ -25,9 +25,14 @@ def is_valid_upload_filename(filename: str) -> bool:
     download URL for a resource pack, and logs name it. So it must be one segment,
     with no ``/`` or ``\\``. It must carry no control character (Unicode ``Cc``: C0,
     DEL and C1), which would split a log line or drive the terminal showing it,
-    and no lone surrogate, which has no UTF-8 encoding at all. It must not be blank,
-    and must fit :data:`MAX_FILENAME_BYTES`. Any other character is a legitimate
-    name, Unicode spaces and joiners included.
+    no lone surrogate, which has no UTF-8 encoding at all, and no noncharacter:
+    U+FFFE and U+FFFF, which XML 1.0 cannot carry while the object store lists its
+    keys in XML, and the other 64 (U+FDD0 to U+FDEF, and the last two code points
+    of every other plane), which Unicode reserves for a program's internal use and
+    XML discourages. It must not be blank, and must fit :data:`MAX_FILENAME_BYTES`.
+    Any other character is a legitimate name: Unicode spaces, joiners and bidi
+    controls, and a code point unassigned today, which may name something
+    tomorrow.
 
     Only an upload asks: a resource pack stored before the check keeps its name,
     and every read path serves it as before.
@@ -36,7 +41,15 @@ def is_valid_upload_filename(filename: str) -> bool:
     return (
         filename.strip() != ""
         and not any(
-            c in "/\\" or unicodedata.category(c) in ("Cc", "Cs") for c in filename
+            c in "/\\" or unicodedata.category(c) in ("Cc", "Cs") or _is_noncharacter(c)
+            for c in filename
         )
         and len(filename.encode("utf-8")) <= MAX_FILENAME_BYTES
     )
+
+
+def _is_noncharacter(c: str) -> bool:
+    """Whether ``c`` is one of the 66 code points Unicode reserves as noncharacters."""
+
+    code = ord(c)
+    return 0xFDD0 <= code <= 0xFDEF or code & 0xFFFE == 0xFFFE

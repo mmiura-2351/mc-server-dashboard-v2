@@ -87,12 +87,12 @@ def refused_filenames(ext: str) -> list[object]:
             None,
             id="256-utf8-bytes",
         ),
-        # The Unicode noncharacters (category Cn, issue #3922): XML 1.0 cannot carry
-        # them, and the object store lists its keys in XML.
-        pytest.param(_quoted(f"a￾b{ext}"), None, id="u+fffe"),
-        pytest.param(_quoted(f"a￿b{ext}"), None, id="u+ffff"),
-        pytest.param(_quoted(f"a﷐b{ext}"), None, id="u+fdd0"),
-        pytest.param(_quoted(f"a﷯b{ext}"), None, id="u+fdef"),
+        # The Unicode noncharacters (issue #3922): XML 1.0 cannot carry U+FFFE or
+        # U+FFFF, and the object store lists its keys in XML.
+        pytest.param(_quoted(f"a\ufffeb{ext}"), None, id="u+fffe"),
+        pytest.param(_quoted(f"a\uffffb{ext}"), None, id="u+ffff"),
+        pytest.param(_quoted(f"a\ufdd0b{ext}"), None, id="u+fdd0"),
+        pytest.param(_quoted(f"a\ufdefb{ext}"), None, id="u+fdef"),
         pytest.param(_quoted(f"a\U0001fffeb{ext}"), None, id="u+1fffe"),
         pytest.param(_quoted(f"a\U0010ffffb{ext}"), None, id="u+10ffff"),
     ]
@@ -104,14 +104,16 @@ def accepted_filenames(ext: str) -> list[object]:
     return [
         pytest.param(f"My Pack (v2) [1.21]{ext}", id="ascii"),
         pytest.param(f"パック{ext}", id="japanese"),
-        pytest.param(f"リソース　パック{ext}", id="ideographic-space"),
-        pytest.param(f"Pokémon{ext}", id="nfd"),
-        pytest.param(f"\U0001f468‍\U0001f469‍\U0001f467{ext}", id="zwj-emoji"),
-        pytest.param(f"a‮b{ext}", id="bidi"),
+        pytest.param(f"リソース\u3000パック{ext}", id="ideographic-space"),
+        pytest.param(f"Poke\u0301mon{ext}", id="nfd"),
+        pytest.param(
+            f"\U0001f468\u200d\U0001f469\u200d\U0001f467{ext}", id="zwj-emoji"
+        ),
+        pytest.param(f"a\u202eb{ext}", id="bidi"),
         pytest.param("a" * (255 - len(ext)) + ext, id="255-bytes"),
         pytest.param("あ" * ((255 - len(ext)) // 3) + ext, id="utf8-under-the-limit"),
-        # Beside the noncharacter ranges, and an unassigned code point: only the
-        # noncharacters of category Cn are refused (issue #3922).
-        pytest.param(f"a﷏bﷰc�d{ext}", id="beside-noncharacters"),
-        pytest.param(f"a͸b{ext}", id="unassigned"),
+        # Beside the noncharacter ranges, and an unassigned code point: of category
+        # Cn, only the noncharacters are refused (issue #3922).
+        pytest.param(f"a\ufdcfb\ufdf0c\ufffdd{ext}", id="beside-noncharacters"),
+        pytest.param(f"a\u0378b{ext}", id="unassigned"),
     ]
