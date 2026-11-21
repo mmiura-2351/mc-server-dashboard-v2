@@ -125,7 +125,7 @@ def _translating_backend_faults(operation: str, key: str) -> Iterator[None]:
 class _Aioboto3S3Client:
     """Implements :class:`S3Client` over one aioboto3 client and a fixed bucket.
 
-    Every error it raises names its key repr'd (issues #3907, #3922). Such an
+    An error that names a key names it repr'd (issues #3907, #3922). Such an
     error reaches a log in a traceback, which keeps its line breaks, so in the
     ``text`` format a raw newline in a key would start a line of its own.
     """
