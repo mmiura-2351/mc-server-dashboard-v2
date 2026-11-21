@@ -2076,7 +2076,7 @@ class ObjectStorage(Storage):
             try:
                 key = snapshot_prefix + sub
                 if await client.head_object(key) is None:
-                    raise NotFoundError(f"file not found: {rel_path.value}")
+                    raise NotFoundError(f"file not found: {rel_path.value!r}")
                 return await _read_all(client, key)
             finally:
                 self._release_lease(snapshot_prefix)
@@ -2111,7 +2111,7 @@ class ObjectStorage(Storage):
                 )
                 key = snapshot_prefix + sub
                 if await client.head_object(key) is None:
-                    raise NotFoundError(f"file not found: {rel_path.value}")
+                    raise NotFoundError(f"file not found: {rel_path.value!r}")
                 async with aclosing(await client.get_object(key)) as body:
                     async for chunk in body:
                         yield chunk
@@ -2144,7 +2144,7 @@ class ObjectStorage(Storage):
         if not objs and sub:
             # A prefix with no members is an empty (non-existent) directory; the
             # root (sub == "") always lists, even when empty.
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
         return _entries_at_level(objs, snapshot_prefix, dir_suffix)
 
     async def path_exists(
@@ -2221,7 +2221,7 @@ class ObjectStorage(Storage):
                 # match it with the invalid-path refusal.
                 if await client.list_objects(key + "/"):
                     raise PathTraversalError(
-                        f"rel_path names a directory, not a file: {rel_path.value}"
+                        f"rel_path names a directory, not a file: {rel_path.value!r}"
                     )
                 # Capture the prior version BEFORE overwriting (Section 4.4/5).
                 if await client.head_object(key) is not None:
@@ -2308,7 +2308,7 @@ class ObjectStorage(Storage):
                 )
                 key = snapshot_prefix + sub
                 if await client.head_object(key) is None:
-                    raise NotFoundError(f"file not found: {rel_path.value}")
+                    raise NotFoundError(f"file not found: {rel_path.value!r}")
                 # Capture the content BEFORE removing it (Section 5), so a delete is
                 # reversible by rollback exactly like an overwrite is.
                 await self._capture_version(
@@ -2349,7 +2349,7 @@ class ObjectStorage(Storage):
                 )
                 objs = await client.list_objects(snapshot_prefix + dir_suffix)
                 if not objs:
-                    raise NotFoundError(f"directory not found: {rel_path.value}")
+                    raise NotFoundError(f"directory not found: {rel_path.value!r}")
                 # Per-object delete loop — not crash-atomic (#1608).
                 for obj in objs:
                     await client.delete_object(obj.key)
@@ -2384,7 +2384,7 @@ class ObjectStorage(Storage):
                 src_key = snapshot_prefix + from_sub
                 dst_key = snapshot_prefix + to_sub
                 if await client.head_object(src_key) is None:
-                    raise NotFoundError(f"file not found: {from_path.value}")
+                    raise NotFoundError(f"file not found: {from_path.value!r}")
                 await client.copy_object(src_key, dst_key)
                 await client.delete_object(src_key)
                 await client.put_object(
@@ -2420,7 +2420,7 @@ class ObjectStorage(Storage):
                 )
                 objs = await client.list_objects(snapshot_prefix + from_suffix)
                 if not objs:
-                    raise NotFoundError(f"directory not found: {from_path.value}")
+                    raise NotFoundError(f"directory not found: {from_path.value!r}")
                 # Per-object copy+delete loop — not crash-atomic (#1608).
                 for obj in objs:
                     rest = obj.key[len(snapshot_prefix + from_suffix) :]
@@ -3209,18 +3209,18 @@ class _ObjectWorkingSetView(WorkingSetView):
         if self._snapshot_prefix is None:
             if not rel_path.parts:
                 return []
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
         sub = self._storage._safe_subkey(rel_path)
         dir_suffix = sub + "/" if sub else ""
         async with shielded_exit(self._storage._client_factory()) as client:
             objs = await client.list_objects(self._snapshot_prefix + dir_suffix)
         if not objs and sub:
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
         return _entries_at_level(objs, self._snapshot_prefix, dir_suffix)
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._snapshot_prefix is None:
-            raise NotFoundError(f"file not found: {rel_path.value}")
+            raise NotFoundError(f"file not found: {rel_path.value!r}")
         sub = self._storage._safe_subkey(rel_path)
         return self._stream_file(self._snapshot_prefix, sub, rel_path)
 
@@ -3243,7 +3243,7 @@ class _ObjectWorkingSetView(WorkingSetView):
             async with shielded_exit(self._storage._client_factory()) as client:
                 key = prefix + sub
                 if await client.head_object(key) is None:
-                    raise NotFoundError(f"file not found: {rel_path.value}")
+                    raise NotFoundError(f"file not found: {rel_path.value!r}")
                 async with aclosing(await client.get_object(key)) as body:
                     async for chunk in body:
                         yield chunk
