@@ -58,7 +58,9 @@ class BackupArchiveStore(abc.ABC):
         then writes the archive. A crash after the row commit but before the archive
         write leaves a dangling row (detectable, self-healing), never an orphaned
         archive with no row. Raises :class:`BackupNotFoundError` if nothing is
-        published to archive.
+        published to archive, and :class:`BackupTooLargeError`, writing nothing,
+        if the working set's archive would be past the decompressed-size cap
+        (#3859).
         """
 
     @abc.abstractmethod

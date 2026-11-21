@@ -466,7 +466,7 @@ async def test_backup_pack_survives_concurrent_publish_reclaim(
     # flip the pointer to a new snapshot and rmtree the old one.
     original_write = FsStorage._write_backup_archive
 
-    def _racing_write(source: Path, archive: Path) -> None:
+    def _racing_write(source: Path, archive: Path, max_bytes: int) -> None:
         # Create a new snapshot and flip current to it.
         new_snap = server_root / "snapshots" / "new-snap"
         new_snap.mkdir(parents=True, exist_ok=True)
@@ -479,7 +479,7 @@ async def test_backup_pack_survives_concurrent_publish_reclaim(
         if not storage._is_leased(old_snapshot):
             shutil.rmtree(old_snapshot)
         # Now proceed with the original write from `source`.
-        original_write(source, archive)
+        original_write(source, archive, max_bytes)
 
     storage._write_backup_archive = staticmethod(_racing_write)  # type: ignore[method-assign]
 

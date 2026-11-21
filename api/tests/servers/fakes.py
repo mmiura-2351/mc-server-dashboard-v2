@@ -948,6 +948,10 @@ class FakeServerRepository(ServerRepository):
         # bit hardest -- the convergence paths call it holding an entity whose
         # ``observed_*`` they loaded a transaction ago.
         current.desired_state = server.desired_state
+        if server.assigned_worker_id != expected_assigned_worker_id:
+            # Mirror the real adapter (issue #3890): only a write that changes the
+            # assignment sets the mark, for a placement, or clears it.
+            current.awaiting_hydrate = server.assigned_worker_id is not None
         current.assigned_worker_id = server.assigned_worker_id
         if write_config:
             current.config = deepcopy(server.config)
@@ -987,6 +991,10 @@ class FakeServerRepository(ServerRepository):
         _observe(server, observed_state, observed_at, detail=detail, reason=reason)
         if unassign:
             server.assigned_worker_id = None
+        # Mirror the real adapter (issue #3890): a release, or a running instance,
+        # owes no hydrate.
+        if unassign or observed_state is ObservedState.RUNNING:
+            server.awaiting_hydrate = False
         return True
 
     async def clear_assignment_after_final_snapshot(
@@ -1002,6 +1010,7 @@ class FakeServerRepository(ServerRepository):
         ):
             return False
         server.assigned_worker_id = None
+        server.awaiting_hydrate = False
         return True
 
     async def clear_stale_assignment(
@@ -1022,6 +1031,38 @@ class FakeServerRepository(ServerRepository):
         ):
             return False
         server.assigned_worker_id = None
+        server.awaiting_hydrate = False
+        return True
+
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #3890): only while worker_id holds
+        # the row as the caller read it, and only a change counts.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.assigned_worker_id != worker_id
+            or server.updated_at != updated_at
+            or not server.awaiting_hydrate
+        ):
+            return False
+        server.awaiting_hydrate = False
+        return True
+
+    async def mark_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #3890): only while worker_id holds
+        # the row, and only a change counts.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.assigned_worker_id != worker_id
+            or server.awaiting_hydrate
+        ):
+            return False
+        server.awaiting_hydrate = True
         return True
 
     async def mark_worker_servers_unknown(
@@ -2096,7 +2137,9 @@ class PlacementSequenceControlPlane(FakeControlPlane):
 
     The last Worker keeps taking every later placement. ``hydrate_outcomes``
     answers a hydrate per Worker, so a test can have one Worker refuse it and see
-    where the next placement lands (issue #3865).
+    where the next placement lands (issue #3865). The fake reads the dict, and
+    ``connected``, on every call, so a test can change a Worker's answer or take it
+    offline between ticks (issue #3890).
     """
 
     def __init__(
@@ -2104,8 +2147,14 @@ class PlacementSequenceControlPlane(FakeControlPlane):
         *,
         places: list[WorkerId],
         hydrate_outcomes: dict[WorkerId, CommandOutcome],
+        connected: dict[WorkerId, bool] | None = None,
+        unavailable_kinds: set[str] | None = None,
     ) -> None:
-        super().__init__(place_to=places[0])
+        super().__init__(
+            place_to=places[0],
+            connected=connected,
+            unavailable_kinds=unavailable_kinds,
+        )
         self._next_places = places[1:]
         self._hydrate_outcomes = hydrate_outcomes
 

@@ -68,11 +68,17 @@ rebuild ships.
     an orphan. On a store the live API has claimed, the store owner marker makes
     them refuse to run, with an ERROR
     ([`../app/STORAGE.md`](../app/STORAGE.md) Section 4.3). It does not stop the
-    probe's writes, which the live API then reclaims as orphans. Nor does it
-    help on an unmarked store (the first start after the upgrade, or a deleted
-    marker): a probe that starts first claims it, becomes the owner and GCs the
-    live objects (issue #3886). A probe whose database is a dump of the live
-    one carries the live installation id and is not refused at all.
+    probe's writes, which the live API then reclaims as orphans. On an
+    unmarked store that holds objects (after the upgrade, or a deleted
+    marker), the probe claims it only if the up to three communities and
+    resource packs it samples from the store are rows of its own database
+    (issue #3886). Its own communities do not match the live store's, so it
+    does not claim it. It does claim, become the owner and GC the live
+    objects when its own uploads to the live store are the lowest-sorted
+    ones sampled, or when the store holds only JARs and plugin blobs and its
+    database has a server or a resource pack. A probe whose database is a
+    dump of the live one carries the live installation id and is not
+    refused at all.
   - alternate host ports. `API_HTTP_PORT` (live: 8000) is a variable; the
     `relay` profile's `25565`, `25665`, `25675/udp` and `19132-19231/udp` are
     literals in `compose.yaml` and need an override file. MC server game ports
