@@ -55,7 +55,7 @@ def _to_server(row: ServerModel) -> Server:
     return Server(
         id=ServerId(row.id),
         community_id=CommunityId(row.community_id),
-        name=ServerName(row.name),
+        name=ServerName.stored(row.name),
         mc_edition=row.mc_edition,
         mc_version=row.mc_version,
         server_type=ServerType(row.server_type),

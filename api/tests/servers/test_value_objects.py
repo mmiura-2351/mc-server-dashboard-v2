@@ -59,6 +59,17 @@ def test_server_name_accepts_any_other_character(name: str) -> None:
     assert ServerName(name).value == name
 
 
+def test_server_name_trims_a_surrounding_line_break_rather_than_refusing_it() -> None:
+    # The rule is on the name as stored, after the trim.
+    assert ServerName("\tsurvival\r\n").value == "survival"
+
+
+def test_a_stored_server_name_is_read_back_as_stored() -> None:
+    # A row stored before the rule keeps its name: reads never refuse it.
+    assert ServerName.stored("a\nb").value == "a\nb"
+    assert ServerName.stored("a\nb") == ServerName.stored("a\nb")
+
+
 # The migration that pins the live ``ck_server_type`` CHECK. Update this pointer
 # when a later migration re-widens the enum.
 _SERVER_TYPE_MIGRATION = (
