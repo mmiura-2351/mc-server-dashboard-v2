@@ -324,9 +324,13 @@ class ServerRepository(abc.ABC):
         """Set ``awaiting_hydrate`` again while ``worker_id`` holds the row (#3890).
 
         A start sets it when the Worker proves it holds no working set for the
-        server after a skipped hydrate (#2499). Guarded on the assignment only:
-        marking errs to the safe side. Returns ``True`` when the row changed.
-        Not announced.
+        server after a skipped hydrate (#2499). Guarded on the assignment only,
+        not on ``updated_at``: an edit committed while the start was on the
+        Worker must not leave a refused replay's scratch publishable. A newer
+        placement on the same Worker cannot have cleared its own mark by then,
+        because its hydrate runs on the Worker's per-server lane behind this
+        start, whose answer the caller acts on with this one write. Returns
+        ``True`` when the row changed. Not announced.
         """
 
     @abc.abstractmethod
