@@ -2156,6 +2156,13 @@ protection (the API holds the assignment across the final snapshot, so the genui
 stale cross-worker publish never arises), and a spoofed id can at worst weaken
 (never strengthen) the guard for a caller already trusted to write the working set.
 
+**A start waits for its Worker's publishes (issue #3950).** A publish that names
+its Worker counts as in flight from the moment its request arrives, before it
+waits for a transfer slot, until it has committed or been refused. A start that
+hydrates that Worker waits for it first, so the hydrate serves what it publishes
+(CONTROL_PLANE.md Section 5). The count is per process and keeps nothing once the
+uploads it counts have left, so a deleted server leaves no entry behind.
+
 **JAR posture.** The resolved server JAR reaches the Worker as part of hydrate
 (ARCHITECTURE.md Section 7.3): `StartServer` ensures the resolved JAR is in the
 content-addressed pool before placement and records its content key on the

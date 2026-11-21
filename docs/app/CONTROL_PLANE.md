@@ -848,6 +848,47 @@ Notes:
   the assignment. The mark is stored with the server, so it also covers a start
   whose API process stopped between the commit and the hydrate, and a start
   cancelled while a hydrate it sent was refused.
+- **A start hydrates a Worker only after that Worker's uploads of the server
+  have landed.** A Worker's snapshot command can end before the API's commit
+  of its upload does: the Worker's transfer deadline (Section 5.2) or a Worker
+  restart ends the command while the API holds the whole body and goes on
+  committing it. The Worker's marker still reads the generation before, so the
+  next start hydrates it. Served before that commit, the hydrate would run the
+  Worker on the older generation, and the commit would then publish a world
+  that run does not contain (issue #3950). So before a start sends a hydrate,
+  it waits for every snapshot upload of the server from that Worker that the
+  data plane still has in flight, being received or committed. The hydrate
+  then serves what they publish.
+  - The data plane counts a publish that names its Worker (`X-Worker-Id`) from
+    the moment its request arrives, before it waits for a transfer slot or
+    reads anything it decides on, until it has committed or been refused
+    (STORAGE.md Section 8). Each API process counts its own uploads, as it
+    holds its own storage locks.
+  - Only that Worker's uploads are waited for. While this Worker is assigned,
+    the commit-time assignment fence refuses another Worker's; if the start
+    then gives the server back, such an upload lands as it would have anyway.
+  - A start that skips the hydrate does not wait: its Worker runs on the tree
+    such an upload packed, or a newer one.
+  - The wait comes after the start's placement commit and holds nothing: no
+    lifecycle lock, database session or storage lock. It is bounded by the
+    shorter of `control.snapshot_timeout_seconds` and
+    `control.hydrate_timeout_seconds` (CONFIGURATION.md Section 5.1). In
+    practice it lasts as long as a commit: an upload whose Worker went away
+    mid-body aborts at the API's next read of it, or after 120 s without a
+    byte if the connection stays open, while one whose whole body arrived
+    commits whatever became of the request.
+  - A wait that runs out sends the Worker nothing. The server stays
+    `desired=running` on that Worker with `observed=unknown`, as after a
+    refused hydrate (the note before last), and the reconciler re-sends the
+    start there without placing the server again. A user start answers
+    `409 upload_in_flight`; the reconciler counts it toward the backoff.
+  - Not covered: a publish that names no Worker, which cannot be told apart
+    from any Worker's; and a proxy in front of the data plane that buffers a
+    whole request before forwarding it, or keeps forwarding it after the
+    Worker has gone. Such a body can reach the API after the Worker's command
+    ended and after a start's wait passed, so request bodies must stream to
+    the API ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md), "The data-plane
+    URL for a cross-host worker").
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
