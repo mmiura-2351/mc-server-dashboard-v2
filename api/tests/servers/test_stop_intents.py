@@ -144,6 +144,9 @@ class _Repository(FakeServerRepository):
 
     ``after_next_read`` runs once, inside the next ``get_by_id``, after the row
     value has been taken: a write it makes is one the reader did not see.
+    ``before_next_clear`` runs once, inside the next ``clear_awaiting_hydrate``,
+    before its write: a write it makes lands between a start's compare and its
+    clear.
     ``pause_next_flip`` holds the next ``update_lifecycle`` at its entry, so a stop
     that has read the row waits there, just before its write. While
     ``stage_flips`` is set, an ``update_lifecycle`` that matches is held back
@@ -153,10 +156,21 @@ class _Repository(FakeServerRepository):
     def __init__(self) -> None:
         super().__init__()
         self.after_next_read: Hook | None = None
+        self.before_next_clear: Hook | None = None
         self.pause_next_flip: asyncio.Event | None = None
         self.flip_paused = asyncio.Event()
         self.stage_flips = False
         self._staged: list[tuple[Server, DesiredState, WorkerId | None, bool]] = []
+
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
+    ) -> bool:
+        hook, self.before_next_clear = self.before_next_clear, None
+        if hook is not None:
+            await hook()
+        return await super().clear_awaiting_hydrate(
+            server_id, worker_id, updated_at=updated_at
+        )
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
         loaded = await super().get_by_id(server_id)
@@ -589,7 +603,9 @@ async def test_a_stop_that_lands_during_the_re_read_keeps_the_start_unsent() -> 
     # The window #3737 left open: the stop commits once the start's re-read has
     # taken the row, and is sent first. The Worker answers it SERVER_NOT_FOUND and
     # the stop releases the row, so a start sent now would run under (stopped,
-    # unassigned). The start sees the bump instead and sends nothing.
+    # unassigned). The start sees the bump instead and sends nothing. Nor does it
+    # clear the row's mark, since the row is no longer its own, so the release
+    # takes no snapshot (issue #3890).
     world = _World()
 
     async def stop() -> None:
@@ -600,7 +616,7 @@ async def test_a_stop_that_lands_during_the_re_read_keeps_the_start_unsent() -> 
     with pytest.raises(LifecycleTransitionConflictError):
         await world.start()
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 
@@ -714,7 +730,8 @@ async def test_a_stop_runnable_at_the_compare_is_sent_after_the_start() -> None:
 async def test_a_stop_still_waiting_on_the_worker_has_already_bumped() -> None:
     # The stop is on the Worker, which has answered nothing yet, when the start
     # compares. It must have bumped before it was sent: a stop that bumped only on
-    # the answer would let the start follow it out.
+    # the answer would let the start follow it out. The start clears no mark, so
+    # the release takes no snapshot (issue #3890).
     world = _World()
     answer = asyncio.Event()
     world.cp.hold_stop_answer = answer
@@ -731,7 +748,7 @@ async def test_a_stop_still_waiting_on_the_worker_has_already_bumped() -> None:
     answer.set()
     await stops[0]
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 
@@ -748,7 +765,8 @@ async def test_a_stop_whose_commit_landed_but_raised_keeps_the_start_unsent(
     # sent. The flip still bumps. Otherwise the start would go out under the
     # stopped row, and an operator who retried the stop before the Worker's first
     # report would release the row under it: the retry takes the final snapshot
-    # and clears the assignment, and sends no stop.
+    # and clears the assignment, and sends no stop. The refused start cleared no
+    # mark, so that retry takes no snapshot (issue #3890).
     world = _World()
 
     async def ambiguous_stop() -> None:
@@ -770,7 +788,7 @@ async def test_a_stop_whose_commit_landed_but_raised_keeps_the_start_unsent(
 
     await world.stop()
 
-    assert world.kinds() == ["hydrate", "snapshot"]
+    assert world.kinds() == ["hydrate"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
 
@@ -2599,6 +2617,44 @@ async def test_an_older_start_after_a_stale_clear_leaves_a_newer_placements_mark
     row = world.repo.by_id[world.server_id]
     assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
         DesiredState.RUNNING,
+        world.worker,
+        True,
+    )
+    await _due_tick_sends_nothing_new(world)
+
+
+async def test_a_placement_between_the_compare_and_the_clear_keeps_its_mark() -> None:
+    # The same release and newer placement, landing after start T1's compare has
+    # passed and before its clear writes. The compare cannot see them, so the
+    # clear's own guard does: it asserts the row as T1 read it, and the newer
+    # placement's write moved ``updated_at``.
+    world = _World()
+    later = _NOW + dt.timedelta(minutes=1)
+
+    async def stop_then_a_kept_start() -> None:
+        await world.stop()
+        # The store moves, so the newer start hydrates rather than reuse the set
+        # T1's hydrate left.
+        world.store_generation = 1
+
+        async def refuse() -> CommandOutcome:
+            return _refused("untracked_container")
+
+        world.cp.hydrate_hooks.append(refuse)
+        newer = replace(world.start_server(), clock=FakeClock(later))
+        with pytest.raises(CommandDispatchError):
+            await newer(community_id=world.community, server_id=world.server_id)
+
+    async def arm() -> None:
+        world.repo.before_next_clear = stop_then_a_kept_start
+
+    world.after_hydrate(arm)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    row = world.repo.by_id[world.server_id]
+    assert (row.updated_at, row.assigned_worker_id, row.awaiting_hydrate) == (
+        later,
         world.worker,
         True,
     )

@@ -304,16 +304,29 @@ class ServerRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def set_awaiting_hydrate(
-        self, server_id: ServerId, worker_id: WorkerId, *, awaiting: bool
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
     ) -> bool:
-        """Set or clear ``awaiting_hydrate`` while ``worker_id`` holds the row.
+        """Clear ``awaiting_hydrate`` for the placement the caller read (#3890).
 
-        A start clears it once the Worker holds the store's working set, and sets
-        it again when that Worker proves it holds none (issue #3890). Guarded on
-        the assignment, so it never marks another Worker's placement or an
-        unassigned row. Returns ``True`` when the row changed. Not announced:
-        the mark is the API's own bookkeeping, not a state a client reads.
+        A start clears it once the Worker holds the store's working set. The
+        write lands only while ``worker_id`` holds the row and its ``updated_at``
+        is still the one the caller read when it checked that the placement is
+        its own, so a newer placement on the same Worker keeps its mark (r2
+        review). Returns ``True`` when the row changed. Not announced: the mark
+        is the API's own bookkeeping, not a state a client reads.
+        """
+
+    @abc.abstractmethod
+    async def mark_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        """Set ``awaiting_hydrate`` again while ``worker_id`` holds the row (#3890).
+
+        A start sets it when the Worker proves it holds no working set for the
+        server after a skipped hydrate (#2499). Guarded on the assignment only:
+        marking errs to the safe side. Returns ``True`` when the row changed.
+        Not announced.
         """
 
     @abc.abstractmethod

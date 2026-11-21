@@ -899,27 +899,69 @@ class ServerRepositoryContract:
         )
 
     @pytest.mark.parametrize(
-        ("holder", "stored_mark", "awaiting", "applies"),
+        ("holder", "read", "stored_mark", "applies"),
         [
-            ("w1", True, False, True),
-            ("w1", False, True, True),
-            ("w1", False, False, False),
-            ("w2", True, False, False),
-            (None, True, False, False),
+            ("w1", "as-stored", True, True),
+            ("w1", "as-stored", False, False),
+            ("w2", "as-stored", True, False),
+            (None, "as-stored", True, False),
+            ("w1", "older", True, False),
         ],
-        ids=["clear", "set", "unchanged", "other-worker", "unassigned"],
+        ids=["clear", "already-clear", "other-worker", "unassigned", "re-placed"],
     )
-    async def test_the_mark_is_set_only_while_the_worker_holds_the_row(
+    async def test_the_mark_is_cleared_only_for_the_placement_read(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        holder: str | None,
+        read: str,
+        stored_mark: bool,
+        applies: bool,
+    ) -> None:
+        # Issue #3890: a start clears the mark once worker w1 holds the store's
+        # working set. The write asserts the row as the start read it, so it never
+        # touches another Worker's placement, nor a newer placement on w1, whose
+        # write moved ``updated_at`` (r2 review).
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.assigned_worker_id = None if holder is None else workers[holder]
+        item.awaiting_hydrate = stored_mark
+        item.updated_at = _LATER
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            changed = await tx.repository.clear_awaiting_hydrate(
+                item.id,
+                workers["w1"],
+                updated_at=_LATER if read == "as-stored" else _NOW,
+            )
+            await tx.commit()
+        assert changed is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert row.awaiting_hydrate is (False if applies else stored_mark)
+
+    @pytest.mark.parametrize(
+        ("holder", "stored_mark", "applies"),
+        [
+            ("w1", False, True),
+            ("w1", True, False),
+            ("w2", False, False),
+            (None, False, False),
+        ],
+        ids=["mark", "already-marked", "other-worker", "unassigned"],
+    )
+    async def test_the_mark_is_set_again_only_while_the_worker_holds_the_row(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
         contract_community_id: CommunityId,
         holder: str | None,
         stored_mark: bool,
-        awaiting: bool,
         applies: bool,
     ) -> None:
-        # Issue #3890: a start clears the mark once worker w1 holds the store's
-        # working set, and never touches another Worker's placement.
+        # Issue #3890: a skipped hydrate the Worker disproves owes it again (#2499).
         workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
         item = server(contract_community_id)
         item.assigned_worker_id = None if holder is None else workers[holder]
@@ -928,15 +970,13 @@ class ServerRepositoryContract:
             await tx.repository.add(item)
             await tx.commit()
         async with server_repository_harness.open() as tx:
-            changed = await tx.repository.set_awaiting_hydrate(
-                item.id, workers["w1"], awaiting=awaiting
-            )
+            changed = await tx.repository.mark_awaiting_hydrate(item.id, workers["w1"])
             await tx.commit()
         assert changed is applies
         async with server_repository_harness.open() as tx:
             row = await tx.repository.get_by_id(item.id)
         assert row is not None
-        assert row.awaiting_hydrate is (awaiting if applies else stored_mark)
+        assert row.awaiting_hydrate is (True if applies else stored_mark)
 
     @pytest.mark.parametrize(
         ("desired", "state", "unassign", "observed_at", "mark_after"),

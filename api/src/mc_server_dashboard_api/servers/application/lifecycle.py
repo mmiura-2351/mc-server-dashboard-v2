@@ -97,11 +97,12 @@ start on that same Worker.
 
 A kept Worker has not hydrated the server, and its scratch may be a leftover older
 than the store. The placement's commit sets the row's ``awaiting_hydrate``, and
-``_launch`` clears it only once the Worker holds the store's working set. While it
-is set, nothing publishes a snapshot from that Worker: the periodic tick skips the
-row, ``_final_snapshot`` takes none and lets the stop release, and the data plane
-refuses the Worker's stale publish. A ``running`` report from the Worker clears it
-too, since that instance's working set is what its snapshots capture from then on.
+``_launch`` clears it only once the Worker holds the store's working set, and only
+for its own placement. While it is set, nothing publishes a snapshot from that
+Worker: the periodic tick skips the row, ``_final_snapshot`` takes none and lets the
+stop release, and the data plane refuses every publish from the Worker. A
+``running`` report from the Worker clears it too, since that instance's working set
+is what its snapshots capture from then on.
 
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
 and that is what makes every convergence site sound. Until issue #2476 the Worker
@@ -1185,11 +1186,15 @@ class StartServer:
         # has not bumped by then is enqueued after this start, and the Worker's
         # per-server lane runs it as a real stop.
         #
-        # The same unit of work first clears the row's ``awaiting_hydrate`` (issue
+        # The same unit of work clears the row's ``awaiting_hydrate`` (issue
         # #3890): the Worker now holds the store's working set, because the hydrate
         # above landed or its held generation is at least the store's, so its
-        # snapshots may publish again. It is cleared even if the compare below
-        # then refuses the start, since that is still true.
+        # snapshots may publish again. That is true of this start's placement
+        # only. A stop may have released the row meanwhile and a newer start
+        # placed it on this same Worker, whose hydrate has not landed (r2 review).
+        # So the clear runs only once the re-read passes the compare, and its write
+        # also asserts the row's ``updated_at`` as that read saw it. The compare
+        # runs again after the unit of work closes, for the enqueue (above).
         #
         # A read or write that raises (a database error) sends no start either,
         # and each caller handles it as a failure before the send. ``__call__``
@@ -1201,11 +1206,14 @@ class StartServer:
         # store has not moved past the generation recorded above.
         # ``redispatch_start`` reverts nothing, as on any failure.
         async with self.uow:
-            await self.uow.servers.set_awaiting_hydrate(
-                server_id, worker_id, awaiting=False
-            )
-            await self.uow.commit()
             current = await self.uow.servers.get_by_id(server_id)
+            if current is not None and self._still_owns(
+                current, worker_id, stop_intent_count
+            ):
+                await self.uow.servers.clear_awaiting_hydrate(
+                    server_id, worker_id, updated_at=current.updated_at
+                )
+                await self.uow.commit()
         if current is None or not self._still_owns(
             current, worker_id, stop_intent_count
         ):
@@ -1284,9 +1292,7 @@ class StartServer:
                 outcome.message,
             )
             async with self.uow:
-                await self.uow.servers.set_awaiting_hydrate(
-                    server_id, worker_id, awaiting=True
-                )
+                await self.uow.servers.mark_awaiting_hydrate(server_id, worker_id)
                 await self.uow.commit()
             return await self._launch(
                 server,
