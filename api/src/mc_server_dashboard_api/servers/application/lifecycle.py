@@ -2231,6 +2231,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
+        hold_if_unreachable: bool = False,
     ) -> bool:
         """Capture the working set of a server whose process is gone.
 
@@ -2265,6 +2266,9 @@ class StopServer:
         uploading, so the caller must HOLD the assignment rather than release it
         while the upload is in flight. ``False`` for success and for a worker
         DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
+        With ``hold_if_unreachable`` a Worker whose session ended re-raises the
+        ``WorkerUnavailableError`` instead, so the caller keeps the assignment
+        for a Worker that may be back with the working set (issue #3963).
 
         A row whose Worker has not hydrated it under this assignment
         (``awaiting_hydrate``, issue #3890) is not snapshotted at all, and this
@@ -2350,6 +2354,18 @@ class StopServer:
                     server_id.value,
                 )
                 return True
+            if (
+                hold_if_unreachable
+                and exc.worker_state is UnavailableWorkerState.NOT_CONNECTED
+            ):
+                _LOG.warning(
+                    "final snapshot could not reach the Worker for server %s: its "
+                    "session ended. Holding the assignment for the "
+                    "disconnected-Worker grace, so a Worker back within it still "
+                    "takes the snapshot (issue #3963)",
+                    server_id.value,
+                )
+                raise
             _LOG.error(
                 "final snapshot could not reach the Worker for server %s; the "
                 "process is gone but the working set was NOT captured "
@@ -2599,6 +2615,7 @@ class StopServer:
                 # The row moved since list_reconcilable snapshotted it; nothing for
                 # this recovery arm to do.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            seen_connected = self.control_plane.is_worker_connected(worker_id=worker_id)
             # TOCTOU guard for the unknown (issue #1599) and stopping (issue #2452)
             # cases: the reconciler routes here only when the worker is
             # disconnected, but the worker may have reconnected in between. If so,
@@ -2607,33 +2624,42 @@ class StopServer:
                 ObservedState.UNKNOWN,
                 ObservedState.STOPPING,
             ):
-                if self.control_plane.is_worker_connected(worker_id=worker_id):
+                if seen_connected:
                     raise InvalidLifecycleTransitionError(str(server_id.value))
             # One step, no await: a start compares either before the bump, and is
             # noted as sent here, or after it, and is not sent (issue #3766).
             self.stop_intents.bump(server_id)
             start_may_be_running = self.stop_intents.start_may_be_running(server_id)
 
+        # A Worker the caller or Step A found connected is owed the final snapshot
+        # or the stop. If its session has ended since, it may still hold the
+        # working set and be back within the disconnected-Worker grace, so the row
+        # is kept for that grace, measured from the drop (issue #3963).
+        connected = self.control_plane.is_worker_connected(worker_id=worker_id)
+        if (worker_connected or seen_connected) and not connected:
+            raise WorkerUnavailableError(
+                str(worker_id.value), worker_state=UnavailableWorkerState.NOT_CONNECTED
+            )
+
         # A connected Worker here means a stopped or crashed row, or an unknown or
         # stopping one whose Worker reconnected during the unit of work's exit:
         # the next tick would send that one a stop anyway.
-        if start_may_be_running and self.control_plane.is_worker_connected(
-            worker_id=worker_id
-        ):
+        if start_may_be_running and connected:
             return await self._redispatch_stop(
                 community_id=community_id, server_id=server_id, force=force
             )
 
         # --- Step B: re-drive the final snapshot when the process is gone and
         # the worker is still reachable (observed stopped, #1004; crashed, #2439)
-        if server.observed_state in (
-            ObservedState.STOPPED,
-            ObservedState.CRASHED,
-        ) and self.control_plane.is_worker_connected(worker_id=worker_id):
+        if (
+            server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED)
+            and connected
+        ):
             upload_may_be_live = await self._final_snapshot(
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                hold_if_unreachable=True,
             )
             if upload_may_be_live:
                 # The connected Worker has not answered the snapshot yet.

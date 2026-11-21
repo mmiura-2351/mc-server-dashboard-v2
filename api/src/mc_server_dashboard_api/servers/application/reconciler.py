@@ -685,12 +685,18 @@ class RunReconcilerTick:
         # with it yet: the first tick runs as the API starts. So the release of such
         # a Worker's row is measured from no earlier than the listener start (issue
         # #3916), and a Worker back within a grace of it still gets the final
-        # snapshot or the stop.
+        # snapshot or the stop. It is also measured from no earlier than the
+        # instant the Worker first read disconnected (issue #3963): the row keeps
+        # its old stamp until the teardown's bulk write lands, and that write may
+        # fail.
         worker_id = server.assigned_worker_id
         if worker_id is not None and not self.control_plane.is_worker_connected(
             worker_id=worker_id
         ):
             since = max(since, self.listener_started_at)
+            offline_since = self.control_plane.worker_offline_since(worker_id=worker_id)
+            if offline_since is not None:
+                since = max(since, offline_since)
         return (now - since) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:

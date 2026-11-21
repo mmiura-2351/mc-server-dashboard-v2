@@ -575,7 +575,9 @@ async def test_reconnect_before_the_old_callers_timeout_does_not_hold_for_good()
     # Stop A's final snapshot is in flight when the Worker reconnects, and the new
     # session stays up. Its old session can never answer, so the snapshot must
     # not stay outstanding past A's deadline: the row has to converge without
-    # another reconnect.
+    # another reconnect. A keeps the row, since the Worker is back with the
+    # working set (issue #3963), and the next final snapshot, sent on the new
+    # session, releases it.
     server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
     repo = FakeServerRepository()
     repo.seed(server)
@@ -588,9 +590,14 @@ async def test_reconnect_before_the_old_callers_timeout_does_not_hold_for_good()
     await worker.next_command()
 
     worker.reconnect()
-    with contextlib.suppress(WorkerUnavailableError):
+    with pytest.raises(WorkerUnavailableError):
         await asyncio.wait_for(caller, timeout=1)
-    await asyncio.wait_for(_ticker(repo, worker).tick(), timeout=1)
+    assert not worker.guard.in_flight(server.id)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    tick = asyncio.create_task(_ticker(repo, worker).tick())
+    await worker.report_ok(await worker.next_command())
+    await asyncio.wait_for(tick, timeout=1)
 
     assert not worker.guard.in_flight(server.id)
     assert _assigned(repo, server) is None
