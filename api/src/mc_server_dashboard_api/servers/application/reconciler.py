@@ -45,7 +45,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   (issue #3890). The refusal is handled below as any start's is, and the next tick
   past the grace takes ``redispatch_start`` to that same Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
-  the stop.
+  the stop. Its final snapshot follows the Worker's answer, and one that fails
+  because the Worker's session ended keeps the row as in the arm below: the action
+  fails, and the row waits for the Worker (issue #3981).
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final
   snapshot (if the Worker is connected) THEN clear the assignment (issue #847 bug 2,
   issue #1004). A stop whose deferred unassign never ran (an API crash or an
@@ -136,6 +138,13 @@ write restamps the Worker's rows, but until it lands, or when it fails, a row
 still carries its stamp from before the drop, and a tick in that window would
 release it at once without its final snapshot.
 
+The tick reads each row's Worker once, its connectivity and then its drop
+instant, and the grace, the finished-stop record below and the release's routing
+all use that one reading (issue #3981). The registry derives a heartbeat lapse
+from the wall clock at each read, so two reads with no await between them can
+still disagree, and a release routed on a disconnected Worker after a grace
+measured on a connected one would go out at once without its final snapshot.
+
 That held predicate used to be near-dead: the held inventory was frozen at Worker
 registration, so every server placed since reported nothing held and took the full
 grace unconditionally. #2477 made it answer for those servers too (a successful
@@ -186,8 +195,10 @@ snapshot can still be uploading (#847). Both stop-side floors are therefore met,
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
 The record is dropped before every stop or final-snapshot dispatch, and any newer
 intent commit or Worker report supersedes it, with no ``EXPIRED`` exception, as
-does a later disconnect of the row's Worker (issue #3963). It is not persisted, so
-after an API restart the full grace applies again.
+does a later disconnect of the row's Worker (issue #3963). The record carries the
+instant its failed write began, so a disconnect while that write fails is later
+than it (issue #3981). It is not persisted, so after an API restart the full grace
+applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors

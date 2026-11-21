@@ -534,8 +534,9 @@ class FleetControlPlaneAdapter(ControlPlane):
             # the servers layer (issue #847): a TIMEOUT means the worker session is
             # healthy and the transfer is still uploading (only the API future was
             # abandoned), so the final-stop snapshot must HOLD the assignment; a
-            # DISCONNECT means the worker is gone and the upload died with its ctx,
-            # so the assignment is released as before. A disconnect that ended the
+            # DISCONNECT means the upload died with the session's ctx, and the
+            # assignment is held too, since the Worker may be back with the working
+            # set (``not_connected``, issue #3981). A disconnect that ended the
             # session while this command awaited its answer is flagged apart from a
             # Worker that was not connected at all: the command may have run
             # (issue #3781). The client is told a timeout apart from a session

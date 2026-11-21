@@ -2514,8 +2514,8 @@ class StopServer:
         connected when it chose this convergence. Such a Worker that drops before
         Step B's final snapshot is taken, or before the owed stop is sent, keeps
         the row: this raises ``WorkerUnavailableError`` instead of releasing
-        (issue #3963). Once the Worker has answered that stop, its own final
-        snapshot still releases on a session end (issue #3981).
+        (issue #3963). So does the owed stop's own final snapshot, once the Worker
+        has answered the stop, when it fails on a session end (issue #3981).
 
         Raises ``LifecycleTransitionConflictError`` without dispatching or releasing
         when another stop convergence for the server is in flight (issue #3491).
@@ -2642,8 +2642,8 @@ class StopServer:
         on, an operator stop the one it read in its own unit of work. A Worker
         already gone when the operator's stop began is released at once, as
         documented. The owed stop's own release, once the Worker has answered it,
-        is not covered: a final snapshot that fails on a session end there still
-        releases (issue #3981).
+        keeps the row the same way when its final snapshot fails on a session end
+        (issue #3981).
 
         Step A also withdraws the intent again, with a bump, as
         :meth:`_redispatch_stop` does and for the same reasons: the write that
