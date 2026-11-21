@@ -215,3 +215,68 @@ func TestPackSnapshotRefusesAnExpiredContext(t *testing.T) {
 		t.Fatalf("spools left in the scratch root: %v", left)
 	}
 }
+
+// A spool whose close fails fails the pack (issue #3940): the close can be where
+// a write-back error such as ENOSPC is first reported, so the archive is not
+// known to be whole. The spool is removed, as on any failed pack.
+func TestPackSnapshotFailsWhenTheSpoolDoesNotClose(t *testing.T) {
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(srcDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "level.dat"), []byte("level"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	orig := closeSpool
+	t.Cleanup(func() { closeSpool = orig })
+	closeSpool = func(f *os.File) error {
+		_ = orig(f)
+		return &os.PathError{Op: "close", Path: f.Name(), Err: unix.ENOSPC}
+	}
+
+	spool, _, err := New(nil).PackSnapshot(context.Background(), srcDir)
+	if !errors.Is(err, unix.ENOSPC) {
+		t.Fatalf("PackSnapshot = %q, %v; want the close's ENOSPC", spool, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(scratch, snapshotSpoolPrefix+"*.tar")); len(left) != 0 {
+		t.Fatalf("spools left in the scratch root: %v", left)
+	}
+}
+
+// The walk retries a stat the kernel interrupted, as the os calls the path-based
+// walk made did (issue #3940): on a scratch filesystem that interrupts it (FUSE,
+// NFS, CIFS), an EINTR fails no snapshot.
+func TestPackRetriesAnInterruptedStat(t *testing.T) {
+	scratch := t.TempDir()
+	srcDir := filepath.Join(scratch, "server")
+	if err := os.MkdirAll(srcDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "level.dat"), []byte("level"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	orig := statAt
+	t.Cleanup(func() { statAt = orig })
+	interrupted := false
+	statAt = func(dirFd int, name string, st *unix.Stat_t) error {
+		if !interrupted {
+			interrupted = true
+			return unix.EINTR
+		}
+		return orig(dirFd, name, st)
+	}
+
+	spool, cleanup, err := New(nil).PackSnapshot(context.Background(), srcDir)
+	if err != nil {
+		t.Fatalf("PackSnapshot: %v", err)
+	}
+	defer cleanup()
+	archive, err := os.ReadFile(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := memberNames(t, archive); !contains(names, "level.dat") {
+		t.Fatalf("archive members %v, want level.dat", names)
+	}
+}
