@@ -441,10 +441,12 @@ with 64-character names do). The gate also refuses a chain of extended headers
 too long for `tarfile`, which reads them recursively: a few hundred before one
 member. The gate runs off the event loop thread
 (issue #3801), on a pool of two threads that it shares with the files upload's
-extract and nothing else (issue #3843), so a slow archive cannot hold the
-default executor that the fs backend, the sweep and import run on. The two
-upload routes admit at most four archive uploads at a time between them: two
-validating and two waiting. One past that is `503 upload_busy`, refused before
+extract and the server import (issues #3843, #3912), so a slow archive cannot
+hold the default executor that the fs backend and the sweep run on. The plugin
+upload's manifest read and the resource-pack upload's validation run on that
+pool too, but are not admitted, so an admitted upload can wait behind them. The
+three archive upload routes admit at most four archive uploads at a time between
+them: two validating and two waiting. One past that is `503 upload_busy`, refused before
 its body is read into memory. A validating thread still holds the GIL, so the
 event loop runs late while it decompresses: with one such thread, a 1 ms loop
 tick was measured late by up to 29 ms at the 99th percentile and 100 ms at

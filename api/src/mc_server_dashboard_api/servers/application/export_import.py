@@ -40,7 +40,6 @@ so a converter can be written later.
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
 import io
 import json
@@ -52,6 +51,9 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
 from mc_server_dashboard_api.rfc3339 import serialize_utc
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.files import (
     _ZIP_READ_ERRORS,
     MAX_ARCHIVE_ENTRIES,
@@ -302,6 +304,11 @@ class ImportServer:
     set, with the metadata member itself excluded. The name comes from the caller,
     not the metadata.
 
+    Each read of the archive (the metadata, the dry run and the publish pass) runs
+    on the archive-validation pool it shares with the backup upload and the files
+    upload's extract (:mod:`.archive_validation`, issue #3912), so a crafted
+    import can hold a thread of that pool but none of the default executor's.
+
     On publish, the imported ``server.properties`` has every platform-managed key
     re-applied (issue #2621) via :func:`apply_platform_properties`: the archive
     carries the SOURCE server's values and nothing downstream re-applies this
@@ -346,15 +353,19 @@ class ImportServer:
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
 
-        metadata = _parse_metadata(content)
+        # Every read of the archive runs on the archive-validation pool: on the
+        # event loop it would stall every other request (issue #1620), and on the
+        # default executor a few such imports would starve everything else that
+        # runs there (issue #3912). Opening the zip parses its whole directory,
+        # so even the metadata read costs seconds for a crafted archive.
+        metadata = await run_archive_validation(_parse_metadata, content)
         # Validate the whole archive (zip-slip / size / entry-count, and the root
         # server.properties path of #2869) BEFORE the row is created, so a hostile
         # archive 413/422s with no server row left behind (issue #277). The metadata
         # member is included in this pass (it is a normal archive entry); only its
-        # write is skipped later. The body bytes are already in memory, so the
-        # dry-run pass is cheap.
-        # Offloaded to a thread: decompression is CPU-bound (issue #1620).
-        await asyncio.to_thread(
+        # write is skipped later. A crafted archive that passes this pass costs as
+        # much again in the publish pass.
+        await run_archive_validation(
             _validate_import_archive,
             content,
             max_bytes=self.max_bytes,
@@ -407,9 +418,10 @@ class ImportServer:
         """
 
         try:
-            # Materialize the entry list on a thread: decompression is CPU-bound
-            # (issue #1620). The async write loop below iterates the result.
-            entries = await asyncio.to_thread(
+            # Materialize the entry list on the archive-validation pool, as the
+            # dry run does (issue #3912). The async write loop below iterates the
+            # result.
+            entries = await run_archive_validation(
                 lambda: list(
                     _archive_entries(
                         EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch

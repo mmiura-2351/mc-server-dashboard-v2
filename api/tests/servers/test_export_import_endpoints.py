@@ -23,6 +23,7 @@ import json
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
+from typing import cast
 
 import httpx2
 import pytest
@@ -43,6 +44,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_archive_upload_admission,
     get_audit_recorder,
     get_authenticate_download_grant,
     get_authenticate_request,
@@ -63,6 +65,10 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.servers.api import servers as servers_api
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
+)
 from mc_server_dashboard_api.servers.application.export_import import (
     EXPORT_FORMAT_VERSION,
     EXPORT_METADATA_FILENAME,
@@ -84,6 +90,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     SlugAlreadyTakenError,
     SlugExhaustedError,
     UnreadableArchiveError,
+    UploadBusyError,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -1083,6 +1090,25 @@ def test_import_oversized_is_413() -> None:
     assert resp.status_code == 413
 
 
+def test_import_over_cap_body_is_413_before_use_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The route checks the body it read against the cap before the use case
+    # runs. Patch the cap small so the fixture stays tiny; the request body limit
+    # was fixed when the route was declared, so only the route's own check trips.
+    monkeypatch.setattr(servers_api, "MAX_UPLOAD_BYTES", 16)
+    use_case = _FakeImport(result=_server_entity(community_id=uuid.uuid4()))
+    app = _app(member=True, allow=True, import_=use_case)
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files={"file": ("server.zip", b"x" * 1024, "application/zip")},
+        data={"name": "imported"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"
+    assert use_case.calls == []  # refused before the use case ran
+
+
 class _FailingWorldWriteStore(FakeFileStore):
     """Takes create's seed writes, then fails publishing the archive's world."""
 
@@ -1212,3 +1238,95 @@ def test_import_zip_slip_member_is_422_invalid_path() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_path"
+
+
+# --- only a few archive uploads at a time (issue #3912) --------------------
+#
+# The import validates on the pool the backup upload and the files extract use,
+# so it counts toward their admission and is refused at once past it, before
+# the body is read into memory.
+
+
+def _with_admission(app: object, admission: ArchiveUploadAdmission) -> None:
+    cast(FastAPI, app).dependency_overrides[get_archive_upload_admission] = lambda: (
+        admission
+    )
+
+
+def _post_import(client: TestClient) -> httpx2.Response:
+    files, data = _zip_upload()
+    return client.post(
+        f"/api/communities/{uuid.uuid4()}/servers/import", files=files, data=data
+    )
+
+
+def test_import_while_every_admission_slot_is_held_is_503_upload_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b""
+
+    monkeypatch.setattr(servers_api, "_read_capped_upload", read)
+    use_case = _FakeImport(result=_server_entity(community_id=uuid.uuid4()))
+    admission = ArchiveUploadAdmission(limit=1)
+    app = _app(member=True, allow=True, import_=use_case)
+    _with_admission(app, admission)
+
+    with admission.slot():
+        resp = _post_import(_client(app))
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "upload_busy"
+    # Nothing knows when a slot frees, so no number is invented.
+    assert "Retry-After" not in resp.headers
+    assert reads == []
+    assert use_case.calls == []
+
+
+class _SlotProbingImport(_FakeImport):
+    """A fake import that records whether its request still holds a slot."""
+
+    def __init__(
+        self, admission: ArchiveUploadAdmission, *, error: Exception | None = None
+    ) -> None:
+        super().__init__(result=_server_entity(community_id=uuid.uuid4()), error=error)
+        self._admission = admission
+        self.held_a_slot: list[bool] = []
+
+    async def __call__(
+        self, *, community_id: ServersCommunityId, name: str, content: bytes
+    ) -> Server:
+        try:
+            with self._admission.slot():
+                self.held_a_slot.append(False)
+        except UploadBusyError:
+            self.held_a_slot.append(True)
+        return await super().__call__(
+            community_id=community_id, name=name, content=content
+        )
+
+
+@pytest.mark.parametrize(
+    ("error", "status_code"),
+    [
+        pytest.param(None, 201, id="created"),
+        pytest.param(UnreadableArchiveError("server.zip"), 422, id="refused"),
+    ],
+)
+def test_an_import_holds_a_slot_until_it_ends(
+    error: Exception | None, status_code: int
+) -> None:
+    admission = ArchiveUploadAdmission(limit=1)
+    use_case = _SlotProbingImport(admission, error=error)
+    app = _app(member=True, allow=True, import_=use_case)
+    _with_admission(app, admission)
+
+    resp = _post_import(_client(app))
+
+    assert resp.status_code == status_code
+    assert use_case.held_a_slot == [True]
+    with admission.slot():  # free again
+        pass

@@ -43,6 +43,7 @@ from mc_server_dashboard_api.community.domain.value_objects import AuthUser, Per
 from mc_server_dashboard_api.config import Settings
 from mc_server_dashboard_api.dependencies import (
     DeferredAuthz,
+    get_archive_upload_admission,
     get_audit_recorder,
     get_bedrock_joinability,
     get_create_server,
@@ -79,6 +80,9 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
 from mc_server_dashboard_api.servers.api.console_line import ConsoleLine
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    ArchiveUploadAdmission,
+)
 from mc_server_dashboard_api.servers.application.command_dispatch import (
     WORKER_UNAVAILABLE_REASON,
 )
@@ -153,6 +157,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownServerTypeError,
     UnreadableArchiveError,
     UnsupportedEditionError,
+    UploadBusyError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.game_session import GameSession
@@ -173,10 +178,6 @@ from mc_server_dashboard_api.servers.domain.version_validator import (
 router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
-
-# How much of the multipart import body to pull per chunk while counting it
-# against the upload cap (the bounded-read loop in ``_read_capped_upload``).
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 # A whole-server export is a streamed zip; the HEAD probe declares the same type.
 _EXPORT_MEDIA_TYPE = "application/zip"
@@ -560,6 +561,7 @@ async def import_server(
     name: Annotated[str, Form(min_length=1)],
     join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
     bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
+    admission: Annotated[ArchiveUploadAdmission, Depends(get_archive_upload_admission)],
 ) -> ServerResponse:
     """Import a whole server from a ZIP export (server:create, issue #274).
 
@@ -595,15 +597,25 @@ async def import_server(
     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
     exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same
     answers create gives for the same conditions.
+
+    **Only a few archive uploads at a time (issue #3912).** This route reads the
+    archive on the small pool the backup upload and the files upload's extract
+    validate on, and counts toward the limit they share: at most four archive
+    uploads at a time across the three routes. One past that is 503
+    ``upload_busy``, refused before its body is read into memory, with no server
+    created; sending it again shortly is the remedy.
     """
 
-    content = await _read_capped_upload(file)
     try:
-        server = await use_case(
-            community_id=CommunityId(community_id),
-            name=name,
-            content=content,
-        )
+        with admission.slot():
+            content = await _read_capped_upload(file)
+            server = await use_case(
+                community_id=CommunityId(community_id),
+                name=name,
+                content=content,
+            )
+    except UploadBusyError as exc:
+        raise _service_unavailable("upload_busy") from exc
     except InvalidExportMetadataError as exc:
         raise _unprocessable("invalid_export_metadata") from exc
     except UnreadableArchiveError as exc:
@@ -1410,25 +1422,20 @@ async def _record_denied(
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
-    """Pull a multipart body in chunks, aborting with 413 past the upload cap.
+    """Read the multipart part whole, refusing it with 413 past the upload cap.
 
-    Mirrors the files-router reader (issue #262): ``file.read()`` with no argument
-    would pull the whole part into memory at once, so read in bounded chunks and
-    refuse as soon as the running count crosses MAX_UPLOAD_BYTES. The use case
-    re-checks the cap, so this is the edge's early-out, not the only guard.
+    One read, which Starlette runs on its thread pool for a part spooled to disk
+    (every part past 1 MiB), so copying up to 512 MiB never runs on the event loop
+    (issue #3912). A part of at most 1 MiB is still in memory and is copied on the
+    loop. The route's request body limit already bounds the part to the cap plus
+    the multipart envelope, so the read never holds more than that. The use case
+    re-checks the cap.
     """
 
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_UPLOAD_BYTES:
-            raise _too_large()
-        chunks.append(chunk)
-    return b"".join(chunks)
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise _too_large()
+    return content
 
 
 # Failed lifecycle/command attempts worth a row (issue #131): a refused state

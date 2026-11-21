@@ -1,22 +1,27 @@
 """The pool the upload doors validate archives on, and its admission (issue #3843).
 
-Two doors take an uploaded archive of up to 512 MiB and decompress it to judge it
-before anything is stored or written: the backup upload
-(:class:`~.backups.UploadBackup`) and the files upload with ``extract``
-(:class:`~.files.UploadFile`). That work is CPU-bound, and the caps do not bound all
-of it: a crafted archive costs minutes near the body cap (issue #3835). On
-asyncio's shared default executor, a few such uploads took every worker, and so
-starved everything else that runs there: every fs Storage call, the storage
-sweep, import and resource packs.
+Three doors take an uploaded archive of up to 512 MiB and decompress it to judge
+it before anything is stored, written or created: the backup upload
+(:class:`~.backups.UploadBackup`), the files upload with ``extract``
+(:class:`~.files.UploadFile`) and the server import
+(:class:`~.export_import.ImportServer`, issue #3912). That work is CPU-bound, and
+the caps do not bound all of it: a crafted archive costs minutes near the body
+cap (issue #3835). On asyncio's shared default executor, a few such uploads took
+every worker, and so starved everything else that runs there, every fs Storage
+call and the storage sweep among them.
 
-So both doors validate on :data:`ARCHIVE_VALIDATION_WORKERS` threads of their own,
-as the password KDF does on its own pool (issue #1696), and nothing else runs
-there. Both doors admit at most :data:`ADMITTED_ARCHIVE_UPLOADS` archive uploads
-at a time between them through one :class:`ArchiveUploadAdmission`: as many as
-the pool validates at once, and as many again waiting for it. Each admitted
-upload holds its body in memory, so that also bounds the memory the doors hold
-at once. Both sizes are constants, as the KDF pool's and the data-plane
-transfer limit's are.
+So the three doors validate on :data:`ARCHIVE_VALIDATION_WORKERS` threads of
+their own, as the password KDF does on its own pool (issue #1696). They admit at
+most :data:`ADMITTED_ARCHIVE_UPLOADS` archive uploads at a time between them
+through one :class:`ArchiveUploadAdmission`: as many as the pool validates at
+once, and as many again waiting for it. Each admitted upload holds its body in
+memory, so that also bounds the memory the doors hold at once. Both sizes are
+constants, as the KDF pool's and the data-plane transfer limit's are.
+
+Two more uploads read zips on this pool, without an admission (issue #3912): the
+plugin upload reads the jar's manifest, which parses the jar's whole zip
+directory, and the resource-pack upload validates the pack. Nothing bounds how
+many of those queue for a thread, so an admitted upload can wait behind them.
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ async def run_archive_validation(
 
 
 class ArchiveUploadAdmission:
-    """The archive uploads both doors have admitted, at most ``limit`` at once.
+    """The archive uploads the three doors have admitted, at most ``limit`` at once.
 
     An upload past the limit is refused at once with :class:`UploadBusyError`
     rather than queued, so it holds no memory while it waits. One instance serves

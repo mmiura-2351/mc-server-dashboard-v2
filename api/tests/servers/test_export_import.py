@@ -21,9 +21,11 @@ DB, no real Storage), per TESTING.md Section 4. Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import json
+import threading
 import uuid
 import zipfile
 from collections.abc import AsyncIterator
@@ -31,6 +33,7 @@ from dataclasses import replace
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import export_import
 from mc_server_dashboard_api.servers.application.export_import import (
     EXPORT_FORMAT_VERSION,
     EXPORT_METADATA_FILENAME,
@@ -62,6 +65,11 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+)
+from tests.servers.executor_starvation import (
+    IN_FLIGHT,
+    InFlight,
+    assert_default_executor_free,
 )
 from tests.servers.fakes import (
     FakeClock,
@@ -606,6 +614,66 @@ async def test_import_publish_failure_is_seed_failed() -> None:
         )
     # The row was created before the publish failed (degraded but repairable).
     assert len(dst_uow.servers.by_id) == 1
+
+
+@pytest.mark.parametrize(
+    ("reader", "slow_call"),
+    [
+        pytest.param("_parse_metadata", 1, id="the-metadata-read"),
+        pytest.param("_archive_entries", 1, id="the-dry-run"),
+        pytest.param("_archive_entries", 2, id="the-pass-that-publishes-the-entries"),
+    ],
+)
+async def test_imports_reading_together_leave_the_default_executor_free(
+    monkeypatch: pytest.MonkeyPatch, reader: str, slow_call: int
+) -> None:
+    # An import reads the archive three times: the metadata, the dry run before
+    # the row is created, and the pass that publishes the entries. A crafted
+    # archive costs as much in each, so all three run on the archive-validation
+    # pool (issue #3912): on the default executor, a few imports reading for
+    # minutes would take every worker from the fs Storage calls, the sweep and
+    # everything else that runs there.
+    in_flight = InFlight()
+    real = getattr(export_import, reader)
+    calls: dict[bytes, int] = {}
+    counting = threading.Lock()
+
+    def read(*args: object, **kwargs: object) -> object:
+        content = next(arg for arg in args if isinstance(arg, bytes))
+        with counting:
+            calls[content] = calls.get(content, 0) + 1
+            this_call = calls[content]
+        if this_call == slow_call:
+            in_flight.block()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(export_import, reader, read)
+    stores = [FakeFileStore() for _ in range(IN_FLIGHT)]
+    imports = []
+    for n, store in enumerate(stores):
+        use_case = ImportServer(
+            create_server=_create_server(FakeUnitOfWork(), store), file_store=store
+        )
+        archive = _zip(
+            {EXPORT_METADATA_FILENAME: _metadata(), "a.txt": f"world {n}".encode()}
+        )
+        imports.append(
+            asyncio.ensure_future(
+                use_case(
+                    community_id=CommunityId(uuid.uuid4()),
+                    name=f"imported-{n}",
+                    content=archive,
+                )
+            )
+        )
+    try:
+        await assert_default_executor_free(in_flight)
+    finally:
+        await asyncio.gather(*imports)
+
+    assert [store.files["a.txt"] for store in stores] == [
+        f"world {n}".encode() for n in range(IN_FLIGHT)
+    ]
 
 
 # --- plugin metadata in export/import (issue #1335) --------------------------

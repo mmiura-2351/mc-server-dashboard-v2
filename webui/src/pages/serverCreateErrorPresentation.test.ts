@@ -83,6 +83,9 @@ describe("serverImportErrorPresentation", () => {
     // A member at the Worker's generation-marker name (issue #3433).
     [422, "reserved_name", "serverCreate.import.error.reserved_name"],
     [409, "slug_taken", "serverCreate.import.error.slug_taken"],
+    // Too many archive uploads at once (issue #3912): nothing was created, and
+    // the remedy is to send it again shortly.
+    [503, "upload_busy", "serverCreate.import.error.upload_busy"],
   ] as const)(
     "toasts a %i %s with the import message",
     (status, reason, key) => {
