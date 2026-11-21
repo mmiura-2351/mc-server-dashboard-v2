@@ -52,6 +52,7 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
 )
 from tests.fleet.fakes import (
     FakeClock,
+    FakeDatabasePing,
     FakeServerStateSink,
     RecordingRealTimeEvents,
     make_worker,
@@ -106,6 +107,7 @@ class _Harness:
         control_plane: ControlPlaneState | None = None,
         real_time_events: RecordingRealTimeEvents | None = None,
         worker_credential: str = _CREDENTIAL,
+        database_ping: FakeDatabasePing | None = None,
     ) -> None:
         self.worker_credential = worker_credential
         self.registry = registry
@@ -119,6 +121,7 @@ class _Harness:
         self.state_sink = state_sink or FakeServerStateSink()
         self.control_plane = control_plane or ControlPlaneState()
         self.real_time_events = real_time_events or RecordingRealTimeEvents()
+        self.database_ping = database_ping or FakeDatabasePing()
         self.servicer: WorkerSessionServicer | None = None
         self._server: aio.Server | None = None
         self._port: int | None = None
@@ -135,6 +138,7 @@ class _Harness:
             control_plane=self.control_plane,
             state_sink=self.state_sink,
             real_time_events=self.real_time_events,
+            database_ping=self.database_ping,
         )
         add_WorkerServiceServicer_to_server(servicer, server)
         self._port = server.add_insecure_port("127.0.0.1:0")
@@ -351,6 +355,7 @@ async def test_non_ascii_presented_credential_is_rejected() -> None:
         control_plane=ControlPlaneState(),
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
     context = _FakeContext(_auth("\u00e9"))
 
@@ -854,6 +859,7 @@ async def test_cancelled_session_cancels_pending_outbound_get() -> None:
         control_plane=control_plane,
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
 
     gen = servicer.Session(_requests(), _Ctx())
@@ -960,6 +966,7 @@ async def test_rebuild_keeps_a_confirm_that_lands_during_the_tally_read() -> Non
         control_plane=ControlPlaneState(),
         state_sink=_ConfirmDuringReadSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
 
     await servicer._rebuild_assignments(worker, session)

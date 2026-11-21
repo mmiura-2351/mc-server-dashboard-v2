@@ -46,6 +46,7 @@ from typing import Any
 import grpc
 from grpc import aio
 
+from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     MAX_MESSAGE_BYTES,
     ControlPlaneState,
@@ -269,6 +270,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         control_plane: ControlPlaneState,
         state_sink: ServerStateSink,
         real_time_events: RealTimeEvents,
+        database_ping: DatabasePing,
     ) -> None:
         self._registry = registry
         self._clock = clock
@@ -283,6 +285,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._control_plane = control_plane
         self._state_sink = state_sink
         self._real_time_events = real_time_events
+        self._database_ping = database_ping
         # Session teardowns still in flight, by worker, held so a teardown that
         # outlives its cancelled RPC task is neither garbage-collected nor cut
         # off at shutdown (issue #3555, :meth:`drain_teardowns`).
@@ -965,6 +968,7 @@ def make_grpc_server(
     control_plane: ControlPlaneState,
     state_sink: ServerStateSink,
     real_time_events: RealTimeEvents,
+    database_ping: DatabasePing,
     host: str,
     port: int,
     cert_file: str | None = None,
@@ -990,6 +994,7 @@ def make_grpc_server(
         control_plane=control_plane,
         state_sink=state_sink,
         real_time_events=real_time_events,
+        database_ping=database_ping,
     )
     add_WorkerServiceServicer_to_server(servicer, server)
     _bind_port(

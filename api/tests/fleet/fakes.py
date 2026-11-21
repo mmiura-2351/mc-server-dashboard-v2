@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.drain_store import WorkerDrainStore
 from mc_server_dashboard_api.fleet.domain.entities import Worker
@@ -42,6 +43,18 @@ class FakeClock(Clock):
 
     def now(self) -> dt.datetime:
         return self._now
+
+
+class FakeDatabasePing(DatabasePing):
+    """Answers the liveness probe with ``reachable``, counting the probes."""
+
+    def __init__(self, *, reachable: bool = True) -> None:
+        self.reachable = reachable
+        self.calls = 0
+
+    async def is_reachable(self) -> bool:
+        self.calls += 1
+        return self.reachable
 
 
 class FakeWorkerDrainStore(WorkerDrainStore):
