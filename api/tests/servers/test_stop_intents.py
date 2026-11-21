@@ -49,6 +49,7 @@ from starlette.requests import Request
 from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.dependencies import (
     get_set_worker_drain,
+    get_snapshot_uploads,
     get_start_server,
     get_stop_server,
 )
@@ -69,6 +70,9 @@ from mc_server_dashboard_api.fleet.application.set_worker_drain import (
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
+)
+from mc_server_dashboard_api.servers.adapters.store_generation import (
+    StorageGenerationReader,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
@@ -2489,6 +2493,9 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter(
 
     assert start.stop_intents is app.state.stop_intents
     assert start.start_intent_lock is app.state.start_intent_lock
+    # The start waits for uploads in the count the data plane keeps (issue #3950).
+    assert isinstance(start.store_generation, StorageGenerationReader)
+    assert start.store_generation.uploads is get_snapshot_uploads(request)
     assert stop.stop_intents is app.state.stop_intents
     assert isinstance(drain.stopper, ServersAssignedServerStopper)
     assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents

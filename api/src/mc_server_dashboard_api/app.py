@@ -739,10 +739,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # backend (or, by construction, a missing fs root) fails fast at boot rather
     # than on first use (CONFIGURATION.md Section 3; STORAGE.md Section 7).
     storage, store_ownership = _build_storage(settings)
-    # The snapshot uploads in flight (issue #3950): the data plane counts each one
-    # in it, and every start that hydrates a Worker waits in it for that Worker's
-    # uploads first. One per process, as the uploads are.
-    snapshot_uploads = SnapshotUploads()
 
     # Build the resource pack store (issue #1176): only available for the object
     # backend; None for fs/remote-fs.
@@ -794,7 +790,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.assignment_fence_engine = assignment_fence_engine
         app.state.settings = settings
         app.state.storage = storage
-        app.state.snapshot_uploads = snapshot_uploads
+        # The snapshot uploads in flight (issue #3950): the data plane counts each
+        # one in it, and every start that hydrates a Worker waits in it for that
+        # Worker's uploads first, so each start below reads it from here.
+        app.state.snapshot_uploads = SnapshotUploads()
         app.state.resource_pack_store = resource_pack_store
         app.state.plugin_cache_store = plugin_cache_store
         app.state.version_catalog = version_catalog
@@ -1166,7 +1165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         ),
                         store_generation=StorageGenerationReader(
                             storage=storage,
-                            uploads=snapshot_uploads,
+                            uploads=app.state.snapshot_uploads,
                             upload_wait_seconds=settings.control.upload_wait_seconds,
                         ),
                         file_store=StorageFileStoreAdapter(storage=storage),
@@ -1292,7 +1291,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                     store_generation=StorageGenerationReader(
                         storage=storage,
-                        uploads=snapshot_uploads,
+                        uploads=app.state.snapshot_uploads,
                         upload_wait_seconds=settings.control.upload_wait_seconds,
                     ),
                     file_store=StorageFileStoreAdapter(storage=storage),
@@ -1319,7 +1318,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 control_plane=reconciler_control_plane,
                 store_generation=StorageGenerationReader(
                     storage=storage,
-                    uploads=snapshot_uploads,
+                    uploads=app.state.snapshot_uploads,
                     upload_wait_seconds=settings.control.upload_wait_seconds,
                 ),
                 clock=ServersSystemClock(),

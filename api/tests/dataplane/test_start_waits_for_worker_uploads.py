@@ -99,9 +99,9 @@ _NOW = dt.datetime(2026, 11, 21, 12, 0, tzinfo=dt.timezone.utc)
 _WORKER_A = WorkerId(uuid.uuid4())
 _WORKER_B = WorkerId(uuid.uuid4())
 _DEADLINE = CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="deadline")
-# Far past a commit's fsyncs on a loaded host, so only a wait that never ends runs
-# it out.
-_WAIT_SECONDS = 30.0
+# A commit's fsyncs at the 10 s each this file's timeouts budget (issue #3651), so
+# only a wait that never ends runs it out.
+_WAIT_SECONDS = 60.0
 
 
 def _fs_storage(tmp_path: Path) -> Storage:

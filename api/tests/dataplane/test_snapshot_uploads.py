@@ -234,7 +234,7 @@ async def test_an_upload_counts_from_before_its_transfer_slot_wait(
         assert not upload.done()
 
         semaphore.release()
-        assert await uploads.settled(_SERVER, _WORKER_A, timeout=30)
+        assert await uploads.settled(_SERVER, _WORKER_A, timeout=60)
 
         assert (await upload).status_code == 204
     assert await _generation(storage) == 1
@@ -334,7 +334,7 @@ async def test_an_upload_whose_worker_left_after_the_whole_body_still_commits(
         writer.close()
         await writer.wait_closed()
 
-        assert await uploads.settled(_SERVER, _WORKER_A, timeout=30)
+        assert await uploads.settled(_SERVER, _WORKER_A, timeout=60)
 
     assert await _generation(storage) == 1
 
@@ -372,6 +372,6 @@ async def test_an_upload_whose_worker_left_mid_body_aborts_and_leaves_the_count(
         writer.close()
         await writer.wait_closed()
 
-        assert await uploads.settled(_SERVER, _WORKER_A, timeout=30)
+        assert await uploads.settled(_SERVER, _WORKER_A, timeout=60)
 
     assert await _generation(storage) == 0
