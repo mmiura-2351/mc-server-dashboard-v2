@@ -3244,6 +3244,9 @@ describe("Keyboard shortcuts with a modal open", () => {
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
     dropOverwrite();
     const dialog = await screen.findByRole("dialog");
+    // The drop opens the prompt outside act, so the dialog shows before its
+    // effect has put it on the stack; it takes focus in that effect.
+    await waitFor(() => expect(dialog).toHaveFocus());
 
     fireEvent.keyDown(dialog, { key: "Escape" });
 
@@ -3269,6 +3272,9 @@ describe("Keyboard shortcuts with a modal open", () => {
     );
     dropOverwrite();
     const dialog = await screen.findByRole("dialog");
+    // The drop opens the prompt outside act, so the dialog shows before its
+    // effect has put it on the stack; it takes focus in that effect.
+    await waitFor(() => expect(dialog).toHaveFocus());
 
     fireEvent.keyDown(dialog, { key: "Escape" });
 
