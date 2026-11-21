@@ -51,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogUpstreamFailedError,
     FileTooLargeError,
     InvalidFilePathError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
@@ -361,6 +362,15 @@ async def install_from_catalog(
             server_id,
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_failure(
+            recorder,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except PluginCacheStorageUnavailableError as exc:
         # Resolving the jar reaches the cache before the plugin row is committed,
         # and the cache is content-addressed, so a retry starts clean (issue
@@ -388,11 +398,15 @@ async def _record_failure(
     authorized: AuthUser,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
+    *,
+    outcome: Outcome = Outcome.DENIED,
 ) -> None:
+    # A refusal (server unsettled or busy) is DENIED; a lifecycle lock lost
+    # before the write it guards (issue #3927) is an ERROR.
     await recorder.record(
         AuditEvent(
             operation=ops.PLUGIN_INSTALL,
-            outcome=Outcome.DENIED,
+            outcome=outcome,
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=ops.TARGET_SERVER,

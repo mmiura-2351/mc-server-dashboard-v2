@@ -46,6 +46,12 @@ ByteStream = AsyncIterator[bytes]
 # publisher may still publish (issue #3544). ``False`` refuses the commit.
 PublisherFence = Callable[[], Awaitable[bool]]
 
+# The caller's check, run under the per-server lock immediately before a restore
+# or a prune first writes to the live working set, that the caller still holds
+# the exclusion it started under (issue #3927). It refuses by raising: the error
+# propagates unchanged and nothing past the check is written.
+ExclusionFence = Callable[[], Awaitable[None]]
+
 
 class HydrateSource:
     """AsyncIterator[bytes] over the working-set tar with an atomic generation.
@@ -426,7 +432,11 @@ class WorkingSetStore(abc.ABC):
 
     @abc.abstractmethod
     async def prune_to_final_snapshot(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        fence: ExclusionFence | None = None,
     ) -> None:
         """Collapse a server's working set to one retained final-state archive (#777).
 
@@ -468,6 +478,13 @@ class WorkingSetStore(abc.ABC):
         NOT gate on the #764 ``.mca`` integrity check: a corrupt server must still be
         deletable, so a structurally torn region is packed as-is rather than blocking
         the reclaim.
+
+        ``fence`` is awaited once under the per-server lock, after the final tar.gz
+        is durable and before the generation advance (issue #3927); with nothing
+        published, before the GC. An error it raises propagates with nothing
+        removed or advanced, so the store is left as by a prune that failed after
+        its pack. It runs while the lock is held, so it must not wait on anything
+        that can wait on this server's lock. ``None`` skips it.
         """
 
 
@@ -565,6 +582,7 @@ class BackupStore(abc.ABC):
         key: BackupKey,
         *,
         force: bool = False,
+        fence: ExclusionFence | None = None,
     ) -> WorkingSetReport:
         """Atomically republish a backup into ``current/`` (FR-BAK-4, issue #743).
 
@@ -601,6 +619,13 @@ class BackupStore(abc.ABC):
         :class:`~.errors.RestorePartiallyPublishedError` carrying the report, and
         one that cannot be confirmed either way
         :class:`~.errors.RestorePublicationUnknownError`.
+
+        ``fence`` is awaited once under the per-server lock, after the lock-free
+        extraction and copy and before the generation bump (issue #3927). An error
+        it raises propagates with nothing bumped or published, and the staged
+        copy is left to the cleanup a failed restore gets. It runs while the lock
+        is held, so it must not wait on anything that can wait on this server's
+        lock. ``None`` skips it.
         """
 
     @abc.abstractmethod

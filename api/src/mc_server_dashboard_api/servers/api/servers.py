@@ -136,6 +136,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidServerNameError,
     InvalidSlugError,
     InvalidSnapshotIntervalError,
+    LifecycleLockLostError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
     PermissionDeniedError,
@@ -1145,6 +1146,7 @@ async def update_server(
         raise _conflict("slug_taken") from exc
     except WorkingSetSeedFailedError as exc:
         # Rewriting server.properties for the port change hit a storage failure,
+        # or the lifecycle lock was lost before that rewrite (issue #3927),
         # surfaced as a mapped 503 (issue #311). That write is deferred to after
         # the commit (#1705), so the row already carries the new port while the
         # file does not; re-issuing the update rewrites the file. The committed
@@ -1454,6 +1456,9 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     # ``server_busy`` (issue #876), the same retry-able conflict the gated routes
     # surface. Only start takes the lock, so stop/restart never raise this.
     ServerBusyError: (Outcome.DENIED, "server_busy"),
+    # The start lost that lock before its flip (issue #3927): nothing started,
+    # and the retry takes the lock afresh.
+    LifecycleLockLostError: (Outcome.ERROR, "lifecycle_lock_lost"),
     CommandDispatchError: (Outcome.DENIED, "command_failed"),
     ServerNotRunningError: (Outcome.DENIED, "server_not_running"),
     NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),
@@ -1472,6 +1477,7 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
 _LIFECYCLE_FAILURES = tuple(_LIFECYCLE_CLASSIFICATION)
 # The transient (ERROR) reasons render as 503; the refusals (DENIED) as 409.
 _SERVICE_UNAVAILABLE_REASONS = {
+    "lifecycle_lock_lost",
     "no_eligible_worker",
     WORKER_UNAVAILABLE_REASON,
     "jar_unavailable",

@@ -19,6 +19,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -31,6 +33,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_create_server,
     get_current_user,
     get_get_catalog_project,
@@ -49,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUpstreamFailedError,
+    LifecycleLockLostError,
     PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
@@ -65,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from mc_server_dashboard_api.servers.domain.version_validator import (
     CatalogUnavailableError as VersionCatalogUnavailableError,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 
@@ -123,6 +128,7 @@ def _app(
     get_project: _FakeUseCase | None = None,
     install: _FakeUseCase | None = None,
     create: _FakeUseCase | None = None,
+    recorder: RecordingAuditRecorder | None = None,
 ) -> object:
     app = _shared_app
     app.dependency_overrides.clear()
@@ -139,6 +145,8 @@ def _app(
         app.dependency_overrides[get_install_from_catalog] = lambda: install
     if create is not None:
         app.dependency_overrides[get_create_server] = lambda: create
+    if recorder is not None:
+        app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return app
 
 
@@ -375,6 +383,27 @@ def test_install_from_catalog_unsettled_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+
+
+def test_install_from_catalog_that_lost_the_lifecycle_lock_is_audited() -> None:
+    # The lock was lost before the write it guards (issue #3927), as a busy lock
+    # is refused before it: both are audited.
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeUseCase(error=LifecycleLockLostError("x")),
+        recorder=recorder,
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/install"),
+        json={"project_id": "proj-1", "version_id": "ver-1"},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_INSTALL]
+    assert recorder.events[0].outcome is Outcome.ERROR
 
 
 def test_install_from_catalog_bedrock_window_exhausted_is_503() -> None:

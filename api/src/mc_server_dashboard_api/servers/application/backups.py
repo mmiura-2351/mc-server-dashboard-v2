@@ -126,6 +126,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileEntryKind, FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
     NullLifecycleLock,
 )
@@ -211,7 +212,7 @@ class CreateBackup:
         # #827-class gap noted in #827). The same lock serializes this archive
         # against a concurrent restore/delete just as RestoreBackup serializes its
         # republish.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
 
@@ -245,6 +246,11 @@ class CreateBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
+            # The lock may have been lost during the snapshot (issue #3927). The row
+            # and the archive written right behind it are one guarded write; the
+            # check stays outside the compensation below, which must not run for
+            # a holder that knows it lost the lock.
+            await lock.ensure_held()
             async with self.uow:
                 await self.uow.backups.add(backup)
                 await self.uow.commit()
@@ -412,7 +418,8 @@ class RestoreBackup:
     :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
     and so does a listed jar that cannot be read (issue #3269). Any failure after
     the publish — a store failure past its flip (issue #3564), the quarantine
-    write and the lifecycle lock's release included —
+    write, and an error the lifecycle lock's hold raises on exit included (the
+    real lock logs a lost session there instead of raising, issue #3927) —
     surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
     error and carrying the corrupt count of a forced corrupt backup that
     published, so the edge audits the force-restore whatever failed after it.
@@ -449,14 +456,16 @@ class RestoreBackup:
         # ``current`` republish underneath it. The lock spans the two transactions
         # the at-rest check and the (re)publish straddle.
         # The corrupt count once Storage has published (``None`` before): the
-        # lock's release on exit comes after the publish, so a release that fails
-        # is a post-publish failure too and keeps the restore's identity (issue
-        # #3269) -- it never replaces a step failure already on its way out.
+        # lock's hold exits after the publish, so an error it raises on exit is a
+        # post-publish failure too and keeps the restore's identity (issue #3269)
+        # -- it never replaces a step failure already on its way out. The real
+        # lock raises none for a lost session (issue #3927); only another error
+        # from the hold's exit still reaches this.
         published: int | None = None
         incomplete: BackupRestoreIncompleteError | None = None
         partial: BackupRestorePartiallyPublishedError | None = None
         try:
-            async with self.lifecycle_lock.hold(server_id):
+            async with self.lifecycle_lock.hold(server_id) as lock:
                 async with self.uow:
                     server = await _load(self.uow, community_id, server_id)
                     backup = await self.uow.backups.get_by_id(backup_id)
@@ -468,24 +477,28 @@ class RestoreBackup:
                 if not server.is_at_rest():
                     raise ServerNotStoppedError(str(server_id.value))
                 try:
+                    # The store confirms the lock under its own per-server lock,
+                    # after the slow staging and right before it publishes (issue
+                    # #3927): a check here would leave the whole staging unguarded.
                     corrupt_count = await self.backup_store.restore(
                         community_id=community_id,
                         server_id=server_id,
                         storage_ref=storage_ref,
                         force=force,
+                        fence=lock.ensure_held,
                     )
                 except BackupCorruptError:
                     # Refused restore (corrupt, no force): quarantine the backup so an
                     # operator sees it is corrupt, then re-raise for the edge to surface
                     # and audit. ``current`` was left untouched by Storage.
-                    await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+                    await self._mark_health(lock, backup_id, BackupHealth.QUARANTINED)
                     raise
                 except BackupUnreadableError:
                     # The restore was the read that found the archive's bytes gone
                     # (issue #3230). Record the verdict the sweep would have, so the
                     # next attempt is refused up front instead of re-reading the
                     # archive; a sweep that later reads it back sound revises it.
-                    await self._mark_health(backup_id, BackupHealth.UNREADABLE)
+                    await self._mark_health(lock, backup_id, BackupHealth.UNREADABLE)
                     raise
                 except BackupRestorePartiallyPublishedError as exc:
                     # The store published the backup, then failed before its
@@ -502,6 +515,7 @@ class RestoreBackup:
                 # the force-restore it was (issue #3269).
                 try:
                     await self._after_publish(
+                        lock,
                         community_id=community_id,
                         server_id=server_id,
                         server=server,
@@ -547,6 +561,7 @@ class RestoreBackup:
 
     async def _after_publish(
         self,
+        lock: HeldLifecycleLock,
         *,
         community_id: CommunityId,
         server_id: ServerId,
@@ -559,13 +574,18 @@ class RestoreBackup:
             # backup IS corrupt, so quarantine it; the edge audits the forced
             # corrupt restore. Quarantine BEFORE the properties re-apply, so a
             # failure there cannot leave a known-corrupt backup unmarked.
-            await self._mark_health(backup_id, BackupHealth.QUARANTINED)
+            await self._mark_health(lock, backup_id, BackupHealth.QUARANTINED)
+        # The properties re-apply is an in-place working-set write that relies on
+        # the lock (issue #3927). The plugin reconcile, which rewrites rows from
+        # that working set, checks again before its commit.
+        await lock.ensure_held()
         await self._reapply_platform_properties(
             community_id=community_id, server_id=server_id, server=server
         )
         # Reconcile plugin rows against the restored filesystem (#1336).
         if self.file_store is not None:
             await _reconcile_plugins(
+                lock,
                 uow=self.uow,
                 file_store=self.file_store,
                 cache=self.cache,
@@ -575,7 +595,12 @@ class RestoreBackup:
                 server=server,
             )
 
-    async def _mark_health(self, backup_id: BackupId, health: BackupHealth) -> None:
+    async def _mark_health(
+        self, lock: HeldLifecycleLock, backup_id: BackupId, health: BackupHealth
+    ) -> None:
+        # A verdict is written under the lock, as the integrity sweep writes its
+        # own (issue #3927).
+        await lock.ensure_held()
         async with self.uow:
             await self.uow.backups.update_health(backup_id, health)
             await self.uow.commit()
@@ -634,6 +659,7 @@ class RestoreBackup:
 
 
 async def _reconcile_plugins(
+    lock: HeldLifecycleLock,
     *,
     uow: UnitOfWork,
     file_store: FileStore,
@@ -667,6 +693,10 @@ async def _reconcile_plugins(
     A listed jar whose read fails any other way raises it too (issue #3269): the
     jar is not known to be bad, only unread, so skipping it would report a partial
     reconciliation as complete. The transaction is discarded, not committed.
+
+    The commit rewrites rows from the restored working set, so it runs only
+    after ``lock`` confirms the lifecycle lock is still held (issue #3927): the
+    listing and the jar reads before it can take long on a large modpack.
     """
 
     try:
@@ -795,6 +825,7 @@ async def _reconcile_plugins(
             changed = True
 
         if changed:
+            await lock.ensure_held()
             await uow.commit()
 
 
@@ -924,7 +955,7 @@ class DeleteBackup:
         # delete (issue #827): a concurrent restore that republishes from this same
         # backup, or a delete-server pruning the working set, must serialize with
         # the archive removal rather than race it across the two transactions.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
                 backup = await self.uow.backups.get_by_id(backup_id)
@@ -934,6 +965,7 @@ class DeleteBackup:
             await _delete_archive_then_row(
                 self.uow,
                 self.backup_store,
+                lock,
                 community_id=community_id,
                 server_id=server_id,
                 backup_id=backup_id,
@@ -944,6 +976,7 @@ class DeleteBackup:
 async def _delete_archive_then_row(
     uow: UnitOfWork,
     backup_store: BackupArchiveStore,
+    lock: HeldLifecycleLock,
     *,
     community_id: CommunityId,
     server_id: ServerId,
@@ -956,9 +989,11 @@ async def _delete_archive_then_row(
     retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
     through here, each under the per-server lifecycle lock it already holds.
     The archive delete is idempotent, so a crash between the two leaves a
-    harmless re-deletable dangling row, never an orphaned archive.
+    harmless re-deletable dangling row, never an orphaned archive. Both run only
+    once ``lock`` confirms the lifecycle lock is still held (issue #3927).
     """
 
+    await lock.ensure_held()
     await backup_store.delete(
         community_id=community_id,
         server_id=server_id,
@@ -999,7 +1034,7 @@ class PruneScheduledBackups:
     async def __call__(
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> list[Backup]:
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 rows = await self.uow.backups.list_for_server(server_id)
@@ -1021,6 +1056,7 @@ class PruneScheduledBackups:
                 await _delete_archive_then_row(
                     self.uow,
                     self.backup_store,
+                    lock,
                     community_id=community_id,
                     server_id=server_id,
                     backup_id=backup.id,
@@ -1336,7 +1372,7 @@ class UploadBackup:
         # removes the row, and the write then lands an archive no delete saw while
         # this returns a backup that no longer exists. The body is already fully
         # received, so the lock never waits on the client's network.
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
 
@@ -1357,6 +1393,9 @@ class UploadBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
+            # One guarded write for the row and the archive behind it, checked
+            # outside the compensation below, as in CreateBackup (issue #3927).
+            await lock.ensure_held()
             async with self.uow:
                 await self.uow.backups.add(backup)
                 await self.uow.commit()

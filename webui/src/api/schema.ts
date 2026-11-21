@@ -971,9 +971,11 @@ export interface paths {
          *     could not be read, leaving the plugin rows unreconciled (#3221). The store
          *     itself can also fail after it published, answering ``publish_incomplete``, or
          *     fail to confirm whether it published, answering ``publish_unknown`` (#3564);
-         *     both steps still run over that working set. Any failure
-         *     after the publish is audited ``error``, under ``backup:force_restore`` when a
-         *     forced corrupt backup was the one published (#3269).
+         *     both steps still run over that working set. A lifecycle lock lost after the
+         *     publish skips the steps, answering ``restore_incomplete``; lost before it,
+         *     nothing is restored and the answer is ``lifecycle_lock_lost`` (#3927). Any
+         *     failure after the publish is audited ``error``, under ``backup:force_restore``
+         *     when a forced corrupt backup was the one published (#3269).
          */
         post: operations["restore_backup_api_communities__community_id__servers__server_id__backups__backup_id__restore_post"];
         delete?: never;

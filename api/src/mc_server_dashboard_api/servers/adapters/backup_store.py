@@ -36,7 +36,7 @@ converge on one status.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 from mc_server_dashboard_api.servers.domain.backup_store import (
     BackupArchiveStore,
@@ -141,11 +141,12 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         server_id: ServerId,
         storage_ref: str,
         force: bool = False,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> int:
         community, server = _scope(community_id, server_id)
         try:
             report = await self._storage.restore_backup(
-                community, server, BackupKey(storage_ref), force=force
+                community, server, BackupKey(storage_ref), force=force, fence=fence
             )
         except NotFoundError as exc:
             raise BackupNotFoundError(storage_ref) from exc
@@ -256,7 +257,11 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
             raise BackupStorageUnavailableError(str(server_id.value)) from exc
 
     async def prune_to_final_snapshot(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         community, server = _scope(community_id, server_id)
         # The DeleteServer reclaim path (issue #777): Storage packs ``current/`` into
@@ -264,7 +269,7 @@ class StorageBackupStoreAdapter(BackupArchiveStore):
         # pack failure. No NotFoundError translation: an unpublished snapshot is a
         # no-op on Storage, not an error.
         try:
-            await self._storage.prune_to_final_snapshot(community, server)
+            await self._storage.prune_to_final_snapshot(community, server, fence=fence)
         except StorageUnavailableError as exc:
             # The pack drives object-store writes (upload_multipart / delete_object): a
             # transport/backend failure surfaces as a storage type (issue #2273).

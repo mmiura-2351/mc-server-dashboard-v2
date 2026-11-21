@@ -319,7 +319,7 @@ class AssignResourcePack:
         assigned_by: uuid.UUID,
         public_base_url: str,
     ) -> tuple[ResourcePackAssignment, ResourcePack]:
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load_server_at_rest(self.uow, community_id, server_id)
 
@@ -379,7 +379,10 @@ class AssignResourcePack:
                 # refused here -- before the file names it (issue #2853).
                 await self.uow.resource_packs.add_assignment(assignment)
                 # Between the flush and the commit: a failed write rolls the row
-                # back rather than committing one the file does not carry.
+                # back rather than committing one the file does not carry. The
+                # write and the commit right behind it rely on the lifecycle lock
+                # (issue #3927).
+                await lock.ensure_held()
                 try:
                     await self.file_store.write_file(
                         community_id=community_id,
@@ -417,7 +420,7 @@ class UnassignResourcePack:
         community_id: CommunityId,
         server_id: ServerId,
     ) -> None:
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load_server_at_rest(self.uow, community_id, server_id)
 
@@ -430,6 +433,9 @@ class UnassignResourcePack:
             props = await read_properties(
                 self.file_store, community_id=community_id, server_id=server_id
             )
+            # The rewrite and the row delete behind it rely on the lifecycle lock
+            # (issue #3927).
+            await lock.ensure_held()
             if props is not None:
                 await self.file_store.write_file(
                     community_id=community_id,

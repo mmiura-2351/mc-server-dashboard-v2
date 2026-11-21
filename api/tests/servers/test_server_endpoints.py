@@ -89,7 +89,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnknownServerTypeError,
     UnsupportedEditionError,
 )
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
+    LifecycleLock,
+)
 from mc_server_dashboard_api.servers.domain.memory_limit import (
     MEMORY_LIMIT_CONFIG_KEY,
 )
@@ -127,6 +130,7 @@ from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeClock,
     FakeFileStore,
+    FakeLifecycleLock,
     FakePluginRepository,
     FakeUnitOfWork,
     FakeVersionValidator,
@@ -1288,7 +1292,9 @@ class _HeldLifecycleLock(LifecycleLock):
     Gives up the way PgLifecycleLock's bounded acquire does (issue #876).
     """
 
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         raise ServerBusyError(str(server_id.value))
 
 
@@ -1312,6 +1318,28 @@ def test_delete_while_the_server_lock_is_held_is_409_server_busy() -> None:
     resp = client.delete(f"/api/communities/{community}/servers/{server_id}")
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_busy"
+
+
+def test_delete_that_lost_the_server_lock_is_503_lifecycle_lock_lost() -> None:
+    # The lock was lost mid-delete (issue #3927): the delete stopped before its
+    # next write, a transient fault the caller retries, not a conflict.
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    app = _app(
+        member=True,
+        allow=True,
+        delete=DeleteServer(
+            uow=uow, backup_store=FakeBackupArchiveStore(), lifecycle_lock=lock
+        ),
+    )
+    client = _client(app)
+    resp = client.delete(f"/api/communities/{community}/servers/{server_id}")
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
 
 
 def test_read_server_carries_backup_retention_policy() -> None:

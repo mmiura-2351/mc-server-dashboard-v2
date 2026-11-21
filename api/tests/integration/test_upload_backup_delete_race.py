@@ -124,12 +124,16 @@ class _HookedBackupStore(StorageBackupStoreAdapter):
         )
 
     async def prune_to_final_snapshot(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if self.on_prune is not None:
             await self.on_prune()
         await super().prune_to_final_snapshot(
-            community_id=community_id, server_id=server_id
+            community_id=community_id, server_id=server_id, fence=fence
         )
 
     async def list_archive_refs(

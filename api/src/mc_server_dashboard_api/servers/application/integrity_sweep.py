@@ -82,6 +82,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
     NullLifecycleLock,
 )
@@ -222,7 +223,7 @@ class IntegritySweep:
             # seen mid-publication. Per backup rather than per server, so the lock
             # is never held across more than one archive check.
             try:
-                async with self.lifecycle_lock.hold(server.id):
+                async with self.lifecycle_lock.hold(server.id) as lock:
                     # Re-read under the lock: the row may have been deleted (or
                     # re-judged) since the listing.
                     async with self.uow:
@@ -234,7 +235,9 @@ class IntegritySweep:
                             listed.id.value,
                         )
                         continue
-                    outcomes[await self._check_backup(server, backup, actor_id)] += 1
+                    outcomes[
+                        await self._check_backup(lock, server, backup, actor_id)
+                    ] += 1
             except ServerBusyError:
                 # Another lifecycle operation (a backup being published, a restore,
                 # ...) held the server past the lock's wait budget; this row may be
@@ -250,9 +253,17 @@ class IntegritySweep:
         return outcomes
 
     async def _check_backup(
-        self, server: Server, backup: Backup, actor_id: uuid.UUID | None
+        self,
+        lock: HeldLifecycleLock,
+        server: Server,
+        backup: Backup,
+        actor_id: uuid.UUID | None,
     ) -> _BackupOutcome:
-        """Probe one backup's archive and persist (and audit) its verdict."""
+        """Probe one backup's archive and persist (and audit) its verdict.
+
+        A verdict is written only while ``lock`` still holds (issue #3927): a lock
+        lost during the probe may have let a publication of this backup begin.
+        """
 
         try:
             corrupt_count = await self.backup_store.check_backup_health(
@@ -268,7 +279,7 @@ class IntegritySweep:
                 "marking unreadable",
                 backup.id.value,
             )
-            await self._condemn(server, backup, BackupHealth.UNREADABLE, actor_id)
+            await self._condemn(lock, server, backup, BackupHealth.UNREADABLE, actor_id)
             return _BackupOutcome.DANGLING
         except BackupUnreadableError:
             # The archive exists but the store cannot produce its bytes (#2371):
@@ -280,7 +291,7 @@ class IntegritySweep:
                 "(the store cannot produce its bytes); marking unreadable",
                 backup.id.value,
             )
-            await self._condemn(server, backup, BackupHealth.UNREADABLE, actor_id)
+            await self._condemn(lock, server, backup, BackupHealth.UNREADABLE, actor_id)
             return _BackupOutcome.UNREADABLE
         except BackupStorageUnavailableError:
             # An outage is no verdict about THIS archive (#2371), and re-running
@@ -311,8 +322,9 @@ class IntegritySweep:
             corrupt_count,
         )
         if health is BackupHealth.QUARANTINED:
-            await self._condemn(server, backup, health, actor_id)
+            await self._condemn(lock, server, backup, health, actor_id)
             return _BackupOutcome.QUARANTINED
+        await lock.ensure_held()
         async with self.uow:
             await self.uow.backups.update_health(backup.id, health)
             await self.uow.commit()
@@ -320,6 +332,7 @@ class IntegritySweep:
 
     async def _condemn(
         self,
+        lock: HeldLifecycleLock,
         server: Server,
         backup: Backup,
         health: BackupHealth,
@@ -333,6 +346,7 @@ class IntegritySweep:
         the verdict, keeping the two remedies queryable apart in the trail.
         """
 
+        await lock.ensure_held()
         async with self.uow:
             await self.uow.backups.update_health(backup.id, health)
             await self.uow.commit()
