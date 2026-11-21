@@ -692,11 +692,9 @@ class RunReconcilerTick:
 
     def _dropped_at(self, server: Server) -> dt.datetime | None:
         # The instant the row's Worker first read disconnected, while it still
-        # does (issue #3963); None for a connected or unassigned row.
+        # does (issue #3963); None for a connected Worker or an unassigned row.
         worker_id = server.assigned_worker_id
-        if worker_id is None or self.control_plane.is_worker_connected(
-            worker_id=worker_id
-        ):
+        if worker_id is None:
             return None
         return self.control_plane.worker_offline_since(worker_id=worker_id)
 
