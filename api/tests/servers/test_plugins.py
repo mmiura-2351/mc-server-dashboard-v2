@@ -488,7 +488,11 @@ async def test_an_install_holds_no_lock_and_no_unit_of_work_while_it_parses(
         parse.release.set()
         await install
 
-    assert lock.events == [(server.id, "acquire"), (server.id, "release")]
+    assert lock.events == [
+        (server.id, "acquire"),
+        (server.id, "check"),  # before the row commit (issue #3927)
+        (server.id, "release"),
+    ]
     assert fs.files["mods/mod.jar"] == b"jar"
 
 
