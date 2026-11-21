@@ -374,6 +374,21 @@ resource-pack GC (Section 4.3) run a pass the same way:
   and the rest can be about one file, and only skip it. `EROFS` is a
   whole-filesystem state, but each delete fails at once, so it skips the JAR too,
   and five in a row end the pass.
+- A pass that ends on a store that gave no answer remembers the key it ended at,
+  and the next pass starts after it (issue #3934). Each GC walks its listing in
+  key order, from the key after that one round to the start, so that key comes
+  last. A failure that is in fact tied to one key, such as a malformed legacy key
+  the object client cannot send or a local-disk `EIO` on one JAR, therefore no
+  longer starves the keys after it: every other orphan is reclaimed within two
+  passes. The bad key still ends each pass that reaches it, with an ERROR from the
+  loop (and, for the JAR pool, a 500 from the manual trigger), until it is fixed
+  or removed. A store that is down ends each pass at its first delete as before,
+  and the key moves on to the next orphan each pass.
+  - A pass that walks the whole listing without such a failure clears the key. A
+    pass the five-in-a-row stop ends keeps it.
+  - The key lives in the API process's memory, so a restart forgets it. The
+    periodic JAR-pool GC and its manual trigger share one.
+  - A pass that starts after a key says so in a DEBUG line.
 - A cancellation (shutdown) ends the pass at once too. A pass that ends at once
   logs no summary; the per-object INFO lines still record what it reclaimed. The
   owner marker's refusal (Section 4.3) stops a pass before it lists anything, as

@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import errno
 import hashlib
 import logging
+import os
+from pathlib import Path
 
 import pytest
 
+from mc_server_dashboard_api.gc_pass import ResumePoint
+from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import ObjectStoreUnreachableError
 from mc_server_dashboard_api.versions.adapters.storage_jar_pool import StorageJarPool
@@ -98,12 +103,14 @@ def _gc(
     pool: JarPool,
     refs: _FakeReferences,
     ownership: FakeStoreOwnership | None = None,
+    resume_point: ResumePoint | None = None,
 ) -> RunJarPoolGc:
     return RunJarPoolGc(
         pool=pool,
         references=refs,
         clock=_FixedClock(_NOW),
         ownership=ownership or FakeStoreOwnership(),
+        resume_point=resume_point or ResumePoint(),
     )
 
 
@@ -263,6 +270,21 @@ class _ObjectPool:
         self.faults.when = lambda op, key: (
             op == "delete_object" and any(sha in key for sha in shas)
         )
+
+    def answer_no_delete(self) -> list[str]:
+        """Give no answer to any delete; the JARs they were for, as they come."""
+
+        attempted: list[str] = []
+
+        def _fails(op: str, key: str) -> bool:
+            if op != "delete_object":
+                return False
+            attempted.append(key.removeprefix("jars/").removesuffix(".jar"))
+            return True
+
+        self.faults.when = _fails
+        self.faults.error = ObjectStoreUnreachableError
+        return attempted
 
     async def keys(self) -> list[str]:
         return [entry.sha256 for entry in await self.pool.list_entries()]
@@ -432,3 +454,137 @@ async def test_a_skipped_jar_leaves_the_count_of_failed_deletes_alone() -> None:
 
     assert await store.keys() == keys
     assert (result.scanned, result.deleted, result.failed) == (9, 0, 5)
+
+
+async def test_a_jar_the_store_gives_no_answer_for_starves_no_other() -> None:
+    # A delete that gets no answer ends the pass (issue #3871). When that failure
+    # is in fact tied to one JAR, the next pass starts after it and comes round to
+    # it last, so every other orphan is reclaimed within two passes, and the JAR
+    # is still tried (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(5)
+    bad = keys[1]
+    store.fail_deletes_of(bad)
+    store.faults.error = ObjectStoreUnreachableError
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=ResumePoint())
+
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+
+    assert await store.keys() == [bad]
+
+
+async def test_a_store_that_answers_no_delete_ends_each_pass_at_its_first() -> None:
+    # A store that is truly down still ends each pass at once. Each pass starts
+    # after the JAR the last one ended at, so the passes take the JARs in turn,
+    # and the resume point is only ever that one JAR (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(3)
+    attempted = store.answer_no_delete()
+    resume_point = ResumePoint()
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
+
+    for _ in range(7):
+        with pytest.raises(JarPoolUnreachableError):
+            await gc()
+
+    assert attempted == [*keys, *keys, keys[0]]
+    assert resume_point.key == keys[0]
+    assert await store.keys() == keys
+
+
+async def test_a_pass_that_comes_round_clears_the_resume_point() -> None:
+    # A pass that walks the whole listing without a store failure leaves no resume
+    # point, so the pass after it starts at the beginning (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(3)
+    store.fail_deletes_of(keys[1])
+    store.faults.error = ObjectStoreUnreachableError
+    resume_point = ResumePoint()
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+    assert resume_point.key == keys[1]
+    store.faults.clear()
+
+    await gc()
+
+    assert resume_point.key is None
+
+
+async def test_a_resumed_pass_logs_where_it_starts_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Where a pass starts is worth a line only when debugging (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(3)
+    store.fail_deletes_of(keys[1])
+    store.faults.error = ObjectStoreUnreachableError
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=ResumePoint())
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+    store.faults.clear()
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await gc()
+
+    (resumed,) = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and keys[1] in r.getMessage()
+    ]
+    assert "after" in resumed.getMessage()
+
+
+async def test_a_jar_whose_unlink_fails_with_eio_does_not_starve_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # fs reads EIO from unlink as a gone store, since a soft NFS mount reports a
+    # dead server that way (issue #3906). One JAR on a bad local disk that answers
+    # EIO therefore ends each pass at that JAR; the next pass starts after it
+    # (issue #3934). It is the one the directory lists first, so a pass in
+    # directory order would meet it before any other.
+    pool = StorageJarPool(FsStorage(tmp_path))
+    for index in range(5):
+        await pool.put(b"jar-%d" % index)
+    for path in (tmp_path / "jars").iterdir():
+        os.utime(path, (_old().timestamp(), _old().timestamp()))
+    bad = next((tmp_path / "jars").iterdir()).stem
+    unlink = Path.unlink
+
+    def _unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.stem == bad:
+            raise OSError(errno.EIO, os.strerror(errno.EIO), str(self))
+        unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", _unlink)
+    gc = _gc(pool, _FakeReferences(set()), resume_point=ResumePoint())
+
+    for _ in range(2):
+        with pytest.raises(JarPoolUnreachableError):
+            await gc()
+
+    assert [entry.sha256 for entry in await pool.list_entries()] == [bad]
+
+
+async def test_a_pass_five_failures_in_a_row_end_keeps_the_resume_point() -> None:
+    # A pass that stops after five failed deletes in a row did not come round, so
+    # the next pass still starts after the JAR the store gave no answer for
+    # (issue #3934).
+    store = _ObjectPool()
+    keys = await store.seed(6)
+    store.fail_deletes_of(keys[0])
+    store.faults.error = ObjectStoreUnreachableError
+    resume_point = ResumePoint()
+    gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
+    with pytest.raises(JarPoolUnreachableError):
+        await gc()
+    store.faults.clear()
+    store.fail_deletes_of(*keys[1:])
+
+    result = await gc()
+
+    assert result.failed == 5
+    assert resume_point.key == keys[0]
