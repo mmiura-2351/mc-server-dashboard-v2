@@ -648,8 +648,9 @@ async def _lifecycle_lock_lost(_request: Request, _exc: Exception) -> JSONRespon
     """Answer an operation that lost its per-server lifecycle lock (issue #3927).
 
     It stopped before its next write that relied on the lock, so retrying it is
-    the remedy: a transient 503. Every route that runs a lock holder can meet it,
-    so it is answered here once rather than by each route.
+    the remedy: a transient 503. Every route that runs a lock holder can meet it.
+    The routes that audit their failures map it themselves to keep the audit row;
+    the rest are answered here once.
     """
 
     return problem_response(status.HTTP_503_SERVICE_UNAVAILABLE, "lifecycle_lock_lost")
