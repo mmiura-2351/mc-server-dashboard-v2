@@ -40,27 +40,49 @@ func recordFsyncs(t *testing.T) *[]string {
 	return &synced
 }
 
-// A snapshot that stamps the generation marker makes the tree it packed durable
-// first (issue #3999). The server writes its world through the page cache, so a
-// marker made durable over an unsynced tree can outlive the tree on a power loss:
-// the skip-hydrate gate then boots the older world the marker does not describe,
-// and its next snapshot publishes that world over newer data. The running-id
-// snapshot syncs right after the pack, while the world is still quiesced, and
-// stamps after the upload. The stopped-id snapshot stamps nothing (it removes the
-// scratch), so it has no tree to make durable for a marker.
-func TestSnapshotMakesThePackedTreeDurableBeforeTheMarker(t *testing.T) {
+// recordStamps appends "stamp" to seq each time a generation-marker write starts
+// (its temp name is drawn).
+func recordStamps(t *testing.T, seq *[]string) {
+	t.Helper()
+	orig := generationTempSuffix
+	generationTempSuffix = func() string {
+		*seq = append(*seq, "stamp")
+		return orig()
+	}
+	t.Cleanup(func() { generationTempSuffix = orig })
+}
+
+// A snapshot that stamps the generation marker makes the tree durable first (issue
+// #3999). The server writes its world through the page cache, so a marker made
+// durable over an unsynced tree can outlive the tree on a power loss: the
+// skip-hydrate gate then boots the older world the marker does not describe, and
+// its next snapshot publishes that world over newer data.
+//
+// The running-id snapshot syncs after the upload, outside the save-off window: a
+// sync started then flushes everything the tree held at the pack and whatever the
+// server wrote since, so the durable tree is no older than the generation the stamp
+// names. It removes the spool first, so the sync drops the spool's pages instead of
+// writing them. A sync that fails still publishes but does not stamp. The stopped-id
+// snapshot stamps nothing (it removes the scratch), so it syncs nothing.
+func TestSnapshotMakesTheTreeDurableBeforeTheMarker(t *testing.T) {
+	quiesced := []string{"save-off", "save-all", "pack", "save-on", "upload", "spool removed", "sync"}
 	for _, tc := range []struct {
-		name    string
-		running bool
-		wantSeq []string
+		name     string
+		running  bool
+		syncErr  error
+		wantSeq  []string
+		wantMark uint64
 	}{
-		{"running", true, []string{"save-off", "save-all", "pack", "sync", "save-on", "upload"}},
-		{"stopped", false, []string{"transfer"}},
+		{"running", true, nil, append(quiesced[:len(quiesced):len(quiesced)], "stamp"), 12},
+		{"running, sync fails", true, unix.EIO, quiesced, 5},
+		{"stopped", false, nil, []string{"transfer"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var seq []string
 			ctrl := &fakeControl{reply: "ok", seq: &seq}
 			tr := &fakeTransfer{gen: 12, seq: &seq}
+			// The hook runs as the spool is removed.
+			tr.stallCleanup = func() { seq = append(seq, "spool removed") }
 			m := newManager(t, &fakeDriver{}, ctrl).WithTransfer(tr)
 			dir := seedScratch(t, m, s1)
 			if tc.running {
@@ -75,13 +97,14 @@ func TestSnapshotMakesThePackedTreeDurableBeforeTheMarker(t *testing.T) {
 			stubSyncfs(t, func(int) error {
 				seq = append(seq, "sync")
 				markerAtSync = append(markerAtSync, readGeneration(dir))
-				return nil
+				return tc.syncErr
 			})
+			recordStamps(t, &seq)
 
 			res := m.Handle(context.Background(), snapshotCmd())
 
 			if !res.Success {
-				t.Fatalf("SnapshotTrigger = %+v, want success", res)
+				t.Fatalf("SnapshotTrigger = %+v, want success: the publish does not depend on the local sync", res)
 			}
 			if !equalLines(seq, tc.wantSeq) {
 				t.Fatalf("operation order = %v, want %v", seq, tc.wantSeq)
@@ -96,42 +119,14 @@ func TestSnapshotMakesThePackedTreeDurableBeforeTheMarker(t *testing.T) {
 				t.Fatalf("marker read %v when the tree was synced, want [5]: the marker claimed the "+
 					"published generation before the tree it names was durable", markerAtSync)
 			}
-			if got := readGeneration(dir); got != 12 {
-				t.Fatalf("marker = %d after the snapshot, want 12", got)
+			if got := readGeneration(dir); got != tc.wantMark {
+				t.Fatalf("marker = %d after the snapshot, want %d", got, tc.wantMark)
+			}
+			declared := res.HeldGeneration != nil
+			if wantDeclared := tc.syncErr == nil; declared != wantDeclared {
+				t.Fatalf("declared a held generation: %v, want %v (it must follow the stamp)", declared, wantDeclared)
 			}
 		})
-	}
-}
-
-// A sync that fails leaves the marker where it was (issue #3999). The publish
-// stands: the store holds what the pack read, which is the newest world there is.
-// What the Worker cannot claim is that its scratch holds it after a power loss,
-// so it neither stamps nor declares the generation; the next start hydrates.
-func TestRunningSnapshotDoesNotStampAPackedTreeItCouldNotMakeDurable(t *testing.T) {
-	tr := &fakeTransfer{gen: 12}
-	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(tr)
-	dir := seedScratch(t, m, s1)
-	if res := m.Handle(context.Background(), startCmd()); !res.Success {
-		t.Fatalf("start = %+v, want success", res)
-	}
-	if err := writeGeneration(dir, 5); err != nil {
-		t.Fatal(err)
-	}
-	stubSyncfs(t, func(int) error { return unix.EIO })
-
-	res := m.Handle(context.Background(), snapshotCmd())
-
-	if !res.Success {
-		t.Fatalf("SnapshotTrigger = %+v, want success: the publish does not depend on the local sync", res)
-	}
-	if len(tr.uploads) != 1 {
-		t.Fatalf("uploads = %v, want one", tr.uploads)
-	}
-	if got := readGeneration(dir); got != 5 {
-		t.Fatalf("marker = %d, want 5: a tree that may not be on disk was stamped as generation 12", got)
-	}
-	if res.HeldGeneration != nil {
-		t.Fatalf("declared held generation %d for a tree that may not be on disk", *res.HeldGeneration)
 	}
 }
 

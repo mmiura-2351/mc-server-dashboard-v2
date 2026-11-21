@@ -15,16 +15,19 @@ import (
 
 // syncWorkingSet makes the working set at workingDir durable: when it returns nil,
 // every file and directory the tree held when it was called is on the disk (issue
-// #3999). The running-id snapshot calls it on the tree it has just packed, before
-// the generation marker can name that tree. The server writes its world through the
-// page cache, and a marker made durable over an unsynced tree can outlive the tree on
-// a power loss; the skip-hydrate gate then boots the older world, and that world's
-// next snapshot publishes it over newer data.
+// #3999). The running-id snapshot calls it once its upload has published the tree,
+// before the generation marker names that tree. The server writes its world through
+// the page cache, and a marker made durable over an unsynced tree can outlive the
+// tree on a power loss; the skip-hydrate gate then boots the older world, and that
+// world's next snapshot publishes it over newer data. The server may be writing while
+// this runs, which the walk tolerates; the sync then covers at least what the tree
+// held at the call.
 //
 // It is one syncfs(2) of the filesystem the working dir lies on: one system call,
 // whatever the size of the tree, and a single device flush. That filesystem holds
-// whatever else shares it as well, so the call also flushes the snapshot's spool
-// beside the working dir and any other dirty data there.
+// whatever else shares it as well, so the call also flushes any other dirty data
+// there; the snapshot removes its spool beside the working dir first, so that the
+// spool's pages are dropped rather than written.
 //
 // Where syncfs is unavailable it walks the tree instead and fsyncs each regular file
 // and directory (fsyncTree). An older kernel answers ENOSYS, and a seccomp profile

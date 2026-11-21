@@ -2219,20 +2219,23 @@ renamed, its directory fsynced) only once the tree it names is durable (issue
 
 - A hydrate fsyncs each file it unpacks and every directory of the tree before the
   rename that swaps the tree in.
-- A running-id snapshot syncs the filesystem the working set lies on
-  (`syncfs(2)`) once the pack is done, while the world is still quiesced, and
-  stamps the new generation after the upload. Where `syncfs` is unavailable
-  (`ENOSYS`, or `EPERM` from a seccomp profile), it fsyncs every regular file and
-  directory of the tree instead. A sync that fails leaves the marker at its older
-  generation: the publish stands, the snapshot declares no held generation, and the
-  next start hydrates.
+- A running-id snapshot, once its upload has published, removes its spool and
+  then syncs the filesystem the working set lies on (`syncfs(2)`) before it stamps
+  the new generation. Where `syncfs` is unavailable (`ENOSYS`, or `EPERM` from a
+  seccomp profile), it fsyncs every regular file and directory of the tree
+  instead. A sync that fails leaves the marker at its older generation: the
+  publish stands, the snapshot declares no held generation, and the next start
+  hydrates.
 - A stopped-id snapshot writes no marker; it removes the scratch.
 
-The sync covers what the pack read, not what the server writes once saving
-resumes, so a power loss can still tear those later writes; the boot region fsck
-is what catches that (CONTROL_PLANE.md Section 4.1). `syncfs` also flushes
-everything else dirty on that filesystem, the snapshot's own spool beside the
-working set included.
+What the marker needs is a durable tree no older than the generation it names,
+not the packed state exactly. So the sync runs after the upload, outside the
+save-off window, while the server writes again: it flushes everything the tree
+held at the pack together with what the server wrote since. The spool is unlinked
+before it, so the sync drops the spool's pages instead of writing them; it still
+flushes whatever else is dirty on that filesystem. Writes after the sync are not
+synced, so a power loss can still tear them; the boot region fsck is what catches
+that (CONTROL_PLANE.md Section 4.1).
 
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
