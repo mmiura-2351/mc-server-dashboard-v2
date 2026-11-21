@@ -2480,7 +2480,9 @@ class StopServer:
         """``_clear_stale_assignment`` under the stop-convergence exclusion.
 
         ``worker_connected`` is whether the caller found the assigned Worker
-        connected when it chose this convergence.
+        connected when it chose this convergence. Such a Worker that drops before
+        its final snapshot or stop is done keeps the row: this raises
+        ``WorkerUnavailableError`` instead of releasing (issue #3963).
 
         Raises ``LifecycleTransitionConflictError`` without dispatching or releasing
         when another stop convergence for the server is in flight (issue #3491).
@@ -2545,10 +2547,11 @@ class StopServer:
         snapshot is re-driven before clearing the assignment — the original stop
         wedged between observed=stopped and the post-snapshot clear, so the
         generation was never advanced. Without this, a cross-worker re-placement
-        hydrates stale store-gen and rolls back. A DISCONNECTED worker skips the
-        snapshot (the worker is gone; same exposure as today, logged loud). A
-        snapshot TIMEOUT raises ``WorkerUnavailableError`` so the reconciler backs
-        off. A snapshot failure (TRANSFER_FAILED, etc.) or a benign duplicate
+        hydrates stale store-gen and rolls back. A worker DISCONNECTED when the
+        caller chose this convergence and still at Step A skips the snapshot (the
+        worker is gone; same exposure as today, logged loud). A snapshot TIMEOUT
+        raises ``WorkerUnavailableError`` so the reconciler backs off. A snapshot
+        failure (TRANSFER_FAILED, etc.) or a benign duplicate
         (working_set_absent) proceeds to clear — ``_final_snapshot`` logs an ordinary
         failure as unconfirmed publication with the cross-worker exposure, or records
         the pinned no-working-set refusal at INFO.
@@ -2588,6 +2591,21 @@ class StopServer:
         A disconnected Worker discarded every command still queued when its
         session ended, so it is released as before, with the exposure the unknown
         leg already accepts.
+
+        A Worker that drops while this runs keeps the row (issue #3963). When the
+        caller (``worker_connected``) or Step A found the Worker connected, it is
+        owed the final snapshot or the stop, and a Worker whose session has ended
+        since may still hold the working set and reconnect seconds later. So the
+        release raises ``WorkerUnavailableError`` (``not_connected``) and leaves
+        the row assigned: when the Worker reads disconnected after Step A, and when
+        Step B's snapshot fails because its session ended, which also covers a
+        Worker already back on a new session. The reconciler counts that as a
+        failed action, and the next tick measures the row's grace from no earlier
+        than the drop, so the release without a snapshot waits a full grace from
+        it. The reconciler passes the connectivity it measured the grace on, since
+        a drop before Step A's read would otherwise look like a Worker long gone.
+        An operator stop passes ``False`` and routes on Step A's own read: a
+        Worker already gone by then is released at once, as documented.
 
         Step A also withdraws the intent again, with a bump, as
         :meth:`_redispatch_stop` does and for the same reasons: the write that

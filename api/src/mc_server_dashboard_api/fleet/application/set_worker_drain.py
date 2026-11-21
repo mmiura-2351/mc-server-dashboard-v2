@@ -23,6 +23,8 @@ operator following the FR-WRK-5 workflow MUST keep the Worker up until the stops
 converge — if the host goes down first and the Worker stays gone, the reconciler
 releases each server ``grace_seconds`` after the disconnect with no final
 snapshot: the snapshot is skipped, not deferred (CONFIGURATION.md Section 5.6).
+If the API restarts meanwhile, the release comes no earlier than the API's start
+plus ``grace_seconds`` (issue #3916).
 The returned count is the number of servers this call *marked*, not the number
 already stopped. Confirm convergence PER SERVER, not by assigned load: this
 call's placement-load decrement (see :meth:`_shed_placement_load`) drops ``GET

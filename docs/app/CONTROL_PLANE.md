@@ -522,10 +522,15 @@ crash instead, since the Worker has already forgotten that instance (issue
 its release waits a full grace from it. An API start is the same case for every
 Worker: none has registered with the new process when the reconciler's first
 tick runs. So the reconciler releases a stopped-intent server whose Worker is not
-connected only once a full grace has passed since the later of the server's own
-stamps and the start of this process's control-plane listener (issue #3916). A
-Worker that re-registers within it, after a graceful restart or a crash, still
-gets the final snapshot or the stop. The reconciler does not restart a
+connected only once a full grace has passed since the latest of the server's own
+stamps, the start of this process's control-plane listener (issue #3916), and
+the instant the Worker first read disconnected (issue #3963): the stream's end,
+or the heartbeat lapse the registry reports before the teardown runs. The
+server's stamps lag that instant until the teardown's write lands, and keep the
+old one if the write fails. A Worker that re-registers within the grace, after a
+drop, a graceful restart or a crash, still gets the final snapshot or the stop,
+and so does one that drops while the reconciler is releasing its server: the
+release is abandoned and waits that grace from the drop. The reconciler does not restart a
 `desired=running` server until the Worker reconnects. If it does not come back, an
 operator stop and then a start moves each server to another eligible Worker
 after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an

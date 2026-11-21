@@ -54,7 +54,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   sink no longer unassigns). The snapshot leg dispatches to a connected Worker so the
   store generation advances before a cross-worker re-placement can hydrate; a
   disconnected Worker skips the snapshot and clears directly (same exposure as
-  before, logged loud).
+  before, logged loud). A Worker that drops while the action runs, after the tick
+  found it connected, keeps the row: the action fails, and the row then waits the
+  disconnected-Worker grace below, from the drop (issue #3963).
 - ``desired=stopped``, observed ``unknown``, still assigned (issue #1599): a stop
   interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
   sets unknown without unassigning). Connected Worker -> redispatch the stop.
@@ -126,6 +128,13 @@ that floor a stopped-intent row whose grace lapsed while no API ran would be
 released without its final snapshot or its stop, though its Worker is back seconds
 later. Every Worker thus gets a full grace to re-register after any API start,
 graceful or a crash. A connected Worker's rows are measured as before.
+
+Such a row is also measured from no earlier than the instant its Worker first
+read disconnected: the end of its session, or the lapse of its heartbeats, which
+the registry reports before the teardown runs (issue #3963). The teardown's bulk
+write restamps the Worker's rows, but until it lands, or when it fails, a row
+still carries its stamp from before the drop, and a tick in that window would
+release it at once without its final snapshot.
 
 That held predicate used to be near-dead: the held inventory was frozen at Worker
 registration, so every server placed since reported nothing held and took the full
