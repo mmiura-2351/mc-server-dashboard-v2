@@ -287,28 +287,36 @@ func TestHydrateRejectsAbsoluteMember(t *testing.T) {
 	}
 }
 
-// The member file is created without following a link at its own name: one in
-// the unpack directory fails the unpack and its target is left untouched.
+// The member file is created only where nothing is (issue #3940): a symlink or a
+// hard link already at its name fails the unpack, and the file outside the unpack
+// directory that it names is left untouched.
 func TestUnpackDoesNotWriteThroughALinkAtAMembersName(t *testing.T) {
-	base := t.TempDir()
-	outside := filepath.Join(base, "outside-secret")
-	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dest := filepath.Join(base, "dest")
-	if err := os.Mkdir(dest, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(dest, "server.properties")); err != nil {
-		t.Fatal(err)
-	}
+	for name, plant := range map[string]func(oldname, newname string) error{
+		"symlink":   os.Symlink,
+		"hard link": os.Link,
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			outside := filepath.Join(base, "outside-secret")
+			if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dest := filepath.Join(base, "dest")
+			if err := os.Mkdir(dest, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := plant(outside, filepath.Join(dest, "server.properties")); err != nil {
+				t.Fatal(err)
+			}
 
-	err := unpackTar(bytes.NewReader(tarOf(map[string]string{"server.properties": "from-tar"})), openDirFd(t, dest))
-	if !errors.Is(err, unix.ELOOP) {
-		t.Fatalf("unpackTar = %v, want ELOOP from the link at the member's name", err)
-	}
-	if got, err := os.ReadFile(outside); err != nil || string(got) != "secret" {
-		t.Fatalf("the link's target reads %q, %v; want it untouched", got, err)
+			err := unpackTar(bytes.NewReader(tarOf(map[string]string{"server.properties": "from-tar"})), openDirFd(t, dest))
+			if !errors.Is(err, unix.EEXIST) {
+				t.Errorf("unpackTar = %v, want EEXIST from the link at the member's name", err)
+			}
+			if got, err := os.ReadFile(outside); err != nil || string(got) != "secret" {
+				t.Fatalf("the linked file outside reads %q, %v; want it untouched", got, err)
+			}
+		})
 	}
 }
 

@@ -839,12 +839,15 @@ func writeFile(dirFd int, target string, src io.Reader, mode os.FileMode) error 
 	if mode == 0 {
 		mode = 0o640
 	}
-	// O_NOFOLLOW refuses to follow a symlink at the final path component. The
-	// unpack target is a brand-new temp tree so no link can pre-exist, but this
-	// keeps the write self-defending against any residual link in the destination.
+	// O_EXCL creates the name or fails with EEXIST (issue #3940): whatever is
+	// already at it — a symlink, dangling or not, or a hard link to a file outside
+	// the tree — is never opened, so nothing is written through it. The unpack
+	// target is a brand-new temp tree, and neither the Worker's pack nor the API's
+	// emits a member name twice, so a hydrate meets no such entry; this keeps the
+	// write self-defending all the same.
 	var fd int
 	if err := ignoringEINTR(func() (err error) {
-		fd, err = unix.Openat(dirFd, path.Base(target), unix.O_CREAT|unix.O_TRUNC|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
+		fd, err = unix.Openat(dirFd, path.Base(target), unix.O_CREAT|unix.O_EXCL|unix.O_WRONLY|unix.O_CLOEXEC, uint32(mode.Perm()))
 		return err
 	}); err != nil {
 		return &os.PathError{Op: "open", Path: target, Err: err}
