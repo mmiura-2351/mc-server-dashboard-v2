@@ -1987,6 +1987,7 @@ argument, and 3 when the database driver raised an error mid-pass (SQLAlchemy
 lifecycle lock was lost (DATABASE.md Section 7). A 1 or a 3 stops the pass with a
 one-line message rather than a traceback: verdicts already written this run are
 committed, and the sweep re-checks every row, so re-running it is safe.
+`log.level=debug` (CONFIGURATION.md Section 5.10) logs the traceback of a 3.
 
 **Damage vs. outage.** A body that ends early looks identical whether the object's
 bytes are damaged or the store is merely having a bad minute — and a verdict on

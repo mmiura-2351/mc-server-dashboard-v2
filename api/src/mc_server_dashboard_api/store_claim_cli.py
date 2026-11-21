@@ -18,8 +18,9 @@ Usage::
 
     cd api && uv run python -m mc_server_dashboard_api.store_claim_cli
 
-Configuration (database URL, storage backend) is read from the environment, the
-same ``MCD_API_*`` settings the API server uses.
+Configuration (database URL, storage backend, log level and format) is read from
+the environment, the same ``MCD_API_*`` settings the API server uses, and the
+command logs through the API's handler (issue #3942).
 
 Exit status: 0 when it claimed the store; 1 when it refused because the store has
 a marker; 2 when it could not tell, because the configuration, the database or
@@ -30,23 +31,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import sys
 
 from mc_server_dashboard_api.app import _build_storage, _resolve_config_file
-from mc_server_dashboard_api.config import load_settings
+from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
 )
 from mc_server_dashboard_api.core.adapters.installation import read_installation_id
+from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.storage.adapters.ownership import CLAIM_COMMAND
 
 
-async def run() -> str | None:
+async def run(settings: Settings) -> str | None:
     """Claim the store; why it was refused, or ``None`` once claimed."""
 
-    settings = load_settings(_resolve_config_file())
     engine = create_engine(settings.database.url, pool_size=1, max_overflow=0)
     try:
         installation_id = await read_installation_id(create_session_factory(engine))
@@ -57,7 +57,6 @@ async def run() -> str | None:
 
 
 def main(argv: list[str]) -> int:
-    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(
         prog=CLAIM_COMMAND,
         description=(
@@ -68,7 +67,11 @@ def main(argv: list[str]) -> int:
     parser.parse_args(argv)
 
     try:
-        refusal = asyncio.run(run())
+        settings = load_settings(_resolve_config_file())
+        # The API's handler, level and format (issue #3942), so this command's
+        # lines are escaped as the API's are (issue #3938).
+        configure_logging(settings.log.level, settings.log.format)
+        refusal = asyncio.run(run(settings))
     except Exception as exc:
         # The configuration, the database or the store failed, so the command
         # cannot tell whether the store is claimed: a fault after the write (the

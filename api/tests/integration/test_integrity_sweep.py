@@ -34,6 +34,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId as CommunityCommunityId,
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
+from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
@@ -430,7 +431,7 @@ async def test_cli_sweep_completes_on_the_smallest_accepted_pool(
     monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
     monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
 
-    summary = await integrity_sweep_cli.run(server_id=server)
+    summary = await integrity_sweep_cli.run(load_settings(None), server_id=server)
 
     assert summary.backups_healthy == 1
     async with ServersUnitOfWork(create_session_factory(engine)) as uow:

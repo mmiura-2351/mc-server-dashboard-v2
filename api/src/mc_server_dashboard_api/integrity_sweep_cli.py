@@ -16,15 +16,16 @@ Usage::
     cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
         --server <server-uuid>
 
-Configuration (database URL, storage backend) is read from the environment, the
-same ``MCD_API_*`` settings the API server uses.
+Configuration (database URL, storage backend, log level and format) is read from
+the environment, the same ``MCD_API_*`` settings the API server uses, and the
+command logs through the API's handler (issue #3942).
 
 Exit status: 0 when the pass completed; 1 when the object store could not serve
 an archive read; 2 on a bad argument; 3 when the database driver raised an error
 mid-pass (SQLAlchemy ``DBAPIError``, such as a dropped connection or a terminated
 backend) or a server's lifecycle lock was lost. A 1 or a 3 stops the pass with a
 one-line message: verdicts already written this run are committed, and the sweep
-is safe to re-run.
+is safe to re-run. ``log.level=debug`` logs the traceback of a 3.
 """
 
 from __future__ import annotations
@@ -41,11 +42,12 @@ from mc_server_dashboard_api.app import _build_storage, _resolve_config_file
 from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSystemClock
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
-from mc_server_dashboard_api.config import load_settings
+from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
 )
+from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -64,8 +66,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 _LOG = logging.getLogger(__name__)
 
 
-async def run(*, server_id: ServerId | None) -> SweepSummary:
-    settings = load_settings(_resolve_config_file())
+async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary:
     engine = create_engine(
         settings.database.url,
         pool_size=settings.database.pool_size,
@@ -100,7 +101,6 @@ async def run(*, server_id: ServerId | None) -> SweepSummary:
 
 
 def main(argv: list[str]) -> int:
-    logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(
         prog="python -m mc_server_dashboard_api.integrity_sweep_cli",
         description="Fsck and quarantine existing backups & snapshots (issue #744).",
@@ -120,8 +120,12 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"invalid --server uuid: {args.server!r}\n")
             return 2
 
+    settings = load_settings(_resolve_config_file())
+    # The API's handler, level and format (issue #3942), so the sweep's lines are
+    # escaped as the API's are (issue #3938).
+    configure_logging(settings.log.level, settings.log.format)
     try:
-        summary = asyncio.run(run(server_id=server_id))
+        summary = asyncio.run(run(settings, server_id=server_id))
     except BackupStorageUnavailableError as exc:
         # The store could not serve an archive read (issue #2371). The pass stops
         # rather than misclassify — an outage is no verdict about a backup — so this

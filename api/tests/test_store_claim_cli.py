@@ -16,6 +16,7 @@ stand-in and the database's installation id fixed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -29,6 +30,9 @@ from mc_server_dashboard_api import store_claim_cli
 from mc_server_dashboard_api.storage.adapters import ownership as ownership_module
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+
+# ``main`` installs the app's log handler (issue #3942); take it off afterwards.
+pytestmark = pytest.mark.usefixtures("app_log_handler_restored")
 
 _OURS = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _THEIRS = uuid.UUID("00000000-0000-4000-8000-000000000002")
@@ -185,3 +189,31 @@ def test_a_store_fault_exits_2_without_a_traceback(
     err = capsys.readouterr().err
     assert err.startswith("store claim failed: NotADirectoryError: ")
     assert "Traceback" not in err
+
+
+def test_the_command_logs_in_the_configured_format(
+    store: _Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command logs through the app's handler at the configured ``log.level``
+    and ``log.format`` (issue #3942), so its lines come out escaped, as the API's
+    do (issue #3938)."""
+
+    monkeypatch.setenv("MCD_API_LOG__LEVEL", "debug")
+    monkeypatch.setenv("MCD_API_LOG__FORMAT", "text")
+
+    async def _ours_logged(_session_factory: object) -> uuid.UUID:
+        logging.getLogger("mc_server_dashboard_api.core.adapters.installation").debug(
+            "installation \x1b[31mred\x1b[0m\nINFO forged"
+        )
+        return _OURS
+
+    monkeypatch.setattr(store_claim_cli, "read_installation_id", _ours_logged)
+
+    assert store_claim_cli.main([]) == 0
+
+    err = capsys.readouterr().err
+    assert (
+        "DEBUG mc_server_dashboard_api.core.adapters.installation "
+        "installation \\x1b[31mred\\x1b[0m\\nINFO forged\n"
+    ) in err
+    assert "\x1b" not in err
