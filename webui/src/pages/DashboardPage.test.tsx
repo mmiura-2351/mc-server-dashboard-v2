@@ -311,6 +311,39 @@ describe("DashboardPage lifecycle actions", () => {
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledTimes(2));
   });
 
+  // The start that accepts the EULA holds the row's controls while in flight,
+  // like any other start (#3929).
+  it("holds Start while the start that accepts the EULA is in flight", async () => {
+    mockApi.get.mockResolvedValue([
+      server({
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      }),
+    ]);
+    mockApi.post
+      .mockRejectedValueOnce(new ApiError(409, { reason: "eula_not_accepted" }))
+      .mockReturnValueOnce(new Promise(() => {}));
+    renderPage();
+
+    await screen.findByText("survival");
+    const start = screen.getByRole("button", { name: t("dashboard.start") });
+    fireEvent.click(start);
+    const accept = await screen.findByRole("button", {
+      name: t("serverDetail.eulaDialog.accept"),
+    });
+    // The refused start has released the controls.
+    await waitFor(() => expect(start).toBeEnabled());
+    fireEvent.click(accept);
+
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenLastCalledWith(
+        `/api/communities/${CID}/servers/s1/start?accept_eula=true`,
+      ),
+    );
+    await waitFor(() => expect(start).toBeDisabled());
+  });
+
   // The success-styled button: a crashed server's Start reads "Restart", the
   // label the restart button carries too.
   const startButton = (observed: string) =>
