@@ -3475,6 +3475,22 @@ async def test_a_connected_workers_row_is_not_held_by_the_api_start(
     assert uow.servers.by_id[server.id].assigned_worker_id is None
 
 
+async def test_a_row_with_no_worker_is_placed_at_the_boot_tick() -> None:
+    # No Worker is assigned, so there is none to wait for.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(place_to=_WORKER)
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, listener_started_at=_NOW).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
 # --- Worker-reported unknown lands on existing arms (issue #2474) -----------
 #
 # SERVER_STATE_UNKNOWN joined the wire enum, so ``unknown`` now reaches a row from a

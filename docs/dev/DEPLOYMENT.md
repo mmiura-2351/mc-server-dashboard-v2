@@ -1877,6 +1877,12 @@ get a "server stopped" MOTD even though the MC containers are healthy;
 the fast held path keeps that window short for routine single-host restarts without
 the operator lowering `grace_seconds` below its safety floor.
 
+The stop side waits too. A server whose stop intent stands but which is still
+assigned to a worker that has not re-registered yet is released, without its final
+snapshot, no sooner than a full `reconciler.grace_seconds` after the API start
+(issue #3916). A worker back within that window still gets the final snapshot or
+the stop first.
+
 Both knobs have boot-time safety floors (a warning, not fatal): `grace_seconds`
 must exceed `max(hydrate_timeout + command_timeout, snapshot_timeout, stop_timeout)`,
 and `held_start_grace_seconds` must exceed `command_timeout_seconds` (it only covers

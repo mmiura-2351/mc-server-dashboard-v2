@@ -499,7 +499,9 @@ for the server once that Worker no longer owns it (issue #3809).
    because there is no Worker to send it to, but the stop intent stands:
    `StopServer` commits `desired=stopped` before it dispatches and reverts
    nothing on a failed dispatch. The server is then released from the Worker
-   with no final snapshot, by the reconciler once `grace_seconds` lapses, or at
+   with no final snapshot, by the reconciler once `grace_seconds` lapses (after
+   an API restart, from no earlier than the new process's start; see the
+   `reconciler.grace_seconds` row below), or at
    once by a second `stop` (for a stopped intent whose Worker is disconnected,
    `stopped_intent_action` selects `clear_stale_assignment`).
 2. **Start it.** The start places the server on another Worker (placement
