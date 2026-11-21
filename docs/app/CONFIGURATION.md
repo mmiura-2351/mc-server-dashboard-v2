@@ -596,11 +596,15 @@ clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format; `json` keeps logs machine-parseable (REQUIREMENTS.md NFR-OBS-1). `text` prints `LEVEL logger message` followed by the same structured fields and correlation ID as `key=value`. |
 
-Both formats also carry uvicorn's own server and access lines, which therefore
-go to stderr with every other line. `log.level` does not filter them: uvicorn
-keeps its own loggers at `INFO`. Under uvicorn's `--reload` or `--workers`
+Both formats also carry uvicorn's own server and access lines and Python's
+warnings (logger `py.warnings`), which therefore go to stderr with every other
+line. `log.level` does not filter uvicorn's lines: uvicorn keeps its own loggers
+at `INFO`. It does filter the warnings, which are `WARNING` records, so
+`log.level=error` drops them. Under uvicorn's `--reload` or `--workers`
 supervisor (`api/README.md`) the parent process never builds the app, so its own
-lines keep uvicorn's format; the image's entry point uses neither.
+lines keep uvicorn's format; the image's entry point uses neither. A warning
+raised before the app is built keeps Python's plain format, such as the one
+uvicorn raises for `--ws websockets`.
 
 Neither format writes a control character raw, so text a client controls (a
 crafted URL path, a header, a filename) cannot put a terminal escape sequence or
@@ -617,7 +621,8 @@ in a line can also be those four characters as sent. A traceback keeps its line
 breaks and escapes every other character above. One residual remains in `text`:
 a line break inside an exception's own message (or note) still starts a new line
 in its traceback, because nothing tells it apart from the traceback's own
-breaks. Use `json`, the default, where one record must be one line.
+breaks. Use `json`, the default, where one record must be one line. The Worker
+and the relay make the same guarantee for their own logs (Section 6.4).
 
 The Prometheus exposition is served on a **separate HTTP listener**, never on
 `server.http_port`: the bundled `cloudflared` service forwards the
@@ -625,7 +630,7 @@ whole public hostname to `api:8000` and path-scopes nothing, so a route on the
 API's HTTP port is a route on the internet. Off by default, like the relay's
 metrics endpoint ([`RELAY.md`](RELAY.md) Section 13) — a deployment that does
 not scrape binds no second port at all. When enabled, the listener serves
-`GET /metrics` and nothing else.
+`GET /metrics` and nothing else, and writes no access line for a scrape.
 
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
@@ -1074,6 +1079,14 @@ per-device `major:minor` and rate that only the operator could configure.
 | `log.level` | `info` | | Log verbosity. |
 | `log.format` | `json` | | Structured-log format (REQUIREMENTS.md NFR-OBS-1). |
 | `worker.metrics_interval_seconds` | `15` | | Cadence at which the Worker samples each running server and emits a `Metrics` event (REQUIREMENTS.md FR-MON-3). `0` keeps the built-in default. |
+
+Neither format writes a control character raw: the guarantee the API makes
+(Section 5.10), over the same characters. Go's `slog` already escapes the C0
+controls, and `text` quotes and escapes any value holding one of the others,
+except DEL. What `slog` leaves raw is written as `\uXXXX`, which a JSON reader
+decodes back to the same text: DEL in either format, and the C1 controls and the
+bidi controls U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069 in
+`json`. The relay's log does the same ([`RELAY.md`](RELAY.md) Section 13).
 
 The Worker captures each running server's console output and streams it to the
 API as `LogLine` events (FR-MON-2), and samples basic per-server runtime metrics

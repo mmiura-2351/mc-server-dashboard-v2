@@ -180,10 +180,27 @@ def configure_logging(level: str, log_format: str) -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
 
-    # uvicorn configures its own logging before it calls the app factory
-    # (serve.py): its server and access loggers get handlers of their own and
-    # stop propagating, so their lines bypassed this handler -- the configured
-    # format and the control-character escaping alike (issue #3928).
+    # A warning is otherwise written to stderr by ``warnings`` itself, past this
+    # handler: a plain-text line in the json format, unescaped (issue #3939).
+    # A test trap: this replaces ``warnings.showwarning``, so a ``pytest.warns``
+    # or ``recwarn`` entered before the first call in a test process stops
+    # seeing warnings. Later calls change nothing while ``logging`` still
+    # records the capture, until ``logging.captureWarnings(False)``.
+    logging.captureWarnings(True)
+    route_uvicorn_logging()
+
+
+def route_uvicorn_logging() -> None:
+    """Send uvicorn's server and access lines through the app handler.
+
+    uvicorn configures its own logging before it calls the app factory
+    (serve.py): its server and access loggers get handlers of their own and
+    stop propagating, so their lines bypassed this handler -- the configured
+    format and the control-character escaping alike (issue #3928). Every later
+    ``uvicorn.Config`` built with its default ``log_config`` does the same again,
+    so the lifespan calls this once more before serving (issue #3939).
+    """
+
     for name in ("uvicorn", "uvicorn.access"):
         server_logger = logging.getLogger(name)
         server_logger.handlers.clear()
