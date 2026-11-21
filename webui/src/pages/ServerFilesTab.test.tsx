@@ -3189,6 +3189,18 @@ describe("Keyboard shortcuts with a modal open", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  // Drops a file over readme.txt, which opens the overwrite prompt over an
+  // open menu: a drop is neither a click nor a pointer-down, so the menu stays.
+  function dropOverwrite() {
+    const tree = document.querySelector(".file-tree") as HTMLElement;
+    fireEvent.drop(tree, {
+      dataTransfer: {
+        files: [new File(["new"], "readme.txt")],
+        types: ["Files"],
+      },
+    });
+  }
+
   it("Escape closes the dialog and keeps the selection behind", async () => {
     const dialog = await openConfirmOverSelection();
 
@@ -3206,16 +3218,17 @@ describe("Keyboard shortcuts with a modal open", () => {
     renderPage();
     await openFiles();
     await screen.findByText(/readme\.txt/);
-    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
     const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
     fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
-    // The menu takes no keys but Escape, so Delete opens the confirm over it.
-    fireEvent.keyDown(document, { key: "Delete" });
+    dropOverwrite();
     const dialog = await screen.findByRole("dialog");
 
     fireEvent.keyDown(dialog, { key: "Escape" });
 
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // The prompt closes once its upload loop hears the cancel.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });
 
@@ -3229,17 +3242,18 @@ describe("Keyboard shortcuts with a modal open", () => {
     renderPage();
     await openFiles();
     await screen.findByText(/readme\.txt/);
-    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
     fireEvent.click(
       screen.getByRole("button", { name: `${t("serverDetail.stop")} ▾` }),
     );
-    // A key the menu does not take reaches the Files tab's shortcuts.
-    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Delete" });
+    dropOverwrite();
     const dialog = await screen.findByRole("dialog");
 
     fireEvent.keyDown(dialog, { key: "Escape" });
 
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // The prompt closes once its upload loop hears the cancel.
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });
 });
