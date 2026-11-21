@@ -1020,13 +1020,14 @@ def _tar_gz_entries(
     count = 0
     with (
         GzipReader(io.BytesIO(content)) as gz,
-        tarfile.open(
+        tarfile.TarFile(
             fileobj=(
                 stream := EndCheckedReader(
                     CappedReader(gz, max_bytes), header_limits=UPLOAD_HEADER_LIMITS
                 )
             ),
-            mode="r:",
+            mode="r",
+            stream=True,
         ) as tf,
     ):
         for member in stream.members(tf):

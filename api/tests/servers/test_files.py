@@ -25,6 +25,7 @@ import struct
 import subprocess
 import tarfile
 import threading
+import tracemalloc
 import uuid
 import zipfile
 import zlib
@@ -3928,6 +3929,34 @@ async def test_upload_extract_tar_counts_directory_members_toward_the_entry_cap(
             extract=True,
         )
     assert store.writes == []
+
+
+async def test_upload_extract_tar_keeps_no_member_it_walked_past() -> None:
+    # ``tarfile`` keeps every member it reads, with its PAX records, unless it
+    # is opened not to (issue #3931). 500 members holding 30 MiB of PAX
+    # comments, 7.5 Mi characters within the door's limits, are walked one
+    # member at a time, in under 12 MiB.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    store = FakeFileStore()
+    use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
+    content = archive_cap_shapes.commented_directories(500, "\U0001f600")
+
+    tracemalloc.start()
+    try:
+        await use_case(
+            community_id=CommunityId(community),
+            server_id=ServerId(server_id),
+            dir_path=".",
+            filename="dirs.tar.gz",
+            content=content,
+            extract=True,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 12 * archive_cap_shapes.MIB
+    assert store.writes == [("a.txt", b"A")]
 
 
 async def test_upload_extract_tar_symlink_member_is_invalid_path() -> None:

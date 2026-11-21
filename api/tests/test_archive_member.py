@@ -116,15 +116,15 @@ def _walk(
     gzipped: bool,
     data: str = "read",
     cap: int | None = None,
-    header_limits: HeaderLimits | None = None,
+    header_limits: HeaderLimits = STORAGE_HEADER_LIMITS,
 ) -> tuple[list[str], int]:
     """The member names, and the bytes read past the end-of-archive marker.
 
     ``data`` is how much of each member's data the caller reads: all of it
     (``read``), none, so ``tarfile`` seeks over it (``skipped``), or one byte
     (``partly``). With a ``cap``, the stream is read through a
-    :class:`CappedReader`, and with ``header_limits`` the walk is held to them,
-    as the upload gates and the storage walks read it.
+    :class:`CappedReader`. The walk is held to ``header_limits``, the storage
+    walks' unless given.
     """
 
     body = io.BytesIO(gzip.compress(archive) if gzipped else archive)
@@ -206,12 +206,12 @@ _ACCEPTED: list[object] = [
 ]
 
 
-# The walks with each set of header limits: the snapshot ingest's (none), the
-# storage walks' and the upload gates'.
+# The walks with each set of header limits: the storage walks' (restore, the
+# health check and the snapshot ingest, issue #3931) and the upload gates'.
 _each_walk = pytest.mark.parametrize(
     "header_limits",
-    [None, STORAGE_HEADER_LIMITS, UPLOAD_HEADER_LIMITS],
-    ids=["ingest", "storage", "upload"],
+    [STORAGE_HEADER_LIMITS, UPLOAD_HEADER_LIMITS],
+    ids=["storage", "upload"],
 )
 # The two sets of header limits, which share the budget and the record cap.
 _each_limits = pytest.mark.parametrize(
@@ -228,10 +228,11 @@ def test_an_archive_that_ends_at_its_marker_reads_whole(
     names: list[str],
     gzipped: bool,
     data: str,
-    header_limits: HeaderLimits | None,
+    header_limits: HeaderLimits,
     tmp_path: Path,
 ) -> None:
-    # The snapshot ingest, the storage walks and the upload gates alike.
+    # The storage walks, the snapshot ingest among them, and the upload gates
+    # alike.
     walk = _walk(
         produce(tmp_path), gzipped=gzipped, data=data, header_limits=header_limits
     )
@@ -468,7 +469,9 @@ _TAR_GZ = gzip.compress(_AB)
 def test_reading_past_the_marker_checks_the_gzip_trailer(
     body: bytes, error: type[Exception]
 ) -> None:
-    stream = EndCheckedReader(GzipReader(io.BytesIO(body)))
+    stream = EndCheckedReader(
+        GzipReader(io.BytesIO(body)), header_limits=STORAGE_HEADER_LIMITS
+    )
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         assert _names(stream, tar) == ["a.txt", "b.txt"]
         with pytest.raises(error):
@@ -486,7 +489,9 @@ def test_reading_past_the_marker_checks_the_gzip_trailer(
     ],
 )
 def test_a_gzip_stream_gzip_itself_reads_is_accepted(body: bytes) -> None:
-    stream = EndCheckedReader(GzipReader(io.BytesIO(body)))
+    stream = EndCheckedReader(
+        GzipReader(io.BytesIO(body)), header_limits=STORAGE_HEADER_LIMITS
+    )
     with tarfile.open(fileobj=stream, mode="r:") as tar:
         assert _names(stream, tar) == ["a.txt", "b.txt"]
         assert sum(len(chunk) for chunk in stream.read_past_end_marker()) > 0
@@ -562,7 +567,9 @@ def test_a_capped_reader_refuses_a_seek_back() -> None:
 
 def test_a_seek_other_than_from_the_start_is_refused() -> None:
     # tarfile seeks with SEEK_SET only (issue #3798).
-    stream = EndCheckedReader(io.BytesIO(bytes(4096)))
+    stream = EndCheckedReader(
+        io.BytesIO(bytes(4096)), header_limits=STORAGE_HEADER_LIMITS
+    )
 
     with pytest.raises(tarfile.ReadError, match="other than from the start"):
         stream.seek(0, io.SEEK_CUR)
@@ -662,8 +669,6 @@ def test_what_the_walk_reads_between_two_members_is_bounded(
         _walk(
             archive, gzipped=gzipped, data=data, cap=len(archive), header_limits=limits
         )
-    # Without the header limits, as the snapshot ingest reads it, it is taken.
-    assert _walk(archive, gzipped=gzipped, data=data, cap=len(archive))[0]
 
 
 @_both
@@ -754,8 +759,6 @@ def test_a_member_holds_at_most_32_pax_records(
             _walk(archive, gzipped=gzipped, header_limits=limits)
     else:
         assert _walk(archive, gzipped=gzipped, header_limits=limits)[0]
-    # Without the header limits, as the snapshot ingest reads it, it is taken.
-    assert _walk(archive, gzipped=gzipped)[0]
 
 
 def _held_by_values(extra: int) -> bytes:
@@ -837,8 +840,6 @@ def test_the_members_hold_at_most_8_mi_characters_of_names_and_pax_records(
     else:
         walked = _walk(archive, gzipped=gzipped, header_limits=UPLOAD_HEADER_LIMITS)
         assert len(walked[0]) >= 16
-    # Without the header limits, as the snapshot ingest reads it, it is taken.
-    assert len(_walk(archive, gzipped=gzipped)[0]) >= 16
 
 
 def _held_by_many_values(extra: int) -> bytes:
@@ -911,6 +912,79 @@ def test_the_storage_walks_take_many_members_named_at_path_max(gzipped: bool) ->
         _walk(archive, gzipped=gzipped, header_limits=UPLOAD_HEADER_LIMITS)
 
 
+# The longest member path the Worker's pack writes, relative to the working set
+# (``maxMemberPath`` in ``worker/internal/adapters/datatransfer``): 4095 bytes,
+# Linux's PATH_MAX less one, here 16 components of 255.
+_WORKER_LONGEST_PATH = "/".join(["n" * 255] * 16)
+
+# The most a snapshot may hold, so the largest size a member of one may give.
+_SNAPSHOT_BYTES = 50 * 1024**3
+
+
+def _workers_largest_member_headers(directories: int) -> bytes:
+    """``directories`` directory members, then a file member's header, each the
+    largest the Worker's pack writes of its kind (issue #3931).
+
+    The pack gives a header only a name, a type, a mode and a size. Go's
+    ``archive/tar`` writes a name past ustar's fields as a PAX ``path`` record,
+    the trailing ``/`` of a directory's included, and a size of 8 GiB or more as
+    a PAX ``size`` record, and nothing else: Python's ``tarfile`` writes the same
+    two records here. A directory at the longest path holds 8,195 characters and
+    the file 8,209, each in 5,632 bytes of headers. The file's data, 50 GiB, is
+    not written, so a walk stops once the file member is handed out.
+    """
+
+    parts = []
+    for i in range(directories):
+        info = tarfile.TarInfo(name=f"{i:04}{_WORKER_LONGEST_PATH[4:]}")
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        parts.append(info.tobuf(format=tarfile.PAX_FORMAT))
+    info = tarfile.TarInfo(name=_WORKER_LONGEST_PATH)
+    info.size = _SNAPSHOT_BYTES
+    info.mode = 0o644
+    parts.append(info.tobuf(format=tarfile.PAX_FORMAT))
+    return b"".join(parts)
+
+
+def test_the_storage_walks_take_the_workers_largest_member_headers() -> None:
+    # The snapshot ingest holds a snapshot to the storage walks' limits (issue
+    # #3931), so they must take every member header the Worker's pack writes,
+    # whatever the member count: two PAX records, under 32; 5,632 bytes, under
+    # the 1 MiB budget; and at most 8,209 characters, under the 16 Ki allowed a
+    # member. 1,100 directories and the file are past the upload gates' 8 Mi.
+    archive = _workers_largest_member_headers(1100)
+    stream = EndCheckedReader(io.BytesIO(archive), header_limits=STORAGE_HEADER_LIMITS)
+
+    with tarfile.open(fileobj=stream, mode="r:") as tar:
+        members = []
+        for member in stream.members(tar):
+            members.append(member)
+            if member.isfile():
+                break
+
+    assert len(members) == 1101
+    assert [sorted(m.pax_headers) for m in (members[0], members[-1])] == [
+        ["path"],
+        ["path", "size"],
+    ]
+    assert (members[-1].name, members[-1].size) == (
+        _WORKER_LONGEST_PATH,
+        _SNAPSHOT_BYTES,
+    )
+    with tarfile.open(
+        fileobj=(
+            upload := EndCheckedReader(
+                io.BytesIO(archive), header_limits=UPLOAD_HEADER_LIMITS
+            )
+        ),
+        mode="r:",
+    ) as tar:
+        with pytest.raises(HeaderLimitError, match="characters of names"):
+            for _member in upload.members(tar):
+                pass
+
+
 def _sparse_after_global_records(windows: list[dict[str, str]]) -> bytes:
     """Each window: a global PAX header of its records, then an old-GNU sparse
     member that stores and maps nothing.
@@ -958,8 +1032,6 @@ def test_each_member_holds_the_global_records_whatever_its_type(
 
     with pytest.raises(HeaderLimitError, match=match):
         _walk(archive, gzipped=gzipped, header_limits=limits)
-    # Without the header limits, as the snapshot ingest reads it, it is taken.
-    assert len(_walk(archive, gzipped=gzipped)[0]) == len(windows)
 
 
 @pytest.mark.parametrize(

@@ -1319,6 +1319,33 @@ async def test_retention_prunes_the_oldest_version(
     assert contents == [b"v3", b"v2"]
 
 
+def test_restore_extract_leaves_a_write_fault_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only ENAMETOOLONG is taken for a member the store cannot hold (issue
+    #3931): a disk that refuses the write says nothing about the archive, and
+    reaches the caller as itself."""
+
+    archive = tmp_path / "backup.tar.gz"
+    info = tarfile.TarInfo(name="a.txt")
+    info.size = 1
+    with tarfile.open(archive, mode="w:gz") as tar:
+        tar.addfile(info, io.BytesIO(b"A"))
+    dest = tmp_path / "out"
+    dest.mkdir()
+
+    def _disk_full(path: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if mode == "wb":
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+        return open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(fs_module, "open", _disk_full, raising=False)
+
+    with pytest.raises(OSError) as raised:
+        _extract_tar_gz_into(archive, dest, _DEFAULT_MAX_RESTORE_BYTES)
+    assert (type(raised.value), raised.value.errno) == (OSError, errno.ENOSPC)
+
+
 def test_restore_extract_preserves_file_mode_and_mtime(tmp_path: Path) -> None:
     """Streaming a member body out by hand still restores its mode and mtime.
 
