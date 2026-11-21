@@ -248,18 +248,20 @@ _COMMENT = 15 * 1024
 
 
 @functools.cache
-def commented_directories(count: int) -> bytes:
+def commented_directories(count: int, character: str = "c") -> bytes:
     """``count`` directory members, each with a PAX ``comment`` of 15 Ki
-    characters, then one file, built once: ``tarfile`` would hold 15 KiB a
-    member, were it to keep every member it reads (issue #3931). A directory
-    has no data, so a walk of it writes next to nothing."""
+    ``character``, then one file, built once: ``tarfile`` would hold the
+    comment a member, were it to keep every member it reads (issue #3931), 15
+    KiB of ``c``s or 60 KiB of a character outside the BMP, which Python holds
+    in four bytes. A directory has no data, so a walk of it writes next to
+    nothing."""
 
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
         for i in range(count):
             info = tarfile.TarInfo(name=f"d{i:03}")
             info.type = tarfile.DIRTYPE
-            info.pax_headers = {"comment": "c" * _COMMENT}
+            info.pax_headers = {"comment": character * _COMMENT}
             tar.addfile(info)
         info = tarfile.TarInfo(name="a.txt")
         info.size = 1

@@ -3933,13 +3933,13 @@ async def test_upload_extract_tar_counts_directory_members_toward_the_entry_cap(
 
 async def test_upload_extract_tar_keeps_no_member_it_walked_past() -> None:
     # ``tarfile`` keeps every member it reads, with its PAX records, unless it
-    # is opened not to (issue #3931). 500 members holding 7.5 MiB of PAX
-    # comments, within the door's limits, are walked one member at a time, in
-    # under 4 MiB.
+    # is opened not to (issue #3931). 500 members holding 30 MiB of PAX
+    # comments, 7.5 Mi characters within the door's limits, are walked one
+    # member at a time, in under 12 MiB.
     community, server_id = uuid.uuid4(), uuid.uuid4()
     store = FakeFileStore()
     use_case = UploadFile(uow=_stopped_uow(community, server_id), file_store=store)
-    content = archive_cap_shapes.commented_directories(500)
+    content = archive_cap_shapes.commented_directories(500, "\U0001f600")
 
     tracemalloc.start()
     try:
@@ -3955,7 +3955,7 @@ async def test_upload_extract_tar_keeps_no_member_it_walked_past() -> None:
     finally:
         tracemalloc.stop()
 
-    assert peak < 4 * archive_cap_shapes.MIB
+    assert peak < 12 * archive_cap_shapes.MIB
     assert store.writes == [("a.txt", b"A")]
 
 

@@ -1359,10 +1359,10 @@ def test_validate_counts_directory_members_toward_the_entry_cap() -> None:
 
 def test_validate_keeps_no_member_it_walked_past() -> None:
     # ``tarfile`` keeps every member it reads, with its PAX records, unless it
-    # is opened not to (issue #3931). 500 members holding 7.5 MiB of PAX
-    # comments, within the gate's limits, are walked one member at a time, in
-    # under 4 MiB.
-    content = archive_cap_shapes.commented_directories(500)
+    # is opened not to (issue #3931). 500 members holding 30 MiB of PAX
+    # comments, 7.5 Mi characters within the gate's limits, are walked one
+    # member at a time, in under 12 MiB.
+    content = archive_cap_shapes.commented_directories(500, "\U0001f600")
 
     tracemalloc.start()
     try:
@@ -1371,7 +1371,7 @@ def test_validate_keeps_no_member_it_walked_past() -> None:
     finally:
         tracemalloc.stop()
 
-    assert peak < 4 * archive_cap_shapes.MIB
+    assert peak < 12 * archive_cap_shapes.MIB
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------
