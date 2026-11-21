@@ -17,6 +17,7 @@ import datetime as dt
 import uuid
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -27,6 +28,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql import false
 
 from mc_server_dashboard_api.core.adapters.database import Base
 
@@ -136,3 +138,10 @@ class ServerModel(Base):
     # Worker's text, bounded before the write.
     crash_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     crash_detail: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Whether the assigned Worker has yet to hydrate the server (issue #3890):
+    # set by the placement of a start, cleared once that Worker holds the
+    # store's working set, reports the server running, or is released. While
+    # set, nothing publishes a snapshot from that Worker.
+    awaiting_hydrate: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false()
+    )

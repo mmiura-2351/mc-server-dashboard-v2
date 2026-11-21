@@ -42,16 +42,18 @@ refusal that definitively did not start (``PORT_CONFLICT``, ``IMAGE_MISSING``,
 was sent (the command MAY have been applied), a post-dispatch ``BUSY`` outcome (the
 Worker refusing because another mutating command is already in flight, or because a
 failed-stop orphan it is still converging holds the id — either way the outcome is
-unknown), and an ``INVALID_STATE`` outcome of the start or of its hydrate (the Worker
-refusing because an instance is already live there), do NOT compensate — see the
-assignment-stickiness note below.
+unknown), an ``INVALID_STATE`` outcome of the start or of its hydrate (the Worker
+refusing because an instance is already live there), and a hydrate refused ``BUSY``,
+``UNAVAILABLE`` or ``EXPIRED`` (an answer that does not rule an instance there out),
+do NOT compensate — see the assignment-stickiness note below.
 
 Start dispatch is hydrate-then-start (FR-DATA-4). After the intent commits,
 ``StartServer`` first drives the Worker to pull the authoritative working set from
 Storage (a server with no published working set yet hydrates to an empty dir, the
 data-plane endpoint being 204), then dispatches the launch; a failure before the
-start command is sent (a failed hydrate, unless refused ``INVALID_STATE`` as below,
-or a pre-dispatch ``WorkerUnavailableError``) compensates the committed intent. The
+start command is sent (a failed hydrate, unless its refusal leaves an instance on
+the Worker possible as below, or a pre-dispatch ``WorkerUnavailableError``)
+compensates the committed intent. The
 launch carries a conventional ``server.jar`` relpath and the server's recorded MC
 version (FR-EXE-5: the Worker picks the Java runtime).
 
@@ -83,6 +85,24 @@ but the instance runs its own working set, and its snapshots publish that set's
 files over the store. ``place_and_start`` then returns, as nothing failed;
 ``__call__`` answers ``InvalidLifecycleTransitionError``, since its start launched
 nothing and the instance may run an older working set than the store's.
+
+A hydrate refused ``BUSY``, ``UNAVAILABLE`` or ``EXPIRED`` is not a failure before
+dispatch in that sense either (issue #3890). It proves no instance, but it does not
+rule one out on that Worker (``_HYDRATE_REFUSALS_KEEPING_THE_WORKER``): another
+command or a failed-stop orphan holds the id, a container the Worker does not track
+may run against the working set, or the hydrate expired before the Worker looked.
+Both ``__call__`` and ``place_and_start`` keep the assignment, record
+observed=unknown, and raise the refusal as before, so the reconciler retries the
+start on that same Worker.
+
+A kept Worker has not hydrated the server, and its scratch may be a leftover older
+than the store. The placement's commit sets the row's ``awaiting_hydrate``, and
+``_launch`` clears it only once the Worker holds the store's working set, and only
+for its own placement. While it is set, nothing publishes a snapshot from that
+Worker: the periodic tick skips the row, ``_final_snapshot`` takes none and lets the
+stop release, and the data plane refuses every publish from the Worker. A
+``running`` report from the Worker clears it too, since that instance's working set
+is what its snapshots capture from then on.
 
 "Definitely live" is now the WHOLE meaning of an ``INVALID_STATE`` start outcome,
 and that is what makes every convergence site sound. Until issue #2476 the Worker
@@ -216,6 +236,31 @@ _WORKING_SET_ABSENT_MARKER = "working dir absent"
 # "not running" on purpose — the server is down because this restart's own stop put
 # it down, and what the operator has to act on is the scratch.
 _WORKING_SET_ABSENT_REASON = "working_set_absent"
+
+# The hydrate refusals after which an instance of the server may still run on the
+# Worker that refused, though the server's record does not name it (issue #3890).
+# Placement cannot see such an instance, so a start or placement that gave the
+# Worker back would let the next one start the same world on a second host. Each
+# is answered before the Worker could rule an instance out, which only an answer
+# given after both ``reserve()`` and its leftover check passed does:
+#
+# * ``BUSY``: ``reserve()`` found another command's reservation for the server (a
+#   start or a stop may be in flight) or a failed-stop orphan, whose process may
+#   still be alive.
+# * ``UNAVAILABLE``: a container of the server the Worker does not track may be
+#   running against its working set; it could not be ended, or the daemon could
+#   not say.
+# * ``EXPIRED``: the session answered before the hydrate reached the Worker's
+#   checks at all. It waited past its budget, behind the Worker-wide cap or behind
+#   another command for this server.
+#
+# ``INVALID_STATE`` (a live instance) has its own arm. Every other answer gives
+# the Worker back: ``TRANSFER_FAILED`` comes after both checks passed, with the id
+# held through the transfer, and the rest are not reachable on a hydrate this API
+# sends (CONTROL_PLANE.md Section 5).
+_HYDRATE_REFUSALS_KEEPING_THE_WORKER = frozenset(
+    {CommandStatus.BUSY, CommandStatus.UNAVAILABLE, CommandStatus.EXPIRED}
+)
 
 
 def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
@@ -662,9 +707,19 @@ class StartServer:
             # caller sees a retryable conflict. A later reconcile tick takes the
             # redispatch_start path to the SAME Worker once the Worker settles (a
             # genuine success then emits a StatusChange; a failure leaves the row
-            # diverged for the next retry). Gate on ``dispatch.attempted`` so a
-            # PRE-dispatch BUSY — a hydrate refused for either reason — still
-            # compensates below: that one never reached the start.
+            # diverged for the next retry). A PRE-dispatch BUSY, a hydrate refused
+            # for either reason, keeps the Worker too, in the arm below.
+            raise failure
+        if (
+            not dispatch.attempted
+            and outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER
+        ):
+            # The Worker refused the HYDRATE with an answer that leaves an instance
+            # of this server there possible (issue #3890). Compensating would let a
+            # later start place it on another Worker while that instance runs. So
+            # keep desired=running and the assignment for the reconciler's
+            # redispatch_start to this Worker, and record what is known.
+            await self._record_unknown(server, worker_id, owe_again=owed_group_files)
             raise failure
         await self._compensate(
             community_id,
@@ -697,14 +752,17 @@ class StartServer:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
-          ever reached a Worker, so re-placing elsewhere cannot double-start. Two
+          ever reached a Worker, so re-placing elsewhere cannot double-start. Three
           exceptions keep the assignment. The re-read just before the send raising
           (a database error, issue #3741): the hydrate succeeded, so the
           assignment is kept for a re-send to the same Worker (see ``_launch``).
-          And a hydrate refused ``INVALID_STATE`` (issue #3865): the Worker
+          A hydrate refused ``INVALID_STATE`` (issue #3865): the Worker
           already runs an instance of the server, so re-placing elsewhere WOULD
           double-start. That one records observed=running, as
-          ``redispatch_start`` does, and returns.
+          ``redispatch_start`` does, and returns. And a hydrate refused ``BUSY``,
+          ``UNAVAILABLE`` or ``EXPIRED`` (issue #3890): the Worker may run an
+          instance, so re-placing elsewhere MAY double-start. That one records
+          observed=unknown and raises, and the next tick retries this Worker.
         - After the start was dispatched (a failed outcome, or a timeout/lost-response
           ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
           assignment. Subsequent ticks then take the ``redispatch_start`` path to the
@@ -726,9 +784,12 @@ class StartServer:
             # Make the owed player-group file changes first, as ``__call__`` does
             # (issue #3223): this path always hydrates, so the store is what gets
             # launched. No Worker holds an unassigned server, so no snapshot can
-            # publish over the write; the lifecycle lock, which this path takes
-            # for it, keeps a second placement of the same orphan from
-            # interleaving. A storage failure raises before a Worker is placed.
+            # publish over the write. Nor can the Worker placed below before its
+            # hydrate lands, even when a refused hydrate keeps it (issue #3890):
+            # the placement marks the row ``awaiting_hydrate``. The lifecycle lock,
+            # which this path takes for it, keeps a second placement of the same
+            # orphan from interleaving. A storage failure raises before a Worker is
+            # placed.
             owed_group_files = await regenerate_pending_group_files(
                 self.uow,
                 self.file_store,
@@ -846,15 +907,22 @@ class StartServer:
             )
             # A failed START outcome may reflect a command the Worker partially
             # applied; keep the assignment for a same-Worker redispatch. A failed
-            # HYDRATE outcome (not dispatched) never reached the start, so unassign.
+            # HYDRATE outcome (not dispatched) never reached the start, so unassign,
+            # unless its answer leaves an instance of this server on the Worker
+            # possible (issue #3890): then keep the Worker, as ``__call__`` does.
             if not dispatch.attempted:
-                await self._unassign(
-                    community_id,
-                    server_id,
-                    worker_id,
-                    stop_intent_count=stop_intent_count,
-                    original=failure,
-                )
+                if outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER:
+                    await self._record_unknown(
+                        server, worker_id, owe_again=owed_group_files
+                    )
+                else:
+                    await self._unassign(
+                        community_id,
+                        server_id,
+                        worker_id,
+                        stop_intent_count=stop_intent_count,
+                        original=failure,
+                    )
             raise failure
         return server
 
@@ -878,8 +946,9 @@ class StartServer:
         and a Worker is assigned, but the launch was never sent (crash between
         commit and dispatch) or the Worker is not actually running it. The intent
         and assignment stand; only the dispatch is replayed, so this changes no DB
-        row — and on failure it reverts nothing (a later reconcile tick retries
-        under backoff). The placement load was already counted on the original
+        row but the ``awaiting_hydrate`` mark ``_launch`` clears (issue #3890) —
+        and on failure it reverts nothing (a later reconcile tick retries under
+        backoff). The placement load was already counted on the original
         assignment, so it is not incremented again.
 
         An ``INVALID_STATE`` outcome means the Worker is already running the server
@@ -1017,8 +1086,9 @@ class StartServer:
         starts fresh), so this is not an error. The failing step's outcome is
         returned (a failed hydrate short-circuits the launch); a
         :class:`WorkerUnavailableError` propagates. Compensation/cleanup policy is
-        the caller's — this helper makes no DB write — so the normal start and the
-        reconciler's re-dispatch paths can each react differently to a failure.
+        the caller's — this helper writes no DB row but the ``awaiting_hydrate``
+        mark (issue #3890, below) — so the normal start and the reconciler's
+        re-dispatch paths can each react differently to a failure.
 
         Just before the start is sent, the server row is re-read in its own unit of
         work (issue #3737), and ``stop_intent_count`` is compared with the server's
@@ -1116,17 +1186,34 @@ class StartServer:
         # has not bumped by then is enqueued after this start, and the Worker's
         # per-server lane runs it as a real stop.
         #
-        # A read that raises (a database error) sends no start either, and each
-        # caller handles it as a failure before the send. ``__call__`` reverts its
-        # intent, as after any such failure (issue #2001); the revert first checks
-        # that the intent is still this start's (issue #3741). ``place_and_start``
-        # keeps its assignment: its hydrate succeeded, so once the reconciler's
-        # grace lapses, and while this Worker is connected, the reconciler re-sends
-        # the start here, without a second hydrate if the store has not moved past
-        # the generation recorded above. ``redispatch_start`` reverts nothing, as on
-        # any failure.
+        # The same unit of work clears the row's ``awaiting_hydrate`` (issue
+        # #3890): the Worker now holds the store's working set, because the hydrate
+        # above landed or its held generation is at least the store's, so its
+        # snapshots may publish again. That is true of this start's placement
+        # only. A stop may have released the row meanwhile and a newer start
+        # placed it on this same Worker, whose hydrate has not landed (r2 review).
+        # So the clear runs only once the re-read passes the compare, and its write
+        # also asserts the row's ``updated_at`` as that read saw it. The compare
+        # runs again after the unit of work closes, for the enqueue (above).
+        #
+        # A read or write that raises (a database error) sends no start either,
+        # and each caller handles it as a failure before the send. ``__call__``
+        # reverts its intent, as after any such failure (issue #2001); the revert
+        # first checks that the intent is still this start's (issue #3741).
+        # ``place_and_start`` keeps its assignment: its hydrate succeeded, so once
+        # the reconciler's grace lapses, and while this Worker is connected, the
+        # reconciler re-sends the start here, without a second hydrate if the
+        # store has not moved past the generation recorded above.
+        # ``redispatch_start`` reverts nothing, as on any failure.
         async with self.uow:
             current = await self.uow.servers.get_by_id(server_id)
+            if current is not None and self._still_owns(
+                current, worker_id, stop_intent_count
+            ):
+                await self.uow.servers.clear_awaiting_hydrate(
+                    server_id, worker_id, updated_at=current.updated_at
+                )
+                await self.uow.commit()
         if current is None or not self._still_owns(
             current, worker_id, stop_intent_count
         ):
@@ -1186,6 +1273,11 @@ class StartServer:
             # ``__call__`` reads the status, finds neither INVALID_STATE nor BUSY, and
             # compensates regardless of ``attempted``.
             #
+            # The skip cleared the row's ``awaiting_hydrate`` on a proof this refusal
+            # has just disproved, so the replay owes the hydrate again until it lands
+            # (issue #3890): a refused replay must not leave the Worker's scratch
+            # publishable.
+            #
             # Log it: the condition means a live Worker's scratch was destroyed
             # underneath it, and a self-healing recovery nobody can see is how the next
             # occurrence gets harder to diagnose. This line and the Worker's own WARN
@@ -1199,6 +1291,9 @@ class StartServer:
                 server_id.value,
                 outcome.message,
             )
+            async with self.uow:
+                await self.uow.servers.mark_awaiting_hydrate(server_id, worker_id)
+                await self.uow.commit()
             return await self._launch(
                 server,
                 community_id,
@@ -1227,13 +1322,7 @@ class StartServer:
         #3865): the marks the start cleared with its intent, for a launch that did
         not happen. The instance keeps its own working set, and its snapshots
         publish that set's player files over the store, so the files are owed
-        again in this same transaction: the marks the start cleared, and every
-        file a group manages, since an earlier start that never launched on this
-        Worker may have cleared a mark the instance never applied. A file no group
-        manages is left as the game left it. That includes one whose last group
-        was detached or deleted, if an earlier start that never launched cleared
-        the mark that change left: nothing owes it any more, so the instance's
-        copy stays.
+        again in this same transaction, as :meth:`_owe_group_files_again` says.
         """
 
         observed_at = self.clock.now()
@@ -1245,12 +1334,7 @@ class StartServer:
                 expected_worker=worker_id,
             )
             if owe_again is not None:
-                attached = await self.uow.groups.list_groups_for_server(server.id)
-                owed = {mark.kind for mark in owe_again}
-                owed |= {group.kind for group in attached}
-                for kind in GroupKind:
-                    if kind in owed:
-                        await self.uow.groups.mark_sync_pending([server.id], kind)
+                await self._owe_group_files_again(server.id, owe_again)
             await self.uow.commit()
         # Keep the return honest (issue #292): reflect the observed state on the
         # entity only when the guarded write landed; if a same-instant/fresher
@@ -1267,6 +1351,78 @@ class StartServer:
                 bedrock_port=server.bedrock_port,
                 running=True,
             )
+
+    async def _record_unknown(
+        self,
+        server: Server,
+        worker_id: WorkerId,
+        *,
+        owe_again: list[PendingGroupSync],
+    ) -> None:
+        """Record observed=unknown for a server kept on ``worker_id`` (issue #3890).
+
+        The Worker refused the hydrate with an answer that does not rule out an
+        instance of the server there, and the start keeps the server on it. The
+        observed state the row carries was not reported by this Worker, which
+        cannot report on a server no record named, so it says nothing about it.
+        ``unknown`` is what the API knows. It also sends both reconciler arms back
+        to this Worker: a running intent is retried here (a stale ``running``
+        would read converged, and nothing would retry the start that was never
+        sent), and a stop whose dispatch fails is sent again rather than released
+        under that instance on the strength of a stale ``stopped``. The write
+        asserts the row is still on ``worker_id``.
+
+        The write is stamped with the placement's instant, the ``updated_at`` of
+        the commit that put the row on ``worker_id``, not with now. The row has
+        named that Worker since then, so a report it sent during the hydrate's
+        round trip has landed already, and the #216 guard keeps that newer fact
+        rather than overwrite it, a crash reason included.
+
+        ``owe_again`` is the marks the start cleared with its intent, for a launch
+        that did not happen. They are owed again in the same transaction, by the
+        rule :meth:`_owe_group_files_again` states for an instance adopted on this
+        Worker. That is the instance this Worker may turn out to run, and
+        ``redispatch_start`` adopts it without owing anything, so the keep owes
+        what that adoption would.
+        """
+
+        observed_at = server.updated_at
+        async with self.uow:
+            applied = await self.uow.servers.record_observed_state(
+                server.id,
+                observed_state=ObservedState.UNKNOWN,
+                observed_at=observed_at,
+                expected_worker=worker_id,
+            )
+            await self._owe_group_files_again(server.id, owe_again)
+            await self.uow.commit()
+        if applied:
+            server.observe(ObservedState.UNKNOWN, observed_at)
+
+    async def _owe_group_files_again(
+        self, server_id: ServerId, owe_again: list[PendingGroupSync]
+    ) -> None:
+        """Owe again the player files a start regenerated for no launch (#3865).
+
+        Run inside the caller's unit of work, for an instance of the server on the
+        start's Worker that it adopts (:meth:`_record_running`) or may turn out to
+        run (:meth:`_record_unknown`, issue #3890). That instance keeps its own
+        working set, and its snapshots publish that set's player files over the
+        store. So two sets of files are owed: the marks the start cleared
+        (``owe_again``), and every file a group manages, since an earlier start
+        that never launched on this Worker may have cleared a mark the instance
+        never applied. A file no group manages is left as the game left it. That
+        includes one whose last group was detached or deleted, if an earlier start
+        that never launched cleared the mark that change left: nothing owes it any
+        more, so the instance's copy stays.
+        """
+
+        attached = await self.uow.groups.list_groups_for_server(server_id)
+        owed = {mark.kind for mark in owe_again}
+        owed |= {group.kind for group in attached}
+        for kind in GroupKind:
+            if kind in owed:
+                await self.uow.groups.mark_sync_pending([server_id], kind)
 
     async def _generation_before_hydrate(
         self, community_id: CommunityId, server_id: ServerId
@@ -1487,7 +1643,8 @@ class StartServer:
 
         Called by ``place_and_start`` only when the failure happened BEFORE the start
         command was sent (a failed hydrate, but not one refused ``INVALID_STATE``,
-        which proves a live instance): no start ever reached a Worker, so
+        which proves a live instance, nor one whose refusal leaves an instance
+        possible, issue #3890): no start ever reached a Worker, so
         clearing the assignment to let a later tick re-place elsewhere cannot
         double-start (issue #101's stickiness invariant). A post-dispatch failure
         does NOT call this — the assignment must stick for a same-Worker redispatch.
@@ -2095,6 +2252,14 @@ class StopServer:
         uploading, so the caller must HOLD the assignment rather than release it
         while the upload is in flight. ``False`` for success and for a worker
         DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
+
+        A row whose Worker has not hydrated it under this assignment
+        (``awaiting_hydrate``, issue #3890) is not snapshotted at all, and this
+        returns ``False`` so the caller releases it. That Worker's scratch may be a
+        leftover older than the store, and publishing it would replace the newer
+        working set. The store wins, as it did when a refused hydrate gave the
+        Worker back, and the next start's hydrate displaces the scratch. The row is
+        read here, so all three callers pass this one check.
         """
 
         # A dispatched snapshot may outlive its caller, so a finished stop recorded
@@ -2103,6 +2268,22 @@ class StopServer:
         # attempt (issue #3682).
         self.unrecorded_stops.forget(server_id)
         self.stop_refusals.forget(server_id)
+        async with self.uow:
+            current = await self.uow.servers.get_by_id(server_id)
+        if (
+            current is not None
+            and current.assigned_worker_id == worker_id
+            and current.awaiting_hydrate
+        ):
+            _LOG.warning(
+                "final snapshot skipped for server %s: worker %s has not hydrated it "
+                "under this assignment, so its scratch may be older than the store. "
+                "The store's working set stands, and the next start's hydrate "
+                "replaces the scratch (issue #3890)",
+                server_id.value,
+                worker_id.value,
+            )
+            return False
         try:
             snapshot = await self.control_plane.snapshot(
                 worker_id=worker_id,

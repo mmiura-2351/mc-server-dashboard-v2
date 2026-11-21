@@ -246,8 +246,10 @@ export const en = {
   // 409 command_expired (issue #3305): the command waited on the host, behind
   // other work, past its budget, and the host never ran it, so a retry is safe.
   // Not commandFailed: nothing was half-done, so there is no state to check. A
-  // start or restart leaves nothing pending. A stop keeps its intent, which the
-  // system replays on its own after a short grace, and a retry replays it at once.
+  // restart leaves nothing pending, nor does a start whose start command expired;
+  // one whose hydrate expired stays pending for the reconciler (issue #3890). A
+  // stop keeps its intent, which the system replays on its own after a short
+  // grace, and a retry replays it at once.
   "dashboard.lifecycle.commandExpired":
     "Not applied: the server host was busy with other work and did not get to it in time. Try again.",
   // 409 command_failed (issue #2420): the host took the command and could not
@@ -269,11 +271,11 @@ export const en = {
   "dashboard.lifecycle.restartPending":
     "Could not restart the server: it may be stopped for now. The system will bring it back automatically.",
   // 409 worker_busy on start (issue #2445). A start refused with worker_busy is
-  // ambiguous at the edge: a post-dispatch BUSY leaves the start pending for the
-  // reconciler, but a pre-dispatch one is undone back to stopped — both arrive
-  // identically, so this must not promise the start will happen. It says it MAY
-  // still come up and to start again only if it stays stopped, rather than the
-  // plain "try again" that on the pending path collides with invalid_transition.
+  // left pending for the reconciler, whether the start or its hydrate was
+  // refused (the hydrate since issue #3890), but this does not promise the start
+  // will happen. It says it MAY still come up and to start again only if it
+  // stays stopped, rather than the plain "try again" that on the pending path
+  // collides with invalid_transition.
   "dashboard.lifecycle.startPending":
     "Could not start the server right now: another operation on it is still in progress. The start may still be applied automatically — check the server's state, and start it again only if it stays stopped.",
   // 409 invalid_transition on start (issue #2445): the server is already
@@ -303,7 +305,8 @@ export const en = {
   // undone and the outcome is simply unknown — a graceful stop outliving the
   // dispatch deadline is the commonest case. The Worker can also answer
   // UNAVAILABLE itself, when its container backend did not cooperate (issue
-  // #3673). A start refused that way is compensated back to stopped, which is
+  // #3673). A start refused that way is compensated back to stopped (a start
+  // whose hydrate was refused stays pending instead, issue #3890), which is
   // why start stays on workerUnavailable above; a restart whose relaunch was
   // refused shares restartUnconfirmed, since the reconciler starts the server if
   // it stays down and its Worker stays connected. Distinct from the *Pending
