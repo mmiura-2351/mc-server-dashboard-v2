@@ -479,6 +479,11 @@ def test_install_from_catalog_upstream_failure_is_502() -> None:
     [
         pytest.param(InvalidFilePathError("x"), "invalid_path", id="path"),
         pytest.param(
+            InvalidFilePathError("x", reason="name_too_long"),
+            "invalid_path",
+            id="store-refusal",
+        ),
+        pytest.param(
             InvalidFilePathError("x", reason="invalid_filename"),
             "invalid_filename",
             id="filename",

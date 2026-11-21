@@ -1241,6 +1241,27 @@ def test_rename_refuses_a_server_name(name: str) -> None:
     assert uow.servers.by_id[ServerId(server_id)].name.value == "survival"
 
 
+def test_rename_refuses_a_stored_name_the_rule_refuses_until_renamed() -> None:
+    # A server stored before the rule keeps its name, but a save that sends it
+    # back is refused like any other; a valid name fixes it (issue #3957).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    legacy = _server_entity(community_id=community, server_id=server_id)
+    legacy.name = ServerName.stored("legacy\nname")
+    uow.servers.seed(legacy)
+    client = _client(_app(member=True, allow=True, update=_real_update(uow)))
+    url = f"/api/communities/{community}/servers/{server_id}"
+
+    resent = client.patch(url, json={"name": "legacy\nname"})
+    assert resent.status_code == 422
+    assert resent.json()["reason"] == "invalid_server_name"
+
+    renamed = client.patch(url, json={"name": "legacy name"})
+    assert renamed.status_code == 200
+    assert uow.servers.by_id[ServerId(server_id)].name.value == "legacy name"
+
+
 def test_update_no_op_config_requires_server_update_403() -> None:
     # A config that round-trips identical to the current config has an empty
     # changed-key set, but the PATCH still requires server:update (issue #458).
