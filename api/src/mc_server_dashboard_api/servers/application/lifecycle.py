@@ -121,7 +121,7 @@ import asyncio
 import datetime as dt
 import logging
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.application.command_dispatch import (
@@ -1801,12 +1801,18 @@ class StopServer:
         only a write made while nothing is in flight for the server: the Worker has
         answered the stop or reported the process gone, and no final snapshot of it
         can still be uploading.
+
+        The record carries the instant the write began, not the one it raised at
+        (issue #3981). A Worker that drops while the write fails is then newer than
+        the record, which no longer keeps the short grace: the Worker may be back
+        with a working set no final snapshot has taken.
         """
 
+        began_at = self.clock.now()
         try:
             yield
         except Exception:
-            self.unrecorded_stops.record(server_id, at=self.clock.now())
+            self.unrecorded_stops.record(server_id, at=began_at)
             raise
 
     async def _stop(
@@ -1906,13 +1912,15 @@ class StopServer:
             # The stop intent already landed (desired=stopped committed above), so
             # this is the RELEASE half of the stop path — identical to the one the
             # reconciler's crashed arm runs (issue #2448); see
-            # ``_release_after_final_snapshot``.
-            await self._release_after_final_snapshot(
-                server=server,
-                worker_id=worker_id,
-                community_id=community_id,
-                server_id=server_id,
-            )
+            # ``_release_after_final_snapshot``. A release kept for a session end
+            # still answers the stop, as on a snapshot timeout (issue #3981).
+            with suppress(WorkerUnavailableError):
+                await self._release_after_final_snapshot(
+                    server=server,
+                    worker_id=worker_id,
+                    community_id=community_id,
+                    server_id=server_id,
+                )
             return server
         if not outcome.success:
             # The Worker answered, so this dispatch is settled: nothing is left in
@@ -1935,13 +1943,16 @@ class StopServer:
         # clear releases it, is dropped by the sink's ownership guard
         # (``ServersServerStateSink.record_observed_state``, "dropping status report
         # from non-owning worker"). Either is acceptable, since this write already
-        # converged the cache.
-        await self._record_stopped_then_final_snapshot(
-            server=server,
-            worker_id=worker_id,
-            community_id=community_id,
-            server_id=server_id,
-        )
+        # converged the cache. The stop is done, so a release kept because the final
+        # snapshot met a session end still answers with the server stopped and
+        # assigned, as on a snapshot timeout (issue #3981).
+        with suppress(WorkerUnavailableError):
+            await self._record_stopped_then_final_snapshot(
+                server=server,
+                worker_id=worker_id,
+                community_id=community_id,
+                server_id=server_id,
+            )
         return server
 
     async def _record_stopped_then_final_snapshot(
@@ -1968,12 +1979,17 @@ class StopServer:
         worker's upload is still live, which splits the ``WorkerUnavailableError``
         the dispatch may raise by its underlying cause (issue #847):
 
-        * DISCONNECT (``upload_may_be_live`` False — the worker session is gone, its
-          ``serveCtx`` cancelled the transfer worker-side, nothing is uploading): the
-          assignment is STILL cleared. The data stays in the Worker's retained
-          scratch (#845) and the next same-worker start reuses it. A cross-worker
-          placement of such a failed-final server keeps the #845-documented exposure
-          (logged loud by ``_final_snapshot``).
+        * SESSION END (``not_connected``, ``upload_may_be_live`` False — the worker
+          session ended before or while the snapshot ran, or a fast reconnect
+          retired it, so its ``serveCtx`` cancelled the transfer worker-side and
+          nothing is uploading): the clear is SKIPPED too, and ``_final_snapshot``
+          raises (issue #3981). The Worker may still hold the working set and be
+          back seconds later. Releasing would orphan that set in its retained
+          scratch (#845) while a start placed the server from the older store. The
+          reconciler's stale-stop arm takes the snapshot once the Worker is back,
+          or releases the row a grace after the drop. A stop sent by ``__call__``
+          still answers, with the server stopped and assigned; ``redispatch_stop``
+          raises, so the reconciler counts the failed attempt.
         * TIMEOUT (``upload_may_be_live`` True — the worker session is healthy and
           the API deadline only abandoned the pending future; the proto has no
           command-cancel, so the worker uploads to completion and may publish late):
@@ -1999,10 +2015,6 @@ class StopServer:
         hold immediately via the late-snapshot sink (#891/#901); the reconciler's
         stale-stop arm (``clear_stale_assignment``) is the backstop, recovering the
         row once the grace window lapses if no late result arrives — grace-bounded.
-        (Asymmetric
-        sub-case on disconnect: a worker that has not yet noticed the drop keeps its
-        ``serveCtx`` alive and the upload running briefly after the clear; bounded by
-        the worker's own stream/heartbeat failure detection — accepted.)
         """
 
         observed_at = self.clock.now()
@@ -2033,14 +2045,15 @@ class StopServer:
         # once the Worker reports the process gone) and BEFORE the unassign, so the
         # captured working set is quiescent (FR-DATA-4, FR-DATA-7).
         #
-        # ``_final_snapshot`` returns normally on success, on a worker DISCONNECT, and
+        # ``_final_snapshot`` returns normally on success, on a failed snapshot, and
         # on a dispatch TIMEOUT (``WorkerUnavailableError`` is caught and logged
         # inside it), reporting ``upload_may_be_live`` only for the timeout. The clear
-        # runs for success and disconnect — the worker is either done uploading or
-        # gone, so releasing the assignment is correct — but is SKIPPED on a timeout,
-        # because the worker is still uploading; holding the row lets the stale-stop
-        # arm recover it (issue #847), the same as the cancellation path, which
-        # propagates OUT of ``_final_snapshot`` and skips the clear too. The clear is
+        # runs for success and failure — the worker is done uploading, so releasing
+        # the assignment is correct — but is SKIPPED on a timeout, because the worker
+        # is still uploading; holding the row lets the stale-stop arm recover it
+        # (issue #847), the same as the cancellation path, which propagates OUT of
+        # ``_final_snapshot`` and skips the clear too. So does a session end, which
+        # ``_final_snapshot`` re-raises (issue #3981). The clear is
         # independently CAS-guarded (``clear_assignment_after_final_snapshot`` matches
         # only a still desired=stopped row still assigned to this worker), so it is run
         # regardless of ``applied``: even if the #216 guard dropped the observed write,
@@ -2130,9 +2143,13 @@ class StopServer:
         a different Worker mid-upload. A snapshot TIMEOUT therefore HOLDS the
         assignment (``upload_may_be_live``), released early by the worker's late
         ``CommandResult`` (``clear_assignment_after_late_snapshot``, #891) or by the
-        stale-stop arm once grace lapses. A snapshot FAILURE still releases: the
-        server is down and the operator's stop succeeded; ``_final_snapshot`` logs
-        publication as unconfirmed and names the cross-worker exposure.
+        stale-stop arm once grace lapses. So does a snapshot that fails because the
+        Worker's session ended, which ``_final_snapshot`` re-raises (issue #3981):
+        the Worker may be back with the working set, and the stale-stop arm takes
+        the snapshot then, or releases the row a grace after the drop. Any other
+        snapshot FAILURE still releases: the server is down and the operator's stop
+        succeeded; ``_final_snapshot`` logs publication as unconfirmed and names the
+        cross-worker exposure.
 
         The release is additionally gated on this call having established the row is
         at rest — see ``at_rest_under_us`` below. That is the one place this path
@@ -2240,7 +2257,6 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
-        hold_if_unreachable: bool = False,
     ) -> bool:
         """Capture the working set of a server whose process is gone.
 
@@ -2255,7 +2271,8 @@ class StopServer:
         rest on all of them, whether the process exited on command or died.
 
         A snapshot failure is logged, not raised: the stop itself already succeeded
-        and the server is down. But the failure is logged at ERROR, not warning
+        and the server is down. A session end is the exception, below. The failure
+        is logged at ERROR, not warning
         (issue #841): this is the ONLY final-snapshot path for a graceful stop, and
         the server is now stopped (and about to be unassigned), so there is no
         periodic-snapshot or reconciler retry. A failed result carries no publication
@@ -2273,11 +2290,19 @@ class StopServer:
         Returns ``upload_may_be_live`` (issue #847): ``True`` only when the snapshot
         dispatch TIMED OUT — the worker session is healthy and the transfer is still
         uploading, so the caller must HOLD the assignment rather than release it
-        while the upload is in flight. ``False`` for success and for a worker
-        DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
-        With ``hold_if_unreachable`` a Worker whose session ended re-raises the
-        ``WorkerUnavailableError`` instead, so the caller keeps the assignment
-        for a Worker that may be back with the working set (issue #3963).
+        while the upload is in flight. ``False`` for success and for a failed
+        snapshot, including one the API could not send at all (no data-plane URL),
+        which says nothing about the Worker — clearing is safe.
+
+        A Worker whose session ended re-raises the ``WorkerUnavailableError``
+        (``not_connected``) instead: at dispatch, in flight, or retired by a fast
+        reconnect that left the Worker connected on a new session (issues #3963,
+        #3981). No upload is live, but the Worker may still hold the working set and
+        be back within the disconnected-Worker grace, so every caller keeps the
+        assignment for the reconciler's stale-stop arm. It takes the snapshot once
+        the Worker is back, or releases the row a grace after the drop. Releasing
+        here would orphan the set in the Worker's scratch while a start placed the
+        server from the older store.
 
         A row whose Worker has not hydrated it under this assignment
         (``awaiting_hydrate``, issue #3890) is not snapshotted at all, and this
@@ -2363,15 +2388,12 @@ class StopServer:
                     server_id.value,
                 )
                 return True
-            if (
-                hold_if_unreachable
-                and exc.worker_state is UnavailableWorkerState.NOT_CONNECTED
-            ):
+            if exc.worker_state is UnavailableWorkerState.NOT_CONNECTED:
                 _LOG.warning(
                     "final snapshot could not reach the Worker for server %s: its "
                     "session ended. Holding the assignment for the "
                     "disconnected-Worker grace, so a Worker back within it still "
-                    "takes the snapshot (issue #3963)",
+                    "takes the snapshot (issues #3963, #3981)",
                     server_id.value,
                 )
                 raise
@@ -2693,7 +2715,6 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
-                hold_if_unreachable=True,
             )
             if upload_may_be_live:
                 # The connected Worker has not answered the snapshot yet.
