@@ -40,12 +40,19 @@ def is_valid_upload_filename(filename: str) -> bool:
 
     return (
         filename.strip() != ""
-        and not any(
-            c in "/\\" or unicodedata.category(c) in ("Cc", "Cs") or _is_noncharacter(c)
-            for c in filename
-        )
+        and not any(is_refused_filename_character(c) for c in filename)
         and len(filename.encode("utf-8")) <= MAX_FILENAME_BYTES
     )
+
+
+def is_refused_filename_character(c: str) -> bool:
+    """Whether no uploaded file's name may carry ``c``.
+
+    ``/``, ``\\``, a control character, a lone surrogate or a noncharacter; see
+    :func:`is_valid_upload_filename` for why.
+    """
+
+    return c in "/\\" or unicodedata.category(c) in ("Cc", "Cs") or _is_noncharacter(c)
 
 
 def _is_noncharacter(c: str) -> bool:

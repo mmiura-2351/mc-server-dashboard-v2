@@ -66,6 +66,10 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeResourcePackStore, FakeUnitOfWork
+from tests.servers.upload_display_names import (
+    accepted_display_names,
+    refused_display_names,
+)
 from tests.servers.upload_filenames import (
     accepted_filenames,
     post_raw_upload,
@@ -414,21 +418,7 @@ class TestUploadDisplayName:
     it carries no control character and has a bound (issue #3922).
     """
 
-    @pytest.mark.parametrize(
-        ("display_name", "charset"),
-        [
-            pytest.param(b"a\x00b", None, id="nul"),
-            pytest.param(b"a\nb", None, id="lf"),
-            pytest.param(b"a\x1b[2Jb", None, id="esc"),
-            pytest.param(b"a\x7fb", None, id="del"),
-            pytest.param("a\x85b".encode(), None, id="c1"),
-            # A lone surrogate has no UTF-8 encoding, so the row could not be
-            # stored; a declared charset decodes one.
-            pytest.param(b"a+2AA-b", "utf-7", id="lone-surrogate"),
-            pytest.param(b"   ", None, id="blank"),
-            pytest.param(("x" * 201).encode(), None, id="201-characters"),
-        ],
-    )
+    @pytest.mark.parametrize(("display_name", "charset"), refused_display_names())
     def test_refuses_a_display_name(
         self, display_name: bytes, charset: str | None
     ) -> None:
@@ -446,22 +436,7 @@ class TestUploadDisplayName:
         assert resp.json()["reason"] == "invalid_display_name"
         assert uc.calls == []
 
-    @pytest.mark.parametrize(
-        ("display_name", "stored"),
-        [
-            pytest.param("My Pack", "My Pack", id="ascii"),
-            pytest.param("パック\u3000二", "パック\u3000二", id="japanese"),
-            pytest.param(
-                "\U0001f468\u200d\U0001f469 a\u202eb",
-                "\U0001f468\u200d\U0001f469 a\u202eb",
-                id="zwj-and-bidi",
-            ),
-            pytest.param("x" * 200, "x" * 200, id="200-characters"),
-            pytest.param("あ" * 200, "あ" * 200, id="200-multibyte-characters"),
-            # The bound is on the name as stored, after the strip.
-            pytest.param("  " + "x" * 200 + "  ", "x" * 200, id="stripped"),
-        ],
-    )
+    @pytest.mark.parametrize(("display_name", "stored"), accepted_display_names())
     def test_stores_a_display_name_stripped(
         self, display_name: str, stored: str
     ) -> None:
