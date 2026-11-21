@@ -14,12 +14,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import os
+import socket
+import threading
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api import integrity_sweep_cli
@@ -108,10 +113,12 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await downgrade_base(_DB_URL)
 
 
-async def _seed_server(engine: AsyncEngine) -> tuple[CommunityId, ServerId]:
+async def _seed_server(
+    engine: AsyncEngine, community_name: str = "guild"
+) -> tuple[CommunityId, ServerId]:
     community = Community(
         id=CommunityCommunityId(uuid.uuid4()),
-        name=CommunityName("guild"),
+        name=CommunityName(community_name),
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -437,3 +444,131 @@ async def test_cli_sweep_completes_on_the_smallest_accepted_pool(
     async with ServersUnitOfWork(create_session_factory(engine)) as uow:
         fetched = await uow.backups.get_by_id(row.id)
     assert fetched is not None and fetched.health is BackupHealth.HEALTHY
+
+
+class _Forwarder:
+    """A TCP forwarder to Postgres that the test can take down.
+
+    ``kill`` stops listening and drops every forwarded connection, which is what a
+    database going down does to its clients, without touching the scratch Postgres
+    the other tests share.
+    """
+
+    def __init__(self, host: str, port: int) -> None:
+        self._upstream = (host, port)
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.port: int = self._listener.getsockname()[1]
+        self._sockets: list[socket.socket] = []
+        self._lock = threading.Lock()
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                client, _ = self._listener.accept()
+            except OSError:
+                return  # killed
+            upstream = socket.create_connection(self._upstream)
+            with self._lock:
+                self._sockets += [client, upstream]
+            for src, dst in ((client, upstream), (upstream, client)):
+                threading.Thread(
+                    target=self._pipe, args=(src, dst), daemon=True
+                ).start()
+
+    @staticmethod
+    def _pipe(src: socket.socket, dst: socket.socket) -> None:
+        with contextlib.suppress(OSError):
+            while data := src.recv(65536):
+                dst.sendall(data)
+        with contextlib.suppress(OSError):
+            dst.shutdown(socket.SHUT_WR)
+
+    def kill(self) -> None:
+        with contextlib.suppress(OSError):
+            self._listener.shutdown(socket.SHUT_RDWR)
+        self._listener.close()
+        with self._lock:
+            for sock in self._sockets:
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+                sock.close()
+
+
+# 4 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(4 * 10 + 30)
+@pytest.mark.usefixtures("app_log_handler_restored")
+async def test_cli_exits_3_when_the_database_goes_down_mid_sweep(
+    engine: AsyncEngine,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Postgres going down while the sweep holds no lifecycle lock (a snapshot
+    check) stops the pass at its next query with exit 3 and one line, no
+    traceback, at the default log settings (issue #3942). The pool's reconnect is
+    refused, which asyncpg raises as a raw ``OSError``; the command's engines type
+    it. The verdict the first server's backup got stays."""
+
+    assert _DB_URL is not None
+    storage = FsStorage(tmp_path)
+    rows = []
+    for name in ("guild", "realm"):
+        community, server = await _seed_server(engine, community_name=name)
+        ref = await _put_backup(
+            storage,
+            community,
+            server,
+            {"world/region/r.0.0.mca": healthy_region_bytes()},
+        )
+        row = _backup(server, ref)
+        async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+            await uow.backups.add(row)
+            await uow.commit()
+        rows.append(row)
+
+    url = make_url(_DB_URL)
+    forwarder = _Forwarder(url.host or "127.0.0.1", url.port or 5432)
+    try:
+        monkeypatch.setenv(
+            "MCD_API_DATABASE__URL",
+            url.set(host="127.0.0.1", port=forwarder.port).render_as_string(
+                hide_password=False
+            ),
+        )
+        monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+        monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+        check = StorageBackupStoreAdapter.check_current_health
+
+        async def _down_during_the_snapshot_check(
+            self: StorageBackupStoreAdapter, **kwargs: Any
+        ) -> Any:
+            forwarder.kill()  # the sweep holds no lifecycle lock here
+            return await check(self, **kwargs)
+
+        monkeypatch.setattr(
+            StorageBackupStoreAdapter,
+            "check_current_health",
+            _down_during_the_snapshot_check,
+        )
+
+        status = await asyncio.to_thread(integrity_sweep_cli.main, [])
+    finally:
+        forwarder.kill()
+
+    err = capsys.readouterr().err
+    assert status == 3, err
+    assert "Traceback" not in err
+    *records, line = err.splitlines()
+    for record in records:  # the sweep's progress, in the default json format
+        json.loads(record)
+    assert line.startswith(
+        "integrity sweep aborted: the database failed (DatabaseConnectError: "
+    )
+    assert line.endswith("it is safe to re-run the sweep.")
+    async with ServersUnitOfWork(create_session_factory(engine)) as uow:
+        healths = [(await uow.backups.get_by_id(row.id)) for row in rows]
+    assert sorted(backup.health.value for backup in healths if backup is not None) == [
+        "healthy",
+        "unknown",
+    ]

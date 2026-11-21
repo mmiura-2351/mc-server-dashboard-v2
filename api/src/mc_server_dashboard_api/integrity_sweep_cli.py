@@ -21,11 +21,15 @@ the environment, the same ``MCD_API_*`` settings the API server uses, and the
 command logs through the API's handler (issue #3942).
 
 Exit status: 0 when the pass completed; 1 when the object store could not serve
-an archive read; 2 on a bad argument; 3 when the database driver raised an error
-mid-pass (SQLAlchemy ``DBAPIError``, such as a dropped connection or a terminated
-backend) or a server's lifecycle lock was lost. A 1 or a 3 stops the pass with a
-one-line message: verdicts already written this run are committed, and the sweep
-is safe to re-run. ``log.level=debug`` logs the traceback of a 3.
+an archive read; 2 on a bad argument or configuration, with one line; 3 when the
+database failed or a server's lifecycle lock was lost. The database fails when it
+refuses a connection, at the start or mid-pass, or the driver raises an error
+(SQLAlchemy ``DBAPIError``, such as a dropped connection or a terminated
+backend). A 1 or a 3 stops the pass with a one-line message: verdicts already
+written this run are committed, and the sweep is safe to re-run.
+``log.level=debug`` logs the traceback of a 3. Any other error, a full disk on
+the store for one, ends in a traceback, and Python exits 1 for it too, so a 1
+alone does not prove a store outage.
 """
 
 from __future__ import annotations
@@ -37,15 +41,23 @@ import sys
 import uuid
 
 from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mc_server_dashboard_api.app import _build_storage, _resolve_config_file
 from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSystemClock
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
-from mc_server_dashboard_api.config import Settings, load_settings
+from mc_server_dashboard_api.config import (
+    Settings,
+    describe_settings_error,
+    load_settings,
+)
 from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
     create_engine,
     create_session_factory,
+    is_transient_database_error,
+    translate_connect_outages,
 )
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.servers.adapters.backup_store import (
@@ -66,8 +78,37 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 _LOG = logging.getLogger(__name__)
 
 
+def _engine(url: str, *, pool_size: int, max_overflow: int) -> AsyncEngine:
+    """An engine whose connect outage is a :class:`DatabaseConnectError`.
+
+    asyncpg raises a refused connect as the raw ``OSError`` a store read can also
+    raise, so ``main`` could not tell a database outage from a disk fault by type
+    (issue #3942). Both of the sweep's engines are built here.
+    """
+
+    engine = create_engine(url, pool_size=pool_size, max_overflow=max_overflow)
+    translate_connect_outages(engine)
+    return engine
+
+
+def _is_database_failure(exc: Exception) -> bool:
+    """Whether ``exc`` means the database failed, which ends the sweep with 3.
+
+    A bare ``OSError`` never does: the fs adapter keeps a full disk or a permission
+    fault raw (STORAGE.md Section 7.3), and the database's own connect failure
+    arrives typed (``_engine``). The rest of what the app counts as a database
+    outage, and every ``DBAPIError``, can only be the database's.
+    """
+
+    if isinstance(exc, OSError):
+        return False
+    return isinstance(
+        exc, DBAPIError | DatabaseConnectError
+    ) or is_transient_database_error(exc)
+
+
 async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary:
-    engine = create_engine(
+    engine = _engine(
         settings.database.url,
         pool_size=settings.database.pool_size,
         max_overflow=settings.database.max_overflow,
@@ -77,7 +118,7 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
     # own engine rather than a slot in the configured pool, leaving that pool
     # whole for the sweep's work. One connection is enough: the sweep holds one
     # lock at a time.
-    lock_engine = create_engine(settings.database.url, pool_size=1, max_overflow=0)
+    lock_engine = _engine(settings.database.url, pool_size=1, max_overflow=0)
     try:
         session_factory = create_session_factory(engine)
         # The integrity sweep only reads the store, so it needs no owner marker
@@ -120,7 +161,15 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(f"invalid --server uuid: {args.server!r}\n")
             return 2
 
-    settings = load_settings(_resolve_config_file())
+    try:
+        settings = load_settings(_resolve_config_file())
+    except (ValueError, OSError) as exc:
+        # Settings that do not validate, or a config file that cannot be read: one
+        # line and the bad-argument status, not a traceback (issue #3942).
+        sys.stderr.write(
+            f"integrity sweep: invalid configuration: {describe_settings_error(exc)}\n"
+        )
+        return 2
     # The API's handler, level and format (issue #3942), so the sweep's lines are
     # escaped as the API's are (issue #3938).
     configure_logging(settings.log.level, settings.log.format)
@@ -151,18 +200,22 @@ def main(argv: list[str]) -> int:
             f"verdict, and it is safe to re-run the sweep.\n"
         )
         return 3
-    except DBAPIError as exc:
-        # The database failed mid-pass: a dropped connection, a terminated backend
-        # (issue #3942). The asyncpg dialect raises an error it has no narrower
-        # class for, such as a backend terminated in flight, as the bare
-        # DBAPIError, and never raises OperationalError, so DBAPIError is the
-        # class caught; any other error is a bug and keeps its traceback.
-        # ``exc.orig`` is the driver's one-line reason; the SQLAlchemy message
-        # adds the statement and a URL over several lines.
+    except Exception as exc:
+        # The database failed: it refused a connection, at the start or mid-pass,
+        # or dropped one, or a backend was terminated (issue #3942). The asyncpg
+        # dialect raises an error it has no narrower class for, such as a backend
+        # terminated in flight, as the bare DBAPIError, and never raises
+        # OperationalError, so every DBAPIError counts. Any other error is a bug or
+        # a standing fault and keeps its traceback.
+        if not _is_database_failure(exc):
+            raise
         _LOG.debug("integrity sweep: the database failed", exc_info=True)
+        # ``exc.orig`` is the driver's one-line reason; a DBAPIError's own message
+        # adds the statement and a URL over several lines.
+        detail = exc.orig if isinstance(exc, DBAPIError) else exc
         sys.stderr.write(
             f"integrity sweep aborted: the database failed "
-            f"({type(exc).__name__}: {exc.orig}), so the sweep stopped. Backups "
+            f"({type(exc).__name__}: {detail}), so the sweep stopped. Backups "
             f"already classified this run keep their verdict, and it is safe to "
             f"re-run the sweep.\n"
         )

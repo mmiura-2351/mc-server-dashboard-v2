@@ -1,23 +1,30 @@
 """The integrity-sweep admin command's ``main`` (issues #744, #3942).
 
 The wiring + DB/storage round-trip lives behind ``run`` (DB-gated). These unit
-tests stub ``run`` so no database is touched, and pin what ``main`` does around
-it: the argument handling (every server by default, ``--server`` scoping, an
-invalid uuid rejected), the summary it prints, the exit status and one-line
-message of each failure it expects, and its logging in the configured format.
+tests mostly stub ``run`` so no database is touched, and pin what ``main`` does
+around it: the argument and configuration handling (every server by default,
+``--server`` scoping, an invalid uuid or configuration rejected), the summary it
+prints, the exit status and one-line message of each failure it expects, and its
+logging in the configured format. One runs the real ``run`` against a port where
+no database listens.
 """
 
 from __future__ import annotations
 
+import errno
 import logging
+import socket
 import uuid
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from sqlalchemy.exc import DBAPIError, InterfaceError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from mc_server_dashboard_api import integrity_sweep_cli
 from mc_server_dashboard_api.config import Settings
+from mc_server_dashboard_api.core.adapters.database import DatabaseConnectError
 from mc_server_dashboard_api.servers.application.integrity_sweep import SweepSummary
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
@@ -135,25 +142,44 @@ def test_main_reports_a_store_outage_cleanly(
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "reason"),
     [
         # A connection the database closed between two statements.
-        InterfaceError("SELECT 1", None, Exception("connection is closed")),
+        (
+            InterfaceError("SELECT 1", None, Exception("connection is closed")),
+            "InterfaceError: connection is closed",
+        ),
         # A statement the database cut off in flight: the asyncpg dialect has no
         # narrower class for that error, so it raises the bare DBAPIError.
-        DBAPIError(
-            "SELECT 1",
-            None,
-            Exception(
-                "connection was closed in the middle of operation: terminating "
-                "connection due to administrator command"
+        (
+            DBAPIError(
+                "SELECT 1",
+                None,
+                Exception(
+                    "connection was closed in the middle of operation: "
+                    "terminating connection due to administrator command"
+                ),
             ),
+            "DBAPIError: connection was closed in the middle of operation: "
+            "terminating connection due to administrator command",
+        ),
+        # A new connection the database refused (the engine types it).
+        (
+            DatabaseConnectError("ConnectionRefusedError: [Errno 111] refused"),
+            "DatabaseConnectError: ConnectionRefusedError: [Errno 111] refused",
+        ),
+        # A pool that could not hand out a connection: an outage, and no
+        # DBAPIError.
+        (
+            PoolTimeoutError("QueuePool limit reached"),
+            "TimeoutError: QueuePool limit reached",
         ),
     ],
-    ids=["connection-closed", "terminated-in-flight"],
+    ids=["connection-closed", "terminated-in-flight", "connect-refused", "pool"],
 )
 def test_main_reports_a_database_failure_cleanly(
-    error: DBAPIError,
+    error: Exception,
+    reason: str,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -173,7 +199,7 @@ def test_main_reports_a_database_failure_cleanly(
 
     err = capsys.readouterr().err
     assert "integrity sweep aborted: the database failed" in err
-    assert f"{type(error).__name__}: {error.orig}" in err  # says why
+    assert f"({reason})" in err  # says why
     assert "the sweep stopped" in err
     assert "Backups already classified this run keep their verdict" in err
     assert "safe to re-run the sweep" in err
@@ -274,6 +300,53 @@ def test_main_lets_an_unexpected_error_propagate(
         integrity_sweep_cli.main([])
 
 
+def test_main_lets_a_store_os_error_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raw ``OSError`` is not taken for a database outage (issue #3942): a store
+    read raises one for a full disk or a permission fault, which the fs adapter
+    keeps raw (STORAGE.md Section 7.3), and the database's own arrives typed."""
+
+    async def _fake_run(
+        _settings: Settings, *, server_id: ServerId | None
+    ) -> SweepSummary:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        integrity_sweep_cli.main([])
+
+
+def test_main_reports_a_refused_database_connection_cleanly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A database that refuses connections from the start stops the sweep at its
+    first query with exit 3 and one line (issue #3942). asyncpg raises the refused
+    connect as a raw ``OSError``; the command's engines type it."""
+
+    with socket.socket() as probe:  # a free port, then nothing listens on it
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setenv(
+        "MCD_API_DATABASE__URL", f"postgresql+asyncpg://u:p@127.0.0.1:{port}/app"
+    )
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+
+    assert integrity_sweep_cli.main([]) == 3
+
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1
+    assert err.startswith(
+        "integrity sweep aborted: the database failed (DatabaseConnectError: "
+        "ConnectionRefusedError: "
+    )
+    assert err.endswith("it is safe to re-run the sweep.\n")
+
+
 def test_main_rejects_an_invalid_server_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_run(
         _settings: Settings, *, server_id: ServerId | None
@@ -282,3 +355,59 @@ def test_main_rejects_an_invalid_server_uuid(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
     assert integrity_sweep_cli.main(["--server", "not-a-uuid"]) == 2
+
+
+def test_main_rejects_a_bad_argument_before_reading_the_configuration(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A bad argument is told apart from a bad configuration: it is checked
+    first, so it exits 2 with its own line whatever the configuration holds."""
+
+    monkeypatch.delenv("MCD_API_DATABASE__URL")
+
+    assert integrity_sweep_cli.main(["--server", "not-a-uuid"]) == 2
+
+    assert capsys.readouterr().err == "invalid --server uuid: 'not-a-uuid'\n"
+
+
+@pytest.mark.parametrize(
+    ("env", "line"),
+    [
+        (
+            {"MCD_API_DATABASE__URL": " ", "MCD_API_LOG__LEVEL": "loud"},
+            "log.level: Input should be 'debug', 'info', 'warning' or 'error' "
+            "(first of 2 errors)",
+        ),
+        (
+            {"MCD_API_CONFIG_FILE": "/nonexistent/mcsd.toml"},
+            "FileNotFoundError: [Errno 2] No such file or directory: "
+            "'/nonexistent/mcsd.toml'",
+        ),
+    ],
+    ids=["invalid-settings", "missing-config-file"],
+)
+def test_main_reports_a_configuration_fault_in_one_line(
+    env: dict[str, str],
+    line: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A configuration the settings refuse, or a config file that cannot be read,
+    exits 2 like a bad argument, with one line naming the first failing key and
+    how many failed rather than pydantic's message or a traceback (issue #3942)."""
+
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+    async def _fake_run(
+        _settings: Settings, *, server_id: ServerId | None
+    ) -> SweepSummary:
+        raise AssertionError("run must not be called on a bad configuration")
+
+    monkeypatch.setattr(integrity_sweep_cli, "run", _fake_run)
+
+    assert integrity_sweep_cli.main([]) == 2
+
+    assert (
+        capsys.readouterr().err == f"integrity sweep: invalid configuration: {line}\n"
+    )

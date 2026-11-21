@@ -191,17 +191,36 @@ def test_a_store_fault_exits_2_without_a_traceback(
     assert "Traceback" not in err
 
 
-def test_a_configuration_fault_exits_2_without_a_traceback(
+def test_a_configuration_fault_exits_2_in_one_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The database URL is a required key, so the settings do not load.
+    # The database URL is a required key, so the settings do not load. The line
+    # names the first failing key and how many failed, not pydantic's message.
     monkeypatch.delenv("MCD_API_DATABASE__URL")
 
     assert store_claim_cli.main([]) == 2
 
     err = capsys.readouterr().err
-    assert err.startswith("store claim failed: ValidationError: ")
-    assert "Traceback" not in err
+    assert err == (
+        "store claim failed: invalid configuration: database: Field required "
+        "(1 error)\n"
+    )
+
+
+def test_a_bad_argument_exits_2_before_the_configuration_is_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command takes no arguments; argparse refuses one before the settings
+    # load, so a bad configuration does not hide it.
+    monkeypatch.delenv("MCD_API_DATABASE__URL")
+
+    with pytest.raises(SystemExit) as exited:
+        store_claim_cli.main(["--bogus"])
+
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert "unrecognized arguments: --bogus" in err
+    assert "store claim failed" not in err
 
 
 def test_the_command_logs_in_the_configured_format(

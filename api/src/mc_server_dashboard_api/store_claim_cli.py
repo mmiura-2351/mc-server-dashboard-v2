@@ -34,7 +34,11 @@ import asyncio
 import sys
 
 from mc_server_dashboard_api.app import _build_storage, _resolve_config_file
-from mc_server_dashboard_api.config import Settings, load_settings
+from mc_server_dashboard_api.config import (
+    Settings,
+    describe_settings_error,
+    load_settings,
+)
 from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
@@ -68,16 +72,24 @@ def main(argv: list[str]) -> int:
 
     try:
         settings = load_settings(_resolve_config_file())
-        # The API's handler, level and format (issue #3942), so this command's
-        # lines are escaped as the API's are (issue #3938).
-        configure_logging(settings.log.level, settings.log.format)
+    except (ValueError, OSError) as exc:
+        # Settings that do not validate, or a config file that cannot be read: one
+        # line rather than pydantic's message over several (issue #3942).
+        sys.stderr.write(
+            f"store claim failed: invalid configuration: "
+            f"{describe_settings_error(exc)}\n"
+        )
+        return 2
+    # The API's handler, level and format (issue #3942), so this command's lines
+    # are escaped as the API's are (issue #3938).
+    configure_logging(settings.log.level, settings.log.format)
+    try:
         refusal = asyncio.run(run(settings))
     except Exception as exc:
-        # The configuration, the database or the store failed, so the command
-        # cannot tell whether the store is claimed: a fault after the write (the
-        # read-back) leaves the marker written, and a re-run then answers. One
-        # line, not a traceback, and a status of its own, so a script tells it from
-        # a refusal.
+        # The database or the store failed, so the command cannot tell whether
+        # the store is claimed: a fault after the write (the read-back) leaves the
+        # marker written, and a re-run then answers. One line, not a traceback,
+        # and a status of its own, so a script tells it from a refusal.
         sys.stderr.write(f"store claim failed: {type(exc).__name__}: {exc}\n")
         return 2
     if refusal is not None:
