@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileEntry,
     FileEntryKind,
     FileStore,
+    SubtreeExtent,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -347,6 +348,22 @@ class StorageFileStoreAdapter(FileStore):
             raise FileAlreadyExistsError(to_path) from exc
         except NotFoundError as exc:
             raise ServerFileNotFoundError(str(server_id.value)) from exc
+
+    async def subtree_extent(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> SubtreeExtent:
+        community, server = _scope(community_id, server_id)
+        try:
+            extent = await self._storage.subtree_extent(
+                community, server, _rel_path(rel_path)
+            )
+        except StorageUnavailableError as exc:
+            raise ServerFileStorageUnavailableError(str(server_id.value)) from exc
+        except _PATH_REFUSED as exc:
+            raise _refused(rel_path, exc) from exc
+        except NotFoundError as exc:
+            raise ServerFileNotFoundError(str(server_id.value)) from exc
+        return SubtreeExtent(depth=extent.depth, longest=extent.longest)
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

@@ -117,6 +117,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     PublisherFence,
     SnapshotHandle,
     Storage,
+    SubtreeExtent,
     WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -2146,6 +2147,41 @@ class ObjectStorage(Storage):
             # root (sub == "") always lists, even when empty.
             raise NotFoundError(f"directory not found: {rel_path.value!r}")
         return _entries_at_level(objs, snapshot_prefix, dir_suffix)
+
+    async def subtree_extent(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> SubtreeExtent:
+        # One prefix listing of every key below the directory (issue #3973), not
+        # one listing per directory: a key is the whole path of a member, so its
+        # own components give the deepest directory and its length the longest
+        # path. A ``.dir`` marker (issue #1125) is no name: it stands for the
+        # directory that holds it, as a listing reads it.
+        sub = self._safe_subkey(rel_path)
+        dir_suffix = sub + "/" if sub else ""
+        async with self._client_factory() as client:
+            server_prefix = self._server_prefix(community_id, server_id)
+            if await self._read_pointer(client, server_prefix) is None:
+                prefix, objs = dir_suffix, []
+            else:
+                snapshot_prefix = await self._lease_live_snapshot(
+                    client, community_id, server_id
+                )
+                prefix = snapshot_prefix + dir_suffix
+                try:
+                    objs = await client.list_objects(prefix)
+                finally:
+                    self._release_lease(snapshot_prefix)
+        if not objs and sub:
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
+        depth = longest = 0
+        for obj in objs:
+            below = obj.key[len(prefix) :]
+            if below == _DIR_MARKER:
+                continue
+            depth = max(depth, below.count("/"))
+            below = below.removesuffix("/" + _DIR_MARKER)
+            longest = max(longest, len(below.encode("utf-8", "surrogateescape")))
+        return SubtreeExtent(depth=depth, longest=longest)
 
     async def path_exists(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath

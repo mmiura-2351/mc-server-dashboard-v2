@@ -72,6 +72,7 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileEntry,
     FileEntryKind,
     FileStore,
+    SubtreeExtent,
 )
 from mc_server_dashboard_api.servers.domain.game_session import GameSession
 from mc_server_dashboard_api.servers.domain.game_session_repository import (
@@ -621,6 +622,25 @@ class FakeFileStore(FileStore):
         for recorded, key in dirs.items():
             self.dirs.discard(key)
             self.dirs.add((to_prefix + (recorded + "/")[len(prefix) :]).rstrip("/"))
+
+    async def subtree_extent(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> SubtreeExtent:
+        # Every seeded file and created directory below the path, measured as a
+        # path below it, the way the object backend measures its keys.
+        path = _canonical(rel_path)
+        prefix = "" if path == "." else path + "/"
+        below = [m[len(prefix) :] for m in self._files() if m.startswith(prefix)]
+        made = [d[len(prefix) :] for d in self._dirs() if d.startswith(prefix)]
+        if path != "." and not below and not made and path not in self._dirs():
+            raise ServerFileNotFoundError(str(server_id.value))
+        return SubtreeExtent(
+            depth=max(
+                [m.count("/") for m in below] + [d.count("/") + 1 for d in made],
+                default=0,
+            ),
+            longest=max((len(m.encode()) for m in below + made), default=0),
+        )
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

@@ -51,12 +51,44 @@ def member_name_refusal(path: str, *, is_dir: bool) -> str | None:
     to count: ``path`` must not carry one.
     """
 
-    parts = [part for part in path.split("/") if part not in ("", ".")]
-    sizes = [len(part.encode("utf-8", "surrogateescape")) for part in parts]
+    sizes = _component_sizes(path)
     if any(size > MAX_COMPONENT_BYTES for size in sizes):
         return NAME_TOO_LONG
-    if sum(sizes) + max(len(sizes) - 1, 0) > MAX_PATH_BYTES:
+    components, size = _path_size(sizes)
+    return extent_refusal(
+        directories=components if is_dir else components - 1, path_bytes=size
+    )
+
+
+def extent_refusal(*, directories: int, path_bytes: int) -> str | None:
+    """Why no working set may hold a name this deep and this long, or ``None``.
+
+    ``directories`` is the directory level the name reaches, and ``path_bytes``
+    its length. A directory move judges by it the deepest and the longest names
+    it creates below its destination, without naming each one.
+    """
+
+    if path_bytes > MAX_PATH_BYTES:
         return PATH_TOO_LONG
-    if (len(parts) if is_dir else len(parts) - 1) > MAX_DIRECTORY_DEPTH:
+    if directories > MAX_DIRECTORY_DEPTH:
         return PATH_TOO_DEEP
     return None
+
+
+def path_size(path: str) -> tuple[int, int]:
+    """``path``'s components and bytes, measured as :func:`member_name_refusal`
+    measures them, with its precondition."""
+
+    return _path_size(_component_sizes(path))
+
+
+def _component_sizes(path: str) -> list[int]:
+    return [
+        len(part.encode("utf-8", "surrogateescape"))
+        for part in path.split("/")
+        if part not in ("", ".")
+    ]
+
+
+def _path_size(sizes: list[int]) -> tuple[int, int]:
+    return len(sizes), sum(sizes) + max(len(sizes) - 1, 0)

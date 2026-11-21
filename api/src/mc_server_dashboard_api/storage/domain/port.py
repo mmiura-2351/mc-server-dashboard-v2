@@ -181,6 +181,21 @@ class DirEntry:
 
 
 @dataclass(frozen=True)
+class SubtreeExtent:
+    """How deep and how long a ``current/`` directory's subtree is (issue #3973).
+
+    ``depth`` is the deepest directory level below the directory, which is level
+    0 itself: a child directory is level 1, and a directory holding none is 0.
+    ``longest`` is the longest path below it, relative to it, in bytes: a child
+    ``a`` is 1 and ``a/b`` is 3, and an empty directory is 0. Both are measured
+    on the names as stored, whatever characters they hold.
+    """
+
+    depth: int
+    longest: int
+
+
+@dataclass(frozen=True)
 class JarPoolStats:
     """Aggregate stats for the content-addressed JAR pool (issue #286).
 
@@ -1025,6 +1040,22 @@ class FileStore(abc.ABC):
 
         Atomic on fs (``rename(2)``); on object backends it is a per-object
         copy+delete loop — not crash-atomic (issue #1608).
+        """
+
+    @abc.abstractmethod
+    async def subtree_extent(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> SubtreeExtent:
+        """Measure the subtree of the directory ``rel_path`` in ``current/`` (#3973).
+
+        A directory rename judges the names it creates by it: every name below
+        the destination is the destination plus a path below the source. Only
+        ``rel_path`` is resolved, as :meth:`list_dir` resolves it; what lies
+        below is measured as stored, without a resolve per name, so a name no
+        ``RelPath`` can spell (a C0 or DEL character) counts like any other. A
+        symlink below is a name and is not followed. One walk on fs, one prefix
+        listing on object. Raises :class:`~.errors.NotFoundError` for a path that
+        is not a directory.
         """
 
     @abc.abstractmethod

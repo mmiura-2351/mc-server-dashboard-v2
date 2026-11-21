@@ -103,6 +103,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     PublisherFence,
     SnapshotHandle,
     Storage,
+    SubtreeExtent,
     WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -2713,6 +2714,30 @@ class FsStorage(Storage):
         finally:
             release()
 
+    async def subtree_extent(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> SubtreeExtent:
+        return await asyncio.to_thread(
+            self._subtree_extent, community_id, server_id, rel_path
+        )
+
+    def _subtree_extent(
+        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+    ) -> SubtreeExtent:
+        not_found = f"directory not found: {rel_path.value!r}"
+        if not self._current_link(community_id, server_id).is_symlink():
+            if rel_path.parts:
+                raise NotFoundError(not_found)
+            return SubtreeExtent(depth=0, longest=0)
+        # Leased like a listing, and resolved as one: only ``rel_path`` is.
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            return _measure_subtree(
+                self._safe_read_target(current, rel_path), not_found
+            )
+        finally:
+            release()
+
     async def path_exists(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bool:
@@ -3782,6 +3807,41 @@ async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
     return await _acquire_off_loop(
         _close_orphaned_handle, _open_readable_sync, path, not_found
     )
+
+
+def _measure_subtree(target: Path, not_found: str) -> SubtreeExtent:
+    """Measure ``target``'s subtree on its names' raw bytes (issue #3973).
+
+    One ``os.scandir`` per directory, iterative, never following a link: a
+    symlink is a name, as the listing describes it. A directory that vanishes
+    under the walk, or stops being one, is left out, as a listing leaves out a
+    child that vanishes; any other failure surfaces. ``target`` itself not being
+    a directory is the listing's miss.
+    """
+
+    depth = longest = 0
+    stack: list[tuple[bytes, bytes, int]] = [(os.fsencode(target), b"", 0)]
+    while stack:
+        directory, below, level = stack.pop()
+        try:
+            with os.scandir(directory) as entries:
+                children = [
+                    (entry.name, entry.is_dir(follow_symlinks=False))
+                    for entry in entries
+                ]
+        except OSError as exc:
+            if not below and exc.errno in _NOT_A_LISTABLE_DIR:
+                raise NotFoundError(not_found) from exc
+            if below and exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                continue
+            raise
+        for name, is_dir in children:
+            path = below + b"/" + name if below else name
+            longest = max(longest, len(path))
+            if is_dir:
+                depth = max(depth, level + 1)
+                stack.append((os.path.join(directory, name), path, level + 1))
+    return SubtreeExtent(depth=depth, longest=longest)
 
 
 def _list_children(target: Path, not_found: str) -> list[Path]:

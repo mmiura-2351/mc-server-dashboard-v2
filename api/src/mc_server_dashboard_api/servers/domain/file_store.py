@@ -57,6 +57,19 @@ class FileEntry:
     size: int
 
 
+@dataclass(frozen=True)
+class SubtreeExtent:
+    """How deep and how long a directory's subtree is (issue #3973).
+
+    ``depth`` is the deepest directory level below the directory, a child
+    directory being level 1 (0 when it holds none); ``longest`` is the longest
+    path below it, relative to it, in bytes (0 when it is empty).
+    """
+
+    depth: int
+    longest: int
+
+
 class FileStore(abc.ABC):
     """Port: the file layer's seam to the authoritative-copy file store."""
 
@@ -202,6 +215,19 @@ class FileStore(abc.ABC):
         No per-file version capture (the Storage Port contract); whole-subtree
         recovery is the backups' job. Raises :class:`ServerFileNotFoundError`
         for a missing source directory.
+        """
+
+    @abc.abstractmethod
+    async def subtree_extent(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> SubtreeExtent:
+        """Measure the subtree of the directory ``rel_path`` in ``current/`` (#3973).
+
+        What a directory rename judges the names it creates by. Only ``rel_path``
+        is resolved; the names below are measured as stored, whatever they hold,
+        so one no path can spell does not fail the measure. Raises
+        :class:`ServerFileNotFoundError` for a path that is not a directory and
+        :class:`InvalidFilePathError` for a traversal-unsafe one.
         """
 
     @abc.abstractmethod

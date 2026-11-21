@@ -48,8 +48,8 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   rename would create below it, is past 4,095 bytes (issue #3973).
 - ``invalid_name_character`` (422) — a mutation's destination carries, in any
   component, a character an uploaded file's name may not carry: a ``\\``, a C1
-  control character, a lone surrogate or a Unicode noncharacter (issues #3969,
-  #3973). C0 and DEL stay ``invalid_path``.
+  control character, a line or paragraph separator, a lone surrogate or a
+  Unicode noncharacter (issues #3969, #3973). C0 and DEL stay ``invalid_path``.
 - ``platform_managed_path`` (422) — a mutation whose destination would leave a
   DIRECTORY at the root ``server.properties`` path. Every write door creates its
   destination's missing parents, so the make-dir and the directory rename that
@@ -465,9 +465,9 @@ async def write_file(
     directories count, so a file path may have 129 components), one with a
     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
     ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
-    control character, a lone surrogate or a Unicode noncharacter in any
-    component is 422 ``invalid_name_character``; C0 and DEL stay
-    ``invalid_path``.
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
     Running or at rest alike, before the Worker is asked.
     """
 
@@ -790,9 +790,9 @@ async def upload_file(
     directories count, so a file path may have 129 components), one with a
     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
     ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
-    control character, a lone surrogate or a Unicode noncharacter in any
-    component is 422 ``invalid_name_character``; C0 and DEL stay
-    ``invalid_path``.
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
     Judged on the resulting path, of the upload and of each member once
     joined to ``path``, in the same pre-write scan, so one refused member
     refuses the whole extract with nothing written.
@@ -1200,13 +1200,16 @@ async def rename_file(
     directories count, so a file path may have 129 components), one with a
     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
     ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
-    control character, a lone surrogate or a Unicode noncharacter in any
-    component is 422 ``invalid_name_character``; C0 and DEL stay
-    ``invalid_path``.
-    A directory rename also judges every name the move creates below the
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
+    A directory rename also judges the names the move creates below the
     destination, so a subtree that would end up too deep or too long is
-    refused with nothing moved. The source is not judged, so a name created
-    before the rule can be renamed to one it admits.
+    refused with nothing moved. A destination with no more components and no
+    more bytes than the source is not measured, so a tree already too deep can
+    still be renamed at its own level, and the names below are not judged by
+    their characters. The source is not judged, so a name created before the
+    rule can be renamed to one it admits.
     """
 
     try:
@@ -1371,9 +1374,9 @@ async def make_directory(
     directories count, so a file path may have 129 components), one with a
     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
     ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
-    control character, a lone surrogate or a Unicode noncharacter in any
-    component is 422 ``invalid_name_character``; C0 and DEL stay
-    ``invalid_path``.
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
     The new directory counts as a level, so it may have 128 components.
     """
 

@@ -16,18 +16,21 @@ so a name that already exists stays reachable.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
 import io
 import tarfile
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.application import files as files_module
 from mc_server_dashboard_api.servers.application.files import (
     DeleteFile,
     ListDir,
@@ -54,6 +57,10 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from mc_server_dashboard_api.storage.adapters.object_store import (
+    ObjectStorage,
+    S3Object,
+)
 from mc_server_dashboard_api.storage.domain.value_objects import (
     CommunityId as StorageCommunityId,
 )
@@ -61,7 +68,8 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
 from tests.servers.fakes import FakeControlPlane, FakeFileStore, FakeUnitOfWork
-from tests.storage.conftest import build_harness
+from tests.storage.conftest import StorageHarness, build_harness
+from tests.storage.fake_s3 import FakeS3Client, FakeS3Store
 
 _NOW = dt.datetime(2025, 1, 1, tzinfo=dt.UTC)
 
@@ -506,6 +514,10 @@ async def odd(request: pytest.FixtureRequest, tmp_path: Path) -> _Doors:
             _nested(129, "f"): b"deep",
             "a\x85b": b"c1",
             "box/a\\b": b"inner",
+            # Directories no ``RelPath`` can spell: reached only through a parent.
+            "ctl/a\x01b/f": b"c0",
+            "ctl/a\x7fb/g": b"del",
+            "deepctl/a\x01b/" + _nested(126, "f"): b"c0-deep",
         },
     )
     uow = FakeUnitOfWork()
@@ -548,3 +560,124 @@ async def test_an_existing_odd_name_is_deleted(odd: _Doors) -> None:
         await odd.read("a\x85b")
     with pytest.raises(ServerFileNotFoundError):
         await odd.read(_nested(129, "f"))
+
+
+async def test_a_tree_already_too_deep_is_renamed_at_its_own_level(
+    odd: _Doors,
+) -> None:
+    # ``d`` to ``e`` adds no level and no byte, so the 129-level tree moves.
+    await odd.rename("d", "e")
+
+    assert await odd.read("e/" + _nested(128, "f")) == b"deep"
+
+
+async def test_a_tree_already_too_deep_is_not_moved_deeper(odd: _Doors) -> None:
+    assert await _refusal(odd.rename("d", "x/d")) == "path_too_deep"
+    assert await odd.read(_nested(129, "f")) == b"deep"
+
+
+async def test_a_directory_holding_control_character_directories_is_moved(
+    odd: _Doors,
+) -> None:
+    # No shorter (nothing is measured), then longer (the extent is): neither is
+    # refused for names below that no path can spell.
+    await odd.rename("ctl", "c")
+    await odd.rename("c", "control-characters")
+
+    assert await odd.names("control-characters") == ["a\x01b", "a\x7fb"]
+
+
+async def test_a_deeper_move_is_judged_by_the_extent_below(odd: _Doors) -> None:
+    # ``deepctl`` holds a directory 127 levels below it, through a C0-named one.
+    assert await _refusal(odd.rename("deepctl", "x/deepctl")) == "path_too_deep"
+
+    await odd.rename("deepctl", "deeper-control-characters")
+    assert await odd.names("deeper-control-characters") == ["a\x01b"]
+
+
+class _CountingClient(FakeS3Client):
+    """A fake S3 client that counts the prefix listings it is asked for."""
+
+    def __init__(self, store: FakeS3Store, listings: list[str]) -> None:
+        super().__init__(store)
+        self._listings = listings
+
+    async def list_objects(self, prefix: str) -> list[S3Object]:
+        self._listings.append(prefix)
+        return await super().list_objects(prefix)
+
+
+async def _listings_to_move(directories: int) -> int:
+    """How many prefix listings a deeper move of a tree of ``directories`` makes."""
+
+    store, listings = FakeS3Store(), list[str]()
+
+    @contextlib.asynccontextmanager
+    async def factory() -> AsyncIterator[_CountingClient]:
+        yield _CountingClient(store, listings)
+
+    storage = ObjectStorage(factory)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    await StorageHarness(storage=storage, _sweep=storage.sweep).publish(
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {f"src/d{i}/f": b"x" for i in range(directories)},
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community, server, running=False))
+    listings.clear()
+    await RenameFile(uow=uow, file_store=StorageFileStoreAdapter(storage=storage))(
+        community_id=CommunityId(community),
+        server_id=ServerId(server),
+        from_path="src",
+        to_path="a/src",
+    )
+    return len(listings)
+
+
+async def test_a_deeper_move_lists_the_object_store_a_fixed_number_of_times() -> None:
+    # One prefix listing measures the subtree, however many directories it has.
+    assert await _listings_to_move(1) == await _listings_to_move(50)
+
+
+async def test_an_over_long_path_is_refused_before_its_characters_are_scanned(
+    doors: _Doors, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanned: list[str] = []
+
+    def counting(c: str) -> bool:
+        scanned.append(c)
+        return is_refused_filename_character(c)
+
+    monkeypatch.setattr(files_module, "is_refused_filename_character", counting)
+    huge = "n" * (1024 * 1024)
+
+    assert await _refusal(doors.write(huge)) == "name_too_long"
+    assert await _refusal(doors.rename("seed.txt", huge)) == "name_too_long"
+    assert scanned == []
+
+
+@pytest.mark.parametrize(("filename", "archive"), _ARCHIVES)
+async def test_an_extract_judges_its_members_off_the_event_loop(
+    doors: _Doors,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    archive: _Archive,
+) -> None:
+    on_loop: list[bool] = []
+    judge = files_module._refuse_unnamable
+
+    def recording(rel_path: str, *, is_dir: bool) -> None:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        judge(rel_path, is_dir=is_dir)
+
+    monkeypatch.setattr(files_module, "_refuse_unnamable", recording)
+    content = archive({f"m{i}.txt": b"x" for i in range(20)})
+
+    await doors.upload(".", filename, content, extract=True)
+
+    assert on_loop == [False] * 20

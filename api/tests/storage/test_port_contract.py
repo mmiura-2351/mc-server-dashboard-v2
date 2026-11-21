@@ -40,6 +40,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
+    SubtreeExtent,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -2955,6 +2956,58 @@ async def test_a_255_byte_name_is_written_on_both_backends(
     await harness.storage.write_file(community, server, rel, b"two")
 
     assert await harness.storage.read_file(community, server, rel) == b"two"
+
+
+async def test_subtree_extent_measures_the_names_below_as_stored(
+    harness: StorageHarness,
+) -> None:
+    """A directory's deepest level and longest path below it (issue #3973).
+
+    Measured on the names as stored, in bytes: a name no ``RelPath`` can spell
+    (a C0 or DEL character) counts like any other, and is not refused.
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "top/a/b/f.txt": b"1",
+            "top/a\x01b/g": b"2",
+            "top/a\x7fb/h": b"3",
+            "top/\u3042\u3042\u3042\u3042/q": b"4",
+            "top/i": b"5",
+            "other/x/y/z/w": b"6",
+        },
+    )
+
+    # An empty directory is measured as the name it is: on object, its marker key
+    # is not a name, so ``a/b/emptydir`` is 12 bytes, not 17.
+    await harness.storage.make_dir(community, server, RelPath("top/a/b/emptydir"))
+
+    extent = await harness.storage.subtree_extent(community, server, RelPath("top"))
+
+    # ``a/b/emptydir`` is level 3; four three-byte characters and ``/q`` are 14
+    # bytes.
+    assert extent == SubtreeExtent(depth=3, longest=14)
+    assert await harness.storage.subtree_extent(
+        community, server, RelPath(".")
+    ) == SubtreeExtent(depth=4, longest=len("top/") + 14)
+    assert await harness.storage.subtree_extent(
+        community, server, RelPath("top/a/b/emptydir")
+    ) == SubtreeExtent(depth=0, longest=0)
+
+
+async def test_subtree_extent_of_a_path_that_is_not_a_directory_is_a_miss(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"top/f": b"1"})
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.subtree_extent(community, server, RelPath("top/f"))
+    with pytest.raises(NotFoundError):
+        await harness.storage.subtree_extent(community, server, RelPath("gone"))
 
 
 async def test_write_file_before_any_publish_initializes_first_version(

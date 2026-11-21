@@ -83,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileEntry,
     FileEntryKind,
     FileStore,
+    SubtreeExtent,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -493,6 +494,30 @@ class FakeFileStore(FileStore):
         if source not in _canonical_names(self.dirs):
             raise ServerFileNotFoundError(str(server_id.value))
         self.renamed_dirs.append((from_path, to_path))
+
+    async def subtree_extent(
+        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+    ) -> SubtreeExtent:
+        # Every seeded listing at or below the path, each entry measured as a path
+        # below it.
+        path = _canonical(rel_path)
+        if path != "." and (
+            _seeded_key(self.dirs, path, container="dirs", holds="directory") is None
+        ):
+            raise ServerFileNotFoundError(str(server_id.value))
+        prefix = "" if path == "." else path + "/"
+        depth = longest = 0
+        for key, listing in self.dirs.items():
+            listed = _canonical(key)
+            if listed != path and not listed.startswith(prefix):
+                continue
+            base = "" if listed == "." else listed + "/"
+            for entry in listing:
+                child = (base + entry.name)[len(prefix) :]
+                longest = max(longest, len(child.encode()))
+                if entry.kind is FileEntryKind.DIRECTORY:
+                    depth = max(depth, child.count("/") + 1)
+        return SubtreeExtent(depth=depth, longest=longest)
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

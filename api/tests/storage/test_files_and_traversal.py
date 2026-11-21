@@ -37,6 +37,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     SymlinkRefusedError,
 )
+from mc_server_dashboard_api.storage.domain.port import SubtreeExtent
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.storage.helpers import (
     drain,
@@ -1495,3 +1496,20 @@ async def test_make_dir_onto_a_file_is_a_conflict(tmp_path: Path) -> None:
     # The file is left intact (the refused mkdir never clobbered it).
     live = snapshot_dir(tmp_path, community, server)
     assert (live / "occupied").read_bytes() == b"X"
+
+
+async def test_subtree_extent_does_not_follow_a_symlink(tmp_path: Path) -> None:
+    """A link below the directory is a name, not a way in (issue #3973).
+
+    A link to an ancestor would make a walk that follows it endless.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"top/a/f": b"x"})
+    live = snapshot_dir(tmp_path, community, server)
+    os.symlink("..", live / "top" / "a" / "up")
+
+    assert await storage.subtree_extent(community, server, RelPath("top")) == (
+        SubtreeExtent(depth=1, longest=len("a/up"))
+    )
