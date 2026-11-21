@@ -8,8 +8,7 @@ the storage value objects at the bounded-context boundary (the lifecycle layer
 never imports the storage domain).
 
 The wait for a Worker's snapshot uploads before a hydrate (issue #3950) waits in
-the data plane's count of the uploads in flight, for ``upload_wait_seconds`` at
-most.
+the data plane's count of the uploads in flight.
 """
 
 from __future__ import annotations
@@ -40,7 +39,6 @@ class StorageGenerationReader(StoreGenerationReader):
 
     storage: Storage
     uploads: SnapshotUploads
-    upload_wait_seconds: float
 
     async def current_generation(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -51,8 +49,13 @@ class StorageGenerationReader(StoreGenerationReader):
         )
 
     async def uploads_settled(
-        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
     ) -> bool:
         return await self.uploads.settled(
-            server_id.value, str(worker_id.value), timeout=self.upload_wait_seconds
+            server_id.value, str(worker_id.value), timeout=timeout
         )

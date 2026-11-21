@@ -508,15 +508,17 @@ class StartServer:
             server.config = config
             server.updated_at = self.clock.now()
             # Any failure across the CAS+commit window — a raising update_lifecycle or
-            # commit, the lost-race abort, or this request task being cancelled at an
-            # await (a client disconnect cancels the HTTP task), including the wait
-            # for the start-intent lock — must release the placement reservation
-            # (the slot _place tentatively took, #778), or it leaks permanently: a
-            # never-committed server id never appears in the authoritative tally, so
-            # no reconnect rebuild ever reclaims it. Releasing on an ambiguous commit
-            # failure is safe: if the commit actually landed, the committed count
-            # undercounts by one until the reconnect rebuild, exactly the recovery
-            # _compensate's docstring already relies on.
+            # commit, the lost-race abort, or this task being cancelled at an await,
+            # including the wait for the start-intent lock — must release the
+            # placement reservation (the slot _place tentatively took, #778), or it
+            # leaks permanently: a never-committed server id never appears in the
+            # authoritative tally, so no reconnect rebuild ever reclaims it. A client
+            # disconnect does not cancel this task: on the shipped uvicorn (h11) and
+            # Starlette ``BaseHTTPMiddleware`` stack, a disconnect reaches only a
+            # handler that reads the request body (issue #3950). Releasing on an
+            # ambiguous commit failure is safe: if the commit actually landed, the
+            # committed count undercounts by one until the reconnect rebuild, exactly
+            # the recovery _compensate's docstring already relies on.
             try:
                 # The flip assumes the at-rest row this start read under the lock,
                 # and the JAR provisioning above can be slow (issue #3927).
@@ -560,9 +562,9 @@ class StartServer:
                     # await in between (a sync registry call) — not after the ``async
                     # with`` block: the UoW ``__aexit__`` awaits rollback()/close(),
                     # suspension points outside this try/except where a
-                    # client-disconnect CancelledError (or a post-commit teardown
-                    # error) would leave the committed reservation neither confirmed
-                    # nor released, leaking it permanently (#840).
+                    # CancelledError (or a post-commit teardown error) would leave
+                    # the committed reservation neither confirmed nor released,
+                    # leaking it permanently (#840).
                     self.control_plane.increment_assignment(
                         worker_id=worker_id, server_id=server_id
                     )
@@ -903,11 +905,8 @@ class StartServer:
             raise
         except SnapshotUploadInFlightError:
             # Kept on this Worker for the next tick, as ``__call__`` keeps it
-            # (issue #3950).
-            if not dispatch.attempted:
-                await self._record_unknown(
-                    server, worker_id, owe_again=owed_group_files
-                )
+            # (issue #3950). This path always hydrates, so nothing was sent yet.
+            await self._record_unknown(server, worker_id, owe_again=owed_group_files)
             raise
         if not outcome.success:
             if not dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
@@ -1166,23 +1165,23 @@ class StartServer:
             # an upload needs. A skipped hydrate does not wait: the Worker runs
             # on the tree such an upload packed, or a newer one.
             #
-            # A wait that runs out raises before anything is sent, and the
-            # Worker is not hydrated over the upload. ``__call__`` and
+            # The wait and the hydrate share one deadline, the hydrate budget from
+            # the moment the wait begins, so the hydrate gets what the wait left
+            # and the start's hydrate phase takes no longer than it did. A
+            # hydrate that then runs out of time fails as any hydrate timeout
+            # does. A wait that leaves nothing raises before anything is sent,
+            # and the Worker is not hydrated over the upload: ``__call__`` and
             # ``place_and_start`` keep the server on this Worker, as for a
             # hydrate refused BUSY, and ``redispatch_start`` changes nothing, so
             # the reconciler retries the start here without placing it again.
-            if not await self.store_generation.uploads_settled(
-                community_id=community_id, server_id=server_id, worker_id=worker_id
-            ):
-                _LOG.warning(
-                    "start of server %s did not hydrate worker %s: a snapshot "
-                    "upload of the server from that worker was still being "
-                    "received or committed when the wait for it ran out; the "
-                    "server stays on that worker, and the start is retried there",
-                    server_id.value,
-                    worker_id.value,
-                )
-                raise SnapshotUploadInFlightError(str(server_id.value))
+            budget = self.control_plane.hydrate_timeout_seconds()
+            began = self.clock.now()
+            settled = await self.store_generation.uploads_settled(
+                community_id=community_id,
+                server_id=server_id,
+                worker_id=worker_id,
+                timeout=budget,
+            )
             # Read the authoritative generation BEFORE the transfer (issue #2477): the
             # data plane serves the store's generation at PULL time, and the counter is
             # monotonic (commit_snapshot, a restore #873, an at-rest edit #889 and the
@@ -1192,13 +1191,28 @@ class StartServer:
             # later start would then skip a hydrate it needs. A failed read costs only
             # the refresh (the entry stays as it was, so the next start hydrates), so
             # it must not fail the launch.
-            hydrated_generation = await self._generation_before_hydrate(
-                community_id, server_id
-            )
+            hydrated_generation: int | None = None
+            if settled:
+                hydrated_generation = await self._generation_before_hydrate(
+                    community_id, server_id
+                )
+            remaining = min(budget, budget - (self.clock.now() - began).total_seconds())
+            if not settled or remaining <= 0:
+                _LOG.warning(
+                    "start of server %s did not hydrate worker %s: waiting for the "
+                    "worker's snapshot uploads of the server used the whole %ss "
+                    "hydrate budget; the server stays on that worker, and the "
+                    "start is retried there",
+                    server_id.value,
+                    worker_id.value,
+                    budget,
+                )
+                raise SnapshotUploadInFlightError(str(server_id.value))
             hydrate = await self.control_plane.hydrate(
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                timeout_seconds=remaining,
             )
             if not hydrate.success:
                 return hydrate

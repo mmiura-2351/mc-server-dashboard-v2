@@ -216,7 +216,7 @@ def _start(uow: FakeUnitOfWork, cp: FakeControlPlane, storage: Storage) -> Start
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=StorageGenerationReader(
-            storage=storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+            storage=storage, uploads=SnapshotUploads()
         ),
         file_store=FakeFileStore(seed_eula=True),
     )

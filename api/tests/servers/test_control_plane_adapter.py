@@ -152,6 +152,29 @@ async def test_hydrate_carries_the_hydrate_timeout_override() -> None:
     assert fleet.last_timeout_override == 600
 
 
+async def test_a_hydrate_handed_what_is_left_of_its_budget_dispatches_with_it() -> None:
+    # A start's wait for the Worker's uploads spends the hydrate budget too, and
+    # hands the hydrate the rest (issue #3950).
+    fleet = _CapturingFleetControlPlane()
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused by hydrate
+        control_plane=fleet,
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+        hydrate_timeout_seconds=600,
+    )
+
+    await adapter.hydrate(
+        worker_id=WorkerId(uuid.uuid4()),
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+        timeout_seconds=150,
+    )
+
+    assert adapter.hydrate_timeout_seconds() == 600
+    assert fleet.last_timeout_override == 150
+
+
 async def test_snapshot_carries_the_snapshot_timeout_override() -> None:
     # The stop's final snapshot dispatches with the longer snapshot budget so a
     # large-world upload does not time out under the general command deadline and

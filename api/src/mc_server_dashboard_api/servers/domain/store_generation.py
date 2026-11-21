@@ -48,13 +48,18 @@ class StoreGenerationReader(abc.ABC):
 
     @abc.abstractmethod
     async def uploads_settled(
-        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
     ) -> bool:
         """Wait for the server's snapshot uploads from ``worker_id`` (issue #3950).
 
         Returns once none of them is still being received or committed, and so
-        once each one that lands has published. False if one still is when the
-        wait's bound runs out. A hydrate of ``worker_id`` sent after a True
+        once each one that lands has published. False if one still is after
+        ``timeout`` seconds. A hydrate of ``worker_id`` sent after a True
         therefore serves at least what those uploads publish. The wait holds no
         lock an upload needs.
         """

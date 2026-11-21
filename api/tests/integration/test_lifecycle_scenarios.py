@@ -175,7 +175,12 @@ class _StoreGeneration(StoreGenerationReader):
         return self.generation
 
     async def uploads_settled(
-        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
     ) -> bool:
         return True
 

@@ -1166,7 +1166,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         store_generation=StorageGenerationReader(
                             storage=storage,
                             uploads=app.state.snapshot_uploads,
-                            upload_wait_seconds=settings.control.upload_wait_seconds,
                         ),
                         file_store=StorageFileStoreAdapter(storage=storage),
                         lifecycle_lock=PgLifecycleLock(engine=engine),
@@ -1292,7 +1291,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     store_generation=StorageGenerationReader(
                         storage=storage,
                         uploads=app.state.snapshot_uploads,
-                        upload_wait_seconds=settings.control.upload_wait_seconds,
                     ),
                     file_store=StorageFileStoreAdapter(storage=storage),
                     # Carry the real per-server lock as insurance for future locked
@@ -1319,7 +1317,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 store_generation=StorageGenerationReader(
                     storage=storage,
                     uploads=app.state.snapshot_uploads,
-                    upload_wait_seconds=settings.control.upload_wait_seconds,
                 ),
                 clock=ServersSystemClock(),
                 stop_refusals=app.state.stop_dispatch_refusals,

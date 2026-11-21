@@ -191,7 +191,7 @@ class _World:
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
             store_generation=StorageGenerationReader(
-                storage=self.storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+                storage=self.storage, uploads=SnapshotUploads()
             ),
             file_store=self.files,
         )(community_id=self.community_id, server_id=self.server_id)
@@ -360,7 +360,7 @@ async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
             clock=FakeClock(_NOW + dt.timedelta(minutes=1)),
             jar_provisioner=FakeJarProvisioner(),
             store_generation=StorageGenerationReader(
-                storage=world.storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+                storage=world.storage, uploads=SnapshotUploads()
             ),
             file_store=world.files,
         )(community_id=world.community_id, server_id=world.server_id)
@@ -403,7 +403,7 @@ async def test_a_start_kept_on_a_busy_worker_leaves_the_change_owed(
             clock=FakeClock(_NOW + dt.timedelta(minutes=1)),
             jar_provisioner=FakeJarProvisioner(),
             store_generation=StorageGenerationReader(
-                storage=world.storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+                storage=world.storage, uploads=SnapshotUploads()
             ),
             file_store=world.files,
         )(community_id=world.community_id, server_id=world.server_id)

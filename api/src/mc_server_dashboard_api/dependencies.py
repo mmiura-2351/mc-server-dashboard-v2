@@ -2154,7 +2154,6 @@ def get_start_server(
         store_generation=StorageGenerationReader(
             storage=get_storage(request),
             uploads=get_snapshot_uploads(request),
-            upload_wait_seconds=get_settings(request).control.upload_wait_seconds,
         ),
         file_store=file_store,
         lifecycle_lock=get_lifecycle_lock(request),

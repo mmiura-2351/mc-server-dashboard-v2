@@ -274,22 +274,6 @@ class ControlSettings(_Section):
         """
         return self.stop_timeout_seconds + self.command_timeout_seconds
 
-    @property
-    def upload_wait_seconds(self) -> int:
-        """How long a start waits for its Worker's snapshot uploads (issue #3950).
-
-        Before a start hydrates a Worker, it waits for that Worker's uploads of the
-        server still being received or committed, so the hydrate serves what they
-        publish. The snapshot budget bounds such an upload's command, and the
-        hydrate budget the hydrate the wait precedes, so the wait takes the shorter
-        of the two; a start whose wait runs out answers BUSY and is retried on the
-        same Worker. Derived rather than a separate knob. Not a term of the
-        reconciler grace floor: the waiting start keeps its assignment, so the
-        orphan path cannot place the server elsewhere meanwhile, and a redispatch
-        to the same Worker waits for the same uploads.
-        """
-        return min(self.snapshot_timeout_seconds, self.hydrate_timeout_seconds)
-
 
 class LogSettings(_Section):
     """Observability (CONFIGURATION.md Section 5.10)."""

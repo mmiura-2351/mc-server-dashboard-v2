@@ -151,7 +151,7 @@ class _Rig:
 
     async def generation(self) -> int:
         reader = StorageGenerationReader(
-            storage=self.storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+            storage=self.storage, uploads=SnapshotUploads()
         )
         return await reader.current_generation(**self.scope)
 
@@ -250,7 +250,7 @@ def _start(rig: _Rig, control_plane: FakeControlPlane) -> StartServer:
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
         store_generation=StorageGenerationReader(
-            storage=rig.storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+            storage=rig.storage, uploads=SnapshotUploads()
         ),
         file_store=rig.files,
     )

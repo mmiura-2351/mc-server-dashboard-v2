@@ -99,7 +99,8 @@ _NOW = dt.datetime(2026, 11, 21, 12, 0, tzinfo=dt.timezone.utc)
 _WORKER_A = WorkerId(uuid.uuid4())
 _WORKER_B = WorkerId(uuid.uuid4())
 _DEADLINE = CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="deadline")
-# A commit's fsyncs at the 10 s each this file's timeouts budget (issue #3651), so
+# The hydrate budget a start's wait shares with its hydrate (issue #3950): a
+# commit's fsyncs at the 10 s each this file's timeouts budget (issue #3651), so
 # only a wait that never ends runs it out.
 _WAIT_SECONDS = 60.0
 
@@ -192,16 +193,30 @@ class _WorkerServesHydrates(FakeControlPlane):
         held: dict[tuple[WorkerId, ServerId], int],
         place_to: WorkerId | None = None,
         outcomes: dict[str, CommandOutcome] | None = None,
+        hydrate_timeout_seconds: float = _WAIT_SECONDS,
     ) -> None:
-        super().__init__(place_to=place_to, held=held, outcomes=outcomes)
+        super().__init__(
+            place_to=place_to,
+            held=held,
+            outcomes=outcomes,
+            hydrate_timeout_seconds=hydrate_timeout_seconds,
+        )
         self._storage = storage
         self.served: list[int] = []
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         outcome = await super().hydrate(
-            worker_id=worker_id, community_id=community_id, server_id=server_id
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            timeout_seconds=timeout_seconds,
         )
         self.served.append(
             await _serve_hydrate(self._storage, community_id.value, server_id.value)
@@ -255,17 +270,13 @@ def _start(
     cp: FakeControlPlane,
     storage: Storage,
     uploads: _WatchedUploads,
-    *,
-    wait_seconds: float = _WAIT_SECONDS,
 ) -> StartServer:
     return StartServer(
         uow=uow,
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
-        store_generation=StorageGenerationReader(
-            storage=storage, uploads=uploads, upload_wait_seconds=wait_seconds
-        ),
+        store_generation=StorageGenerationReader(storage=storage, uploads=uploads),
         file_store=FakeFileStore(seed_eula=True),
         lifecycle_lock=uploads.lock,
     )
@@ -654,10 +665,11 @@ def test_a_start_on_another_worker_does_not_wait_and_the_late_commit_lands_after
 def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
     tmp_path: Path, shared_app: FastAPI, make_storage: Callable[[Path], Storage]
 ) -> None:
-    # The first test's start, with A's commit held past the wait's bound. The
-    # start sends no hydrate and keeps the server on A, observed unknown, which
-    # the reconciler retries. Once the commit has landed, that retry hydrates A
-    # with it, without placing the server again.
+    # The first test's start, with A's commit held past the hydrate budget the
+    # wait shares with the hydrate. The start sends no hydrate and keeps the
+    # server on A, observed unknown, which the reconciler retries. Once the
+    # commit has landed, that retry hydrates A with it, without placing the
+    # server again.
     storage = make_storage(tmp_path)
     server = _server(
         desired=DesiredState.RUNNING, observed=ObservedState.RUNNING, on_a=True
@@ -671,6 +683,7 @@ def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
         place_to=_WORKER_A,
         held={(_WORKER_A, server.id): 1},
         outcomes={"snapshot": _DEADLINE},
+        hydrate_timeout_seconds=0.05,
     )
     uploads = _WatchedUploads()
 
@@ -683,7 +696,7 @@ def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
             server,
             base=1,
             before_start=lambda: _stop(uow, cp, server),
-            start=lambda: _start(uow, cp, storage, uploads, wait_seconds=0.05)(
+            start=lambda: _start(uow, cp, storage, uploads)(
                 community_id=server.community_id, server_id=server.id
             ),
             release_on_wait=False,

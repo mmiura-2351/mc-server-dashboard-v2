@@ -120,7 +120,7 @@ def _start(
         clock=clock,
         jar_provisioner=FakeJarProvisioner(),
         store_generation=StorageGenerationReader(
-            storage=storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+            storage=storage, uploads=SnapshotUploads()
         ),
         file_store=StorageFileStoreAdapter(storage=storage),
     )

@@ -870,15 +870,19 @@ Notes:
   - A start that skips the hydrate does not wait: its Worker runs on the tree
     such an upload packed, or a newer one.
   - The wait comes after the start's placement commit and holds nothing: no
-    lifecycle lock, database session or storage lock. It is bounded by the
-    shorter of `control.snapshot_timeout_seconds` and
-    `control.hydrate_timeout_seconds` (CONFIGURATION.md Section 5.1). In
-    practice it lasts as long as a commit: an upload whose Worker went away
-    mid-body aborts at the API's next read of it, or after 120 s without a
-    byte if the connection stays open, while one whose whole body arrived
-    commits whatever became of the request.
-  - A wait that runs out sends the Worker nothing. The server stays
-    `desired=running` on that Worker with `observed=unknown`, as after a
+    lifecycle lock, database session or storage lock. In practice it lasts as
+    long as a commit: an upload whose Worker went away mid-body aborts at the
+    API's next read of it, or after 120 s without a byte if the connection
+    stays open, while one whose whole body arrived commits whatever became of
+    the request.
+  - The wait and the hydrate share one deadline:
+    `control.hydrate_timeout_seconds` from the moment the wait begins. The
+    hydrate is dispatched with what the wait left of it, and one that then
+    runs out of time fails as any hydrate timeout does. A start's hydrate
+    phase therefore takes no longer than it did, and the reconciler grace
+    floor (CONFIGURATION.md Section 5.1, note 3) holds unchanged.
+  - A wait that uses the whole budget sends the Worker nothing. The server
+    stays `desired=running` on that Worker with `observed=unknown`, as after a
     refused hydrate (the note before last), and the reconciler re-sends the
     start there without placing the server again. A user start answers
     `409 upload_in_flight`; the reconciler counts it toward the backoff.

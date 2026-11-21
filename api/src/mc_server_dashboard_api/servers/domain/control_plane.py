@@ -437,13 +437,31 @@ class ControlPlane(abc.ABC):
 
     @abc.abstractmethod
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         """Trigger a working-set hydrate before launch and await it (FR-DATA-4).
 
         The adapter addresses the data-plane endpoint for ``(community_id,
         server_id)`` and hands the Worker the URL + a short-lived token; the bulk
         bytes move off the control-plane stream (CONTROL_PLANE.md Section 5).
+
+        ``timeout_seconds`` is how long the hydrate may take, ``None`` the whole
+        :meth:`hydrate_timeout_seconds`. A start passes what its wait for the
+        Worker's uploads left of that budget (issue #3950).
+        """
+
+    @abc.abstractmethod
+    def hydrate_timeout_seconds(self) -> float:
+        """The budget of a start's hydrate (issue #822).
+
+        A start that waits for the Worker's uploads first spends it on the wait
+        and the hydrate together (issue #3950), so its hydrate phase takes no
+        longer than the budget.
         """
 
     @abc.abstractmethod
