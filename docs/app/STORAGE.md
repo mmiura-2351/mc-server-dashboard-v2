@@ -1999,6 +1999,27 @@ Reading every archive is deliberate cost: the sweep is operator-invoked only
 (`integrity_sweep_cli`, never run on boot), so there is no sampling, cap, or
 config knob.
 
+**Sweep exit status.** `integrity_sweep_cli` exits 0 when the pass completed, 1
+when the store could not serve an archive read (an outage, below), 2 on a bad
+argument or configuration, with one line, and 3 when the database failed or a
+server's lifecycle lock was lost (DATABASE.md Section 7). The database fails when
+it refuses a connection, at the start or mid-pass, or the driver raises an error
+(SQLAlchemy `DBAPIError`, such as a dropped connection or a terminated backend).
+A 1 or a 3 stops the pass with a one-line message rather than a traceback:
+verdicts already written this run are committed, and the sweep re-checks every
+row, so re-running it is safe. `log.level=debug` (CONFIGURATION.md Section 5.10)
+logs the traceback of a 3. Any other error ends in a traceback, and Python exits
+1 for it too, so a 1 alone does not prove a store outage. Among those are the
+`OSError`s the fs adapter keeps raw, a full disk for one: a refused database
+connect is an `OSError` as well, so the command tells the two apart where it
+connects, not by type.
+
+**Sweep log.** The sweep logs through the API's handler, in `log.format` (JSON
+by default), at `log.level`. The per-backup verdict line of a healthy or
+quarantined backup (`integrity sweep: backup <id> -> healthy`) is an `INFO`
+record, so `log.level=warning` hides it and leaves the summary's counts; an
+unreadable or dangling backup's line is a `WARNING`.
+
 **Damage vs. outage.** A body that ends early looks identical whether the object's
 bytes are damaged or the store is merely having a bad minute — and a verdict on
 the latter would condemn every backup in the deployment over one outage. The
@@ -2026,7 +2047,7 @@ backoff so a momentary fault has a chance to clear, and the two reads decide:
   object's bytes end, so it cannot corroborate the short one, and the pair stays
   `ObjectStoreUnavailableError` → `BackupStorageUnavailableError`. The sweep does
   not catch that: the pass stops, logging which backup it died on, and the CLI
-  exits non-zero with an operator-facing message rather than a traceback.
+  exits 1 with an operator-facing message rather than a traceback.
 
 Accepting disagreeing stop points trades away some outage protection: a store that
 tears down both reads mid-body, at different points, now marks the backup

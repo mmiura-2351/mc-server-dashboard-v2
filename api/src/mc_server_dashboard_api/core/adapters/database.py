@@ -8,9 +8,12 @@ layer owns and the liveness probe behind the :class:`DatabasePing` Port.
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncpg
 import sqlalchemy.exc
-from sqlalchemy import MetaData, text
+from sqlalchemy import MetaData, event, text
+from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -104,6 +107,37 @@ def is_transient_database_error(exc: BaseException) -> bool:
     if isinstance(exc, _TRANSIENT_ERRORS):
         return True
     return isinstance(exc, sqlalchemy.exc.DBAPIError) and exc.connection_invalidated
+
+
+class DatabaseConnectError(Exception):
+    """A new connection failed because the database is unavailable (issue #3942).
+
+    asyncpg raises a refused or timed-out connect as the raw ``OSError`` above,
+    which by type is no different from a filesystem fault. An engine passed to
+    :func:`translate_connect_outages` raises this instead, with the driver's error
+    as its ``__cause__``, so a caller that also does file I/O can tell the two
+    apart.
+    """
+
+
+def translate_connect_outages(engine: AsyncEngine) -> None:
+    """Make ``engine`` raise :class:`DatabaseConnectError` for an outage at connect.
+
+    Hooks the dialect's connect, so it covers every new connection the pool makes,
+    a reconnect after a failed pre-ping included. Whether a failure is an outage is
+    :func:`is_transient_database_error`'s call; any other failure is raised as it
+    was.
+    """
+
+    def _connect(dialect: Dialect, _record: object, cargs: Any, cparams: Any) -> Any:
+        try:
+            return dialect.connect(*cargs, **cparams)
+        except Exception as exc:
+            if is_transient_database_error(exc):
+                raise DatabaseConnectError(f"{type(exc).__name__}: {exc}") from exc
+            raise
+
+    event.listen(engine.sync_engine, "do_connect", _connect)
 
 
 class SqlAlchemyDatabasePing(DatabasePing):

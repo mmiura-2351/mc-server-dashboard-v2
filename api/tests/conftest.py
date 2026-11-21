@@ -8,6 +8,7 @@ dummy URL is never dialed (NFR-TEST-1).
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import tempfile
@@ -28,6 +29,7 @@ from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
     Authentication,
 )
+from mc_server_dashboard_api.logging import _TAG as _APP_LOG_HANDLER_TAG
 from tests.argon2_diagnostics import RECENT_NODE_IDS
 from tests.client_utils import bind_exit_stack
 from tests.identity.fakes import FakeTokenService, FakeUnitOfWork, make_user
@@ -251,6 +253,26 @@ def _client_exit_stack() -> Iterator[None]:
             yield
         finally:
             bind_exit_stack(None)
+
+
+@pytest.fixture
+def app_log_handler_restored() -> Iterator[None]:
+    """Undo the ``configure_logging`` an operator command's ``main`` makes.
+
+    The app's handler writes to the ``sys.stderr`` it was installed with, which in
+    a test is that test's capture and is closed after it, so a later test's log
+    line would hit a closed stream. The handler and the root level the test found
+    are put back.
+    """
+
+    root = logging.getLogger()
+    found = [h for h in root.handlers if getattr(h, _APP_LOG_HANDLER_TAG, False)]
+    level = root.level
+    yield
+    root.handlers[:] = [
+        h for h in root.handlers if not getattr(h, _APP_LOG_HANDLER_TAG, False)
+    ] + found
+    root.setLevel(level)
 
 
 @pytest.fixture(scope="session")
