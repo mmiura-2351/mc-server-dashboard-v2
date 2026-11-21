@@ -616,7 +616,9 @@ async def publish_snapshot(
                 # committing makes the commit refuse it
                 # (``hydrated_during_upload``), so that publish is not
                 # current. A stamp the #2284 identity guard skips is of the
-                # first kind, since its publish committed.
+                # first kind, since its publish committed. Not covered: a host
+                # crash that loses writes the Worker never synced, and an
+                # operator's copy into the scratch (STORAGE.md Section 4.6).
                 current_publisher = await storage.current_publisher(*scope)
                 if (
                     current_publisher is not None

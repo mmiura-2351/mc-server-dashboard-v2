@@ -874,6 +874,9 @@ Notes:
   the upload at its deadline, or when the marker write fails, and none of these
   replaces the tree. A hydrate does, and serves either the store's current
   generation or one before an upload that was still committing, which it voids.
+  Two things this does not cover: a host crash that loses writes the Worker
+  never synced, which can leave its scratch older than what it packed, and an
+  operator's copy into the scratch (STORAGE.md Section 4.6).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

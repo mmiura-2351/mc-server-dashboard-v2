@@ -421,9 +421,10 @@ class WorkingSetStore(abc.ABC):
         committed a state the fence refuses — another Worker assigned — before
         this read sees every publish the fence let through. A publish whose fence
         has not run yet is refused. The skip-hydrate decision reads the
-        generation this way, and so does the snapshot upload guard (issue
-        #3564): every mutation of the published working set runs whole under
-        this lock, so the read never observes one half done.
+        generation this way, and so does the snapshot upload guard, through
+        :meth:`settled_upload_base` (issue #3564): every mutation of the
+        published working set runs whole under this lock, so the read never
+        observes one half done.
         """
 
     @abc.abstractmethod
