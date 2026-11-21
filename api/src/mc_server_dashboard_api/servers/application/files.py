@@ -1627,25 +1627,32 @@ async def _refuse_unstorable_subtree(
     """Refuse a directory move the member-name rule refuses below it (issue #3973).
 
     Moving ``from_path`` to ``to_path`` names everything below it anew: each
-    name is the destination plus its path below the source. A destination with
-    no more components and no more bytes than the source makes no name deeper or
-    longer than one that is already there, so nothing is measured. Otherwise the
-    subtree's extent, its deepest directory and its longest path below the
-    source, is measured as stored and judged after the destination. The names
-    themselves do not change, so their characters are not asked about: a name
-    no path can spell moves with the rest.
+    name is the destination plus its path below the source. Each limit is judged
+    only when the destination grows what it bounds: the depth when it has more
+    components than the source, the length when it has more bytes. One that
+    does not grow makes no name deeper, or longer, than one already there, so a
+    tree already too deep still moves to a longer name at its own level. When
+    neither grows nothing is measured. Otherwise the subtree's extent, its
+    deepest directory and its longest path below the source, is measured as
+    stored and judged after the destination. The names themselves do not change,
+    so their characters are not asked about: a name no path can spell moves with
+    the rest.
     """
 
     to_components, to_bytes = path_size(to_path)
     from_components, from_bytes = path_size(from_path)
-    if to_components <= from_components and to_bytes <= from_bytes:
+    deeper, longer = to_components > from_components, to_bytes > from_bytes
+    if not deeper and not longer:
         return
     extent = await file_store.subtree_extent(
         community_id=community_id, server_id=server_id, rel_path=from_path
     )
+    # An empty directory adds no separator. A limit the destination does not
+    # grow is passed a zero, which it admits.
+    moved_bytes = to_bytes + 1 + extent.longest if extent.longest else to_bytes
     reason = extent_refusal(
-        directories=to_components + extent.depth,
-        path_bytes=to_bytes + 1 + extent.longest if extent.longest else to_bytes,
+        directories=to_components + extent.depth if deeper else 0,
+        path_bytes=moved_bytes if longer else 0,
     )
     if reason is not None:
         raise InvalidFilePathError(to_path, reason=reason)

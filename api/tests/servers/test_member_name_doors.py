@@ -571,6 +571,16 @@ async def test_a_tree_already_too_deep_is_renamed_at_its_own_level(
     assert await odd.read("e/" + _nested(128, "f")) == b"deep"
 
 
+async def test_a_tree_already_too_deep_moves_to_a_longer_name_at_its_own_level(
+    odd: _Doors,
+) -> None:
+    # ``d`` to ``dd`` adds a byte but no level: its length is judged, its depth
+    # is not, so the 129-level tree moves.
+    await odd.rename("d", "dd")
+
+    assert await odd.read("dd/" + _nested(128, "f")) == b"deep"
+
+
 async def test_a_tree_already_too_deep_is_not_moved_deeper(odd: _Doors) -> None:
     assert await _refusal(odd.rename("d", "x/d")) == "path_too_deep"
     assert await odd.read(_nested(129, "f")) == b"deep"
@@ -707,11 +717,43 @@ async def test_a_directory_moved_to_4095_bytes_is_admitted(doors: _Doors) -> Non
 
 @pytest.mark.parametrize("doors", ["object"], indirect=True)
 async def test_a_longer_name_at_the_same_level_is_measured(doors: _Doors) -> None:
-    # ``a/src`` to a 250-byte name adds no level but 245 bytes, so the 3,900
-    # bytes below make a 4,151-byte path.
+    # ``a/src`` to a 193-byte name adds no level but 188 bytes, so the 3,900
+    # bytes below make a 2 + 193 + 1 + 3,900 = 4,096-byte path; 192 bytes make
+    # 4,095.
     await doors.write("a/src/" + _long_path(3900))
 
-    assert await _refusal(doors.rename("a/src", "a/" + "n" * 250)) == "path_too_long"
+    assert await _refusal(doors.rename("a/src", "a/" + "n" * 193)) == "path_too_long"
+
+    await doors.rename("a/src", "a/" + "n" * 192)
+    assert await doors.read("a/" + "n" * 192 + "/" + _long_path(3900)) == b"x"
+
+
+async def test_a_tree_already_too_long_moves_one_level_deeper_at_its_own_length(
+    tmp_path: Path,
+) -> None:
+    # On object only, as fs cannot hold a path this long. 200 + 1 + 3,896 =
+    # 4,097 bytes is already past the limit; a 200-byte destination one level
+    # deeper adds a level but no byte, so its depth is judged and its length is
+    # not.
+    harness = build_harness("object", tmp_path)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    await harness.publish(
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {"x" * 200 + "/" + _long_path(3896): b"long"},
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community, server, running=False))
+    doors = _Doors(
+        community=CommunityId(community),
+        server=ServerId(server),
+        store=StorageFileStoreAdapter(storage=harness.storage),
+        uow=uow,
+    )
+
+    await doors.rename("x" * 200, "a/" + "x" * 198)
+
+    assert await doors.read("a/" + "x" * 198 + "/" + _long_path(3896)) == b"long"
 
 
 @pytest.mark.parametrize("doors", ["object"], indirect=True)

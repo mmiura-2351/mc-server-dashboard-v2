@@ -1811,23 +1811,25 @@ which the API's constants and the Worker's walk bounds are each tested against:
   `name_too_long`, and on object it is joined to a key prefix; issue #3979
   decides the final number.
 
-The rule is the application's, above this Port: every door that creates a name
-asks it before anything is written, and answers a refusal with that `422`
-reason. The files-API write (at rest, and running, before the Worker is asked),
-make-dir, upload and each archive member joined to the upload's directory, and a
-rename's destination. A directory rename also judges the names the move creates
-below the destination, each the destination plus a path below the source. A
-destination with no more components and no more bytes than the source creates
-none deeper or longer than one already there, so it is not measured: a tree
-already too deep can still be renamed at its own level. Any other is judged by
-the subtree's extent, its deepest directory and longest path below the source,
-measured as stored in one walk on fs and one prefix listing on object
-(`subtree_extent`), so a subtree too deep or too long to move is refused whole.
-The moved names keep their characters and are not asked about them, so a
-directory whose name no path can spell moves with the rest. A server import
-refuses such a member before its row exists, and the backup upload gate refuses
-one as `422 invalid_archive`, its `detail` naming the member and the reason,
-before the archive is stored.
+The rule is the application's, above this Port: every door that creates a name,
+except those tracked in issue #4008, asks it before anything is written, and
+answers a refusal with that `422` reason. The files-API write (at rest, and
+running, before the Worker is asked), make-dir, upload and each archive member
+joined to the upload's directory, and a rename's destination. A directory rename
+also judges the names the move creates below the destination, each the
+destination plus a path below the source. Each limit is judged only when the
+destination grows what it bounds: the depth when it has more components than the
+source, the length when it has more bytes. One it does not grow makes no name
+deeper, or longer, than one already there, so a tree already too deep can still
+be renamed at its own level, to a longer name too. A destination that grows
+neither is not measured. Any other is judged by the subtree's extent, its
+deepest directory and longest path below the source, measured as stored in one
+walk on fs and one prefix listing on object (`subtree_extent`), so a subtree too
+deep or too long to move is refused whole. The moved names keep their characters
+and are not asked about them, so a directory whose name no path can spell moves
+with the rest. A server import refuses such a member before its row exists, and
+the backup upload gate refuses one as `422 invalid_archive`, its `detail` naming
+the member and the reason, before the archive is stored.
 
 The files-API doors also refuse the characters an uploaded file's name may not
 carry (issues #3922, #3969): a `\`, a control character (C0, DEL or C1), a lone
