@@ -1232,13 +1232,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   else in the modal closes a popover open in it first, then the modal. When a
   toast holding keyboard focus goes, dismissed, timed out or dropped by the
   stack cap, focus moves to the next toast's dismiss button, or the one before
-  when it was the last. With no
-  toast left, focus returns to the element it came into the stack from, unless
-  that is behind an open modal; failing that, to the open modal, or else to
-  the page's `main` region. A toast that goes holding the focus a click or a
-  tap left skips the other toasts and sends focus straight back the same way,
-  without scrolling the page, so a key pressed next cannot dismiss another
-  toast unread. Focus never drops to the page body while any of these exists.
+  when it was the last. With no toast left, focus returns to the element it
+  came into the stack from, unless that is behind an open modal; failing that,
+  to the open modal, or else to the page's `main` region. A toast that goes
+  holding the focus a click or a tap left skips the other toasts and sends
+  focus straight back the same way, without scrolling the page, so a key
+  pressed next cannot dismiss another toast unread. Focus never drops to the
+  page body while any of these exists.
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while

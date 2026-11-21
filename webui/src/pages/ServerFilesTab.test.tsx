@@ -2910,7 +2910,8 @@ describe("Keyboard shortcuts", () => {
     await openFiles();
     await screen.findByText(/a\.txt/);
     fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
-    // As a modal's Escape is when its listener ran first and closed it.
+    // As the stop menu's Escape is when its listener ran first and closed
+    // the menu.
     const take = (e: KeyboardEvent) => e.preventDefault();
     document.addEventListener("keydown", take, true);
 
@@ -3410,10 +3411,10 @@ describe.each(["context", "stop"])(
       "%s moves no focus to a file row",
       async (key) => {
         const focused = await openMenuOverSelection();
+        const list = document.querySelector(".file-list");
+        expect(list).toBeInTheDocument();
         const onRowFocus = vi.fn();
-        document
-          .querySelector(".file-list")
-          ?.addEventListener("focusin", onRowFocus);
+        list?.addEventListener("focusin", onRowFocus);
 
         fireEvent.keyDown(focused, { key });
 
