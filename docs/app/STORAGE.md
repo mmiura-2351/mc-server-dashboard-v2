@@ -381,14 +381,15 @@ resource-pack GC (Section 4.3) run a pass the same way:
   after it (issue #3934). Ending early means a delete the store gave no answer
   to, or the fifth failed delete in a row. Each GC walks its listing in key
   order, from the key after that one round to the start, so that key comes last.
-  The passes that end early therefore form one continuous scan round the keys:
-  each moves the scan on by at least one key, or by five at the stop.
+  From the first pass that ends early, the passes therefore form one continuous
+  scan round the keys: each later one moves the scan on by at least one key, or
+  by five at the stop.
   - Failures that are in fact tied to keys therefore no longer starve the keys
     after them. Examples are a malformed legacy key the object client cannot
     send, a local-disk `EIO` on one JAR, or objects whose deletes keep being
     refused. With one key that gets no answer, every other orphan is reclaimed
     within two passes. Ten adjacent keys whose deletes keep failing hold back the
-    orphan above them for two passes.
+    orphan above them for up to two passes.
   - A key whose delete keeps failing still fails in each pass that reaches it.
     One that gets no answer ends that pass with an ERROR from the loop (and, for
     the JAR pool, a 500 from the manual trigger) until it is fixed or removed.
@@ -397,11 +398,19 @@ resource-pack GC (Section 4.3) run a pass the same way:
   - A pass that walks the whole listing without ending early clears the key.
   - The key lives in the API process's memory, so a restart forgets it. The
     periodic JAR-pool GC and its manual trigger share one.
-  - A pass with no key starts at a random place in key order. That is the first
-    pass of a process, and the pass after one that came round. At the default
-    daily intervals, an API process that lives under a day never runs the pass
-    that resumes. Its first pass still starts somewhere new, so across restarts
-    the keys after a bad one are reached too.
+  - A pass with no key starts at a random place in key order and walks up or
+    down from it at random, wrapping round (issue #3965). That is the first pass
+    of a process, and the pass after one that came round. A pass with a key
+    always walks up from after it, so the pass after one that walked down walks
+    back over the keys that one met.
+  - At the default daily intervals, an API process that lives under a day never
+    runs the pass that resumes, so across restarts only passes with no key run.
+    With one key that gets no answer, such a pass reaches any other orphan with a
+    chance of one half, wherever it lies: two restarts on average (1.9 to 2.0
+    measured over 100 listed keys). With several such keys, the chance for an
+    orphan is about half the share of listed keys between the two bad keys
+    around it. Two that split the listing in half take about four restarts on
+    average (3.6 to 4.1 measured) for every key between them.
   - A pass that starts after a key says so in a DEBUG line.
 - A cancellation (shutdown) ends the pass at once too. A pass that ends at once
   logs no summary; the per-object INFO lines still record what it reclaimed. The
