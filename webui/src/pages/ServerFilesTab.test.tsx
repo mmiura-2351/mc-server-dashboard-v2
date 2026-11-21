@@ -2940,6 +2940,28 @@ describe("Keyboard shortcuts", () => {
     expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
   });
 
+  it("Escape with focus outside the open stop menu closes it and leaves the selection", async () => {
+    routeGet({
+      detail: server({ assigned_worker_id: "w1" }),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: `${t("serverDetail.stop")} ▾` }),
+    );
+    // Focus gone from the menu, as after a Tab out of it.
+    (document.activeElement as HTMLElement).blur();
+
+    // Handled, so a Files listener that runs once the menu has closed leaves
+    // it alone (#3971).
+    expect(fireEvent.keyDown(document.body, { key: "Escape" })).toBe(false);
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
+  });
+
   it.each(["Delete", "Backspace"])(
     "%s opens and cancels delete confirmation for a selected item",
     async (key) => {
@@ -3257,6 +3279,118 @@ describe("Keyboard shortcuts with a modal open", () => {
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });
 });
+
+// ── Keyboard shortcuts with a page menu open (issue #3971) ───────────────────
+
+// A key pressed while the file context menu or the stop menu is open is the
+// menu's: the listing neither acts on its selection nor takes the key from
+// the browser.
+describe.each(["context", "stop"])(
+  "Keyboard shortcuts with the %s menu open",
+  (menu) => {
+    // Opens the menu over a listing with a.txt selected and b.txt not, and
+    // returns what holds focus: the stop menu's first item, or the page body,
+    // where the context menu leaves it.
+    async function openMenuOverSelection({ copyFirst = false } = {}) {
+      routeGet({
+        // At rest but still assigned: the stop control shows beside the
+        // listing.
+        detail: server({ assigned_worker_id: "w1" }),
+        list: listing([
+          { name: "a.txt", kind: "file" },
+          { name: "b.txt", kind: "file" },
+        ]),
+      });
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+      fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+      if (copyFirst) {
+        fireEvent.keyDown(document, { key: "c", ctrlKey: true });
+        await screen.findByText(t("files.copied"));
+      }
+      if (menu === "context") {
+        const row = screen.getByText(/a\.txt/).closest("li") as HTMLElement;
+        fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+      } else {
+        fireEvent.click(
+          screen.getByRole("button", { name: `${t("serverDetail.stop")} ▾` }),
+        );
+      }
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+      return document.activeElement as HTMLElement;
+    }
+
+    it.each(["Delete", "Backspace"])(
+      "%s opens no delete confirm",
+      async (key) => {
+        const focused = await openMenuOverSelection();
+
+        expect(fireEvent.keyDown(focused, { key })).toBe(true);
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+      },
+    );
+
+    it("F2 opens no rename dialog", async () => {
+      const focused = await openMenuOverSelection();
+
+      expect(fireEvent.keyDown(focused, { key: "F2" })).toBe(true);
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+    });
+
+    it("Ctrl+A selects nothing", async () => {
+      const focused = await openMenuOverSelection();
+
+      expect(fireEvent.keyDown(focused, { key: "a", ctrlKey: true })).toBe(
+        true,
+      );
+      expect(screen.getByRole("checkbox", { name: "b.txt" })).not.toBeChecked();
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+    });
+
+    it("Ctrl+C copies nothing", async () => {
+      const focused = await openMenuOverSelection();
+
+      expect(fireEvent.keyDown(focused, { key: "c", ctrlKey: true })).toBe(
+        true,
+      );
+      expect(screen.queryByText(t("files.copied"))).not.toBeInTheDocument();
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+    });
+
+    it("Ctrl+V pastes nothing", async () => {
+      const focused = await openMenuOverSelection({ copyFirst: true });
+
+      expect(fireEvent.keyDown(focused, { key: "v", ctrlKey: true })).toBe(
+        true,
+      );
+      // A paste over a.txt would first ask to overwrite it.
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(mockDownload.fetchFileBlob).not.toHaveBeenCalled();
+      expect(screen.getByRole("menu")).toBeInTheDocument();
+    });
+
+    // The stop menu takes the arrows itself, and puts focus back on its item
+    // after the key, so a move to a row shows only as a visit.
+    it.each(["ArrowDown", "ArrowUp"])(
+      "%s moves no focus to a file row",
+      async (key) => {
+        const focused = await openMenuOverSelection();
+        const onRowFocus = vi.fn();
+        document
+          .querySelector(".file-list")
+          ?.addEventListener("focusin", onRowFocus);
+
+        fireEvent.keyDown(focused, { key });
+
+        expect(onRowFocus).not.toHaveBeenCalled();
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+      },
+    );
+  },
+);
 
 // ── Navigation history (issue #1475) ────────────────────────────────────────
 
