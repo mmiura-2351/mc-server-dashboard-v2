@@ -49,22 +49,21 @@ var version = "0.0.0-dev"
 const configPathEnv = "MCD_WORKER_CONFIG"
 
 func main() {
-	if err := run(context.Background()); err != nil {
+	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(context.Background(), cfg, newLogger(cfg.Log)); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-// run wires the Worker and blocks until the session ends. It returns nil on a
-// signal-driven clean shutdown and an error on a fatal config/registration
-// failure.
-func run(ctx context.Context) error {
-	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
-	if err != nil {
-		return err
-	}
-
-	logger := newLogger(cfg.Log)
+// run wires the Worker from its loaded configuration and blocks until the
+// session ends. It returns nil on a signal-driven clean shutdown and an error on
+// a fatal wiring/registration failure.
+func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	logger.Info("worker configuration loaded", "config", cfg)
 
 	conn, err := dial(cfg.API, logger)

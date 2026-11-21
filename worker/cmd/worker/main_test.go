@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
@@ -49,26 +52,64 @@ func TestControlPlaneKeepaliveMatchesServerContract(t *testing.T) {
 	}
 }
 
-// TestRunFailsFastOnMissingConfig verifies the wiring surfaces a fatal config
-// error at boot when required keys are absent (CONFIGURATION.md Section 2). The
-// test clears the relevant env so Load sees nothing.
-func TestRunFailsFastOnMissingConfig(t *testing.T) {
-	for _, k := range []string{
-		"MCD_WORKER_CONFIG",
-		"MCD_WORKER_API_GRPC_ENDPOINT",
-		"MCD_WORKER_API_CREDENTIAL",
-		"MCD_WORKER_WORKER_SCRATCH_DIR",
-	} {
-		t.Setenv(k, "")
+// TestMainFailsFastOnMissingConfig verifies the wiring surfaces a fatal config
+// error at boot when required keys are absent (CONFIGURATION.md Section 2): main
+// exits 1 and says why. The child sees no MCD_WORKER_* variable, so Load sees
+// nothing.
+func TestMainFailsFastOnMissingConfig(t *testing.T) {
+	if isChild(t) {
+		main()
+		return
 	}
+	stderr, code := runChild(t)
+	if code != 1 {
+		t.Errorf("main() with no config exited %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "config") {
+		t.Errorf("main() wrote %q, want a config error", stderr)
+	}
+}
 
-	err := run(context.Background())
-	if err == nil {
-		t.Fatal("run() with no config returned nil, want a fatal config error")
+// childEnv marks a run of the test binary as runChild's child, by the name of the
+// one test it runs.
+const childEnv = "MCSD_TEST_CHILD"
+
+// runChild runs t again in a child process of the test binary, for a test that
+// exits or changes process-wide state. The child sees no MCD_* or GRPC_GO_*
+// variable but those in env, so the ambient environment cannot steer it. It
+// returns what the child wrote to stderr and its exit code.
+func runChild(t *testing.T, env ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "MCD_") && !strings.HasPrefix(kv, "GRPC_GO_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
 	}
-	if !strings.Contains(err.Error(), "config") {
-		t.Errorf("run() error = %v, want a config error", err)
+	cmd.Env = append(cmd.Env, env...)
+	cmd.Env = append(cmd.Env, childEnv+"="+t.Name())
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	var exitErr *exec.ExitError
+	if err := cmd.Run(); err != nil && !errors.As(err, &exitErr) {
+		t.Fatalf("run the child: %v", err)
 	}
+	return stderr.String(), cmd.ProcessState.ExitCode()
+}
+
+// isChild reports whether this process is runChild's child for t.
+func isChild(t *testing.T) bool {
+	return os.Getenv(childEnv) == t.Name()
+}
+
+// runFromEnv runs the Worker as main does, from the configuration the environment
+// gives and with a logger over os.Stderr as it is at the call.
+func runFromEnv(ctx context.Context) error {
+	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
+	if err != nil {
+		return err
+	}
+	return run(ctx, cfg, newLogger(cfg.Log))
 }
 
 // TestResolveRconHost pins the RCON host-resolution gate (issue #218): only a
@@ -134,7 +175,7 @@ func TestResolveRconHost(t *testing.T) {
 // run() is reachable without Docker or a live API. The control-plane dial is lazy
 // (grpc.NewClient connects on first use), the container driver's client construction only
 // parses the docker host (NewEngineClient), and Run returns nil at once on a cancelled
-// context. TestRunFailsFastOnMissingConfig already calls run() for the config leg; this
+// context. TestMainFailsFastOnMissingConfig already runs main() for the config leg; this
 // covers the scratch legs.
 //
 // What this test must NOT fake is the orphan sweep's success: since review round 2 the
@@ -167,7 +208,7 @@ func TestBootReclaimsScratchLeftovers(t *testing.T) {
 	t.Cleanup(func() { backstop.Stop() })
 	setBootEnv(t, scratch, fakeDockerSocket(t), endpoint)
 
-	if err := run(ctx); err != nil {
+	if err := runFromEnv(ctx); err != nil {
 		t.Fatalf("run() = %v, want nil: this test needs the boot sequence to complete and the "+
 			"session to return, as a clean shutdown does", err)
 	}
@@ -212,7 +253,7 @@ func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := run(ctx)
+	err := runFromEnv(ctx)
 	if err == nil {
 		t.Fatal("run() with an unsupported docker host returned nil, want the instance-manager " +
 			"build to fail: this test places that failure between the orphan sweep and the " +
@@ -263,7 +304,7 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := run(ctx); err != nil {
+	if err := runFromEnv(ctx); err != nil {
 		t.Fatalf("run() = %v, want nil: a failed orphan sweep is non-fatal by design, and this "+
 			"test needs boot to reach the reclaims and decline them", err)
 	}
@@ -619,7 +660,7 @@ func runInBackground(t *testing.T) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx) }()
+	go func() { done <- runFromEnv(ctx) }()
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -812,7 +853,7 @@ func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 }
 
 // captureStderr redirects os.Stderr to a pipe for the rest of the test and returns the
-// reader for what boot logged there — run() builds its own logger over os.Stderr
+// reader for what boot logged there — runFromEnv builds boot's logger over os.Stderr
 // (newLogger), so this is where a test of the wiring observes a boot decision that nothing
 // else exposes. The returned func restores os.Stderr and reads the pipe once; it is also
 // registered as cleanup, so a t.Fatal inside the captured window cannot leave the process

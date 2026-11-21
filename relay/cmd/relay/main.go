@@ -92,22 +92,22 @@ var version = "0.0.0-dev"
 const configPathEnv = "MCD_RELAY_CONFIG"
 
 func main() {
-	if err := run(context.Background()); err != nil {
+	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := run(context.Background(), cfg, newLogger(cfg.Log)); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-// run wires the relay and blocks until shutdown. It returns nil on a
-// signal-driven clean shutdown, and an error on a fatal config/bind failure
-// or a failure-driven listener shutdown (non-transient Accept error).
-func run(ctx context.Context) error {
-	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
-	if err != nil {
-		return err
-	}
-
-	logger := newLogger(cfg.Log)
+// run wires the relay from its loaded configuration and blocks until shutdown.
+// It returns nil on a signal-driven clean shutdown, and an error on a fatal
+// wiring/bind failure or a failure-driven listener shutdown (non-transient
+// Accept error).
+func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	logger.Info("relay configuration loaded", "config", cfg)
 
 	// Dedicated registry (never the client_golang global default) plus the
@@ -274,12 +274,7 @@ func run(ctx context.Context) error {
 	// NON-FATAL: observability must never take player ingress down, so it is
 	// logged at Error and the relay keeps running without the endpoint.
 	if cfg.Metrics.Enabled {
-		srv := &http.Server{
-			Handler: metricsHandler(reg),
-			// Bound the header read so an idle/slow client cannot pin a
-			// connection on the metrics listener.
-			ReadHeaderTimeout: 5 * time.Second,
-		}
+		srv := newMetricsServer(reg)
 		ln, lnErr := net.Listen("tcp", cfg.Metrics.Listen)
 		if lnErr != nil {
 			logger.Error("metrics listener bind failed; continuing without the metrics endpoint", "listen", cfg.Metrics.Listen, "error", lnErr)
@@ -309,6 +304,16 @@ func run(ctx context.Context) error {
 // metricsShutdownTimeout bounds the metrics HTTP server's graceful shutdown on
 // SIGINT/SIGTERM before its connections are forcibly closed.
 const metricsShutdownTimeout = 5 * time.Second
+
+// newMetricsServer builds the metrics / health HTTP server over reg.
+func newMetricsServer(reg *prometheus.Registry) *http.Server {
+	return &http.Server{
+		Handler: metricsHandler(reg),
+		// Bound the header read so an idle/slow client cannot pin a
+		// connection on the metrics listener.
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+}
 
 // metricsHandler builds the metrics/health mux: /metrics exposes reg's series
 // via promhttp; /healthz is a static liveness 200. Both answer GET (and so
