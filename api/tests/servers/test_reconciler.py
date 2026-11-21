@@ -3768,6 +3768,57 @@ async def test_a_worker_back_within_a_grace_of_its_drop_is_owed_its_row(
     assert uow.servers.by_id[server.id].assigned_worker_id is None
 
 
+class _SessionEndsAsStepAOpens(FakeUnitOfWork):
+    """Ends the Worker's session as the release's first unit of work opens.
+
+    That is after the tick measured the row's grace on a connected Worker, and
+    before Step A reads the row (issue #3963).
+    """
+
+    def __init__(self, cp: FakeControlPlane, servers: FakeServerRepository) -> None:
+        super().__init__(servers=servers)
+        self._cp: FakeControlPlane | None = cp
+
+    async def __aenter__(self) -> FakeUnitOfWork:
+        cp, self._cp = self._cp, None
+        if cp is not None:
+            cp.end_session(_WORKER, at=_NOW)
+        return self
+
+
+@pytest.mark.parametrize(("observed", "start_sent"), _CONNECTED_LEGS)
+async def test_a_worker_that_drops_before_step_a_is_released_a_grace_after_the_drop(
+    observed: ObservedState, start_sent: bool
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    intents = StopIntentCounter()
+    if start_sent:
+        intents.start_sent(server.id)
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(
+        uow,
+        cp,
+        clock,
+        stop_uow=_SessionEndsAsStepAOpens(cp, uow.servers),
+        stop_intents=intents,
+    )
+
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
 @pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
 async def test_a_row_stamped_before_its_workers_drop_waits_a_grace_from_the_drop(
     observed: ObservedState,
