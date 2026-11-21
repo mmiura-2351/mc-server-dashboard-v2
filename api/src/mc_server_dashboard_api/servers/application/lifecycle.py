@@ -1855,7 +1855,10 @@ class StopServer:
             )
         if owed == "clear_stale_assignment":
             return await self._clear_stale_assignment(
-                community_id=community_id, server_id=server_id, force=force
+                community_id=community_id,
+                server_id=server_id,
+                worker_connected=False,
+                force=force,
             )
         if worker_id is None:
             # Nothing was placed, so there is no Worker to tell and no placement
@@ -2456,9 +2459,12 @@ class StopServer:
         return server
 
     async def clear_stale_assignment(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, worker_connected: bool
     ) -> Server:
         """``_clear_stale_assignment`` under the stop-convergence exclusion.
+
+        ``worker_connected`` is whether the caller found the assigned Worker
+        connected when it chose this convergence.
 
         Raises ``LifecycleTransitionConflictError`` without dispatching or releasing
         when another stop convergence for the server is in flight (issue #3491).
@@ -2466,11 +2472,18 @@ class StopServer:
 
         with self.stop_convergence.claim(server_id):
             return await self._clear_stale_assignment(
-                community_id=community_id, server_id=server_id
+                community_id=community_id,
+                server_id=server_id,
+                worker_connected=worker_connected,
             )
 
     async def _clear_stale_assignment(
-        self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_connected: bool,
+        force: bool = False,
     ) -> Server:
         """Release a stop wedged at (stopped, stopped|unknown|crashed|stopping,
         assigned).

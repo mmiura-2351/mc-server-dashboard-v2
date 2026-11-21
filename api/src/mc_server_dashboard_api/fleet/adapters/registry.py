@@ -156,7 +156,7 @@ class InMemoryWorkerRegistry(WorkerRegistry):
         # Ignore a teardown from a stale Session: the worker has reconnected on a
         # newer one and must stay online (CONTROL_PLANE.md Section 4.4).
         if worker is not None and self._sessions.get(worker_id) == session:
-            self._workers[worker_id] = worker.disconnect()
+            self._workers[worker_id] = worker.disconnect(self._clock.now())
 
     def is_current_session(self, worker_id: WorkerId, session: SessionToken) -> bool:
         return self._sessions.get(worker_id) == session

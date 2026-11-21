@@ -1435,7 +1435,11 @@ async def test_disconnected_recovery_records_a_failed_release_only_when_finished
             control_plane=cp,
             clock=FakeClock(_NOW),
             unrecorded_stops=unrecorded,
-        ).clear_stale_assignment(community_id=server.community_id, server_id=server.id)
+        ).clear_stale_assignment(
+            community_id=server.community_id,
+            server_id=server.id,
+            worker_connected=False,
+        )
     assert cp.dispatched == []
     assert (unrecorded.recorded_at(server.id) == _NOW) is recorded
 

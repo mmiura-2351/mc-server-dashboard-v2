@@ -876,8 +876,12 @@ class RunReconcilerTick:
                 store_generation=store_generation,
             )
         elif action == "clear_stale_assignment":
+            worker_id = server.assigned_worker_id
             return await self.make_stop_server().clear_stale_assignment(
-                community_id=server.community_id, server_id=server.id
+                community_id=server.community_id,
+                server_id=server.id,
+                worker_connected=worker_id is not None
+                and self.control_plane.is_worker_connected(worker_id=worker_id),
             )
         else:  # redispatch_stop
             return await self.make_stop_server().redispatch_stop(

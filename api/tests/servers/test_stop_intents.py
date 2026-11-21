@@ -2199,8 +2199,15 @@ async def test_a_convergence_that_finds_the_row_started_again_withdraws_nothing(
 
     async def tick() -> None:
         converge = getattr(world.stop_server(), convergence)
+        routed = (
+            {"worker_connected": True}
+            if convergence == "clear_stale_assignment"
+            else {}
+        )
         with pytest.raises(InvalidLifecycleTransitionError):
-            await converge(community_id=world.community, server_id=world.server_id)
+            await converge(
+                community_id=world.community, server_id=world.server_id, **routed
+            )
 
     world.after_hydrate(tick)
 
@@ -2597,7 +2604,9 @@ async def test_an_older_start_after_a_stale_clear_leaves_a_newer_placements_mark
             True,
         )
         await stop_at(_NOW + dt.timedelta(seconds=120)).clear_stale_assignment(
-            community_id=world.community, server_id=world.server_id
+            community_id=world.community,
+            server_id=world.server_id,
+            worker_connected=True,
         )
         assert world.stored() == (DesiredState.STOPPED, None)
         world.store_generation = 1

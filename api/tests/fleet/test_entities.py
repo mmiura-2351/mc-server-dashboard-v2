@@ -36,7 +36,7 @@ def test_with_heartbeat_moves_the_window() -> None:
 
 
 def test_disconnected_worker_is_offline_even_when_fresh() -> None:
-    worker = make_worker(at=_T0).disconnect()
+    worker = make_worker(at=_T0).disconnect(_T0)
     assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.OFFLINE
 
 
@@ -48,7 +48,7 @@ def test_draining_worker_reports_draining_while_live() -> None:
 def test_draining_offline_worker_is_offline() -> None:
     # Liveness wins over drain: a draining Worker that has gone offline reports
     # OFFLINE, not DRAINING.
-    worker = make_worker(at=_T0).start_draining().disconnect()
+    worker = make_worker(at=_T0).start_draining().disconnect(_T0)
     assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.OFFLINE
 
 

@@ -38,7 +38,7 @@ class WorkerStatus(enum.Enum):
 class Worker:
     """A registered Worker and its last-known liveness signal.
 
-    ``disconnected`` is set when the stream ends (clean close or transport
+    ``disconnected_at`` is set when the stream ends (clean close or transport
     error); such a Worker is ``OFFLINE`` regardless of its heartbeat age. A
     still-connected Worker is ``OFFLINE`` only once it misses heartbeats past the
     liveness window (CONTROL_PLANE.md Section 4.3/4.4).
@@ -49,18 +49,18 @@ class Worker:
     capabilities: WorkerCapabilities
     registered_at: dt.datetime
     last_heartbeat_at: dt.datetime
-    disconnected: bool = False
+    disconnected_at: dt.datetime | None = None
     draining: bool = False
 
     def with_heartbeat(self, at: dt.datetime) -> Worker:
         """Return a copy whose liveness is refreshed to heartbeat time ``at``."""
 
-        return replace(self, last_heartbeat_at=at, disconnected=False)
+        return replace(self, last_heartbeat_at=at, disconnected_at=None)
 
-    def disconnect(self) -> Worker:
-        """Return a copy marked disconnected (stream ended)."""
+    def disconnect(self, at: dt.datetime) -> Worker:
+        """Return a copy marked disconnected (stream ended) at ``at``."""
 
-        return replace(self, disconnected=True)
+        return replace(self, disconnected_at=at)
 
     def start_draining(self) -> Worker:
         """Return a copy marked draining (excluded from placement, FR-WRK-5)."""
@@ -79,7 +79,7 @@ class Worker:
         ``OFFLINE`` even while draining.
         """
 
-        if self.disconnected:
+        if self.disconnected_at is not None:
             return WorkerStatus.OFFLINE
         if now - self.last_heartbeat_at > timeout:
             return WorkerStatus.OFFLINE
