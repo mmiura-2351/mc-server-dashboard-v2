@@ -631,8 +631,8 @@ class WorkerAssignment:
 
 # An async lookup of a server's current assignment, or None if unassigned. The
 # data-plane snapshot endpoint uses it to fence late publishes from a worker that
-# is no longer assigned (issue #1703), and to refuse a stale one from a worker
-# that has not hydrated the server yet (issue #3890).
+# is no longer assigned (issue #1703), and to refuse every publish from the
+# assigned worker while it has not hydrated the server yet (issue #3890).
 AssignedWorkerLookup = Callable[
     [uuid.UUID, uuid.UUID], Awaitable[WorkerAssignment | None]
 ]

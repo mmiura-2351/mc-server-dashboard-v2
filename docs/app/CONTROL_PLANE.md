@@ -805,12 +805,17 @@ Notes:
     release of a stale assignment asks for it, and the stop releases the
     server: the store's working set stands, as it did when such a start gave
     the Worker back, and the next start's hydrate replaces the scratch;
-  - the data plane refuses a stale-base publish from that Worker, although it
-    is the assigned one (STORAGE.md Section 8).
+  - the data plane refuses every publish from that Worker, although it is the
+    assigned one, whatever base the publish declares, or none (STORAGE.md
+    Section 8). That includes a late final snapshot of the Worker's previous
+    assignment that starts uploading after the new placement: its scratch stays
+    on the Worker, and the store wins again.
 
   The mark clears once the Worker holds the store's working set: its hydrate
   succeeded, or the generation it holds is at least the store's, so the start
-  skips the hydrate. If the Worker then refuses that start because the working
+  skips the hydrate. Only the start whose placement it is clears it: one whose
+  server a stop released and a newer start placed on the same Worker during its
+  hydrate leaves the newer placement's mark. If the Worker then refuses that start because the working
   set is not on its disk (Section 7), the mark is set again for the hydrate
   the start replays. A `running` report from the Worker clears it too, as does
   an `INVALID_STATE` hydrate: from then on the instance's working set is the
