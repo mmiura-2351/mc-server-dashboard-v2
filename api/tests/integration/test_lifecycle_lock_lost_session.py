@@ -20,7 +20,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
@@ -173,6 +173,56 @@ async def test_a_session_that_no_longer_holds_the_lock_reports_it_lost(
         async with lock.hold(server_id) as held:
             await _release_by_hand(held, server_id)
             await held.ensure_held()
+
+
+async def test_a_release_cancelled_mid_unlock_stays_a_cancellation(
+    engine: AsyncEngine,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only a failed release is logged and swallowed: a cancellation that lands
+    # while the unlock waits goes on as itself. The connection is closed rather
+    # than pooled, so no session keeps the lock: a pooled one would hold it for
+    # good, and only the same session could take it again.
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+    unlocking = asyncio.Event()
+
+    async def _never_answers(*_args: object, **_kwargs: object) -> None:
+        unlocking.set()
+        await asyncio.Event().wait()
+
+    async def _hold() -> None:
+        async with lock.hold(server_id):
+            monkeypatch.setattr(AsyncConnection, "execute", _never_answers)
+
+    task = asyncio.create_task(_hold())
+    await unlocking.wait()
+    task.cancel()
+    await asyncio.wait({task})
+    monkeypatch.undo()
+
+    assert task.cancelled()
+    assert _release_warnings(caplog) == []
+    async with asyncio.timeout(5):
+        while await _sessions_holding(engine, server_id):
+            await asyncio.sleep(0.05)
+
+
+async def _sessions_holding(engine: AsyncEngine, server_id: ServerId) -> int:
+    """How many sessions hold ``server_id``'s lifecycle lock, pooled ones included."""
+
+    async with engine.connect() as conn:
+        count = await conn.scalar(
+            text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                " AND objsubid = 1"
+                " AND ((classid::bigint << 32) | objid::bigint) = :key"
+            ),
+            {"key": lifecycle_lock_mod._lock_key(server_id)},
+        )
+    assert isinstance(count, int)
+    return count
 
 
 async def _release_by_hand(held: HeldLifecycleLock, server_id: ServerId) -> None:
