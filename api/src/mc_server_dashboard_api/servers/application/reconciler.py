@@ -185,8 +185,9 @@ snapshot can still be uploading (#847). Both stop-side floors are therefore met,
 ``redispatch_stop`` and ``clear_stale_assignment`` both take
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
 The record is dropped before every stop or final-snapshot dispatch, and any newer
-intent commit or Worker report supersedes it, with no ``EXPIRED`` exception. It is
-not persisted, so after an API restart the full grace applies again.
+intent commit or Worker report supersedes it, with no ``EXPIRED`` exception, as
+does a later disconnect of the row's Worker (issue #3963). It is not persisted, so
+after an API restart the full grace applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
@@ -676,9 +677,28 @@ class RunReconcilerTick:
         # True when a stop finished but its write failed, and that is still the most
         # recent thing known about the row (issue #3441). Superseded, and tied, the
         # same way as a refusal that is not EXPIRED: the record is made after the
-        # intent commit it follows, on the same clock.
+        # intent commit it follows, on the same clock. The drop of the row's
+        # Worker supersedes it too (issue #3963): a Worker back within a full grace
+        # of the drop still gets its final snapshot, so only a record made since
+        # the drop keeps the short grace.
         recorded_at = self.unrecorded_stops.recorded_at(server.id)
-        return recorded_at is not None and recorded_at >= self._since(server)
+        if recorded_at is None:
+            return False
+        since = self._since(server)
+        dropped_at = self._dropped_at(server)
+        if dropped_at is not None:
+            since = max(since, dropped_at)
+        return recorded_at >= since
+
+    def _dropped_at(self, server: Server) -> dt.datetime | None:
+        # The instant the row's Worker first read disconnected, while it still
+        # does (issue #3963); None for a connected or unassigned row.
+        worker_id = server.assigned_worker_id
+        if worker_id is None or self.control_plane.is_worker_connected(
+            worker_id=worker_id
+        ):
+            return None
+        return self.control_plane.worker_offline_since(worker_id=worker_id)
 
     def _since(self, server: Server) -> dt.datetime:
         # The instant the divergence is measured from: the most recent of
@@ -703,9 +723,9 @@ class RunReconcilerTick:
             worker_id=worker_id
         ):
             since = max(since, self.listener_started_at)
-            offline_since = self.control_plane.worker_offline_since(worker_id=worker_id)
-            if offline_since is not None:
-                since = max(since, offline_since)
+        dropped_at = self._dropped_at(server)
+        if dropped_at is not None:
+            since = max(since, dropped_at)
         return (now - since) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:
