@@ -88,6 +88,23 @@ describe("Popover", () => {
     expect(trigger).toHaveFocus();
   });
 
+  // An Escape that cancels an IME conversion is the IME's (#3993).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "stays open on an Escape the IME is composing with (%o)",
+    (composing) => {
+      renderPopover();
+      fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+
+      const notPrevented = fireEvent.keyDown(document, {
+        key: "Escape",
+        ...composing,
+      });
+
+      expect(screen.getByText("panel content")).toBeInTheDocument();
+      expect(notPrevented).toBe(true);
+    },
+  );
+
   it("leaves Escape to a modal opened over it", () => {
     const onClose = vi.fn();
     const page = (modalOpen: boolean) => (

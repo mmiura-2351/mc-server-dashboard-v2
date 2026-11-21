@@ -1223,6 +1223,14 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Keys behind a menu.** While a page menu is open (the Files tab's context
   menu, the stop menu), the Files tab's shortcuts do nothing, so a key never
   acts on the listing behind the menu. The menu's own keys still work.
+- **Keys an IME takes.** A key pressed while an input method composes text
+  (`isComposing`, or the `keyCode` 229 some browsers send instead) is left to
+  the IME and not prevented. So an Escape that cancels a conversion in a
+  dialog field does not close the modal, and none closes a popover, a menu
+  or a toast, or clears the Files selection; the stop menu's keys and the
+  Files tab's shortcuts ignore it too. The stop menu's type-ahead also skips a
+  letter pressed with Ctrl, Meta or Alt, so the browser's own shortcut, such
+  as Ctrl+F's find, still works.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast

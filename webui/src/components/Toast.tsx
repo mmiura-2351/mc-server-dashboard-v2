@@ -13,6 +13,7 @@ import {
 } from "react";
 import { t } from "../i18n/index.ts";
 import { isFocusVisible } from "./focusVisible.ts";
+import { isComposing } from "./isComposing.ts";
 import { setToastZone, topmostDialog } from "./Modal.tsx";
 
 // Self-built toast primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
@@ -336,8 +337,9 @@ function ToastItem({
         onClick={() => onDismiss(toast.id)}
         onKeyDown={(event) => {
           // Stop here: Modal and Popover close on an Escape that reaches the
-          // document.
-          if (event.key === "Escape") {
+          // document. One that cancels an IME conversion is the IME's
+          // (#3993).
+          if (event.key === "Escape" && !isComposing(event.nativeEvent)) {
             event.stopPropagation();
             onDismiss(toast.id);
           }

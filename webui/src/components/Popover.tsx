@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { isComposing } from "./isComposing.ts";
 import { topmostDialog } from "./Modal.tsx";
 
 // Self-built popover primitive (WEBUI_SPEC.md 7.6 — no UI kit): a trigger
@@ -104,7 +105,8 @@ export function Popover({
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") {
+      // An Escape that cancels an IME conversion is the IME's (#3993).
+      if (event.key !== "Escape" || isComposing(event)) {
         return;
       }
       // Escape under a modal that does not hold this popover is the modal's

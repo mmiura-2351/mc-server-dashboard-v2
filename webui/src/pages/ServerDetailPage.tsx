@@ -16,6 +16,7 @@ import { MAX_CONSOLE_LINE_BYTES, utf8ByteLength } from "../api/limits.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { isComposing } from "../components/isComposing.ts";
 import { Modal, topmostDialog } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { useServerToast } from "../components/useServerToast.ts";
@@ -706,7 +707,12 @@ function StopControl({
     };
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       // Escape under an open modal closes the modal, not this menu (#3920).
-      if (event.key === "Escape" && topmostDialog() === null) {
+      // One that cancels an IME conversion is the IME's (#3993).
+      if (
+        event.key === "Escape" &&
+        topmostDialog() === null &&
+        !isComposing(event)
+      ) {
         // Handled, so the Files tab's listener leaves the Escape alone even
         // when it runs once the menu has closed (#3971).
         event.preventDefault();
@@ -744,6 +750,10 @@ function StopControl({
     event: KeyboardEvent<HTMLButtonElement>,
     i: number,
   ) => {
+    // A key the IME is composing with is the IME's (#3993).
+    if (isComposing(event.nativeEvent)) {
+      return;
+    }
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
@@ -772,7 +782,14 @@ function StopControl({
         break;
       default: {
         // Type-ahead: jump to the next item whose label starts with the key.
-        if (event.key.length !== 1) {
+        // A letter with Ctrl, Meta or Alt is the browser's shortcut, as
+        // Ctrl+F's find (#3993).
+        if (
+          event.key.length !== 1 ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.altKey
+        ) {
           return;
         }
         const key = event.key.toLowerCase();

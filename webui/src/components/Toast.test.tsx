@@ -495,6 +495,32 @@ describe("Toast", () => {
     }
   });
 
+  // An Escape that cancels an IME conversion is the IME's (#3993).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "leaves the toast up and passes on an Escape the IME is composing with (%o)",
+    (composing) => {
+      const onDocumentKeyDown = vi.fn();
+      document.addEventListener("keydown", onDocumentKeyDown);
+      try {
+        renderToasts();
+        show("Failed", "error");
+        const close = screen.getByRole("button", { name: "Close" });
+
+        act(() => close.focus());
+        const notPrevented = fireEvent.keyDown(close, {
+          key: "Escape",
+          ...composing,
+        });
+
+        expect(screen.getByText("Failed")).toBeInTheDocument();
+        expect(onDocumentKeyDown).toHaveBeenCalledTimes(1);
+        expect(notPrevented).toBe(true);
+      } finally {
+        document.removeEventListener("keydown", onDocumentKeyDown);
+      }
+    },
+  );
+
   it("leaves the toast up and passes on a key other than Escape", () => {
     const onDocumentKeyDown = vi.fn();
     document.addEventListener("keydown", onDocumentKeyDown);

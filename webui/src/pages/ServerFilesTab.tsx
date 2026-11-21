@@ -48,6 +48,7 @@ import {
 } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { isComposing } from "../components/isComposing.ts";
 import { Modal, topmostDialog } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
@@ -1076,8 +1077,9 @@ export function ServerFilesTab({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // While a modal is open, its keys are the dialog's, not the listing's
-      // behind it (#3920).
-      if (topmostDialog() !== null) {
+      // behind it (#3920). A key the IME is composing with is the IME's
+      // (#3993).
+      if (topmostDialog() !== null || isComposing(e)) {
         return;
       }
       // Skip when a text input / textarea / contenteditable is focused — the
@@ -2186,7 +2188,8 @@ function FileContextMenu({
     };
     const handleKey = (e: KeyboardEvent) => {
       // Escape under an open modal closes the modal, not this menu (#3920).
-      if (e.key === "Escape" && topmostDialog() === null) {
+      // One that cancels an IME conversion is the IME's (#3993).
+      if (e.key === "Escape" && topmostDialog() === null && !isComposing(e)) {
         e.stopImmediatePropagation();
         onClose();
       }

@@ -84,6 +84,29 @@ describe("Modal", () => {
     expect(fireEvent.keyDown(document, { key: "Escape" })).toBe(false);
   });
 
+  // An Escape that cancels an IME conversion in a dialog field is the IME's,
+  // so the dialog and what was typed stay (#3993).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "leaves an Escape the IME is composing with to it (%o)",
+    (composing) => {
+      const onClose = vi.fn();
+      render(
+        <Modal open={true} title="Title" onClose={onClose}>
+          <input aria-label="Name" />
+        </Modal>,
+      );
+      const input = screen.getByRole("textbox", { name: "Name" });
+
+      const notPrevented = fireEvent.keyDown(input, {
+        key: "Escape",
+        ...composing,
+      });
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(notPrevented).toBe(true);
+    },
+  );
+
   it("does not call onClose when the dialog body is clicked", () => {
     const onClose = vi.fn();
     render(

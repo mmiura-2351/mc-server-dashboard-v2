@@ -2921,6 +2921,52 @@ describe("Keyboard shortcuts", () => {
     expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
   });
 
+  // A key the IME is composing with is the IME's, not a file command
+  // (#3993).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "Escape the IME is composing with leaves the selection (%o)",
+    async (composing) => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "a.txt", kind: "file" }]),
+      });
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+      fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+      const notPrevented = fireEvent.keyDown(document.body, {
+        key: "Escape",
+        ...composing,
+      });
+
+      expect(screen.getByRole("checkbox", { name: "a.txt" })).toBeChecked();
+      expect(notPrevented).toBe(true);
+    },
+  );
+
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "Delete the IME is composing with opens no delete confirm (%o)",
+    async (composing) => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "a.txt", kind: "file" }]),
+      });
+      renderPage();
+      await openFiles();
+      await screen.findByText(/a\.txt/);
+      fireEvent.click(screen.getByRole("checkbox", { name: "a.txt" }));
+
+      const notPrevented = fireEvent.keyDown(document.body, {
+        key: "Delete",
+        ...composing,
+      });
+
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(notPrevented).toBe(true);
+    },
+  );
+
   it("Escape in the stop menu closes it and leaves the selection", async () => {
     // At rest but still assigned: the stop control shows beside the listing.
     routeGet({
@@ -3139,6 +3185,36 @@ describe("Keyboard shortcuts", () => {
     );
     expect(screen.getByRole("checkbox", { name: "readme.txt" })).toBeChecked();
   });
+
+  // An Escape that cancels an IME conversion is the IME's (#3993).
+  it.each([{ isComposing: true }, { keyCode: 229 }])(
+    "Escape the IME is composing with leaves the context menu open and passes on (%o)",
+    async (composing) => {
+      routeGet({
+        detail: server(),
+        list: listing([{ name: "readme.txt", kind: "file" }]),
+      });
+      renderPage();
+      await openFiles();
+      await screen.findByText(/readme\.txt/);
+      const row = screen.getByText(/readme\.txt/).closest("li") as HTMLElement;
+      fireEvent.contextMenu(row, { clientX: 100, clientY: 200 });
+      const onDocumentKeyDown = vi.fn();
+      document.addEventListener("keydown", onDocumentKeyDown);
+      try {
+        const notPrevented = fireEvent.keyDown(document.body, {
+          key: "Escape",
+          ...composing,
+        });
+
+        expect(screen.getByRole("menu")).toBeInTheDocument();
+        expect(onDocumentKeyDown).toHaveBeenCalledTimes(1);
+        expect(notPrevented).toBe(true);
+      } finally {
+        document.removeEventListener("keydown", onDocumentKeyDown);
+      }
+    },
+  );
 });
 
 // ── Keyboard shortcuts with a modal open (issue #3920) ───────────────────────
