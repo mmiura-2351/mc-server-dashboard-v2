@@ -335,9 +335,13 @@ func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) 
 						if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
 							t.Fatal(err)
 						}
-						linked := filepath.Join(base, "elsewhere")
+						// An outside link is absolute. An inside one is relative and names
+						// a sibling, so resolving it never leaves the link's directory:
+						// only the refusal of every link, not the one of an escape,
+						// stops it.
+						linked, linkTarget := filepath.Join(base, "elsewhere"), filepath.Join(base, "elsewhere")
 						if target == "inside" {
-							linked = filepath.Join(dest, "elsewhere")
+							linked, linkTarget = filepath.Join(dest, filepath.Dir(link), "elsewhere"), "elsewhere"
 						}
 						if err := os.Mkdir(linked, 0o750); err != nil {
 							t.Fatal(err)
@@ -346,7 +350,7 @@ func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) 
 						if err := os.Remove(filepath.Join(dest, link)); err != nil && !os.IsNotExist(err) {
 							t.Fatal(err)
 						}
-						if err := os.Symlink(linked, filepath.Join(dest, link)); err != nil {
+						if err := os.Symlink(linkTarget, filepath.Join(dest, link)); err != nil {
 							t.Fatal(err)
 						}
 						var buf bytes.Buffer

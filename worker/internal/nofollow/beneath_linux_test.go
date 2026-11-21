@@ -18,7 +18,9 @@ func TestOpenat2BeneathRefusesALinkOrAnEscape(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "sub"), filepath.Join(dir, "inside")); err != nil {
+	// Relative, so resolving it never leaves dir: only the refusal of every link
+	// stops it.
+	if err := os.Symlink("sub", filepath.Join(dir, "inside")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(root, filepath.Join(dir, "outside")); err != nil {
@@ -38,6 +40,7 @@ func TestOpenat2BeneathRefusesALinkOrAnEscape(t *testing.T) {
 	for rel, want := range map[string]error{
 		"sub":                      nil,
 		"inside":                   unix.ELOOP,
+		"inside/..":                unix.ELOOP,
 		"outside/dir":              unix.ELOOP,
 		"..":                       unix.EXDEV,
 		"sub/../..":                unix.EXDEV,
