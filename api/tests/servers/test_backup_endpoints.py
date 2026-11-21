@@ -120,6 +120,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidFilePathError,
     InvalidRetentionPolicyError,
+    LifecycleLockLostError,
     PluginReconcileIncompleteError,
     ServerBusyError,
     ServerNotFoundError,
@@ -478,6 +479,21 @@ def test_create_storage_unavailable_is_503_with_reason() -> None:
     # No Retry-After: nothing in the request path knows when the store recovers.
     assert "Retry-After" not in resp.headers
     # Mirrors the worker-down path: an ERROR against the server (no backup id).
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_create_that_lost_the_lifecycle_lock_is_503_and_audited() -> None:
+    # The lock was lost before the backup row's commit (issue #3927): nothing
+    # was created, and the create is audited like its other transient failures.
+    use_case = _FakeUseCase(error=LifecycleLockLostError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
     assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
     assert recorder.events[0].outcome is Outcome.ERROR
     assert recorder.events[0].target_type == ops.TARGET_SERVER
