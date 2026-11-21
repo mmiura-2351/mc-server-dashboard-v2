@@ -3,11 +3,14 @@
 The GCs and the storage sweep delete what this database does not name, so they may
 only run against a store that belongs to this database. At startup the API claims
 its store: it keeps an owner marker that exists, and writes one naming its
-installation id when none does, if the store is empty or the database has rows
-that name stored objects (issue #3886). Before every destructive pass the marker
-is read again, and the pass is refused unless the marker names this installation.
-The operator's claim writes a marker whatever the store holds, but never replaces
-one.
+installation id when none does, only on evidence that the store is this
+database's (issue #3886). An empty store is. A store that holds objects is if
+the communities and resource packs its keys name, a few sampled per namespace,
+are all rows of this database; one holding only JARs and plugin blobs is if the
+database has rows that name stored objects. Before every destructive pass the
+marker is read again, and the pass is refused unless the marker names this
+installation. The operator's claim writes a marker whatever the store holds, but
+never replaces one.
 
 The same rules hold on both backends: a marker object in the bucket, and a marker
 file at the fs root.
@@ -43,10 +46,20 @@ from mc_server_dashboard_api.storage.adapters.ownership import (
 )
 from mc_server_dashboard_api.storage.domain.errors import NotFoundError
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
+from tests.store_ownership import FakeStoreDatabase, UnaskedStoreDatabase
 
 _OURS = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _THEIRS = uuid.UUID("00000000-0000-4000-8000-000000000002")
 _CLAIM_COMMAND = "python -m mc_server_dashboard_api.store_claim_cli"
+
+# Communities and a resource pack, as their ids appear in keys. ``_PROBE`` is
+# a probe database's own community, which no store under test holds.
+_LIVE = uuid.UUID("10000000-0000-4000-8000-000000000001")
+_OTHER = uuid.UUID("20000000-0000-4000-8000-000000000002")
+_PROBE = uuid.UUID("30000000-0000-4000-8000-000000000003")
+_PACK = uuid.UUID("40000000-0000-4000-8000-000000000004")
+
+_UNASKED = UnaskedStoreDatabase()
 
 
 def _marker(installation_id: uuid.UUID) -> bytes:
@@ -58,30 +71,26 @@ def _marker(installation_id: uuid.UUID) -> bytes:
     ).encode()
 
 
-async def _rows() -> bool:
-    """The database probe of a database with rows that name stored objects."""
+def _world(community: uuid.UUID | str, server: str = "s") -> str:
+    """A key of a community's server, as the storage adapters lay it out."""
 
-    return True
-
-
-async def _no_rows() -> bool:
-    """The database probe of a fresh database: no row names a stored object."""
-
-    return False
+    return f"communities/{community}/servers/{server}/snapshots/x/world/level.dat"
 
 
-async def _never_asked() -> bool:
-    raise AssertionError("probed a store that already has a marker")
+_JAR = f"jars/{'a' * 64}.jar"
+_PLUGIN = f"plugin-cache/{'b' * 64}"
+_PACK_KEY = f"resource-packs/{_PACK}/pack.zip"
 
 
 @dataclass
 class _Backend:
     """One store under test: build an ownership over it, and read/seed its marker.
 
-    ``put`` stores one object under a namespace a GC or sweep lists, and ``held``
+    ``put`` stores one object at a key (its path under the fs root), and ``held``
     says whether it is still there.
     """
 
+    kind: str
     make: Callable[[], ObjectStoreOwnership | FsStoreOwnership]
     read: Callable[[], bytes | None]
     seed: Callable[[bytes], object]
@@ -94,52 +103,36 @@ def _backend(kind: str, tmp_path: Path) -> _Backend:
     if kind == "object":
         store = FakeS3Store()
         return _Backend(
+            kind=kind,
             make=lambda: ObjectStoreOwnership(fake_s3_factory(store), bucket="mcsd"),
             read=lambda: store.objects.get(OWNER_MARKER),
             seed=lambda body: store.objects.__setitem__(OWNER_MARKER, body),
             remove=lambda: store.objects.pop(OWNER_MARKER, None),
-            put=lambda ns: store.objects.__setitem__(f"{ns}held", b"live"),
-            held=lambda ns: f"{ns}held" in store.objects,
+            put=lambda key: store.objects.__setitem__(key, b"live"),
+            held=lambda key: key in store.objects,
         )
     root = tmp_path / "storage"
     root.mkdir()
     path = root / OWNER_MARKER
 
-    def _put(namespace: str) -> None:
-        (root / namespace).mkdir()
-        (root / namespace / "held").write_bytes(b"live")
+    def _put(key: str) -> None:
+        (root / key).parent.mkdir(parents=True, exist_ok=True)
+        (root / key).write_bytes(b"live")
 
     return _Backend(
+        kind=kind,
         make=lambda: FsStoreOwnership(root),
         read=lambda: path.read_bytes() if path.exists() else None,
         seed=path.write_bytes,
         remove=lambda: path.unlink(missing_ok=True),
         put=_put,
-        held=lambda ns: (root / ns / "held").exists(),
+        held=lambda key: (root / key).exists(),
     )
 
 
 @pytest.fixture(params=["object", "fs"])
 def backend(request: pytest.FixtureRequest, tmp_path: Path) -> _Backend:
     return _backend(request.param, tmp_path)
-
-
-# Every namespace a GC or sweep lists, on each backend: an object in any one of
-# them makes the store hold objects.
-_NAMESPACES = [("object", ns.value) for ns in KeyNamespace] + [
-    ("fs", "communities"),
-    ("fs", "jars"),
-]
-
-
-@pytest.fixture(params=_NAMESPACES, ids=lambda p: f"{p[0]}-{p[1].rstrip('/')}")
-def holding(request: pytest.FixtureRequest, tmp_path: Path) -> tuple[_Backend, str]:
-    """An unmarked store holding one object, and the namespace it is under."""
-
-    kind, namespace = request.param
-    store = _backend(kind, tmp_path)
-    store.put(namespace)
-    return store, namespace
 
 
 def _claim_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -157,44 +150,28 @@ def _named(body: bytes | None) -> str:
     return named
 
 
-async def test_an_empty_store_is_claimed_even_by_an_empty_database(
+async def _assert_claimed(backend: _Backend, database: FakeStoreDatabase) -> None:
+    ownership = backend.make()
+
+    await ownership.claim(_OURS, database=database)
+
+    assert _named(backend.read()) == str(_OURS)
+    assert await ownership.refusal() is None
+
+
+async def _assert_refused(
     backend: _Backend,
-) -> None:
-    # A fresh deployment: nothing in the store can be another database's.
-    ownership = backend.make()
+    database: FakeStoreDatabase,
+    caplog: pytest.LogCaptureFixture,
+) -> str:
+    """Claim, expect no marker and one ERROR naming the step; return the ERROR."""
 
-    await ownership.claim(_OURS, database_names_objects=_no_rows)
-
-    assert _named(backend.read()) == str(_OURS)
-    assert await ownership.refusal() is None
-
-
-async def test_a_store_holding_objects_is_claimed_by_a_database_with_rows(
-    holding: tuple[_Backend, str],
-) -> None:
-    # The upgrade of an existing deployment to the marker.
-    backend, namespace = holding
-    ownership = backend.make()
-
-    await ownership.claim(_OURS, database_names_objects=_rows)
-
-    assert _named(backend.read()) == str(_OURS)
-    assert await ownership.refusal() is None
-    assert backend.held(namespace)
-
-
-async def test_a_store_holding_objects_is_not_claimed_by_an_empty_database(
-    holding: tuple[_Backend, str], caplog: pytest.LogCaptureFixture
-) -> None:
-    # A probe or dev stack's fresh database on the live store (issue #3886).
-    backend, namespace = holding
     ownership = backend.make()
 
     with caplog.at_level(logging.ERROR):
-        await ownership.claim(_OURS, database_names_objects=_no_rows)
+        await ownership.claim(_OURS, database=database)
 
     assert backend.read() is None
-    assert backend.held(namespace)
     refusal = await ownership.refusal()
     assert refusal is not None
     assert "has not claimed" in refusal
@@ -203,33 +180,178 @@ async def test_a_store_holding_objects_is_not_claimed_by_an_empty_database(
     assert OWNER_MARKER in error
     assert str(_OURS) in error
     assert _CLAIM_COMMAND in error
+    return error
+
+
+# --- a store without a marker -----------------------------------------------------
+
+
+async def test_an_empty_store_is_claimed_without_asking_the_database(
+    backend: _Backend,
+) -> None:
+    # A fresh deployment: nothing in the store can be another database's.
+    ownership = backend.make()
+
+    await ownership.claim(_OURS, database=_UNASKED)
+
+    assert _named(backend.read()) == str(_OURS)
+    assert await ownership.refusal() is None
+
+
+async def test_a_store_of_this_databases_community_is_claimed(
+    backend: _Backend,
+) -> None:
+    # The upgrade of an existing deployment: its keys name its own community.
+    # The id is the evidence, so the rows rule is not asked.
+    backend.put(_world(_LIVE))
+    backend.put(_JAR)
+    database = FakeStoreDatabase(communities=[_LIVE])
+
+    await _assert_claimed(backend, database)
+
+    assert backend.held(_world(_LIVE))
+    assert database.asked == [("has", str(_LIVE))]
+
+
+async def test_a_probe_database_with_its_own_community_does_not_claim_another(
+    backend: _Backend, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A probe or dev stack on the live store, past its first community and server:
+    # it has rows, but none of the communities the store holds (issue #3886).
+    backend.put(_world(_LIVE))
+    database = FakeStoreDatabase(rows=True, communities=[_PROBE])
+
+    error = await _assert_refused(backend, database, caplog)
+
+    assert str(_LIVE) in error
+    assert backend.held(_world(_LIVE))
+
+
+async def test_one_unknown_community_among_known_ones_refuses(
+    backend: _Backend, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A community this database has sorts first and holds many keys: the sample
+    # reaches past them to the next community, which this database lacks.
+    for server in ("s1", "s2", "s3", "s4"):
+        backend.put(_world(_LIVE, server))
+    backend.put(_world(_OTHER))
+    database = FakeStoreDatabase(rows=True, communities=[_LIVE])
+
+    await _assert_refused(backend, database, caplog)
+
+
+@pytest.mark.parametrize("name", ["c", "not-a-uuid", f"{_LIVE}x"])
+async def test_a_key_that_names_no_community_refuses(
+    backend: _Backend, caplog: pytest.LogCaptureFixture, name: str
+) -> None:
+    backend.put(_world(name))
+    database = FakeStoreDatabase(rows=True, communities=[_LIVE])
+
+    await _assert_refused(backend, database, caplog)
+
+
+async def test_the_claim_samples_at_most_three_communities(
+    backend: _Backend,
+) -> None:
+    communities = [
+        uuid.UUID(f"{i}0000000-0000-4000-8000-00000000000{i}") for i in range(1, 6)
+    ]
+    for community in communities:
+        backend.put(_world(community))
+    database = FakeStoreDatabase(communities=communities)
+
+    await _assert_claimed(backend, database)
+
+    ((question, *asked),) = database.asked
+    assert question == "has"
+    assert len(asked) == 3
+    assert set(asked) <= {str(c) for c in communities}
+
+
+async def test_a_store_of_this_databases_resource_pack_is_claimed() -> None:
+    # Resource packs exist on the object backend only.
+    backend = _backend("object", Path())
+    backend.put(_PACK_KEY)
+
+    await _assert_claimed(backend, FakeStoreDatabase(resource_packs=[_PACK]))
+
+
+async def test_a_resource_pack_this_database_lacks_refuses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _backend("object", Path())
+    backend.put(_PACK_KEY)
+    backend.put(_world(_LIVE))
+    database = FakeStoreDatabase(rows=True, communities=[_LIVE])
+
+    error = await _assert_refused(backend, database, caplog)
+
+    assert str(_PACK) in error
+
+
+# The content-addressed namespaces on each backend: a key there names no row.
+_CONTENT = [("object", _JAR), ("object", _PLUGIN), ("fs", _JAR)]
+
+
+@pytest.fixture(params=_CONTENT, ids=lambda p: f"{p[0]}-{p[1].split('/')[0]}")
+def content(request: pytest.FixtureRequest, tmp_path: Path) -> tuple[_Backend, str]:
+    """An unmarked store holding one content-addressed object, and its key."""
+
+    kind, key = request.param
+    store = _backend(kind, tmp_path)
+    store.put(key)
+    return store, key
+
+
+async def test_a_store_of_blobs_only_is_claimed_by_a_database_with_rows(
+    content: tuple[_Backend, str],
+) -> None:
+    backend, key = content
+
+    await _assert_claimed(backend, FakeStoreDatabase(rows=True))
+
+    assert backend.held(key)
+
+
+async def test_a_store_of_blobs_only_is_not_claimed_by_a_fresh_database(
+    content: tuple[_Backend, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    backend, key = content
+
+    await _assert_refused(backend, FakeStoreDatabase(), caplog)
+
+    assert backend.held(key)
 
 
 async def test_a_store_left_unclaimed_stays_refused_until_a_restart(
-    holding: tuple[_Backend, str],
+    backend: _Backend,
 ) -> None:
     # Only a start claims: the operator's claim takes effect at the next one.
-    backend, _namespace = holding
+    backend.put(_world(_LIVE))
     running = backend.make()
-    await running.claim(_OURS, database_names_objects=_no_rows)
+    await running.claim(_OURS, database=FakeStoreDatabase())
 
     assert await backend.make().claim_explicitly(_OURS) is None
 
     assert await running.refusal() is not None
     restarted = backend.make()
-    await restarted.claim(_OURS, database_names_objects=_never_asked)
+    await restarted.claim(_OURS, database=_UNASKED)
     assert await restarted.refusal() is None
 
 
+async def _never_sampled() -> object:
+    raise AssertionError("sampled a store that already has a marker")
+
+
 @pytest.mark.parametrize("owner", [_OURS, _THEIRS])
-async def test_a_marked_store_is_never_probed(
+async def test_a_marked_store_is_never_sampled(
     backend: _Backend, monkeypatch: pytest.MonkeyPatch, owner: uuid.UUID
 ) -> None:
     backend.seed(_marker(owner))
     ownership = backend.make()
-    monkeypatch.setattr(ownership, "_holds_objects", _never_asked)
+    monkeypatch.setattr(ownership, "_sample", _never_sampled)
 
-    await ownership.claim(_OURS, database_names_objects=_never_asked)
+    await ownership.claim(_OURS, database=_UNASKED)
 
     assert backend.read() == _marker(owner)
 
@@ -240,7 +362,7 @@ async def test_claim_keeps_a_marker_that_names_this_installation(
     backend.seed(_marker(_OURS))
     ownership = backend.make()
 
-    await ownership.claim(_OURS, database_names_objects=_never_asked)
+    await ownership.claim(_OURS, database=_UNASKED)
 
     assert backend.read() == _marker(_OURS)
     assert await ownership.refusal() is None
@@ -253,7 +375,7 @@ async def test_a_marker_naming_another_installation_refuses_and_is_kept(
     ownership = backend.make()
 
     with caplog.at_level(logging.ERROR):
-        await ownership.claim(_OURS, database_names_objects=_never_asked)
+        await ownership.claim(_OURS, database=_UNASKED)
 
     assert backend.read() == _marker(_THEIRS)
     refusal = await ownership.refusal()
@@ -277,7 +399,7 @@ async def test_an_unreadable_marker_refuses_and_is_kept(
     backend.seed(body)
     ownership = backend.make()
 
-    await ownership.claim(_OURS, database_names_objects=_never_asked)
+    await ownership.claim(_OURS, database=_UNASKED)
 
     assert backend.read() == body
     assert await ownership.refusal() is not None
@@ -289,7 +411,7 @@ async def test_a_marker_removed_after_the_claim_refuses_rather_than_reclaims(
     # Handing a store to another database means removing its marker; a process
     # still running against it must stop, not take the store back.
     ownership = backend.make()
-    await ownership.claim(_OURS, database_names_objects=_no_rows)
+    await ownership.claim(_OURS, database=FakeStoreDatabase())
     backend.remove()
 
     assert await ownership.refusal() is not None
@@ -304,7 +426,7 @@ async def test_an_unclaimed_store_refuses(backend: _Backend) -> None:
 
 async def test_a_marker_replaced_after_the_claim_refuses(backend: _Backend) -> None:
     ownership = backend.make()
-    await ownership.claim(_OURS, database_names_objects=_no_rows)
+    await ownership.claim(_OURS, database=FakeStoreDatabase())
     backend.seed(_marker(_THEIRS))
 
     assert await ownership.refusal() is not None
@@ -316,7 +438,7 @@ async def test_an_fs_claim_creates_a_root_that_does_not_exist_yet(
     root = tmp_path / "not-yet"
     ownership = FsStoreOwnership(root)
 
-    await ownership.claim(_OURS, database_names_objects=_no_rows)
+    await ownership.claim(_OURS, database=FakeStoreDatabase())
 
     assert _named((root / OWNER_MARKER).read_bytes()) == str(_OURS)
     assert await ownership.refusal() is None
@@ -337,7 +459,7 @@ async def test_an_fs_claim_removes_a_temp_file_a_crashed_claim_left(
     two_hours_ago = time.time() - 7200
     os.utime(stale, (two_hours_ago, two_hours_ago))
 
-    await FsStoreOwnership(root).claim(_OURS, database_names_objects=_no_rows)
+    await FsStoreOwnership(root).claim(_OURS, database=FakeStoreDatabase())
 
     assert not stale.exists()
     assert fresh.exists()
@@ -408,8 +530,8 @@ async def test_two_concurrent_first_starts_claim_the_bucket_once() -> None:
     theirs = ObjectStoreOwnership(_racing_factory(store, barrier, landed), bucket="b")
 
     await asyncio.gather(
-        ours.claim(_OURS, database_names_objects=_no_rows),
-        theirs.claim(_THEIRS, database_names_objects=_no_rows),
+        ours.claim(_OURS, database=FakeStoreDatabase()),
+        theirs.claim(_THEIRS, database=FakeStoreDatabase()),
     )
 
     # Both read "no marker" and both tried to write one, but only one write
@@ -427,10 +549,10 @@ async def test_concurrent_first_starts_on_an_fs_root_claim_it_once(
     root.mkdir()
     first = FsStoreOwnership(root)
     second = FsStoreOwnership(root)
-    await first.claim(_OURS, database_names_objects=_no_rows)
+    await first.claim(_OURS, database=FakeStoreDatabase())
     _miss_first_read(second, monkeypatch)
 
-    await second.claim(_THEIRS, database_names_objects=_no_rows)
+    await second.claim(_THEIRS, database=FakeStoreDatabase())
 
     assert _named((root / OWNER_MARKER).read_bytes()) == str(_OURS)
     assert await first.refusal() is None
@@ -497,7 +619,7 @@ async def test_claim_falls_back_to_a_plain_put_and_reads_it_back() -> None:
         _factory_of(_NoConditionalPut(FakeS3Client(store))), bucket="mcsd"
     )
 
-    await ownership.claim(_OURS, database_names_objects=_no_rows)
+    await ownership.claim(_OURS, database=FakeStoreDatabase())
 
     assert _named(store.objects[OWNER_MARKER]) == str(_OURS)
     assert await ownership.refusal() is None
@@ -514,7 +636,7 @@ async def test_the_plain_put_fallback_never_replaces_another_installations_marke
         _factory_of(_NoConditionalPut(FakeS3Client(store))), bucket="mcsd"
     )
 
-    await ownership.claim(_OURS, database_names_objects=_never_asked)
+    await ownership.claim(_OURS, database=_UNASKED)
 
     assert store.objects[OWNER_MARKER] == _marker(_THEIRS)
     assert await ownership.refusal() is not None
@@ -533,3 +655,52 @@ async def test_the_plain_put_fallback_keeps_a_marker_from_an_operator_claim() ->
 
 async def test_the_marker_lies_outside_every_swept_namespace() -> None:
     assert not any(OWNER_MARKER.startswith(prefix) for prefix in KeyNamespace)
+
+
+class _ReplacedAfterPut(_NoConditionalPut):
+    """A plain write that another claimant's plain write replaces at once."""
+
+    async def put_object(self, key: str, body: bytes) -> None:
+        await self._inner.put_object(key, body)
+        await self._inner.put_object(key, _marker(_THEIRS))
+
+
+async def test_an_operator_claim_without_conditional_writes_reads_its_marker_back() -> (
+    None
+):
+    # The read before the put cannot see a marker written after it; the read after
+    # tells the operator that another claimant's write landed last.
+    store = FakeS3Store()
+    ownership = ObjectStoreOwnership(
+        _factory_of(_ReplacedAfterPut(FakeS3Client(store))), bucket="mcsd"
+    )
+
+    refusal = await ownership.claim_explicitly(_OURS)
+
+    assert refusal is not None
+    assert str(_THEIRS) in refusal
+
+
+# --- why the operator's claim did not claim a marked store -------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "says"),
+    [
+        (_marker(_OURS), "already this database's: its owner marker"),
+        (_marker(_THEIRS), f"names installation {_THEIRS}, not this database's"),
+        (b"not json", "names no installation"),
+    ],
+    ids=["ours", "theirs", "unreadable"],
+)
+async def test_an_operator_claim_says_why_a_marked_store_was_not_claimed(
+    backend: _Backend, body: bytes, says: str
+) -> None:
+    backend.seed(body)
+
+    refusal = await backend.make().claim_explicitly(_OURS)
+
+    assert refusal is not None
+    assert says in refusal
+    assert "None" not in refusal
+    assert backend.read() == body

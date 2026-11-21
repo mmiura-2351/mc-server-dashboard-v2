@@ -4,7 +4,9 @@ At startup the API leaves an unmarked store that already holds objects unclaimed
 when no row of its database names a stored object. The command claims such a
 store for this database: it writes the owner marker naming this installation,
 whatever the store holds, and deletes nothing. It never replaces a marker,
-whichever installation that marker names.
+whichever installation that marker names. It exits 0 when it claimed the store, 1
+when it refused, and 2, with one line and no traceback, when the database or the
+store failed.
 
 These run ``main`` over the config-selected store the API builds (object, over
 the in-memory S3 stub, and fs), with the real marker in place of the app suite's
@@ -107,9 +109,13 @@ def test_the_command_claims_an_unmarked_store_holding_objects(
     assert "restart the API" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("owner", [_OURS, _THEIRS])
+@pytest.mark.parametrize(
+    ("owner", "says"),
+    [(_OURS, "already this database's"), (_THEIRS, "another database's")],
+    ids=["ours", "theirs"],
+)
 def test_the_command_refuses_a_store_that_has_a_marker(
-    store: _Store, capsys: pytest.CaptureFixture[str], owner: uuid.UUID
+    store: _Store, capsys: pytest.CaptureFixture[str], owner: uuid.UUID, says: str
 ) -> None:
     store.seed(_marker(owner))
 
@@ -118,8 +124,24 @@ def test_the_command_refuses_a_store_that_has_a_marker(
     assert store.read() == _marker(owner)
     assert store.held()
     err = capsys.readouterr().err
-    assert "store not claimed" in err
+    assert says in err
     assert str(owner) in err
+
+
+async def _database_down(_session_factory: object) -> uuid.UUID:
+    raise OSError("connection refused")
+
+
+def test_a_database_fault_exits_2_without_a_traceback(
+    store: _Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(store_claim_cli, "read_installation_id", _database_down)
+
+    assert store_claim_cli.main([]) == 2
+
+    assert store.read() is None
+    err = capsys.readouterr().err
+    assert err == "store claim failed: OSError: connection refused\n"
 
 
 def test_the_command_leaves_a_crashed_claims_temp_file(
@@ -141,3 +163,25 @@ def test_the_command_leaves_a_crashed_claims_temp_file(
     assert store_claim_cli.main([]) == 0
 
     assert stale.exists()
+
+
+def test_a_store_fault_exits_2_without_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The configured fs root is a file, so the marker can be neither read nor
+    # written.
+    root = tmp_path / "not-a-dir"
+    root.write_bytes(b"")
+    monkeypatch.setattr(store_claim_cli, "read_installation_id", _ours)
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(root))
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership",
+        ownership_module.FsStoreOwnership,
+    )
+
+    assert store_claim_cli.main([]) == 2
+
+    err = capsys.readouterr().err
+    assert err.startswith("store claim failed: NotADirectoryError: ")
+    assert "Traceback" not in err

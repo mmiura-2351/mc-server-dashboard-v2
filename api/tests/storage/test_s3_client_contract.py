@@ -135,36 +135,56 @@ async def test_missing_and_deleted_objects_are_absent(
     assert await client.list_objects(prefix) == []
 
 
-async def test_any_object_sees_only_keys_under_its_prefix(
+async def test_first_key_is_the_lowest_key_under_its_prefix(
     s3: tuple[S3Client, str, StoreClock, bool],
 ) -> None:
     client, prefix, _clock, _controlled = s3
-    assert await client.any_object(prefix) is False
+    assert await client.first_key(prefix) is None
 
-    await client.put_object(prefix + "jars/one.jar", b"jar")
     await client.put_object(prefix + "jars/two.jar", b"jar")
+    await client.put_object(prefix + "jars/one.jar", b"jar")
 
-    assert await client.any_object(prefix + "jars/") is True
-    assert await client.any_object(prefix) is True
-    assert await client.any_object(prefix + "communities/") is False
+    assert await client.first_key(prefix + "jars/") == prefix + "jars/one.jar"
+    assert await client.first_key(prefix) == prefix + "jars/one.jar"
+    assert await client.first_key(prefix + "communities/") is None
 
 
-async def test_any_object_finds_a_deep_key_behind_deleted_siblings(
+async def test_first_key_starts_after_a_given_key(
+    s3: tuple[S3Client, str, StoreClock, bool],
+) -> None:
+    # The claim skips past one community's keys to sample the next community.
+    client, prefix, _clock, _controlled = s3
+    namespace = prefix + "communities/"
+    await client.put_object(namespace + "a/servers/s/generation", b"1")
+    await client.put_object(namespace + "a/servers/t/generation", b"1")
+    await client.put_object(namespace + "b/servers/s/generation", b"1")
+
+    assert await client.first_key(namespace, start_after=namespace + "a0") == (
+        namespace + "b/servers/s/generation"
+    )
+    assert await client.first_key(namespace, start_after=namespace + "b0") is None
+
+
+async def test_first_key_finds_a_deep_key_behind_deleted_siblings(
     s3: tuple[S3Client, str, StoreClock, bool],
 ) -> None:
     # The store owner claim reads "no key" as an empty store it may take
-    # (issue #3886), so a one-key listing must not come back empty while a key
-    # lies deeper, or behind keys deleted earlier that sort first.
+    # (issue #3886). SeaweedFS keeps a deleted key's directories, and 4.33 lists
+    # only MaxKeys + 2 of them per directory, so a one-key listing behind three
+    # emptied siblings reported none. Eight leave a margin.
     client, prefix, _clock, _controlled = s3
     namespace = prefix + "communities/"
-    for gone in ("a/servers/s/incoming/t1/level.dat", "b/servers/s/generation"):
-        await client.put_object(namespace + gone, b"gone")
-        await client.delete_object(namespace + gone)
-    assert await client.any_object(namespace) is False
+    for i in range(8):
+        gone = f"{namespace}a{i:02d}/servers/s/incoming/t1/level.dat"
+        await client.put_object(gone, b"gone")
+        await client.delete_object(gone)
+    assert await client.first_key(namespace) is None
 
-    await client.put_object(namespace + "c/servers/s/snapshots/x/world/level.dat", b"w")
+    live = namespace + "zz/servers/s/snapshots/x/world/level.dat"
+    await client.put_object(live, b"w")
 
-    assert await client.any_object(namespace) is True
+    assert await client.first_key(namespace) == live
+    assert await client.first_key(namespace, start_after=namespace + "a00") == live
 
 
 async def test_put_if_absent_never_replaces_an_existing_object(

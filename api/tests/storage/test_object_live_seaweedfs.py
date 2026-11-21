@@ -68,6 +68,7 @@ from tests.storage.helpers import (
     region_targz,
     tar_stream,
 )
+from tests.store_ownership import UnaskedStoreDatabase
 
 # One healthy region body, reused by the readability-probe archives below.
 _REGION = healthy_region_bytes()
@@ -308,10 +309,6 @@ async def _drop_bucket(bucket: str) -> None:
 _FRESH_BUCKET = "mcsdfresh"
 
 
-async def _never_asked() -> bool:
-    raise AssertionError("an empty store is claimed without the database probe")
-
-
 async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> None:
     # Issue #946: SeaweedFS auto-creates the bucket on first WRITE, not on read. A
     # fresh deployment's FastAPI lifespan runs the startup sweep before any write has
@@ -330,7 +327,7 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
 
         async with factory() as client:
             assert await client.list_objects("communities/") == []
-            assert await client.any_object("communities/") is False
+            assert await client.first_key("communities/") is None
             assert await client.list_multipart_uploads("communities/") == []
             assert await client.head_object("communities/missing") is None
             with pytest.raises(NotFoundError):
@@ -341,7 +338,7 @@ async def test_fresh_bucketless_store_reads_as_empty_then_write_creates_it() -> 
         # A bucketless store holds no object, so a fresh database claims it
         # without being asked whether it names any (issue #3886).
         ownership = ObjectStoreOwnership(factory, bucket=_FRESH_BUCKET)
-        await ownership.claim(uuid.UUID(int=1), database_names_objects=_never_asked)
+        await ownership.claim(uuid.UUID(int=1), database=UnaskedStoreDatabase())
         assert await ownership.refusal() is None
 
         async with factory() as client:

@@ -9,12 +9,13 @@ installation id is fixed.
 
 With a marker naming another installation, none of them deletes anything. With
 no marker, the app writes one naming its own installation and the startup sweep
-runs, but only if the store is empty or the database has rows that name stored
-objects (issue #3886). A fresh database on a store that already holds objects
-does not claim it, and every pass refuses. On the default fs backend, a marker
-file at the root naming another installation blocks the startup and periodic
-sweeps the same way, and so does an unmarked root a fresh database does not
-claim.
+runs, but only on evidence that the store is this database's (issue #3886): an
+empty store, or one whose communities and resource packs are rows of the
+database. A probe database with a community of its own, on a store that holds
+another community, does not claim it, and every pass refuses. On the default fs
+backend, a marker file at the root naming another installation blocks the
+startup and periodic sweeps the same way, and so does an unmarked root such a
+database does not claim.
 """
 
 from __future__ import annotations
@@ -43,15 +44,22 @@ from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
 from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.store_ownership import FakeStoreDatabase
 
 _OURS = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _THEIRS = uuid.UUID("00000000-0000-4000-8000-000000000002")
 _LONG_AGO = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
-_STAGED = "communities/c/servers/s/incoming/t1/level.dat"
+# The community and resource pack the seeded objects belong to, and a probe
+# database's own community, which no seeded object belongs to.
+_COMMUNITY = uuid.UUID("10000000-0000-4000-8000-000000000001")
+_PACK_ID = uuid.UUID("40000000-0000-4000-8000-000000000004")
+_PROBE_COMMUNITY = uuid.UUID("30000000-0000-4000-8000-000000000003")
+
+_STAGED = f"communities/{_COMMUNITY}/servers/s/incoming/t1/level.dat"
 _JAR = f"jars/{'a' * 64}.jar"
 _PLUGIN = f"plugin-cache/{'b' * 64}"
-_PACK = f"resource-packs/{uuid.uuid4()}/pack.zip"
+_PACK = f"resource-packs/{_PACK_ID}/pack.zip"
 
 
 def _marker(installation_id: uuid.UUID) -> bytes:
@@ -96,19 +104,27 @@ async def _ours(_session_factory: object) -> uuid.UUID:
     return _OURS
 
 
-async def _rows(_session_factory: object) -> bool:
-    """The database probe of a database with rows that name stored objects."""
+def _deployment() -> FakeStoreDatabase:
+    """The database of the deployment the seeded objects belong to."""
 
-    return True
-
-
-async def _no_rows(_session_factory: object) -> bool:
-    """The database probe of a fresh database: no row names a stored object."""
-
-    return False
+    return FakeStoreDatabase(
+        rows=True, communities=[_COMMUNITY], resource_packs=[_PACK_ID]
+    )
 
 
-_PROBE = "mc_server_dashboard_api.app.database_names_stored_objects"
+def _probe() -> FakeStoreDatabase:
+    """A probe or dev stack's database, with a community of its own."""
+
+    return FakeStoreDatabase(rows=True, communities=[_PROBE_COMMUNITY])
+
+
+def _use_database(monkeypatch: pytest.MonkeyPatch, database: FakeStoreDatabase) -> None:
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.SqlAlchemyStoreDatabase",
+        lambda _session_factory: database,
+    )
+
+
 _CLAIM_COMMAND = "python -m mc_server_dashboard_api.store_claim_cli"
 _OWNERSHIP_LOGGER = ownership_module.__name__
 
@@ -136,7 +152,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
     )
 
     monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
-    monkeypatch.setattr(_PROBE, _rows)
+    _use_database(monkeypatch, _deployment())
 
     async def _drained(self: SqlAlchemyWorkerDrainStore) -> frozenset[WorkerId]:
         return frozenset()
@@ -199,8 +215,8 @@ async def test_a_bucket_another_database_owns_blocks_every_gc_and_sweep(
 async def test_an_unmarked_bucket_is_claimed_and_swept(
     store: FakeS3Store, captured: _Captured
 ) -> None:
-    # The upgrade of an existing deployment: the store holds objects, and so does
-    # the database rows naming them (the fixture's database probe).
+    # The upgrade of an existing deployment: the store holds objects of the
+    # community and resource pack its database has (the fixture's database).
     _seed(store)
     app = create_app()
 
@@ -215,7 +231,7 @@ async def test_an_unmarked_bucket_is_claimed_and_swept(
 async def test_an_empty_bucket_is_claimed_by_a_fresh_database(
     store: FakeS3Store, captured: _Captured, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_PROBE, _no_rows)
+    _use_database(monkeypatch, FakeStoreDatabase())
     app = create_app()
 
     async with app.router.lifespan_context(app):
@@ -231,15 +247,15 @@ def _claim_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
     ]
 
 
-async def test_a_fresh_database_leaves_a_bucket_holding_objects_unclaimed(
+async def test_a_probe_database_leaves_a_bucket_of_another_community_unclaimed(
     store: FakeS3Store,
     captured: _Captured,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # A probe or dev stack with its own empty database, pointed at the live bucket
+    # A probe or dev stack with a database of its own, pointed at the live bucket
     # (issue #3886): claiming it would make every live object an orphan.
-    monkeypatch.setattr(_PROBE, _no_rows)
+    _use_database(monkeypatch, _probe())
     _seed(store)
     app = create_app()
 
@@ -305,7 +321,7 @@ async def test_an_fs_root_another_database_owns_blocks_both_sweeps(
     )
 
 
-async def test_a_fresh_database_leaves_an_fs_root_holding_objects_unclaimed(
+async def test_a_probe_database_leaves_an_fs_root_of_another_community_unclaimed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     captured: _Captured,
@@ -318,8 +334,10 @@ async def test_a_fresh_database_leaves_an_fs_root_holding_objects_unclaimed(
         ownership_module.FsStoreOwnership,
     )
     monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
-    monkeypatch.setattr(_PROBE, _no_rows)
-    staged = tmp_path / "communities" / "c" / "servers" / "s" / "incoming" / "t1"
+    _use_database(monkeypatch, _probe())
+    staged = (
+        tmp_path / "communities" / str(_COMMUNITY) / "servers" / "s" / "incoming" / "t1"
+    )
     staged.mkdir(parents=True)
     (staged / "level.dat").write_bytes(b"in flight")
     app = create_app()
