@@ -48,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
     ControlPlane,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -590,8 +591,9 @@ async def test_reconnect_before_the_old_callers_timeout_does_not_hold_for_good()
     await worker.next_command()
 
     worker.reconnect()
-    with pytest.raises(WorkerUnavailableError):
+    with pytest.raises(WorkerUnavailableError) as excinfo:
         await asyncio.wait_for(caller, timeout=1)
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
     assert not worker.guard.in_flight(server.id)
     assert _assigned(repo, server) == server.assigned_worker_id
 

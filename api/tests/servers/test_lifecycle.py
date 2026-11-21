@@ -81,6 +81,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
+    ExitHookUnitOfWork,
     FakeBedrockTunnelSync,
     FakeClock,
     FakeControlPlane,
@@ -7498,16 +7499,21 @@ async def test_a_worker_gone_since_the_caller_found_it_connected_keeps_its_row(
     _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
 
 
-class _SessionEndsDuringSnapshot(FakeControlPlane):
-    """The final snapshot fails because the Worker's session ended under it.
+class _SessionGoneAtSnapshot(FakeControlPlane):
+    """The final snapshot fails because the Worker's session is gone.
 
-    ``reconnected``: a new session registered first, and retired the old one's
-    commands, so the Worker reads connected again by then.
+    ``ending`` is how, each the shape the adapter raises:
+
+    - ``in-flight``: the session ended while the snapshot awaited its answer.
+    - ``at-dispatch``: the session had ended before the snapshot was sent (a
+      drop during ``_final_snapshot``'s own row read), so nothing was queued.
+    - ``back``: a new session registered first and retired the old one's
+      commands, so the Worker reads connected again by then.
     """
 
-    def __init__(self, *, reconnected: bool) -> None:
+    def __init__(self, *, ending: str) -> None:
         super().__init__()
-        self._reconnected = reconnected
+        self._ending = ending
 
     async def snapshot(
         self,
@@ -7518,24 +7524,25 @@ class _SessionEndsDuringSnapshot(FakeControlPlane):
         final: bool = False,
     ) -> CommandOutcome:
         self.dispatched.append(("snapshot", worker_id, server_id))
-        if not self._reconnected:
+        if self._ending != "back":
             self.end_session(worker_id, at=_NOW)
         raise WorkerUnavailableError(
             str(worker_id.value),
-            session_ended_in_flight=True,
+            session_ended_in_flight=self._ending != "at-dispatch",
             worker_state=UnavailableWorkerState.NOT_CONNECTED,
         )
 
 
-@pytest.mark.parametrize("reconnected", [False, True], ids=["gone", "back"])
+@pytest.mark.parametrize("ending", ["in-flight", "at-dispatch", "back"])
+@pytest.mark.parametrize("entry", ["reconciler", "operator"])
 @pytest.mark.parametrize(
     "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
 )
-async def test_a_worker_whose_session_ends_during_the_snapshot_keeps_its_row(
-    observed: ObservedState, reconnected: bool
+async def test_a_worker_whose_session_is_gone_at_the_snapshot_keeps_its_row(
+    observed: ObservedState, entry: str, ending: str
 ) -> None:
     community, server_id, worker = _ids()
-    cp = _SessionEndsDuringSnapshot(reconnected=reconnected)
+    cp = _SessionGoneAtSnapshot(ending=ending)
     uow = FakeUnitOfWork()
     uow.servers.seed(
         _server(
@@ -7545,13 +7552,19 @@ async def test_a_worker_whose_session_ends_during_the_snapshot_keeps_its_row(
             worker_id=worker,
         )
     )
+    stop = _stale_clear(uow, cp, StopIntentCounter())
 
     with pytest.raises(WorkerUnavailableError) as excinfo:
-        await _stale_clear(uow, cp, StopIntentCounter()).clear_stale_assignment(
-            community_id=CommunityId(community),
-            server_id=ServerId(server_id),
-            worker_connected=True,
-        )
+        if entry == "reconciler":
+            await stop.clear_stale_assignment(
+                community_id=CommunityId(community),
+                server_id=ServerId(server_id),
+                worker_connected=True,
+            )
+        else:
+            await stop(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
 
     assert [kind for kind, _, _ in cp.dispatched] == ["snapshot"]
     _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
@@ -7611,6 +7624,36 @@ async def test_an_operator_stop_whose_worker_drops_after_step_a_keeps_the_row(
 
     with pytest.raises(WorkerUnavailableError) as excinfo:
         await _stale_clear(uow, cp, intents)(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert cp.dispatched == []
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_an_operator_stop_whose_worker_drops_before_step_a_keeps_the_row(
+    observed: ObservedState,
+) -> None:
+    # The stop found the Worker connected as it read the row. The session ends as
+    # that unit of work exits, before Step A reads the row again.
+    community, server_id, worker = _ids()
+    cp = FakeControlPlane()
+    uow = ExitHookUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+    uow.arm(lambda: cp.end_session(WorkerId(worker), at=_NOW))
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stale_clear(uow, cp, StopIntentCounter())(
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
 

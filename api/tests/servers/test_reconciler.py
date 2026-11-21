@@ -3844,6 +3844,54 @@ async def test_a_row_stamped_before_its_workers_drop_waits_a_grace_from_the_drop
     assert uow.servers.by_id[server.id].assigned_worker_id is None
 
 
+@pytest.mark.parametrize("drop", ["before-the-tick", "mid-release"])
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED], ids=lambda s: s.value
+)
+async def test_a_drop_after_an_unrecorded_stop_waits_the_full_grace_from_it(
+    observed: ObservedState, drop: str
+) -> None:
+    # A finished stop's write failed 1 s before the Worker dropped, and the
+    # teardown's write did not land either, so the row keeps its stamp from
+    # before both. The drop is newer than the record, so the release waits the
+    # full grace from it, not the short one: the Worker may be back within it.
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    unrecorded = UnrecordedStops()
+    unrecorded.record(server.id, at=_NOW - dt.timedelta(seconds=1))
+    clock = FakeClock(_NOW)
+    if drop == "before-the-tick":
+        cp = FakeControlPlane(connected={_WORKER: False}, offline_since={_WORKER: _NOW})
+        reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+    else:
+        # The tick finds the Worker connected and the record live, so it acts
+        # after the short grace, and the Worker drops at Step A's exit.
+        cp = FakeControlPlane()
+        stop_uow, intents = session_ends_as_step_a_exits(
+            cp, _WORKER, at=_NOW, servers=uow.servers
+        )
+        reconciler = _reconciler(
+            uow,
+            cp,
+            clock,
+            unrecorded_stops=unrecorded,
+            stop_uow=stop_uow,
+            stop_intents=intents,
+        )
+
+    await reconciler.tick()
+    for elapsed in (_REFUSED_GRACE, 30, _GRACE - 1):
+        clock.set(_NOW + dt.timedelta(seconds=elapsed))
+        await reconciler.tick()
+        assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER, elapsed
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
 # --- Worker-reported unknown lands on existing arms (issue #2474) -----------
 #
 # SERVER_STATE_UNKNOWN joined the wire enum, so ``unknown`` now reaches a row from a
