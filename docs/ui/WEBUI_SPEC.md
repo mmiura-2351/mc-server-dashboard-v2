@@ -1157,15 +1157,18 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   than "Close", the name the modal's backdrop shares.
 - **Modal focus.** While a modal is open, Tab keeps focus in the topmost
   dialog and the toast stack. A Tab that lands focus anywhere else, such as
-  the page behind or a dialog below, is pulled back to the dialog's first
-  control, or its last after Shift+Tab, or to the dialog itself when it has
-  none; the pulled-to control may scroll into view inside the dialog, and the
-  page's scroll that Tab made is undone (a scroller of its own on the page is
-  not). So Tab never walks the page behind. Focus that a script or the pointer
-  moves outside is left there, so a confirm can close its dialog and focus the
-  control behind it in any order; the next Tab from there enters the dialog at
-  its first control, or its last after Shift+Tab. Tab from the page body is
-  the browser's: after a focused control is removed it goes on from where that
+  the page behind or a dialog below, is pulled back by the topmost dialog to
+  the dialog's first control, or its last after Shift+Tab, or to the dialog
+  itself when it has none; the pulled-to control may scroll into view inside
+  the dialog, and the page's scroll that Tab made is undone (a scroller of its
+  own on the page is not). So Tab never walks the page behind. A Tab counts
+  only until it has moved focus: its first focus move uses it up, and its
+  keyup or a 0 ms timer ends it when it moves none. Focus that a script or the
+  pointer moves outside after that is left there, even while the Tab's key is
+  still down, so a confirm can close its dialog and focus the control behind
+  it in any order; the next Tab from there enters the dialog at its first
+  control, or its last after Shift+Tab. Tab from the page body is the
+  browser's: after a focused control is removed it goes on from where that
   control was, and after a click on a toast's text it goes to that toast's
   dismiss button. A control disabled while it holds focus, as a confirm button
   is while its action runs, hands focus to the dialog itself without

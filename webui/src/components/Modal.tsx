@@ -113,8 +113,9 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     });
 
     // The last Tab's direction and the page's scroll before it, kept until
-    // the browser has moved focus for it: until its keyup, or a timer when
-    // that keyup is lost, as when Tab leaves the page.
+    // the browser has moved focus for it: used up by the first focus that
+    // follows, or cleared at its keyup, or by a timer when that keyup is
+    // lost, as when Tab leaves the page.
     let lastTab: { shiftKey: boolean; x: number; y: number } | null = null;
 
     // A Tab that lands focus outside the dialog and the toast stack, the
@@ -122,19 +123,26 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
     // pulled back: to the dialog's first control, or its last after
     // Shift+Tab. The control may scroll into view inside the dialog; the
     // page's scroll the Tab made is undone. Focus a script or the pointer
-    // moves is left alone: a confirm may close the dialog and focus behind it
-    // in any order, and the keydown branch below takes the next Tab. Only the
-    // topmost dialog records a Tab, so only it pulls.
+    // moves is left alone, even while the Tab's key is still down: a confirm
+    // may close the dialog and focus behind it in any order, and the keydown
+    // branch below takes the next Tab. Only the topmost dialog pulls: one
+    // that opens over it during the Tab, from a blur handler say, keeps the
+    // focus it takes.
     const isOutside = (node: Node | null) =>
       !dialog.contains(node) && !toastZone?.contains(node);
     const onFocusIn = () => {
-      const active = document.activeElement;
-      if (lastTab === null || !isOutside(active)) {
+      const tab = lastTab;
+      lastTab = null;
+      if (
+        dialogStack.at(-1) !== dialog ||
+        tab === null ||
+        !isOutside(document.activeElement)
+      ) {
         return;
       }
       const inDialog = focusableWithin(dialog);
-      focusFirstOf(lastTab.shiftKey ? inDialog.reverse() : inDialog, dialog);
-      window.scrollTo(lastTab.x, lastTab.y);
+      focusFirstOf(tab.shiftKey ? inDialog.reverse() : inDialog, dialog);
+      window.scrollTo(tab.x, tab.y);
     };
     document.addEventListener("focusin", onFocusIn);
 
