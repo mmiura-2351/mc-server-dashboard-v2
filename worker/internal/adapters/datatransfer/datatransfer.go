@@ -887,15 +887,24 @@ func safeRel(name string) (string, error) {
 // rel is walked one name at a time from rootFd (issue #3940): each directory is
 // opened relative to its parent's descriptor without following a link
 // (openDirBeneath), and a missing one is created by its single name relative to
-// that descriptor. A symlink at any directory on the path therefore fails the
-// walk instead of redirecting a write, whether it points out of rootFd or at
-// another directory inside it. The walk holds at most two descriptors at a time.
+// that descriptor, then opened the same way. A symlink at any directory on the
+// path therefore fails the walk instead of redirecting a write, whether it points
+// out of rootFd or at another directory inside it. The walk holds at most two
+// descriptors at a time.
+//
+// A mkdirat that answers EEXIST is opened past too: an interrupted one that had
+// already created the directory answers so on its EINTR retry. The open is what
+// judges the name, refusing a link or anything that is not a directory.
 func openDirAllAt(rootFd int, rel string) (int, error) {
 	dirFd := rootFd
 	for _, name := range strings.Split(rel, "/") {
+		op := "open"
 		fd, err := openDirBeneath(dirFd, name)
 		if errors.Is(err, unix.ENOENT) {
-			if err = ignoringEINTR(func() error { return unix.Mkdirat(dirFd, name, 0o750) }); err == nil {
+			op = "mkdir"
+			err = ignoringEINTR(func() error { return unix.Mkdirat(dirFd, name, 0o750) })
+			if err == nil || errors.Is(err, unix.EEXIST) {
+				op = "open"
 				fd, err = openDirBeneath(dirFd, name)
 			}
 		}
@@ -903,7 +912,7 @@ func openDirAllAt(rootFd int, rel string) (int, error) {
 			_ = unix.Close(dirFd)
 		}
 		if err != nil {
-			return -1, &os.PathError{Op: "mkdir", Path: rel, Err: err}
+			return -1, &os.PathError{Op: op, Path: rel, Err: err}
 		}
 		dirFd = fd
 	}

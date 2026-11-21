@@ -373,8 +373,8 @@ func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) 
 							t.Fatal(err)
 						}
 
-						if err := unpackTar(&buf, openDirFd(t, dest)); err == nil {
-							t.Error("unpackTar = nil, want the link on the member's path refused")
+						if err := unpackTar(&buf, openDirFd(t, dest)); !errors.Is(err, linkRefusal(kernel)) {
+							t.Errorf("unpackTar = %v, want %v from the link on the member's path", err, linkRefusal(kernel))
 						}
 						if entries, err := os.ReadDir(linked); err != nil || len(entries) != 0 {
 							t.Fatalf("the link's target holds %v, %v; want nothing written through the link", entries, err)
@@ -481,7 +481,7 @@ func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
 // A directory member whose name an entry other than a directory already holds
 // fails the unpack, as os.MkdirAll failed it: here a dangling link, which the
 // walk refuses to open (issue #3940) instead of following it into a mkdir at its
-// target, with openat2 or without it.
+// target, with openat2 or without it. The error names the refused open.
 func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
 	for _, kernel := range []string{"openat2", "without openat2"} {
 		t.Run(kernel, func(t *testing.T) {
@@ -501,14 +501,78 @@ func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := unpackTar(&buf, openDirFd(t, dest)); err == nil {
-				t.Error("unpackTar = nil, want the link at the directory's name refused")
+			err := unpackTar(&buf, openDirFd(t, dest))
+			var pathErr *os.PathError
+			if !errors.Is(err, linkRefusal(kernel)) || !errors.As(err, &pathErr) || pathErr.Op != "open" {
+				t.Errorf("unpackTar = %v, want an open refused with %v at the link", err, linkRefusal(kernel))
 			}
 			if _, err := os.Lstat(filepath.Join(dest, "nowhere")); !errors.Is(err, fs.ErrNotExist) {
 				t.Fatalf("the link's target: %v; want it never created", err)
 			}
 		})
 	}
+}
+
+// An interrupted mkdirat that had already created its directory answers EEXIST
+// on its EINTR retry (issue #3940). The walk then opens what is at the name all
+// the same, and that open is what judges it: the directory is used, while a link
+// or a file planted in the same window is refused as at any other open. The
+// planting happens between the walk's first open and its mkdirat.
+func TestUnpackOpensWhatAnInterruptedMkdirLeft(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plant func(at, outside string) error
+		want  error
+	}{
+		"the directory": {func(at, _ string) error { return os.Mkdir(at, 0o750) }, nil},
+		"a link":        {func(at, outside string) error { return os.Symlink(outside, at) }, unix.ELOOP},
+		"a file":        {func(at, _ string) error { return os.WriteFile(at, nil, 0o640) }, unix.ENOTDIR},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			dest, outside := filepath.Join(base, "dest"), filepath.Join(base, "outside")
+			for _, dir := range []string{dest, outside} {
+				if err := os.Mkdir(dir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			orig := openat2Beneath
+			t.Cleanup(func() { openat2Beneath = orig })
+			planted := false
+			openat2Beneath = func(dirFd int, n string) (int, error) {
+				fd, err := orig(dirFd, n)
+				if n == "world" && errors.Is(err, unix.ENOENT) && !planted {
+					planted = true
+					if perr := tc.plant(filepath.Join(dest, "world"), outside); perr != nil {
+						t.Error(perr)
+					}
+				}
+				return fd, err
+			}
+
+			err := unpackTar(bytes.NewReader(tarOf(map[string]string{"world/level.dat": "level"})), openDirFd(t, dest))
+			if !planted || !errors.Is(err, tc.want) {
+				t.Fatalf("unpackTar = %v (planted: %v), want %v", err, planted, tc.want)
+			}
+			if tc.want == nil {
+				if got, err := os.ReadFile(filepath.Join(dest, "world", "level.dat")); err != nil || string(got) != "level" {
+					t.Errorf("world/level.dat reads %q, %v; want the member", got, err)
+				}
+			}
+			if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+				t.Errorf("outside holds %v, %v; want nothing", entries, err)
+			}
+		})
+	}
+}
+
+// linkRefusal is the errno the unpack walk refuses a link at a directory with:
+// openat2's RESOLVE_NO_SYMLINKS answers ELOOP, and the O_NOFOLLOW|O_DIRECTORY
+// open of the fallback answers ENOTDIR.
+func linkRefusal(kernel string) error {
+	if kernel == "without openat2" {
+		return unix.ENOTDIR
+	}
+	return unix.ELOOP
 }
 
 // withoutOpenat2 makes the unpack take, for the rest of the test, the path it
