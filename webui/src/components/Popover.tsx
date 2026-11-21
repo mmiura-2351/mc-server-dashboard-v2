@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { topmostDialog } from "./Modal.tsx";
 
 // Self-built popover primitive (WEBUI_SPEC.md 7.6 — no UI kit): a trigger
 // button plus an absolutely-positioned panel that closes on outside-click and
@@ -103,6 +104,12 @@ export function Popover({
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
+      // Escape under a modal that does not hold this popover is the modal's
+      // (#3920).
+      const dialog = topmostDialog();
+      if (dialog !== null && !dialog.contains(wrapperRef.current)) {
+        return;
+      }
       if (event.key === "Escape") {
         setOpen(false);
         triggerRef.current?.focus();

@@ -48,7 +48,7 @@ import {
 } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
-import { Modal } from "../components/Modal.tsx";
+import { Modal, topmostDialog } from "../components/Modal.tsx";
 import { SimpleConfirmDialog } from "../components/SimpleConfirmDialog.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { UploadProgress } from "../components/UploadProgress.tsx";
@@ -1075,6 +1075,11 @@ export function ServerFilesTab({
   // Keyboard shortcuts: Delete/Backspace, F2, Ctrl+A, Escape, Ctrl+C, Ctrl+V, arrows.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // While a modal is open, its keys are the dialog's, not the listing's
+      // behind it (#3920).
+      if (topmostDialog() !== null) {
+        return;
+      }
       // Skip when a text input / textarea / contenteditable is focused — the
       // user is typing, not issuing a file command.
       const tag = (e.target as HTMLElement).tagName;
@@ -2172,7 +2177,8 @@ function FileContextMenu({
       }
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      // Escape under an open modal closes the modal, not this menu (#3920).
+      if (e.key === "Escape" && topmostDialog() === null) {
         e.stopImmediatePropagation();
         onClose();
       }
