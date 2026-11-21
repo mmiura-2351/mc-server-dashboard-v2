@@ -493,6 +493,29 @@ snapshot, carries an expiry, `expires_after`. A command still
 waiting when its expiry runs out is answered `EXPIRED` and is never executed
 (Section 5, "Expiry").
 
+**Delivery.** The API handles the Worker's messages one at a time, in the order
+they arrive, except heartbeats, which it records as it reads them (Section 4.3).
+When handling a message fails because the database is unavailable, the API holds
+the message and retries it in place, and the messages behind it wait (issue
+#3614). The retries back off from 0.5 s, doubling up to 10 s, with no time
+budget. The hold ends when the message is applied, or when the session ends,
+which loses the message: the Worker closes the stream, a newer session replaces
+this one, or its heartbeats lapse. If the database answered its liveness probe
+just before a retry and the message still fails as if the database were down,
+the error is the message's own, and the message is dropped. A failure of any
+other kind drops the message too. When more than five drops follow one another,
+the API ends the session; a held message's failures do not count toward them.
+
+Log lines and metrics wait in the same queue, so a hold delays them, and they
+are lost if the session ends first. At most 1024 messages wait. Once that many
+do, the API stops reading the stream, heartbeats included, until the hold ends:
+a long outage under a busy log stream ends the session when its heartbeats
+lapse.
+
+The delivery guarantee: a report is applied at least once across transient
+database errors within a session; a report held when the session ends is lost;
+the Worker's sends are not acknowledged.
+
 ### 4.3 Heartbeat and liveness
 
 The Worker emits `Event{Heartbeat}` every `heartbeat_interval` (returned in

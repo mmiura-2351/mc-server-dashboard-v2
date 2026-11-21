@@ -102,12 +102,13 @@ class FakeServerStateSink(ServerStateSink):
         self.counted_for: list[str] = []
         self._running_ids = running_ids or {}
         # Server ids whose next record_observed_state call raises, simulating a
-        # transient DB error while handling one StatusChange; the id is dropped
-        # after raising so a later report for the same server succeeds.
+        # handler failure on one StatusChange that is not a database outage (an
+        # outage's message is held, issue #3614); the id is dropped after raising
+        # so a later report for the same server succeeds.
         self._fail_observed_for = fail_observed_for or set()
         # When set, every record_observed_state call raises, simulating a sink
-        # that is permanently down (e.g. the DB is unreachable); used to exercise
-        # the consecutive-failure containment cap (issue #807).
+        # that is permanently broken with an error that is not a database outage;
+        # used to exercise the consecutive-failure containment cap (issue #807).
         self._always_fail_observed = always_fail_observed
         # The set of server ids the sink reports as existing (issue #924). When
         # None, all ids are treated as existing (the default for tests that do not
