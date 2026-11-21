@@ -28,7 +28,9 @@ def test_server_name_rejects_blank() -> None:
 
 # A server name is shown in every list and names its export's file, so it carries
 # no control character, and no lone surrogate, which has no UTF-8 encoding and so
-# could not be stored (issue #3957).
+# could not be stored (issue #3957). Nor a line or paragraph separator (Unicode
+# ``Zl`` and ``Zp``), which breaks the line as a control character does (issue
+# #3988).
 @pytest.mark.parametrize(
     "name",
     [
@@ -39,6 +41,8 @@ def test_server_name_rejects_blank() -> None:
         pytest.param("a\x7fb", id="del"),
         pytest.param("a\x85b", id="c1"),
         pytest.param("a\ud800b", id="lone-surrogate"),
+        pytest.param("a\u2028b", id="u+2028"),
+        pytest.param("a\u2029b", id="u+2029"),
     ],
 )
 def test_server_name_rejects_a_control_character_or_lone_surrogate(name: str) -> None:

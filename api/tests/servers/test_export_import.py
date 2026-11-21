@@ -41,11 +41,13 @@ from mc_server_dashboard_api.servers.application.export_import import (
     ImportServer,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
+from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    InvalidServerNameError,
     LifecycleLockLostError,
     PortAlreadyTakenError,
     ServerFilesUnsettledError,
@@ -840,6 +842,164 @@ async def test_import_old_archive_without_plugins_succeeds() -> None:
     )
     imported_plugins = await dst_uow.plugins.list_for_server(server.id)
     assert imported_plugins == []
+
+
+# --- import: the name is checked first (issue #3988) ------------------------
+
+
+async def test_import_refuses_the_name_before_reading_the_archive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("the archive was read")
+
+    monkeypatch.setattr(export_import, "run_archive_validation", read)
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    with pytest.raises(InvalidServerNameError):
+        await imp(
+            community_id=CommunityId(uuid.uuid4()),
+            name="a\x00b",
+            content=_zip({EXPORT_METADATA_FILENAME: _metadata()}),
+        )
+    assert len(dst_uow.servers.by_id) == 0
+
+
+# --- import: an imported plugin's names (issue #3988) ------------------------
+
+
+def _plugin_entry(**overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "rel_path": "mods/fabric-api.jar",
+        "filename": "fabric-api.jar",
+        "display_name": "Fabric API",
+    }
+    entry.update(overrides)
+    return entry
+
+
+async def _imported_plugin(entry: dict[str, object]) -> ServerPlugin:
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    server = await imp(
+        community_id=CommunityId(uuid.uuid4()),
+        name="imported",
+        content=_zip({EXPORT_METADATA_FILENAME: _metadata(plugins=[entry])}),
+    )
+    [plugin] = await dst_uow.plugins.list_for_server(server.id)
+    return plugin
+
+
+# The archive's display name is not one the importing user typed, so a name the
+# display-name rule refuses is made to fit it rather than refused: each character
+# the rule refuses is replaced with ``_``, the result is cut to 200 characters,
+# and a blank one gives way to the file's name less its extension.
+@pytest.mark.parametrize(
+    ("overrides", "stored"),
+    [
+        pytest.param({"display_name": "Fabric\nAPI"}, "Fabric_API", id="c0"),
+        pytest.param({"display_name": "Fabric\x85API"}, "Fabric_API", id="c1"),
+        pytest.param(
+            {"display_name": "Fabric\ud800API"}, "Fabric_API", id="lone-surrogate"
+        ),
+        pytest.param({"display_name": "Fabric\u2028API"}, "Fabric_API", id="u+2028"),
+        pytest.param({"display_name": "Fabric\u2029API"}, "Fabric_API", id="u+2029"),
+        pytest.param({"display_name": "  Fabric API  "}, "Fabric API", id="stripped"),
+        pytest.param({"display_name": "x" * 250}, "x" * 200, id="cut-to-200"),
+        pytest.param(
+            {"display_name": "x" * 199 + " y"}, "x" * 199, id="cut-then-stripped"
+        ),
+        pytest.param({"display_name": ""}, "fabric-api", id="empty"),
+        pytest.param({"display_name": " \t "}, "fabric-api", id="blank"),
+        pytest.param(
+            {"display_name": "", "filename": "a\x85b.jar"},
+            "a_b",
+            id="stem-of-the-sanitised-filename",
+        ),
+        pytest.param(
+            {"display_name": "", "filename": "  .jar"}, ".jar", id="blank-stem"
+        ),
+    ],
+)
+async def test_import_fits_a_plugin_display_name_to_the_rule(
+    overrides: dict[str, object], stored: str
+) -> None:
+    plugin = await _imported_plugin(_plugin_entry(**overrides))
+    assert plugin.display_name == stored
+    assert checked_display_name(plugin.display_name) == plugin.display_name
+
+
+async def test_import_fits_a_missing_plugin_display_name_to_the_rule() -> None:
+    entry = _plugin_entry()
+    del entry["display_name"]
+    plugin = await _imported_plugin(entry)
+    assert plugin.display_name == "fabric-api"
+
+
+# The archive's file name gets the catalog's treatment: the basename, with each
+# character the upload rule refuses replaced with ``_``. Its ``rel_path`` names
+# the archive member the file is, so it is kept as it is.
+@pytest.mark.parametrize(
+    ("filename", "stored"),
+    [
+        pytest.param("a\x85b.jar", "a_b.jar", id="c1"),
+        pytest.param("a\ud800b.jar", "a_b.jar", id="lone-surrogate"),
+        pytest.param("a\uffffb.jar", "a_b.jar", id="u+ffff"),
+        pytest.param("a\u2028b.jar", "a_b.jar", id="u+2028"),
+        pytest.param("../../evil.jar", "evil.jar", id="traversal"),
+        pytest.param("a\\..\\evil.jar", "evil.jar", id="backslash"),
+        # The upload rule's bound, 255 bytes, not the 246 an install keeps.
+        pytest.param("a" * 251 + ".jar", "a" * 251 + ".jar", id="255-bytes"),
+    ],
+)
+async def test_import_sanitises_a_plugin_filename(filename: str, stored: str) -> None:
+    plugin = await _imported_plugin(_plugin_entry(filename=filename))
+    assert plugin.filename == stored
+    assert plugin.rel_path == "mods/fabric-api.jar"
+
+
+# A plugin entry whose file name is still refused once sanitised, or whose
+# ``rel_path`` is no safe relative path, refuses the whole import before the row
+# is created.
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(_plugin_entry(filename="a" * 252 + ".jar"), id="256-bytes"),
+        pytest.param(_plugin_entry(filename=".."), id="dotdot"),
+        pytest.param(_plugin_entry(filename=""), id="empty-filename"),
+        pytest.param(_plugin_entry(filename="   "), id="blank-filename"),
+        pytest.param(_plugin_entry(filename=5), id="filename-not-a-string"),
+        pytest.param(
+            {"rel_path": "mods/fabric-api.jar", "display_name": "x"},
+            id="no-filename",
+        ),
+        pytest.param(_plugin_entry(rel_path="../escape.jar"), id="rel-path-dotdot"),
+        pytest.param(_plugin_entry(rel_path="/mods/a.jar"), id="rel-path-absolute"),
+        pytest.param(_plugin_entry(rel_path="mods/a\nb.jar"), id="rel-path-c0"),
+        pytest.param(_plugin_entry(rel_path=["mods"]), id="rel-path-not-a-string"),
+        pytest.param(
+            {"filename": "fabric-api.jar", "display_name": "x"}, id="no-rel-path"
+        ),
+        pytest.param("mods/fabric-api.jar", id="not-an-object"),
+    ],
+)
+async def test_import_refuses_an_unsafe_plugin_entry(entry: object) -> None:
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    with pytest.raises(InvalidExportMetadataError):
+        await imp(
+            community_id=CommunityId(uuid.uuid4()),
+            name="imported",
+            content=_zip({EXPORT_METADATA_FILENAME: _metadata(plugins=[entry])}),
+        )
+    assert len(dst_uow.servers.by_id) == 0
+    assert dst_store.files == {}
 
 
 # --- import: Bedrock port allocation on Geyser detection (issue #1551) -------

@@ -967,7 +967,7 @@ def test_import_of_an_unreadable_archive_is_422_and_creates_nothing(
     assert file_store.files == {}
 
 
-def _export_zip() -> bytes:
+def _export_zip(**overrides: object) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w") as zf:
         zf.writestr(
@@ -980,10 +980,80 @@ def _export_zip() -> bytes:
                     "mc_version": "1.21.1",
                     "server_type": "vanilla",
                     "exported_at": _NOW.isoformat(),
+                    **overrides,
                 }
             ),
         )
     return buf.getvalue()
+
+
+def _real_import(uow: ServersFakeUnitOfWork, file_store: FakeFileStore) -> ImportServer:
+    return ImportServer(
+        create_server=CreateServer(
+            uow=uow,
+            clock=ServersFakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=file_store,
+            port_range=PortRange(start=25565, end=25664),
+        ),
+        file_store=file_store,
+    )
+
+
+def test_import_refuses_the_name_before_taking_a_slot_or_reading_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The name is checked first (issue #3988): a request it refuses neither
+    # waits for an archive-upload slot nor has its body read into memory.
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b""
+
+    monkeypatch.setattr(servers_api, "_read_capped_upload", read)
+    use_case = _FakeImport(result=_server_entity(community_id=uuid.uuid4()))
+    admission = ArchiveUploadAdmission(limit=1)
+    app = _app(member=True, allow=True, import_=use_case)
+    _with_admission(app, admission)
+
+    with admission.slot():
+        resp = post_raw_upload(
+            _client(app),
+            f"/api/communities/{uuid.uuid4()}/servers/import",
+            b'"server.zip"',
+            fields={"name": b"a\x00b"},
+            content=_export_zip(),
+        )
+
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_server_name"
+    assert reads == []
+    assert use_case.calls == []
+
+
+def test_import_with_an_unsafe_plugin_entry_is_422_invalid_export_metadata() -> None:
+    # A plugin entry whose rel_path is no safe relative path is the archive's
+    # metadata at fault, not one of its members (issue #3988).
+    uow = ServersFakeUnitOfWork()
+    file_store = FakeFileStore()
+    app = _app(member=True, allow=True, import_=_real_import(uow, file_store))
+    plugin = {
+        "rel_path": "../escape.jar",
+        "filename": "escape.jar",
+        "display_name": "Escape",
+    }
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        files={
+            "file": ("server.zip", _export_zip(plugins=[plugin]), "application/zip")
+        },
+        data={"name": "imported"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_export_metadata"
+    assert uow.servers.by_id == {}
+    assert file_store.files == {}
 
 
 # The ``name`` form field names the imported server, so it is refused as a

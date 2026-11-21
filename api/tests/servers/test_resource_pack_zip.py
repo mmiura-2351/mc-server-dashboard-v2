@@ -291,3 +291,16 @@ class TestPathTraversal:
         )
         with pytest.raises(InvalidResourcePackError, match="path traversal"):
             validate_and_normalize(content)
+
+    def test_the_member_name_is_escaped_in_the_message(self) -> None:
+        # The name comes from the uploaded zip, so it may carry a control
+        # character; the message escapes it (issue #3988).
+        content = _make_zip(
+            {
+                "pack.mcmeta": _VALID_MCMETA,
+                "../a\nb": b"evil",
+            }
+        )
+        with pytest.raises(InvalidResourcePackError) as excinfo:
+            validate_and_normalize(content)
+        assert str(excinfo.value) == "path traversal: '../a\\nb'"

@@ -43,6 +43,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidCpuAllocationError,
     InvalidMemoryLimitError,
+    InvalidServerNameError,
     InvalidSnapshotIntervalError,
     PermissionDeniedError,
     PortAlreadyTakenError,
@@ -441,6 +442,30 @@ async def test_create_rejects_non_java_edition() -> None:
             config={},
         )
     # Rejected before staging or even consulting the catalog (Java-only at M1).
+    assert uow.commits == 0
+    assert validator.calls == []
+
+
+async def test_create_refuses_the_name_before_any_other_check() -> None:
+    # As an update does (issue #3988): the name is refused before the edition,
+    # the type, the config or the catalog are consulted.
+    uow = FakeUnitOfWork()
+    validator = FakeVersionValidator()
+    with pytest.raises(InvalidServerNameError):
+        await CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=validator,
+            file_store=FakeFileStore(),
+            port_range=_PORTS,
+        )(
+            community_id=CommunityId(uuid.uuid4()),
+            name="a\x00b",
+            mc_edition="bedrock",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            config={},
+        )
     assert uow.commits == 0
     assert validator.calls == []
 
