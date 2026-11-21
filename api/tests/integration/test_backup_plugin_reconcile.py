@@ -47,6 +47,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     PluginReconcileIncompleteError,
 )
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import NullHeldLifecycleLock
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
@@ -198,6 +199,7 @@ async def test_a_ghost_that_violates_a_constraint_does_not_poison_the_reconcile(
     file_store.files["plugins/two.jar"] = _jar(b"two")
 
     await _reconcile_plugins(
+        NullHeldLifecycleLock(),
         uow=_RacingUnitOfWork(engine),
         file_store=file_store,
         cache=None,
@@ -262,6 +264,7 @@ async def test_a_partial_reconcile_rolls_back_and_a_retry_completes_it(
 
     async def _reconcile() -> None:
         await _reconcile_plugins(
+            NullHeldLifecycleLock(),
             uow=ServersUnitOfWork(create_session_factory(engine)),
             file_store=file_store,
             cache=None,

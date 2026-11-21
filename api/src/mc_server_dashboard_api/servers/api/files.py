@@ -165,6 +165,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     InvalidVersionIdError,
+    LifecycleLockLostError,
     PlatformManagedKeyError,
     ServerBusyError,
     ServerFileNotFoundError,
@@ -493,6 +494,16 @@ async def write_file(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_WRITE,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except WorkerUnavailableError as exc:
         raise _service_unavailable("worker_unavailable") from exc
     except CommandDispatchError as exc:
@@ -666,6 +677,16 @@ async def rollback_file(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_ROLLBACK,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_file(recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id)
 
 
@@ -808,6 +829,16 @@ async def upload_file(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_UPLOAD,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except ServerFileStorageUnavailableError as exc:
         raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_UPLOAD, authorized, community_id, server_id)
@@ -1168,6 +1199,16 @@ async def rename_file(
             recorder, ops.FILE_RENAME, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_RENAME,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_file(recorder, ops.FILE_RENAME, authorized, community_id, server_id)
 
 
@@ -1232,6 +1273,16 @@ async def delete_file(
             recorder, ops.FILE_DELETE, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_DELETE,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_file(recorder, ops.FILE_DELETE, authorized, community_id, server_id)
 
 
@@ -1299,6 +1350,16 @@ async def make_directory(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_file_failure(
+            recorder,
+            ops.FILE_MKDIR,
+            authorized,
+            community_id,
+            server_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except ServerFileStorageUnavailableError as exc:
         raise _storage_unavailable() from exc
     await _record_file(recorder, ops.FILE_MKDIR, authorized, community_id, server_id)
@@ -1405,13 +1466,19 @@ async def _record_file_failure(
     authorized: AuthUser,
     community_id: uuid.UUID,
     server_id: uuid.UUID,
+    *,
+    outcome: Outcome = Outcome.DENIED,
 ) -> None:
-    """Record a refused file op (DENIED — server unsettled), targeting the server."""
+    """Record a failed file op, targeting the server.
+
+    A refusal (server unsettled or busy) is DENIED; a lifecycle lock lost before
+    the write it guards (issue #3927) is an ERROR.
+    """
 
     await recorder.record(
         AuditEvent(
             operation=operation,
-            outcome=Outcome.DENIED,
+            outcome=outcome,
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=ops.TARGET_FILE,

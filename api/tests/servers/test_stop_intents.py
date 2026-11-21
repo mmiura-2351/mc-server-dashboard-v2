@@ -106,7 +106,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerBusyError,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
+    NullHeldLifecycleLock,
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -315,13 +317,13 @@ class _ExclusiveLock(LifecycleLock):
         self.waited = asyncio.Event()
 
     @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[None]:
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
         if self.busy:
             raise ServerBusyError(str(server_id.value))
         if self._lock.locked():
             self.waited.set()
         async with self._lock:
-            yield
+            yield NullHeldLifecycleLock()
 
 
 class _IntentLock(StartIntentLock):

@@ -110,6 +110,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     ByteStream,
     DirEntry,
+    ExclusionFence,
     HydrateSource,
     JarPoolEntry,
     JarPoolStats,
@@ -1223,7 +1224,11 @@ class ObjectStorage(Storage):
         return None
 
     async def prune_to_final_snapshot(
-        self, community_id: CommunityId, server_id: ServerId
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        *,
+        fence: ExclusionFence | None = None,
     ) -> None:
         # The DeleteServer reclaim path (issue #777): pack the live snapshot into a
         # single retained ``final.tar.gz`` object at the server prefix, then drop the
@@ -1259,6 +1264,11 @@ class ObjectStorage(Storage):
                         )
                     finally:
                         await _discard_spool(spool, raise_fault=False)
+                    # The caller's exclusion fence (issue #3927), after the slow
+                    # pack and before the first write that removes or advances
+                    # anything: a refusal leaves a prune that failed after its pack.
+                    if fence is not None:
+                        await fence()
                     # Advance the generation BEFORE the pointer goes (issue #3434):
                     # this is where the prune guarantees it never lowers the store
                     # generation. DeleteServer commits the row delete only AFTER this
@@ -1295,6 +1305,9 @@ class ObjectStorage(Storage):
                     # prefix and overwrites the good final.tar.gz with an
                     # empty/partial pack (#777).
                     await client.delete_object(server_prefix + _POINTER)
+                elif fence is not None:
+                    # Nothing to pack: the fence comes before the GC (issue #3927).
+                    await fence()
                 # The final archive is durable and the pointer is gone (or nothing was
                 # published); reclaim the remaining working-set objects. The
                 # generation marker stays (see the bump above). Idempotent: a retry
@@ -1654,6 +1667,7 @@ class ObjectStorage(Storage):
         key: BackupKey,
         *,
         force: bool = False,
+        fence: ExclusionFence | None = None,
     ) -> WorkingSetReport:
         backup_key = self._backup_key(community_id, server_id, key)
         transfer_id = f"restore-{key.value}-{uuid.uuid4().hex}"
@@ -1734,6 +1748,12 @@ class ObjectStorage(Storage):
                     # a concurrent snapshot commit's generation re-check so the restore
                     # cannot interleave with the commit's pointer flip.
                     async with self._server_lock(community_id, server_id):
+                        # The caller's exclusion fence (issue #3927), before the
+                        # bump: the copy above ran without this lock. A refusal
+                        # leaves the copied snapshot to the sweep, as any failure
+                        # before the flip does.
+                        if fence is not None:
+                            await fence()
                         # Bump the generation on this authoritative publish (issue
                         # #873), mirroring the fs adapter: a restore replaces
                         # ``current/`` like a snapshot commit, so it MUST advance the
@@ -1750,11 +1770,12 @@ class ObjectStorage(Storage):
                         await self._bump_generation(
                             client, server_prefix, RESTORE_PUBLISHER
                         )
-                        # Unlike a commit, nothing is re-checked before the flip
-                        # (issue #3904). A server delete's prune, which deletes
+                        # Unlike a commit, no generation is re-checked before the
+                        # flip (issue #3904). A server delete's prune, which deletes
                         # ``snapshots/`` and ``incoming/``, cannot land after the
                         # copy above: RestoreBackup and DeleteServer hold the
-                        # per-server lifecycle lock across their whole storage call.
+                        # per-server lifecycle lock across their whole storage call,
+                        # and each confirms it in its fence (issue #3927).
                         old_prefix = await self._read_pointer(client, server_prefix)
                         try:
                             await self._write_pointer(client, server_prefix, new_prefix)

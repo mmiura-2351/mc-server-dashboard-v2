@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -82,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     FileTooLargeError,
     InvalidPluginSideError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginCacheStorageUnavailableError,
     PluginNotFoundError,
@@ -1190,6 +1192,59 @@ def test_resolve_apply_busy_audit_targets_server() -> None:
     assert [e.operation for e in recorder.events] == [ops.PLUGIN_RESOLVE]
     assert recorder.events[0].outcome is Outcome.DENIED
     assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+@pytest.mark.parametrize(
+    ("route", "operation", "target_type"),
+    [
+        ("install", ops.PLUGIN_INSTALL, ops.TARGET_SERVER),
+        ("resolve_apply", ops.PLUGIN_RESOLVE, ops.TARGET_SERVER),
+        ("update", ops.PLUGIN_UPDATE, ops.TARGET_PLUGIN),
+        ("remove", ops.PLUGIN_REMOVE, ops.TARGET_PLUGIN),
+        ("enable", ops.PLUGIN_ENABLE, ops.TARGET_PLUGIN),
+        ("disable", ops.PLUGIN_DISABLE, ops.TARGET_PLUGIN),
+        ("set_side", ops.PLUGIN_SET_SIDE, ops.TARGET_PLUGIN),
+    ],
+)
+def test_a_lost_lifecycle_lock_is_503_and_audited_as_an_error(
+    route: str, operation: str, target_type: str
+) -> None:
+    # The lock was lost before the write it guards (issue #3927), as a busy lock
+    # is refused before it: both are audited.
+    recorder = RecordingAuditRecorder()
+    error = LifecycleLockLostError("x")
+    key = "toggle" if route in {"enable", "disable"} else route
+    use_case: dict[str, Any] = {
+        key: _FakeInstall(error=error)
+        if route == "install"
+        else _FakeUseCase(error=error)
+    }
+    app = _app(member=True, allow=True, recorder=recorder, **use_case)
+    client = _client(app)
+    base = _url(uuid.uuid4(), uuid.uuid4())
+    plugin = f"{base}/{uuid.uuid4()}"
+    if route == "install":
+        resp = client.post(
+            base,
+            data={"display_name": "Test"},
+            files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+        )
+    elif route == "resolve_apply":
+        resp = client.post(f"{base}/resolve/apply")
+    elif route == "update":
+        resp = client.post(f"{plugin}/update", json={"version_id": "v1"})
+    elif route == "remove":
+        resp = client.delete(plugin)
+    elif route == "set_side":
+        resp = client.post(f"{plugin}/side", json={"side": "client"})
+    else:
+        resp = client.post(f"{plugin}/{route}")
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == target_type
 
 
 # --- store outage (issue #3233) --------------------------------------------

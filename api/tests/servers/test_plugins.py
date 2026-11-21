@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import threading
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import replace
 
 import pytest
@@ -27,6 +28,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginNotFoundError,
     PortRangeExhaustedError,
@@ -487,7 +489,11 @@ async def test_an_install_holds_no_lock_and_no_unit_of_work_while_it_parses(
         parse.release.set()
         await install
 
-    assert lock.events == [(server.id, "acquire"), (server.id, "release")]
+    assert lock.events == [
+        (server.id, "acquire"),
+        (server.id, "check"),  # before the row commit (issue #3927)
+        (server.id, "release"),
+    ]
     assert fs.files["mods/mod.jar"] == b"jar"
 
 
@@ -1289,3 +1295,152 @@ async def test_set_side_failed_commit_leaves_file_unchanged() -> None:
         )
     # The jar must NOT have been materialized into the working set.
     assert fs.files == {}
+
+
+# -- A lost lifecycle lock (issue #3927) --
+#
+# Each mutation commits its row and then writes the working set; both rely on
+# the lifecycle lock, so a holder that lost it commits and writes nothing.
+
+
+async def test_install_that_lost_the_lifecycle_lock_commits_and_writes_nothing() -> (
+    None
+):
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    lock = _lost_lock()
+
+    with pytest.raises(LifecycleLockLostError):
+        await InstallPlugin(
+            uow=uow,
+            file_store=fs,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=lock,
+        )(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="fabric-api.jar",
+            display_name="Fabric API",
+            content=b"fake-jar-bytes",
+        )
+
+    assert uow.commits == 0
+    assert fs.files == {}
+
+
+class _TimelineCache(FakePluginCacheStore):
+    """A cache that records each ingest on a lock's event timeline."""
+
+    def __init__(self, events: list[tuple[ServerId, str]], server_id: ServerId) -> None:
+        super().__init__()
+        self._events = events
+        self._server_id = server_id
+
+    async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
+        self._events.append((self._server_id, "cache-put"))
+        await super().put(sha256, stream)
+
+
+async def test_install_confirms_the_lock_after_the_cache_ingest() -> None:
+    # The ingest is the slow storage write inside the hold: a check before it
+    # would leave that whole window unguarded.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    lock = FakeLifecycleLock()
+
+    await InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=_TimelineCache(lock.events, server.id),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="fabric-api.jar",
+        display_name="Fabric API",
+        content=b"fake-jar-bytes",
+    )
+
+    assert lock.events == [
+        (server.id, "acquire"),
+        (server.id, "cache-put"),
+        (server.id, "check"),
+        (server.id, "release"),
+    ]
+
+
+async def test_remove_that_lost_the_lifecycle_lock_commits_and_deletes_nothing() -> (
+    None
+):
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/test.jar"] = b"jar"
+    p = _plugin(server_id=server.id)
+    uow.plugins.seed(p)
+
+    with pytest.raises(LifecycleLockLostError):
+        await RemovePlugin(
+            uow=uow, file_store=fs, clock=FakeClock(_NOW), lifecycle_lock=_lost_lock()
+        )(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id)
+
+    assert uow.commits == 0
+    assert fs.files == {"mods/test.jar": b"jar"}
+
+
+async def test_toggle_that_lost_the_lifecycle_lock_commits_and_moves_nothing() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/test.jar"] = b"jar"
+    p = _plugin(server_id=server.id, enabled=True, rel_path="mods/test.jar")
+    uow.plugins.seed(p)
+
+    with pytest.raises(LifecycleLockLostError):
+        await TogglePlugin(
+            uow=uow,
+            file_store=fs,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=_lost_lock(),
+        )(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, enable=False)
+
+    assert uow.commits == 0
+    assert fs.files == {"mods/test.jar": b"jar"}
+
+
+async def test_set_side_that_lost_the_lifecycle_lock_commits_and_moves_nothing() -> (
+    None
+):
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/test.jar"] = b"jar"
+    p = _plugin(server_id=server.id, enabled=True, rel_path="mods/test.jar")
+    uow.plugins.seed(p)
+
+    with pytest.raises(LifecycleLockLostError):
+        await SetPluginSide(
+            uow=uow,
+            file_store=fs,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+            lifecycle_lock=_lost_lock(),
+        )(community_id=_COMMUNITY, server_id=server.id, plugin_id=p.id, side="client")
+
+    assert uow.commits == 0
+    assert fs.files == {"mods/test.jar": b"jar"}
+
+
+def _lost_lock() -> FakeLifecycleLock:
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    return lock

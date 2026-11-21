@@ -56,6 +56,10 @@ regenerate with `make proto-gen` from the repo root (see
   [`docs/dev/DEPENDENCIES.md`](../docs/dev/DEPENDENCIES.md)).
 - **golangci-lint**: pinned by `GOLANGCI_VERSION` in the root `Makefile`.
 
+The Worker builds and runs only on Linux: it uses Linux-only system calls such
+as openat2, so `go build` and `go vet` fail for any other `GOOS`. On another OS,
+develop inside a Linux container or VM.
+
 Run every command below from this `worker/` directory, except the `make`
 targets, which run from the repo root.
 

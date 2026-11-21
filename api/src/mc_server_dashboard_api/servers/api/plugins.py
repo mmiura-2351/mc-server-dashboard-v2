@@ -94,6 +94,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     InvalidPluginSideError,
+    LifecycleLockLostError,
     PluginAlreadyExistsError,
     PluginCacheBlobNotFoundError,
     PluginCacheStorageUnavailableError,
@@ -554,6 +555,17 @@ async def install_plugin(
             target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_INSTALL,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except PluginCacheStorageUnavailableError as exc:
         # The jar cache is reached before the plugin row is committed, and it is
         # content-addressed, so nothing is left for a retry to trip over (issue
@@ -744,6 +756,17 @@ async def apply_plugin_resolution(
             target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_RESOLVE,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_plugin(
         recorder,
         ops.PLUGIN_RESOLVE,
@@ -892,6 +915,16 @@ async def update_plugin(
             recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_UPDATE,
+            authorized,
+            community_id,
+            plugin_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except PluginCacheStorageUnavailableError as exc:
         # Resolving the new jar reaches the cache before the row is updated, so
         # the plugin is still on its old version and a retry starts over (issue
@@ -995,6 +1028,16 @@ async def remove_plugin(
             recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_REMOVE,
+            authorized,
+            community_id,
+            plugin_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     await _record_plugin(
         recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
     )
@@ -1054,6 +1097,16 @@ async def enable_plugin(
             recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_ENABLE,
+            authorized,
+            community_id,
+            plugin_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except PluginCacheBlobNotFoundError as exc:
         # The change is committed before the miss (issue #3437): audit it as the
         # success path does, since it stands. The audit row has no detail column
@@ -1122,6 +1175,16 @@ async def disable_plugin(
             recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_DISABLE,
+            authorized,
+            community_id,
+            plugin_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except PluginCacheBlobNotFoundError as exc:
         # The change is committed before the miss (issue #3437): audit it as the
         # success path does, since it stands. The audit row has no detail column
@@ -1196,6 +1259,16 @@ async def set_plugin_side(
             recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
         )
         raise _conflict("server_busy") from exc
+    except LifecycleLockLostError as exc:
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_SET_SIDE,
+            authorized,
+            community_id,
+            plugin_id,
+            outcome=Outcome.ERROR,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except PluginCacheBlobNotFoundError as exc:
         # The change is committed before the miss (issue #3437): audit it as the
         # success path does, since it stands. The audit row has no detail column
@@ -1387,11 +1460,15 @@ async def _record_plugin_failure(
     community_id: uuid.UUID,
     target_id: uuid.UUID,
     target_type: str = ops.TARGET_PLUGIN,
+    *,
+    outcome: Outcome = Outcome.DENIED,
 ) -> None:
+    # A refusal (server unsettled or busy) is DENIED; a lifecycle lock lost
+    # before the write it guards (issue #3927) is an ERROR.
     await recorder.record(
         AuditEvent(
             operation=operation,
-            outcome=Outcome.DENIED,
+            outcome=outcome,
             actor_id=authorized.user_id.value,
             community_id=community_id,
             target_type=target_type,

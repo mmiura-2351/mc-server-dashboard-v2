@@ -442,7 +442,7 @@ class StartServer:
         # of a Storage mutation. The lock is held only across the flip+commit, not
         # the post-commit dispatch: once the intent is durable the gated ops see
         # desired=running and 409, so the slow network launch needs no lock.
-        async with self.lifecycle_lock.hold(server_id), self.uow:
+        async with self.lifecycle_lock.hold(server_id) as lock, self.uow:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
@@ -456,6 +456,9 @@ class StartServer:
                 # owed player-file regeneration below — launching the stale file
                 # (issue #3223).
                 raise LifecycleTransitionConflictError(str(server_id.value))
+            # The EULA write and the owed player-group files below are in-place
+            # working-set writes (issue #3927).
+            await lock.ensure_held()
             # EULA gate: starting without acceptance would crash the Minecraft
             # process immediately ("You need to agree to the EULA").
             if accept_eula:
@@ -514,6 +517,9 @@ class StartServer:
             # undercounts by one until the reconnect rebuild, exactly the recovery
             # _compensate's docstring already relies on.
             try:
+                # The flip assumes the at-rest row this start read under the lock,
+                # and the JAR provisioning above can be slow (issue #3927).
+                await lock.ensure_held()
                 # From the count read to the commit (issue #3741,
                 # ``start_intent_lock.py``): a failed start's revert holds the same
                 # lock from its check to its write, so this intent cannot land in
@@ -772,7 +778,7 @@ class StartServer:
           instances of one server.
         """
 
-        async with self.lifecycle_lock.hold(server_id), self.uow:
+        async with self.lifecycle_lock.hold(server_id) as lock, self.uow:
             server = await _load(self.uow, community_id, server_id)
             if (
                 server.desired_state is not DesiredState.RUNNING
@@ -790,6 +796,8 @@ class StartServer:
             # which this path takes for it, keeps a second placement of the same
             # orphan from interleaving. A storage failure raises before a Worker is
             # placed.
+            # The owed files are in-place working-set writes (issue #3927).
+            await lock.ensure_held()
             owed_group_files = await regenerate_pending_group_files(
                 self.uow,
                 self.file_store,
@@ -815,6 +823,8 @@ class StartServer:
             # failure is safe: a landed commit undercounts by one until the reconnect
             # rebuild, the recovery this path already relies on.
             try:
+                # As in ``__call__`` (issue #3927).
+                await lock.ensure_held()
                 # From the count read to the commit, as in ``__call__`` (issue
                 # #3741).
                 async with self.start_intent_lock.hold(server_id):

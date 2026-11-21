@@ -24,7 +24,7 @@ import datetime as dt
 import os
 import threading
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 
 import pytest
 from sqlalchemy import text
@@ -117,6 +117,7 @@ class _BlockingBackupStore(FakeBackupArchiveStore):
         server_id: ServerId,
         storage_ref: str,
         force: bool = False,
+        fence: Callable[[], Awaitable[None]] | None = None,
     ) -> int:
         self.entered.set()
         await self.release.wait()
@@ -125,6 +126,7 @@ class _BlockingBackupStore(FakeBackupArchiveStore):
             server_id=server_id,
             storage_ref=storage_ref,
             force=force,
+            fence=fence,
         )
 
 
