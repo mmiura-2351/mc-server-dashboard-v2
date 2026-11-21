@@ -1046,6 +1046,79 @@ async def test_install_from_catalog_non_jar_filename_fails() -> None:
         )
 
 
+# A catalog's file name never went through the upload rule (issue #3957): each
+# character that rule refuses is replaced, and a name still refused after that
+# is 422 ``invalid_filename``, with nothing written.
+_UNSAFE_CATALOG_FILENAMES = [
+    pytest.param("a\x01b.jar", id="c0"),
+    pytest.param("a\x85b.jar", id="c1"),
+    pytest.param("a\ud800b.jar", id="lone-surrogate"),
+    pytest.param("a\uffffb.jar", id="u+ffff"),
+    pytest.param("a\ufdd0b.jar", id="u+fdd0"),
+]
+
+# 256 bytes in UTF-8: one past what a file name may hold.
+_OVERLONG_CATALOG_FILENAME = "a" * 252 + ".jar"
+
+
+def _install_from(
+    catalog: FakeCatalogProvider, fs: FakeFileStore, uow: FakeUnitOfWork
+) -> InstallFromCatalog:
+    return InstallFromCatalog(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+
+
+@pytest.mark.parametrize("filename", _UNSAFE_CATALOG_FILENAMES)
+async def test_install_from_catalog_replaces_a_refused_character(
+    filename: str,
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    version, content = _version(filename=filename)
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(), [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    plugin = await _install_from(catalog, fs, uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.filename == "a_b.jar"
+    assert plugin.rel_path == "mods/a_b.jar"
+    assert list(fs.files) == ["mods/a_b.jar"]
+
+
+async def test_install_from_catalog_refuses_an_overlong_filename() -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    version, content = _version(filename=_OVERLONG_CATALOG_FILENAME)
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(), [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    with pytest.raises(InvalidFilePathError) as excinfo:
+        await _install_from(catalog, fs, uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            project_id="proj-1",
+            version_id="ver-1",
+        )
+    assert excinfo.value.reason == "invalid_filename"
+    assert fs.files == {}
+    assert uow.commits == 0
+
+
 # -- helpers for update/dependency tests --
 
 
@@ -1544,6 +1617,66 @@ async def test_update_plugin_different_filename() -> None:
     assert result.filename == "fabric-api-0.93.0.jar"
     assert "mods/fabric-api-0.93.0.jar" in fs.files
     assert "mods/fabric-api-0.92.0.jar" not in fs.files
+
+
+def _update_to(
+    catalog: FakeCatalogProvider, fs: FakeFileStore, uow: FakeUnitOfWork
+) -> UpdatePlugin:
+    return UpdatePlugin(
+        uow=uow,
+        catalog=catalog,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+    )
+
+
+def _seed_update(
+    filename: str,
+) -> tuple[FakeUnitOfWork, FakeFileStore, FakeCatalogProvider, Server, ServerPlugin]:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    fs.files["mods/fabric-api-0.92.0.jar"] = b"old"
+    plugin = _plugin(server_id=server.id, source_version_id="ver-1")
+    uow.plugins.seed(plugin)
+    new_content = b"new-jar-bytes-v2"
+    ver_new, _ = _version(
+        version_id="ver-2", filename=filename, file_content=new_content
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(), [ver_new])
+    catalog.seed_file(ver_new.files[0].url, new_content)
+    return uow, fs, catalog, server, plugin
+
+
+@pytest.mark.parametrize("filename", _UNSAFE_CATALOG_FILENAMES)
+async def test_update_plugin_replaces_a_refused_character(filename: str) -> None:
+    uow, fs, catalog, server, plugin = _seed_update(filename)
+    result = await _update_to(catalog, fs, uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        version_id="ver-2",
+    )
+    assert result.filename == "a_b.jar"
+    assert result.rel_path == "mods/a_b.jar"
+    assert list(fs.files) == ["mods/a_b.jar"]
+
+
+async def test_update_plugin_refuses_an_overlong_filename() -> None:
+    uow, fs, catalog, server, plugin = _seed_update(_OVERLONG_CATALOG_FILENAME)
+    with pytest.raises(InvalidFilePathError) as excinfo:
+        await _update_to(catalog, fs, uow)(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            plugin_id=plugin.id,
+            version_id="ver-2",
+        )
+    assert excinfo.value.reason == "invalid_filename"
+    assert fs.files == {"mods/fabric-api-0.92.0.jar": b"old"}
+    assert uow.commits == 0
 
 
 async def test_update_disabled_plugin_keeps_disabled_path_no_orphan() -> None:

@@ -26,6 +26,39 @@ def test_server_name_rejects_blank() -> None:
         ServerName("   ")
 
 
+# A server name is shown in every list and names its export's file, so it carries
+# no control character, and no lone surrogate, which has no UTF-8 encoding and so
+# could not be stored (issue #3957).
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a\x00b", id="nul"),
+        pytest.param("a\nb", id="lf"),
+        pytest.param("a\tb", id="tab"),
+        pytest.param("a\x1b[2Jb", id="esc"),
+        pytest.param("a\x7fb", id="del"),
+        pytest.param("a\x85b", id="c1"),
+        pytest.param("a\ud800b", id="lone-surrogate"),
+    ],
+)
+def test_server_name_rejects_a_control_character_or_lone_surrogate(name: str) -> None:
+    with pytest.raises(InvalidServerNameError) as excinfo:
+        ServerName(name)
+    # The message names the rule, not the refused name.
+    assert name not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("サバイバル\u3000二", id="japanese"),
+        pytest.param("\U0001f468\u200d\U0001f469 a\u202eb", id="zwj-and-bidi"),
+    ],
+)
+def test_server_name_accepts_any_other_character(name: str) -> None:
+    assert ServerName(name).value == name
+
+
 # The migration that pins the live ``ck_server_type`` CHECK. Update this pointer
 # when a later migration re-widens the enum.
 _SERVER_TYPE_MIGRATION = (
