@@ -421,11 +421,12 @@ func (e escapingWriter) Write(p []byte) (int, error) {
 }
 
 // escapedInLog reports whether r is one of the characters the API's log
-// formats escape beyond C0 (CONFIGURATION.md Section 5.10).
+// formats escape (CONFIGURATION.md Section 5.10) other than those slog escapes
+// itself: C0, U+2028 and U+2029.
 func escapedInLog(r rune) bool {
 	switch {
 	case r >= 0x7f && r < 0xa0,
-		r == 0x061c, r == 0x200e, r == 0x200f, r == 0x2028, r == 0x2029,
+		r == 0x061c, r == 0x200e, r == 0x200f,
 		r >= 0x202a && r <= 0x202e,
 		r >= 0x2066 && r <= 0x2069:
 		return true
