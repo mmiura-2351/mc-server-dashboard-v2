@@ -258,7 +258,9 @@ include_external_packages = true
 # contract — the layered and adapters contracts already cover them — and its
 # `source_modules` is domain + application wherever both exist.
 # `tests/tooling/test_context_contracts.py` holds each list to that `ls` and
-# repeats the deliberate omissions, so an omission changes in both.
+# repeats the deliberate omissions, so an omission changes in both. It also
+# derives each context's `layers` and adapters-contract `source_modules` from
+# the packages on disk, so those hand-written lists are checked too.
 [[tool.importlinter.contracts]]
 name = "core context layers (domain <- application <- api; adapters at the edge)"
 type = "layers"
