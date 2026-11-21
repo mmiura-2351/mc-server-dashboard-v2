@@ -106,6 +106,7 @@ from mc_server_dashboard_api.servers.domain.backup_retention import (
 )
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.display_name import fitted_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
@@ -908,7 +909,11 @@ async def _ingest_ghost(
         server_id=server_id,
         rel_path=jar_path,
         filename=filename,
-        display_name=manifest.mod_identifier or filename.removesuffix(".jar"),
+        # Neither the mod id nor the file's name was typed by the user, so a name
+        # the display-name rule refuses is made to fit it (issue #3988).
+        display_name=fitted_display_name(
+            manifest.mod_identifier or "", filename=filename
+        ),
         description=None,
         loader_type=loader_type,
         source=source,

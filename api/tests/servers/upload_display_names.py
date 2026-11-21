@@ -22,6 +22,10 @@ def refused_display_names() -> list[object]:
         # A lone surrogate has no UTF-8 encoding, so the row could not be
         # stored; a declared charset decodes one.
         pytest.param(b"a+2AA-b", "utf-7", id="lone-surrogate"),
+        # The line and paragraph separators (Unicode ``Zl`` and ``Zp``) break the
+        # line the name is shown on, as a control character does (issue #3988).
+        pytest.param("a\u2028b".encode(), None, id="u+2028"),
+        pytest.param("a\u2029b".encode(), None, id="u+2029"),
         pytest.param(b"   ", None, id="blank"),
         pytest.param(("x" * 201).encode(), None, id="201-characters"),
     ]

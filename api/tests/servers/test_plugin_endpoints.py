@@ -576,10 +576,13 @@ def test_install_plugin_refuses_the_display_name_before_reading_the_body(
 
 # The jar's name becomes a file name in the server's content directory, so an
 # install refuses one no file can carry, as the resource-pack upload does (issue
-# #3922).
+# #3922). Disabling the plugin renames its file ``<name>.disabled``, which must
+# fit ``NAME_MAX`` too, so a jar's name is at most 246 bytes (issue #3988).
 
 
-@pytest.mark.parametrize(("filename", "charset"), refused_filenames(".jar"))
+@pytest.mark.parametrize(
+    ("filename", "charset"), refused_filenames(".jar", max_bytes=246)
+)
 def test_install_plugin_refuses_an_unsafe_filename(
     filename: bytes, charset: str | None
 ) -> None:
@@ -597,7 +600,7 @@ def test_install_plugin_refuses_an_unsafe_filename(
     assert install.calls == []
 
 
-@pytest.mark.parametrize("filename", accepted_filenames(".jar"))
+@pytest.mark.parametrize("filename", accepted_filenames(".jar", max_bytes=246))
 def test_install_plugin_accepts_a_unicode_filename(filename: str) -> None:
     install = _FakeInstall(result=_plugin())
     app = _app(member=True, allow=True, install=install)

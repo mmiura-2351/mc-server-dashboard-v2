@@ -109,9 +109,10 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
 )
-from mc_server_dashboard_api.servers.domain.plugin import PluginId, ServerPlugin
-from mc_server_dashboard_api.servers.domain.upload_filename import (
-    is_valid_upload_filename,
+from mc_server_dashboard_api.servers.domain.plugin import (
+    PluginId,
+    ServerPlugin,
+    is_valid_plugin_filename,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
@@ -491,17 +492,19 @@ async def install_plugin(
 
     The jar's filename names its file in the server's content directory, so a
     name no file can carry is 422 ``invalid_filename``: one that is blank,
-    carries a control character, a lone surrogate or a Unicode noncharacter,
-    contains ``/`` or ``\\``, or is over 255 bytes in UTF-8. The display name is
-    stored stripped, under the resource-pack upload's rule (issue #3957).
-    Stripped, one that is empty, over 200 characters, or carries a control
-    character or a lone surrogate is 422 ``invalid_display_name``. Both are
+    carries a control character, a line or paragraph separator, a lone surrogate
+    or a Unicode noncharacter, contains ``/`` or ``\\``, or is over 246 bytes in
+    UTF-8, which leaves room for the ``.disabled`` a disabled plugin's file
+    carries (issue #3988). The display name is stored stripped, under the
+    resource-pack upload's rule (issue #3957). Stripped, one that is empty, over
+    200 characters, or carries a control character, a line or paragraph
+    separator or a lone surrogate is 422 ``invalid_display_name``. Both are
     refused before the upload is read into memory (Starlette has spooled it by
     then, issue #3922), the filename first.
     """
 
     filename = file.filename or ""
-    if not is_valid_upload_filename(filename):
+    if not is_valid_plugin_filename(filename):
         raise _unprocessable("invalid_filename")
     stored_name = checked_display_name(display_name)
     if stored_name is None:

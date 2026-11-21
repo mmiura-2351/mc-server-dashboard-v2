@@ -61,9 +61,13 @@ def _quoted(name: str) -> bytes:
     return f'"{name}"'.encode()
 
 
-def refused_filenames(ext: str) -> list[object]:
-    """``(filename, charset)`` pairs no upload may keep, each ending ``ext``."""
+def refused_filenames(ext: str, *, max_bytes: int = 255) -> list[object]:
+    """``(filename, charset)`` pairs no upload may keep, each ending ``ext``.
 
+    ``max_bytes`` is the longest name the upload keeps, in UTF-8 bytes.
+    """
+
+    over = max_bytes + 1
     return [
         pytest.param(_quoted(f"a\x00b{ext}"), None, id="nul"),
         pytest.param(_quoted(f"a\nb{ext}"), None, id="lf"),
@@ -79,15 +83,19 @@ def refused_filenames(ext: str) -> list[object]:
         pytest.param(_quoted(f"a\\\\b{ext}"), None, id="backslash"),
         pytest.param(b'""', None, id="empty"),
         pytest.param(b'"   "', None, id="blank"),
-        pytest.param(_quoted("a" * (256 - len(ext)) + ext), None, id="256-bytes"),
-        # The limit is bytes: under 90 characters, but 256 bytes in UTF-8.
+        pytest.param(_quoted("a" * (over - len(ext)) + ext), None, id=f"{over}-bytes"),
+        # The limit is bytes: under 90 characters, but over it in UTF-8.
         pytest.param(
             _quoted(
-                "あ" * ((256 - len(ext)) // 3) + "a" * ((256 - len(ext)) % 3) + ext
+                "あ" * ((over - len(ext)) // 3) + "a" * ((over - len(ext)) % 3) + ext
             ),
             None,
-            id="256-utf8-bytes",
+            id=f"{over}-utf8-bytes",
         ),
+        # The line and paragraph separators (Unicode ``Zl`` and ``Zp``) break the
+        # line the name is shown on, as a control character does (issue #3988).
+        pytest.param(_quoted(f"a\u2028b{ext}"), None, id="u+2028"),
+        pytest.param(_quoted(f"a\u2029b{ext}"), None, id="u+2029"),
         # The Unicode noncharacters (issue #3922): XML 1.0 cannot carry U+FFFE or
         # U+FFFF, and the object store lists its keys in XML.
         pytest.param(_quoted(f"a\ufffeb{ext}"), None, id="u+fffe"),
@@ -99,8 +107,11 @@ def refused_filenames(ext: str) -> list[object]:
     ]
 
 
-def accepted_filenames(ext: str) -> list[object]:
-    """Names an upload keeps as given, each ending ``ext``."""
+def accepted_filenames(ext: str, *, max_bytes: int = 255) -> list[object]:
+    """Names an upload keeps as given, each ending ``ext``.
+
+    ``max_bytes`` is the longest name the upload keeps, in UTF-8 bytes.
+    """
 
     return [
         pytest.param(f"My Pack (v2) [1.21]{ext}", id="ascii"),
@@ -111,8 +122,10 @@ def accepted_filenames(ext: str) -> list[object]:
             f"\U0001f468\u200d\U0001f469\u200d\U0001f467{ext}", id="zwj-emoji"
         ),
         pytest.param(f"a\u202eb{ext}", id="bidi"),
-        pytest.param("a" * (255 - len(ext)) + ext, id="255-bytes"),
-        pytest.param("あ" * ((255 - len(ext)) // 3) + ext, id="utf8-under-the-limit"),
+        pytest.param("a" * (max_bytes - len(ext)) + ext, id=f"{max_bytes}-bytes"),
+        pytest.param(
+            "あ" * ((max_bytes - len(ext)) // 3) + ext, id="utf8-under-the-limit"
+        ),
         # Beside the noncharacter ranges, and an unassigned code point: of category
         # Cn, only the noncharacters are refused (issue #3922).
         pytest.param(f"a\ufdcfb\ufdf0c\ufffdd{ext}", id="beside-noncharacters"),

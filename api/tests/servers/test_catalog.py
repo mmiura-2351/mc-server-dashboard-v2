@@ -24,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogProject,
     CatalogVersion,
 )
+from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
@@ -309,6 +310,47 @@ async def test_install_from_catalog_happy_path() -> None:
     # File was written to the store.
     assert "mods/fabric-api-0.92.0.jar" in fs.files
     assert uow.commits == 1
+
+
+# The project's title becomes the display name, which the user did not type, so
+# a title the display-name rule refuses is made to fit it rather than refused
+# (issue #3988): each character the rule refuses is replaced with ``_``, the
+# result is cut to 200 characters, and a blank one gives way to the file's name
+# less its extension.
+@pytest.mark.parametrize(
+    ("title", "stored"),
+    [
+        pytest.param("Fabric\nAPI", "Fabric_API", id="c0"),
+        pytest.param("Fabric\x85API", "Fabric_API", id="c1"),
+        pytest.param("Fabric\ud800API", "Fabric_API", id="lone-surrogate"),
+        pytest.param("Fabric\u2028API", "Fabric_API", id="u+2028"),
+        pytest.param("Fabric\u2029API", "Fabric_API", id="u+2029"),
+        pytest.param("  Fabric API  ", "Fabric API", id="stripped"),
+        pytest.param("x" * 250, "x" * 200, id="cut-to-200"),
+        pytest.param("x" * 199 + " y", "x" * 199, id="cut-then-stripped"),
+        pytest.param("", "fabric-api-0.92.0", id="empty"),
+        pytest.param(" \t ", "fabric-api-0.92.0", id="blank"),
+    ],
+)
+async def test_install_from_catalog_fits_the_title_to_the_display_name_rule(
+    title: str, stored: str
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    version, content = _version()
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(title=title), [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    plugin = await _install_from(catalog, FakeFileStore(), uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.display_name == stored
+    assert checked_display_name(plugin.display_name) == plugin.display_name
 
 
 async def test_install_from_catalog_parses_manifest() -> None:
@@ -1057,10 +1099,21 @@ _UNSAFE_CATALOG_FILENAMES = [
     pytest.param("a\ud800b.jar", id="lone-surrogate"),
     pytest.param("a\uffffb.jar", id="u+ffff"),
     pytest.param("a\ufdd0b.jar", id="u+fdd0"),
+    # The line and paragraph separators (issue #3988).
+    pytest.param("a\u2028b.jar", id="u+2028"),
+    pytest.param("a\u2029b.jar", id="u+2029"),
 ]
 
-# 256 bytes in UTF-8: one past what a file name may hold.
-_OVERLONG_CATALOG_FILENAME = "a" * 252 + ".jar"
+# Disabling a plugin renames its file ``<name>.disabled``, which must fit the fs
+# ``NAME_MAX`` of 255 bytes, so a jar's name holds at most 246 (issue #3988).
+_LONGEST_CATALOG_FILENAME = "a" * 242 + ".jar"
+
+# 247 bytes in UTF-8: one past what a jar's name may hold.
+_OVERLONG_CATALOG_FILENAMES = [
+    pytest.param("a" * 243 + ".jar", id="247-bytes"),
+    # The bound is bytes: 85 characters, 247 bytes.
+    pytest.param("あ" * 81 + ".jar", id="247-utf8-bytes"),
+]
 
 
 def _install_from(
@@ -1099,12 +1152,34 @@ async def test_install_from_catalog_replaces_a_refused_character(
     assert list(fs.files) == ["mods/a_b.jar"]
 
 
-async def test_install_from_catalog_refuses_an_overlong_filename() -> None:
+async def test_install_from_catalog_keeps_the_longest_filename() -> None:
     uow = FakeUnitOfWork()
     server = _server()
     uow.servers.seed(server)
     fs = FakeFileStore()
-    version, content = _version(filename=_OVERLONG_CATALOG_FILENAME)
+    version, content = _version(filename=_LONGEST_CATALOG_FILENAME)
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(_project(), [version])
+    catalog.seed_file(version.files[0].url, content)
+
+    plugin = await _install_from(catalog, fs, uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        project_id="proj-1",
+        version_id="ver-1",
+    )
+    assert plugin.filename == _LONGEST_CATALOG_FILENAME
+
+
+@pytest.mark.parametrize("filename", _OVERLONG_CATALOG_FILENAMES)
+async def test_install_from_catalog_refuses_an_overlong_filename(
+    filename: str,
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    version, content = _version(filename=filename)
     catalog = FakeCatalogProvider()
     catalog.seed_project(_project(), [version])
     catalog.seed_file(version.files[0].url, content)
@@ -1668,8 +1743,20 @@ async def test_update_plugin_replaces_a_refused_character(filename: str) -> None
     assert list(fs.files) == ["mods/a_b.jar"]
 
 
-async def test_update_plugin_refuses_an_overlong_filename() -> None:
-    uow, fs, catalog, server, plugin = _seed_update(_OVERLONG_CATALOG_FILENAME)
+async def test_update_plugin_keeps_the_longest_filename() -> None:
+    uow, fs, catalog, server, plugin = _seed_update(_LONGEST_CATALOG_FILENAME)
+    result = await _update_to(catalog, fs, uow)(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        plugin_id=plugin.id,
+        version_id="ver-2",
+    )
+    assert result.filename == _LONGEST_CATALOG_FILENAME
+
+
+@pytest.mark.parametrize("filename", _OVERLONG_CATALOG_FILENAMES)
+async def test_update_plugin_refuses_an_overlong_filename(filename: str) -> None:
+    uow, fs, catalog, server, plugin = _seed_update(filename)
     with pytest.raises(InvalidFilePathError) as excinfo:
         await _update_to(catalog, fs, uow)(
             community_id=_COMMUNITY,

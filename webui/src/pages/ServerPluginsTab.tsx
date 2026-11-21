@@ -36,7 +36,10 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
 import { classifyQueryResult } from "../queryState.ts";
-import { pluginErrorPresentation } from "./serverPluginsErrorPresentation.ts";
+import {
+  type PluginJarSource,
+  pluginErrorPresentation,
+} from "./serverPluginsErrorPresentation.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -150,15 +153,17 @@ export function ServerPluginsTab({
   const desired = normalizeState(server.desired_state);
   const serverAtRest = atRest(state, desired);
 
-  const onError = (error: unknown) => {
+  const showError = (error: unknown, jarSource: PluginJarSource) => {
     if (onForbidden(error)) return;
     // An enable / disable / side change is committed before the jar miss
     // (#3437): refetch so the row shows the state that stands.
     if (error instanceof ApiError && error.reason === "plugin_jar_missing") {
       refresh();
     }
-    showToast(tn(pluginErrorPresentation(error)), "error");
+    showToast(tn(pluginErrorPresentation(error, jarSource)), "error");
   };
+  // Every operation but the upload installs a catalog's jar or none.
+  const onError = (error: unknown) => showError(error, "catalog");
 
   const refresh = () => {
     queryClient.invalidateQueries({
@@ -375,7 +380,7 @@ export function ServerPluginsTab({
     onError: (error) => {
       progress.reset();
       if (isUploadAbortError(error)) return;
-      onError(error);
+      showError(error, "upload");
     },
   });
 
