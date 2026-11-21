@@ -79,9 +79,21 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
+class DatabaseConnectError(Exception):
+    """A new connection failed because the database is unavailable (issue #3942).
+
+    asyncpg raises a refused or timed-out connect as the raw ``OSError`` below,
+    which by type is no different from a filesystem fault. An engine passed to
+    :func:`translate_connect_outages` raises this instead, with the driver's error
+    as its ``__cause__``, so a caller that also does file I/O can tell the two
+    apart.
+    """
+
+
 # What a database outage raises, by when it hits (#3313, #3995). SQLAlchemy does
 # not translate a socket error, so a refused, timed-out or unresolvable connect is
-# the raw ``OSError``. A pool that cannot hand out a connection is SQLAlchemy's
+# the raw ``OSError``, or :class:`DatabaseConnectError` on an engine that
+# translates it. A pool that cannot hand out a connection is SQLAlchemy's
 # ``TimeoutError``. A server that is full, starting up or shutting down answers a
 # connect with an error that reaches the caller as the generic ``DBAPIError``,
 # its SQLSTATE on ``orig`` (``_OUTAGE_SQLSTATES``). A connection lost mid-query,
@@ -90,6 +102,7 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
 # classes count for an error that reaches a caller untranslated; through
 # SQLAlchemy 2.1 none does.
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
+    DatabaseConnectError,
     OSError,
     sqlalchemy.exc.TimeoutError,
     sqlalchemy.exc.OperationalError,
@@ -99,11 +112,16 @@ _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     asyncpg.TooManyConnectionsError,
 )
 
-# The SQLSTATEs of a server that cannot take the connection now, besides all of
-# class 08 (connection exception): an administrator or crash shutdown, a server
+# The SQLSTATEs of a server that cannot take the connection now, besides class
+# 08 (connection exception): an administrator or crash shutdown, a server
 # starting up, shutting down or recovering, and a full connection table. A wrong
 # password or database (28xxx, 3D000) is a configuration fault, not an outage.
 _OUTAGE_SQLSTATES = frozenset({"57P01", "57P02", "57P03", "53300"})
+
+# The one member of class 08 that is not an outage (#4010): a protocol violation
+# is a fault of the driver or a proxy, so it is never transient, even when the
+# server closed the connection over it.
+_PROTOCOL_VIOLATION = "08P01"
 
 
 def is_transient_database_error(exc: BaseException) -> bool:
@@ -111,30 +129,23 @@ def is_transient_database_error(exc: BaseException) -> bool:
 
     Retrying later may succeed. A generic ``DBAPIError`` is one when SQLAlchemy
     invalidated the connection, or when the driver's error it wraps carries an
-    outage's SQLSTATE.
+    outage's SQLSTATE. A protocol violation is not one in any shape.
     """
 
+    if isinstance(exc, asyncpg.ProtocolViolationError):
+        return False
     if isinstance(exc, _TRANSIENT_ERRORS):
         return True
     if not isinstance(exc, sqlalchemy.exc.DBAPIError):
         return False
     sqlstate = getattr(exc.orig, "sqlstate", None) or ""
+    if sqlstate == _PROTOCOL_VIOLATION:
+        return False
     return (
         exc.connection_invalidated
         or sqlstate.startswith("08")
         or sqlstate in _OUTAGE_SQLSTATES
     )
-
-
-class DatabaseConnectError(Exception):
-    """A new connection failed because the database is unavailable (issue #3942).
-
-    asyncpg raises a refused or timed-out connect as the raw ``OSError`` above,
-    which by type is no different from a filesystem fault. An engine passed to
-    :func:`translate_connect_outages` raises this instead, with the driver's error
-    as its ``__cause__``, so a caller that also does file I/O can tell the two
-    apart.
-    """
 
 
 def translate_connect_outages(engine: AsyncEngine) -> None:

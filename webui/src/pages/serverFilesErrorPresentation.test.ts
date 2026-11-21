@@ -143,6 +143,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.uploadBusy" },
     ],
     [
+      "names the database for a 503 database_unavailable apart from the worker (#4010)",
+      new ApiError(503, { reason: "database_unavailable" }),
+      { key: "common.databaseUnavailable" },
+    ],
+    [
       "falls back for an unknown API status",
       new ApiError(500, { reason: "internal_error" }),
       { key: "files.error.generic" },

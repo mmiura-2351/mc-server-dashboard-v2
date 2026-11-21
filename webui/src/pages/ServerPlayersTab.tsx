@@ -41,6 +41,9 @@ function playerErrorMessage(error: unknown): TranslationKey {
       return "players.error.serverMustBeStopped";
     case "server_busy":
       return "players.error.serverBusy";
+    // The API's database is down (issue #4010), not the server's Worker.
+    case "database_unavailable":
+      return "common.databaseUnavailable";
   }
 
   switch (error.status) {

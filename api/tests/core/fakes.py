@@ -25,21 +25,28 @@ class RecordingSleep:
             await asyncio.Event().wait()
 
 
-def server_error(error: asyncpg.PostgresError) -> sqlalchemy.exc.DBAPIError:
+def server_error(
+    error: asyncpg.PostgresError, *, invalidated: bool = False
+) -> sqlalchemy.exc.DBAPIError:
     """What SQLAlchemy over asyncpg raises when the server answers with ``error``.
 
     Built the way the 2.1 dialect builds it (#3995): asyncpg's error becomes the
     dialect's own ``Error``, which carries its SQLSTATE and has asyncpg's error as
-    its cause, and SQLAlchemy wraps that in the generic ``DBAPIError``, the
-    connection not invalidated. A real server refusing a connect gives this
-    shape (tests/integration/test_transient_database_error.py).
+    its cause, and SQLAlchemy wraps that in the generic ``DBAPIError``. A real
+    server refusing a connect gives this shape, the connection not invalidated
+    (tests/integration/test_transient_database_error.py). A connection lost
+    mid-query is the same shape with ``invalidated``.
     """
 
     # The dialect's ``Error.__init__`` is untyped.
     orig = AsyncAdapt_asyncpg_dbapi.Error(error.args[0], error)  # type: ignore[no-untyped-call]
     orig.__cause__ = error
     wrapped = sqlalchemy.exc.DBAPIError.instance(
-        None, None, orig, AsyncAdapt_asyncpg_dbapi.Error
+        None,
+        None,
+        orig,
+        AsyncAdapt_asyncpg_dbapi.Error,
+        connection_invalidated=invalidated,
     )
     assert type(wrapped) is sqlalchemy.exc.DBAPIError
     return wrapped

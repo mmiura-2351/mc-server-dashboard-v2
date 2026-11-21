@@ -154,6 +154,16 @@ branches on exactly one contract:
   refreshes its access token and sends the request again. A body past the
   route's own cap is a different `413` reason (`request_too_large`,
   `file_too_large`, ...) and does not ask for a refresh.
+- A `503` with `reason: "database_unavailable"` can answer any request while
+  the API's database is unavailable: it refuses the connection, is full, is
+  starting up or shutting down, no pooled connection to it frees up in time, or
+  the connection was lost mid-request. It carries `Retry-After: 5` and no
+  other member; retrying later is the remedy.
+  A write whose connection was lost during its commit may have been applied
+  even so, as with any request that gets no answer. The API logs the outage as
+  one WARNING line at most every 30 s, with each request's traceback at DEBUG.
+  Any other database failure, a protocol violation (SQLSTATE `08P01`) among
+  them, stays a `500 internal_error` with its traceback logged.
 
 Reason codes the `/auth/*` endpoints emit:
 

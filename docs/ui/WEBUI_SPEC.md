@@ -1159,6 +1159,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` and `worker_state` members are enumerated in
   [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
+- **Database outages.** A 503 `database_unavailable`, which any request can
+  answer while the API's database is down ([`AUTH_API.md`](../app/AUTH_API.md)
+  Section 2), has one shared message that names the database and asks to try
+  again shortly. The Files, Players, Plugins and Backups tabs, whose bare 503
+  names the server agent, and the lifecycle toasts map it by reason first, so
+  the agent is not blamed; elsewhere it takes the page's generic message. The
+  client adds no retry of its own: a query retries a 5xx as any query does.
 - **Toast timing.** An error toast stays until it is dismissed, since many
   errors name a remedy to act on. Any other toast closes on its own after 2 s
   plus 100 ms per character of its message, clamped to 3.2–12 s. It counts

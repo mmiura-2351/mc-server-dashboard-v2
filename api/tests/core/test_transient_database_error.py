@@ -16,8 +16,10 @@ import asyncpg
 import pytest
 import sqlalchemy.exc
 from sqlalchemy import text
+from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 
 from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
     create_engine,
     is_transient_database_error,
 )
@@ -84,7 +86,6 @@ def test_other_errors_are_not_transient(exc: Exception) -> None:
         pytest.param(asyncpg.PostgresConnectionError("x"), "08000", id="08000"),
         pytest.param(asyncpg.ConnectionDoesNotExistError("x"), "08003", id="08003"),
         pytest.param(asyncpg.ConnectionFailureError("x"), "08006", id="08006"),
-        pytest.param(asyncpg.ProtocolViolationError("x"), "08P01", id="08P01"),
         pytest.param(
             asyncpg.AdminShutdownError("terminating connection"), "57P01", id="57P01"
         ),
@@ -111,10 +112,17 @@ def test_an_outage_the_server_reports_is_transient(
 @pytest.mark.parametrize(
     ("error", "sqlstate"),
     [
-        # A cancelled or timed-out statement, and a dropped database, are not an
-        # outage of the server.
+        # A protocol violation is a driver or proxy fault, not an outage (#4010).
+        pytest.param(asyncpg.ProtocolViolationError("x"), "08P01", id="08P01"),
+        # A cancelled or timed-out statement, a dropped database and an idle
+        # session timed out are not an outage of the server.
         pytest.param(asyncpg.QueryCanceledError("x"), "57014", id="57014"),
         pytest.param(asyncpg.DatabaseDroppedError("x"), "57P04", id="57P04"),
+        pytest.param(asyncpg.IdleSessionTimeoutError("x"), "57P05", id="57P05"),
+        # A serialization failure or a deadlock is the transaction's to retry,
+        # not the server being unavailable.
+        pytest.param(asyncpg.SerializationError("x"), "40001", id="40001"),
+        pytest.param(asyncpg.DeadlockDetectedError("x"), "40P01", id="40P01"),
         # Out of disk or memory is not a full connection table.
         pytest.param(asyncpg.DiskFullError("x"), "53100", id="53100"),
         pytest.param(asyncpg.OutOfMemoryError("x"), "53200", id="53200"),
@@ -140,6 +148,43 @@ def test_another_error_the_server_reports_is_not_transient(
 ) -> None:
     assert error.sqlstate == sqlstate
     assert is_transient_database_error(server_error(error)) is False
+
+
+def test_a_connection_lost_mid_query_is_transient() -> None:
+    lost = asyncpg.ConnectionDoesNotExistError("connection was closed")
+
+    assert is_transient_database_error(server_error(lost, invalidated=True)) is True
+
+
+def test_a_protocol_violation_is_not_transient_in_any_shape() -> None:
+    # The server closes the connection after a protocol violation, so it can
+    # arrive invalidated too; the fault is still the driver's or a proxy's.
+    violation = asyncpg.ProtocolViolationError("invalid message format")
+
+    assert is_transient_database_error(violation) is False
+    assert is_transient_database_error(server_error(violation)) is False
+    assert (
+        is_transient_database_error(server_error(violation, invalidated=True)) is False
+    )
+
+
+def test_an_error_with_no_sqlstate_is_not_transient() -> None:
+    # The dialect's ``Error`` always has the attribute; with no server error
+    # behind it, it is ``None``.
+    orig = AsyncAdapt_asyncpg_dbapi.Error("no server error")  # type: ignore[no-untyped-call]
+    wrapped = sqlalchemy.exc.DBAPIError.instance(
+        None, None, orig, AsyncAdapt_asyncpg_dbapi.Error
+    )
+
+    assert orig.sqlstate is None
+    assert is_transient_database_error(wrapped) is False
+
+
+def test_a_connect_outage_an_engine_translated_is_transient() -> None:
+    translated = DatabaseConnectError("ConnectionRefusedError: refused")
+    translated.__cause__ = ConnectionRefusedError(111, "refused")
+
+    assert is_transient_database_error(translated) is True
 
 
 async def test_an_unreachable_database_raises_a_transient_error() -> None:
