@@ -3163,6 +3163,30 @@ describe("Keyboard shortcuts with a modal open", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(screen.getByRole("menu")).toBeInTheDocument();
   });
+
+  it("Escape closes a dialog opened over the stop menu, not the menu", async () => {
+    // At rest but still assigned: the stop control shows beside the Files
+    // tab's shortcuts.
+    routeGet({
+      detail: server({ assigned_worker_id: "w1" }),
+      list: listing([{ name: "readme.txt", kind: "file" }]),
+    });
+    renderPage();
+    await openFiles();
+    await screen.findByText(/readme\.txt/);
+    fireEvent.click(screen.getByRole("checkbox", { name: "readme.txt" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: `${t("serverDetail.stop")} ▾` }),
+    );
+    // A key the menu does not take reaches the Files tab's shortcuts.
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Delete" });
+    const dialog = await screen.findByRole("dialog");
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
 });
 
 // ── Navigation history (issue #1475) ────────────────────────────────────────
