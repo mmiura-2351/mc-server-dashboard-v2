@@ -588,14 +588,22 @@ database restart, a terminated backend) and tells the holder nothing, so another
 operation on the same server can take it while the first still runs (issue
 #3927). So the holder checks that its own session still holds it, a query of
 `pg_locks` on the lock's connection, right before each write that relies on the
-lock, or before each run of such writes. A lock found lost, or a check that fails or gets no answer within a
-few seconds, stops the operation before that write with
-`503 lifecycle_lock_lost`, and leaves what any failure at that point leaves. A
-restore and a server delete check inside the storage call, under the per-server
-storage lock, right before the restore's flip and the prune's first removal, so
-the slow copy or pack before them is covered too. A loss that only the release
-finds is answered the same way, although the writes made since the last check
-stand.
+lock, or before each run of such writes. A lock found lost, or a check that
+fails or gets no answer within five seconds, stops the operation before that
+write with `503 lifecycle_lock_lost`, and leaves what any failure at that point
+leaves. Closing a connection that stopped answering takes up to two seconds
+more. A restore and a server delete check inside the storage call, under the
+per-server storage lock, right before the restore's flip and the prune's first
+removal, so the slow copy or pack before them is covered too. A restore that
+loses the lock after its flip answers `503 restore_incomplete` instead, as the
+restored files are live and only the steps after the flip were skipped. A loss
+that only the release finds is logged, not raised: every write the operation
+made followed a check that passed, so it answers as it finished, with its result
+or its own error.
+
+The lock needs a direct or session-pooled connection to PostgreSQL. Behind a
+transaction-mode pooler a session-level lock does not hold, and the check passes
+or fails by chance, so that setup is unsupported.
 
 What remains is the window from a check until the writes it guards are done: a
 lock lost there goes unnoticed, and closing it would take fencing tokens that
@@ -1038,7 +1046,8 @@ A failure raised before the commit records no event, since nothing changed.
 Backup restore is the exception: any failure after its publish records `error`.
 That covers 503 `seed_failed`, 503 `plugin_reconcile_incomplete`, 503
 `publish_incomplete` from a store that failed after its flip, 503
-`publish_unknown` from one that could not confirm its flip (#3564), and an
+`publish_unknown` from one that could not confirm its flip (#3564), 503
+`restore_incomplete` from a lifecycle lock lost after it (#3927), and an
 unmapped 500. When the published backup was a forced corrupt one, that `error`
 is recorded as `backup:force_restore`, not `backup:restore` (#3269).
 
