@@ -690,11 +690,11 @@ function StopControl({
     }
   }, [open, active]);
 
-  // Close the menu on a click outside it or on Escape, mirroring the
-  // document-listener pattern in Modal.tsx (listeners attached only while open).
-  // Escape returns focus to the trigger so keyboard users are not stranded; the
-  // per-item handler below also catches it (and stops propagation), so this is
-  // the fallback for an Escape pressed before focus has entered the menu.
+  // Close the menu on a click outside it or on Escape, with document listeners
+  // attached only while open. Escape returns focus to the trigger so keyboard
+  // users are not stranded; the per-item handler below also catches it, and
+  // marks it handled without stopping its propagation, so this is the
+  // fallback for an Escape pressed while focus is outside the menu.
   useEffect(() => {
     if (!open) {
       return;
@@ -707,6 +707,9 @@ function StopControl({
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       // Escape under an open modal closes the modal, not this menu (#3920).
       if (event.key === "Escape" && topmostDialog() === null) {
+        // Handled, so the Files tab's listener leaves the Escape alone even
+        // when it runs once the menu has closed (#3971).
+        event.preventDefault();
         setOpen(false);
         triggerRef.current?.focus();
       }

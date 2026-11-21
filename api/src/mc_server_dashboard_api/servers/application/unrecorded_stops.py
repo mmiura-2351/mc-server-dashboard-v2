@@ -66,11 +66,12 @@ class UnrecordedStops:
         self._recorded_at.pop(server_id, None)
 
     def record(self, server_id: ServerId, *, at: dt.datetime) -> None:
-        """Record that a finished stop of ``server_id`` failed to be written at ``at``.
+        """Record that a finished stop of ``server_id`` failed to be written.
 
-        Callers record only when nothing is in flight for the server: the Worker
-        answered the stop or reported the process gone, and no final snapshot of it
-        can still be uploading.
+        ``at`` is when the failed write began (issue #3981). Callers record only
+        when nothing is in flight for the server: the Worker answered the stop or
+        reported the process gone, and no final snapshot of it can still be
+        uploading.
         """
 
         self._recorded_at[server_id] = at

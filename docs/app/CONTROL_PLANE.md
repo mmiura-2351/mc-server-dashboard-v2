@@ -531,8 +531,9 @@ old one if the write fails. A Worker that re-registers within the grace, after a
 drop, a graceful restart or a crash, still gets the final snapshot or the stop,
 and so does one that drops before the reconciler's release has taken the final
 snapshot or sent the owed stop: the release is abandoned and waits that grace
-from the drop. Once the Worker has answered that stop, a final snapshot that
-fails on a session end still releases (issue #3981). The reconciler does not restart a
+from the drop. A stop's own final snapshot, from an operator or the reconciler,
+is held the same way when it fails on a session end, including a reconnect that
+retires it while the Worker is back (issue #3981). The reconciler does not restart a
 `desired=running` server until the Worker reconnects. If it does not come back, an
 operator stop and then a start moves each server to another eligible Worker
 after a hydrate from authoritative storage (CONFIGURATION.md Section 5.6; an

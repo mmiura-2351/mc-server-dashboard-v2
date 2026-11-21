@@ -45,7 +45,9 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   (issue #3890). The refusal is handled below as any start's is, and the next tick
   past the grace takes ``redispatch_start`` to that same Worker.
 - ``desired=stopped`` but observed ``running`` on a connected Worker -> re-dispatch
-  the stop.
+  the stop. Its final snapshot follows the Worker's answer, and one that fails
+  because the Worker's session ended keeps the row as in the arm below: the action
+  fails, and the row waits for the Worker (issue #3981).
 - ``desired=stopped``, observed ``stopped``, still assigned -> re-drive the final
   snapshot (if the Worker is connected) THEN clear the assignment (issue #847 bug 2,
   issue #1004). A stop whose deferred unassign never ran (an API crash or an
@@ -136,6 +138,13 @@ write restamps the Worker's rows, but until it lands, or when it fails, a row
 still carries its stamp from before the drop, and a tick in that window would
 release it at once without its final snapshot.
 
+The tick reads each row's Worker once, its connectivity and then its drop
+instant, and the grace, the finished-stop record below and the release's routing
+all use that one reading (issue #3981). The registry derives a heartbeat lapse
+from the wall clock at each read, so two reads with no await between them can
+still disagree, and a release routed on a disconnected Worker after a grace
+measured on a connected one would go out at once without its final snapshot.
+
 That held predicate used to be near-dead: the held inventory was frozen at Worker
 registration, so every server placed since reported nothing held and took the full
 grace unconditionally. #2477 made it answer for those servers too (a successful
@@ -186,8 +195,10 @@ snapshot can still be uploading (#847). Both stop-side floors are therefore met,
 ``refused_stop_grace_seconds``. The owed action is the one the table above selects.
 The record is dropped before every stop or final-snapshot dispatch, and any newer
 intent commit or Worker report supersedes it, with no ``EXPIRED`` exception, as
-does a later disconnect of the row's Worker (issue #3963). It is not persisted, so
-after an API restart the full grace applies again.
+does a later disconnect of the row's Worker (issue #3963). The record carries the
+instant its failed write began, so a disconnect while that write fails is later
+than it (issue #3981). It is not persisted, so after an API restart the full grace
+applies again.
 
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
@@ -435,6 +446,24 @@ class _GraceDecision:
     store_generation: int | None = None
 
 
+@dataclass(frozen=True)
+class _WorkerReading:
+    """One read of a candidate's assigned Worker, shared by its whole decision.
+
+    The registry derives a heartbeat lapse from the wall clock at each read, so
+    two reads with no await between them can disagree (issue #3981). The tick
+    therefore reads the Worker once per row, and the grace, the finished-stop
+    record and the action's routing all use this one reading. ``connected`` is
+    read first: a lapse between the two reads then gives a connected Worker with
+    a drop instant, which holds the row, never a disconnected one without it,
+    which would release it at once. Both are ``False``/``None`` for a row with no
+    Worker.
+    """
+
+    connected: bool
+    dropped_at: dt.datetime | None
+
+
 @dataclass
 class RunReconcilerTick:
     """One pass of the periodic divergence reconciler (issue #101).
@@ -560,15 +589,28 @@ class RunReconcilerTick:
         action = self._action_for(server)
         if action is None:
             return
-        decision = await self._grace_for(server, action)
-        if self._within_grace(server, now, decision.grace_seconds):
+        worker = self._read_worker(server)
+        decision = await self._grace_for(server, action, worker)
+        if self._within_grace(server, now, decision.grace_seconds, worker):
             return
         attempt = self._attempts.get(server.id)
         if attempt is not None and now < attempt.next_eligible_at:
             return
-        await self._run(server, action, now, decision.store_generation)
+        await self._run(server, action, now, decision.store_generation, worker)
 
-    async def _grace_for(self, server: Server, action: str) -> _GraceDecision:
+    def _read_worker(self, server: Server) -> _WorkerReading:
+        worker_id = server.assigned_worker_id
+        if worker_id is None:
+            return _WorkerReading(connected=False, dropped_at=None)
+        connected = self.control_plane.is_worker_connected(worker_id=worker_id)
+        return _WorkerReading(
+            connected=connected,
+            dropped_at=self.control_plane.worker_offline_since(worker_id=worker_id),
+        )
+
+    async def _grace_for(
+        self, server: Server, action: str, worker: _WorkerReading
+    ) -> _GraceDecision:
         # A ``redispatch_stop`` whose previous stop dispatch the Worker RETURNED a
         # refusal for, with nothing learned about the row since (issue #2478), or an
         # EXPIRED one on a row still observed ``running`` with no newer intent commit
@@ -589,7 +631,7 @@ class RunReconcilerTick:
         if action in (
             "redispatch_stop",
             "clear_stale_assignment",
-        ) and self._stop_finished_unrecorded(server):
+        ) and self._stop_finished_unrecorded(server, worker.dropped_at):
             return _GraceDecision(self.refused_stop_grace_seconds)
         # Otherwise select the grace per action and held state (issue #999). A
         # ``redispatch_start`` whose assigned Worker is connected (already true here —
@@ -673,30 +715,27 @@ class RunReconcilerTick:
             return refused_at >= server.updated_at
         return refused_at >= self._since(server)
 
-    def _stop_finished_unrecorded(self, server: Server) -> bool:
+    def _stop_finished_unrecorded(
+        self, server: Server, dropped_at: dt.datetime | None
+    ) -> bool:
         # True when a stop finished but its write failed, and that is still the most
         # recent thing known about the row (issue #3441). Superseded, and tied, the
         # same way as a refusal that is not EXPIRED: the record is made after the
         # intent commit it follows, on the same clock. The drop of the row's
-        # Worker supersedes it too (issue #3963): a Worker back within a full grace
-        # of the drop still gets its final snapshot, so only a record made since
-        # the drop keeps the short grace.
+        # Worker (``dropped_at``, the instant it first read disconnected, while it
+        # still does) supersedes it too (issue #3963), so only a record made since
+        # the drop keeps the short grace: a release of a Worker already gone. The
+        # record carries the instant its write began, when the Worker had already
+        # answered (issue #3981), so a Worker that drops while that write fails is
+        # newer than it. Such a Worker, back within a full grace of the drop, still
+        # gets its final snapshot.
         recorded_at = self.unrecorded_stops.recorded_at(server.id)
         if recorded_at is None:
             return False
         since = self._since(server)
-        dropped_at = self._dropped_at(server)
         if dropped_at is not None:
             since = max(since, dropped_at)
         return recorded_at >= since
-
-    def _dropped_at(self, server: Server) -> dt.datetime | None:
-        # The instant the row's Worker first read disconnected, while it still
-        # does (issue #3963); None for a connected Worker or an unassigned row.
-        worker_id = server.assigned_worker_id
-        if worker_id is None:
-            return None
-        return self.control_plane.worker_offline_since(worker_id=worker_id)
 
     def _since(self, server: Server) -> dt.datetime:
         # The instant the divergence is measured from: the most recent of
@@ -706,7 +745,9 @@ class RunReconcilerTick:
         # in-flight start (#774).
         return max(server.updated_at, server.observed_at or server.updated_at)
 
-    def _within_grace(self, server: Server, now: dt.datetime, grace: int) -> bool:
+    def _within_grace(
+        self, server: Server, now: dt.datetime, grace: int, worker: _WorkerReading
+    ) -> bool:
         since = self._since(server)
         # A Worker this process does not see connected may only not have registered
         # with it yet: the first tick runs as the API starts. So the release of such
@@ -716,14 +757,10 @@ class RunReconcilerTick:
         # instant the Worker first read disconnected (issue #3963): the row keeps
         # its old stamp until the teardown's bulk write lands, and that write may
         # fail.
-        worker_id = server.assigned_worker_id
-        if worker_id is not None and not self.control_plane.is_worker_connected(
-            worker_id=worker_id
-        ):
+        if server.assigned_worker_id is not None and not worker.connected:
             since = max(since, self.listener_started_at)
-        dropped_at = self._dropped_at(server)
-        if dropped_at is not None:
-            since = max(since, dropped_at)
+        if worker.dropped_at is not None:
+            since = max(since, worker.dropped_at)
         return (now - since) < dt.timedelta(seconds=grace)
 
     def _action_for(self, server: Server) -> str | None:
@@ -755,6 +792,7 @@ class RunReconcilerTick:
         action: str,
         now: dt.datetime,
         store_generation: int | None,
+        worker: _WorkerReading,
     ) -> None:
         _LOG.info(
             "reconciling diverged server %s: desired=%s observed=%s action=%s",
@@ -764,7 +802,7 @@ class RunReconcilerTick:
             action,
         )
         try:
-            dispatched = await self._dispatch(server, action, store_generation)
+            dispatched = await self._dispatch(server, action, store_generation, worker)
         except Exception as exc:  # noqa: BLE001 - never abort the tick
             if (
                 action in ("place_and_start", "redispatch_start")
@@ -883,7 +921,11 @@ class RunReconcilerTick:
         )
 
     async def _dispatch(
-        self, server: Server, action: str, store_generation: int | None
+        self,
+        server: Server,
+        action: str,
+        store_generation: int | None,
+        worker: _WorkerReading,
     ) -> Server:
         # Build a FRESH use case per action so each runs on its own unit of work
         # (#871). The real UnitOfWork binds a single mutable session, so two
@@ -909,12 +951,11 @@ class RunReconcilerTick:
                 store_generation=store_generation,
             )
         elif action == "clear_stale_assignment":
-            worker_id = server.assigned_worker_id
+            # Routed on the reading the grace was measured on (issue #3981).
             return await self.make_stop_server().clear_stale_assignment(
                 community_id=server.community_id,
                 server_id=server.id,
-                worker_connected=worker_id is not None
-                and self.control_plane.is_worker_connected(worker_id=worker_id),
+                worker_connected=worker.connected,
             )
         else:  # redispatch_stop
             return await self.make_stop_server().redispatch_stop(

@@ -1202,30 +1202,43 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   its place: Chromium does so while its content overflows and nothing in it
   takes Tab, as with a `.modal-body` whose controls are all disabled, or a
   list nested in it that scrolls on its own. The trap looks for one only in a
-  `.modal-body` with no control in it.
+  `.modal-body` with no control in it. A browser that does not stop Tab on
+  such a scroller runs past it, as Chromium does past a disabled scrolling
+  textarea; a Tab that runs out of the dialog that way goes on from the
+  scroller in its direction, to the scroller itself if it takes focus, else
+  to the next stop that does, a toast included, rather than back to the
+  dialog's start or end.
 - **Keys behind a modal.** While a modal is open, the page behind it acts on
   no key: the Files tab's shortcuts do nothing, and a menu or popover outside
   the topmost dialog leaves Escape to the dialog. So a key never acts on a
-  selection or a menu the dialog hides. The dialog marks the Escape that
-  closes it as handled, and the Files tab's Escape clears the selection only
-  when nothing has handled it, so the selection stays even when the dialog
-  has closed before the tab sees the key. The same holds for an Escape the
-  stop menu handled.
+  selection or a menu the dialog hides. The dialog hears a key after every
+  listener on the page, so the dialog is still open when the Files tab sees
+  it, and it marks the Escape that closes it as handled. The Files tab's
+  Escape clears the selection only when nothing has handled it, so an Escape
+  the stop menu handled, with focus in the menu or outside it, keeps the
+  selection even when the menu has closed before the tab sees the key. Inside
+  the topmost dialog, Escape closes only the innermost layer: a popover open
+  in it closes and marks the Escape handled, and the dialog leaves a handled
+  Escape alone, so the next Escape closes the dialog.
+- **Keys behind a menu.** While a page menu is open (the Files tab's context
+  menu, the stop menu), the Files tab's shortcuts do nothing, so a key never
+  acts on the listing behind the menu. The menu's own keys still work.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast
   wraps to the dialog's first control, and Shift+Tab runs the same cycle
   backwards. The stack stays outside the dialog, so a toast is never moved and
   announced again. Escape on a toast dismisses only that toast; Escape anywhere
-  else in the modal closes the modal. When a toast holding keyboard focus
-  goes, dismissed, timed out or dropped by the stack cap, focus moves to the
-  next toast's dismiss button, or the one before when it was the last. With no
-  toast left, focus returns to the element it came into the stack from, unless
-  that is behind an open modal; failing that, to the open modal, or else to
-  the page's `main` region. A toast that goes holding the focus a click or a
-  tap left skips the other toasts and sends focus straight back the same way,
-  without scrolling the page, so a key pressed next cannot dismiss another
-  toast unread. Focus never drops to the page body while any of these exists.
+  else in the modal closes a popover open in it first, then the modal. When a
+  toast holding keyboard focus goes, dismissed, timed out or dropped by the
+  stack cap, focus moves to the next toast's dismiss button, or the one before
+  when it was the last. With no toast left, focus returns to the element it
+  came into the stack from, unless that is behind an open modal; failing that,
+  to the open modal, or else to the page's `main` region. A toast that goes
+  holding the focus a click or a tap left skips the other toasts and sends
+  focus straight back the same way, without scrolling the page, so a key
+  pressed next cannot dismiss another toast unread. Focus never drops to the
+  page body while any of these exists.
 - **Toast stack.** At most three errors and two timed toasts show at once. A
   new toast past that drops the oldest of its own kind, so a timed toast never
   pushes out an error, nor an error a timed toast. An error raised again while

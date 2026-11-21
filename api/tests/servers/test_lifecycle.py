@@ -2901,12 +2901,13 @@ async def test_stop_final_snapshot_timeout_holds_assignment() -> None:
     assert stored.assigned_worker_id == WorkerId(worker)
 
 
-async def test_stop_final_snapshot_disconnect_clears_assignment() -> None:
+async def test_stop_final_snapshot_disconnect_holds_assignment() -> None:
     # Issue #847 (round-3): the OTHER half of the WorkerUnavailableError split. A
     # worker DISCONNECT (``WorkerNotConnectedError`` cause, ``upload_may_be_live``
-    # False) means the worker session is gone and the upload died with its ctx —
-    # nothing is uploading, so the assignment is cleared immediately as before, so a
-    # later same-worker start reuses the retained scratch (#845).
+    # False) means the worker session is gone and nothing is uploading. The Worker
+    # may still hold the working set and be back seconds later, so the assignment
+    # is held too, for the reconciler to snapshot or release (issue #3981). The
+    # stop itself is done, so it answers with the server stopped.
     community, server_id, worker = _ids()
     uow = FakeUnitOfWork()
     uow.servers.seed(
@@ -2932,8 +2933,12 @@ async def test_stop_final_snapshot_disconnect_clears_assignment() -> None:
             try:
                 raise WorkerNotConnectedError(str(worker_id.value))
             except WorkerNotConnectedError as exc:
-                # The adapter leaves upload_may_be_live at its False default here.
-                raise WorkerUnavailableError(str(worker_id.value)) from exc
+                # The adapter leaves upload_may_be_live at its False default here,
+                # and names the Worker not connected (issue #3820).
+                raise WorkerUnavailableError(
+                    str(worker_id.value),
+                    worker_state=UnavailableWorkerState.NOT_CONNECTED,
+                ) from exc
 
     cp = _SnapshotDisconnects()
     result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
@@ -2941,8 +2946,8 @@ async def test_stop_final_snapshot_disconnect_clears_assignment() -> None:
     )
 
     assert result.observed_state is ObservedState.STOPPED
-    assert result.assigned_worker_id is None
-    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+    assert result.assigned_worker_id == WorkerId(worker)
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
 
 
 async def test_late_failed_snapshot_clears_held_assignment() -> None:
@@ -7511,8 +7516,10 @@ class _SessionGoneAtSnapshot(FakeControlPlane):
       commands, so the Worker reads connected again by then.
     """
 
-    def __init__(self, *, ending: str) -> None:
-        super().__init__()
+    def __init__(
+        self, *, ending: str, outcomes: dict[str, CommandOutcome] | None = None
+    ) -> None:
+        super().__init__(outcomes=outcomes)
         self._ending = ending
 
     async def snapshot(
@@ -7685,6 +7692,152 @@ async def test_an_operator_stop_releases_a_worker_already_gone_at_once(
     )
 
     assert cp.dispatched == []
+    assert result.assigned_worker_id is None
+    assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
+
+
+# --- a stop answered before its final snapshot meets a session end (#3981) --
+#
+# Once the Worker has answered a stop, the final snapshot is the last step
+# before the release. If it fails because the Worker's session ended, in
+# flight, at dispatch, or retired by a fast reconnect, the Worker may still hold
+# the working set, so the row is kept: the reconciler snapshots it once the
+# Worker is back, or releases it a grace after the drop. A plain stop answers
+# with the server stopped and still assigned, as on a snapshot timeout. A
+# convergence of a stopped intent raises instead, as the release's own snapshot
+# does (issue #3963).
+
+_STOP_ANSWERS = {
+    "confirmed": CommandOutcome(status=CommandStatus.OK),
+    "not-found": CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND),
+}
+_SESSION_ENDINGS = ["in-flight", "at-dispatch", "back"]
+
+
+@pytest.mark.parametrize("ending", _SESSION_ENDINGS)
+@pytest.mark.parametrize("answer", list(_STOP_ANSWERS))
+async def test_a_stop_whose_final_snapshot_meets_a_session_end_keeps_the_row(
+    answer: str, ending: str
+) -> None:
+    community, server_id, worker = _ids()
+    cp = _SessionGoneAtSnapshot(ending=ending, outcomes={"stop": _STOP_ANSWERS[answer]})
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+
+    result = await StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    assert result.observed_state is ObservedState.STOPPED
+    assert result.assigned_worker_id == WorkerId(worker)
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.desired_state is DesiredState.STOPPED
+    assert stored.observed_state is ObservedState.STOPPED
+    assert stored.assigned_worker_id == WorkerId(worker)
+
+
+# Each convergence of a stopped intent that sends the stop first: the
+# reconciler's replay, an operator's stop of the same row, and the stop owed
+# to a start that may still be launching, from either caller.
+_STOP_CONVERGENCES = ["reconciler", "operator", "owed-stop", "owed-stop-operator"]
+
+
+@pytest.mark.parametrize("ending", _SESSION_ENDINGS)
+@pytest.mark.parametrize("answer", list(_STOP_ANSWERS))
+@pytest.mark.parametrize("entry", _STOP_CONVERGENCES)
+async def test_a_stop_convergence_whose_final_snapshot_meets_a_session_end_keeps_it(
+    entry: str, answer: str, ending: str
+) -> None:
+    community, server_id, worker = _ids()
+    cp = _SessionGoneAtSnapshot(ending=ending, outcomes={"stop": _STOP_ANSWERS[answer]})
+    uow = FakeUnitOfWork()
+    owed_stop = entry.startswith("owed-stop")
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            observed=ObservedState.STOPPED if owed_stop else ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    intents = StopIntentCounter()
+    if owed_stop:
+        intents.start_sent(ServerId(server_id))
+    stop = _stale_clear(uow, cp, intents)
+
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        if entry == "reconciler":
+            await stop.redispatch_stop(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+        elif entry == "owed-stop":
+            await stop.clear_stale_assignment(
+                community_id=CommunityId(community),
+                server_id=ServerId(server_id),
+                worker_connected=True,
+            )
+        else:
+            await stop(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    _assert_kept_for_a_gone_worker(excinfo, uow, server_id, worker)
+
+
+def _final_snapshot_fails(failure: str, stop: CommandOutcome) -> FakeControlPlane:
+    if failure == "could-not-send":
+        # No data-plane URL: a bare WorkerUnavailableError that never left the
+        # API and says nothing about the Worker.
+        return FakeControlPlane(outcomes={"stop": stop}, unavailable_kinds={"snapshot"})
+    return FakeControlPlane(
+        outcomes={
+            "stop": stop,
+            "snapshot": CommandOutcome(status=CommandStatus.TRANSFER_FAILED),
+        }
+    )
+
+
+@pytest.mark.parametrize("failure", ["could-not-send", "transfer-failed"])
+@pytest.mark.parametrize("answer", list(_STOP_ANSWERS))
+@pytest.mark.parametrize("entry", ["direct", "reconciler"])
+async def test_a_stop_whose_final_snapshot_fails_otherwise_still_releases(
+    entry: str, answer: str, failure: str
+) -> None:
+    # Unchanged: only a session end keeps the row.
+    community, server_id, worker = _ids()
+    cp = _final_snapshot_fails(failure, _STOP_ANSWERS[answer])
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING if entry == "direct" else DesiredState.STOPPED,
+            observed=ObservedState.RUNNING,
+            worker_id=worker,
+        )
+    )
+    stop = _stale_clear(uow, cp, StopIntentCounter())
+
+    if entry == "direct":
+        result = await stop(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+    else:
+        result = await stop.redispatch_stop(
+            community_id=CommunityId(community), server_id=ServerId(server_id)
+        )
+
+    assert [kind for kind, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert result.assigned_worker_id is None
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
 
