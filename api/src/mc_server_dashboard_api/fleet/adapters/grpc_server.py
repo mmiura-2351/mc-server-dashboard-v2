@@ -423,7 +423,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # rebuild it from the authoritative running-server tally so placement is
             # correct after a reconnect (epic #7 reconciliation obligation).
             try:
-                await self._rebuild_assignments(worker_id)
+                await self._rebuild_assignments(worker_id, session)
             except Exception:
                 _LOG.warning(
                     "assignment rebuild failed; tearing down registration",
@@ -449,7 +449,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # Read inbound events/results in a background task while this generator
             # yields the Worker's outbound commands; both share the one stream.
             reader = asyncio.ensure_future(
-                self._read_inbound(worker_id, request_iterator)
+                self._read_inbound(worker_id, session, request_iterator)
             )
             # Application-level heartbeat watchdog (issue #1600): polls the
             # registry's derived liveness at heartbeat_interval; returns when
@@ -621,6 +621,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
     async def _read_inbound(
         self,
         worker_id: WorkerId,
+        session: SessionToken,
         request_iterator: AsyncIterator[pb.WorkerMessage],
     ) -> None:
         """Read the inbound stream, fast-pathing heartbeats (issue #1698).
@@ -642,7 +643,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     await processor  # propagate cap-trip
                     return
                 if _is_heartbeat(message):
-                    self._registry.record_heartbeat(worker_id, self._clock.now())
+                    self._registry.record_heartbeat(
+                        worker_id, session, self._clock.now()
+                    )
                     continue
                 await queue.put(message)
             await queue.put(None)  # sentinel for clean EOF
@@ -714,7 +717,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
             else:
                 consecutive_failures = 0
 
-    async def _rebuild_assignments(self, worker_id: WorkerId) -> None:
+    async def _rebuild_assignments(
+        self, worker_id: WorkerId, session: SessionToken
+    ) -> None:
         # Snapshot the confirm epoch BEFORE reading the DB tally (#844): a placement
         # that commits AND confirms in the await below stamps a later epoch, so
         # set_assignment keeps that +1 rather than overwriting it with this stale
@@ -723,7 +728,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         assignments = await self._state_sink.running_assignment_ids(
             worker_id=worker_id.value
         )
-        self._registry.set_assignment(worker_id, assignments, snapshot_epoch)
+        self._registry.set_assignment(worker_id, session, assignments, snapshot_epoch)
 
     async def _authenticate(
         self,

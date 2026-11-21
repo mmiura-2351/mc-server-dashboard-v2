@@ -55,7 +55,7 @@ class _Registry(WorkerRegistry):
     def held_generation(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def record_heartbeat(self, worker_id, at):  # type: ignore[no-untyped-def]
+    def record_heartbeat(self, worker_id, session, at):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
     def mark_disconnected(self, worker_id, session):  # type: ignore[no-untyped-def]
@@ -88,7 +88,9 @@ class _Registry(WorkerRegistry):
     def decrement_assignment(self, worker_id, server_id):  # type: ignore[no-untyped-def]
         raise NotImplementedError
 
-    def set_assignment(self, worker_id, assignments, snapshot_epoch):  # type: ignore[no-untyped-def]
+    def set_assignment(  # type: ignore[no-untyped-def]
+        self, worker_id, session, assignments, snapshot_epoch
+    ):
         raise NotImplementedError
 
     def candidates_for_placement(self):  # type: ignore[no-untyped-def]

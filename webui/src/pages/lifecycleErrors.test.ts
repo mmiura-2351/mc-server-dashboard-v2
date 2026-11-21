@@ -294,8 +294,10 @@ describe("lifecycleErrorMessage", () => {
 
   // What the copy promises is the contract for these messages, so each claim
   // is pinned in both locales (issue #3820):
-  // - an offline stop holds only until the release, which stops nothing on the
-  //   host, so only a host back before then gets the stop;
+  // - an offline stop completes on a host back in time, with the final
+  //   snapshot, and a retry once it is back does that at once (issue #3983);
+  //   a stop again while it is away releases the server without that snapshot,
+  //   and the release stops nothing on the host;
   // - an offline restart is never re-sent;
   // - moving the server is safe only once the old host is down, since nothing
   //   fences an instance still alive there (CONFIGURATION.md 5.6);
@@ -306,12 +308,42 @@ describe("lifecycleErrorMessage", () => {
     [
       "en",
       "dashboard.lifecycle.stopWorkerOffline",
-      /released from that host after a while; if the host comes back before then, the server is stopped there/,
+      /^The server host is not reachable\./,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /if the host comes back in time, the stop completes there with a final snapshot, and stopping again once it is back does that at once/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /stop the server again to release it now, without that snapshot, then start it to move it to another host/,
     ],
     [
       "ja",
       "dashboard.lifecycle.stopWorkerOffline",
-      /しばらくするとサーバーはこのホストから切り離されます。それまでにホストが戻れば、サーバーはそこで停止されます/,
+      /^サーバーホストに接続できません。/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /猶予時間内にホストが戻れば、そのホストで最終スナップショットを取って停止が完了します。ホストが戻ったあとでもう一度停止すれば、すぐに完了します/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /もう一度停止すると最終スナップショットを取らずにすぐ切り離せます。そのあと起動すると別のホストへ移せます/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /^The server host is not reachable, so the system cannot restart the server/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /^サーバーホストに接続できないため、システムはこのサーバーを再起動できません/,
     ],
     [
       "en",
