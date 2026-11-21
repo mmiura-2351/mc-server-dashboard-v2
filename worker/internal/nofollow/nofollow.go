@@ -14,7 +14,9 @@
 // It is a layer-neutral helper like internal/javaproperties, so that the
 // server.properties reader (an adapter) and the generation-marker reader (the
 // application package) share one implementation without either importing the
-// other's layer.
+// other's layer. For the same reason it holds Openat2Beneath, with which the
+// instance manager's file operations and the hydrate's unpack open a directory
+// below one they must not leave.
 package nofollow
 
 import (
@@ -58,6 +60,23 @@ func OpenDir(path string) (int, error) {
 func OpenAt(dirFd int, name string, flags int, mode uint32) (int, error) {
 	for {
 		fd, err := unix.Openat(dirFd, name, flags, mode)
+		if !errors.Is(err, unix.EINTR) {
+			return fd, err
+		}
+	}
+}
+
+// Openat2Beneath opens the directory rel below the directory behind dirFd with
+// openat2 RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS, retried on EINTR, so the kernel
+// itself refuses any component that is a symlink (ELOOP) and any resolution that
+// would leave dirFd (EXDEV), an absolute rel included (Linux 5.6+). The returned
+// fd is an O_PATH directory handle, for use as the directory of further *at
+// calls; the caller closes it. Where openat2 is unavailable (an older kernel, or
+// not Linux) it fails with ENOSYS and opens nothing, and the caller falls back
+// to a per-component O_NOFOLLOW walk.
+func Openat2Beneath(dirFd int, rel string) (int, error) {
+	for {
+		fd, err := openat2Beneath(dirFd, rel)
 		if !errors.Is(err, unix.EINTR) {
 			return fd, err
 		}

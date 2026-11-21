@@ -68,7 +68,7 @@ func openParentBeneath(root, target string, mkdir bool) (parentFd int, leaf stri
 		if relParent == "" {
 			relParent = "."
 		}
-		fd, oerr := openat2Beneath(rootFd, relParent)
+		fd, oerr := nofollow.Openat2Beneath(rootFd, relParent)
 		if oerr == nil {
 			_ = unix.Close(rootFd)
 			return fd, leaf, nil
