@@ -510,18 +510,20 @@ async def test_retry_refuses_while_an_abandoned_final_snapshot_is_outstanding() 
 async def test_a_lost_final_snapshot_result_still_converges() -> None:
     # Stop A is abandoned and its result never arrives: the Worker's session ends
     # instead. While the snapshot is outstanding the reconciler leaves the row
-    # alone; once the session's end drops the record, its stale-stop arm releases.
+    # alone; once the session's end drops the record, its stale-stop arm releases,
+    # a grace after the session ended (issue #3963).
     server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
     repo = FakeServerRepository()
     repo.seed(server)
     worker = _Worker(repo, server)
+    clock = FakeClock(_NOW)
     reconciler = RunReconcilerTick(
         uow=FakeUnitOfWork(servers=repo),
         make_start_server=lambda: pytest.fail("no start is owed"),
         make_stop_server=lambda: _stop_server(repo, worker.cp, worker.guard),
         control_plane=worker.cp,
         store_generation=FakeStoreGenerationReader(),
-        clock=FakeClock(_NOW),
+        clock=clock,
         stop_refusals=StopDispatchRefusals(),
         unrecorded_stops=UnrecordedStops(),
         grace_seconds=60,
@@ -539,6 +541,10 @@ async def test_a_lost_final_snapshot_result_still_converges() -> None:
     assert _assigned(repo, server) == server.assigned_worker_id
 
     worker.disconnect()
+    await asyncio.wait_for(reconciler.tick(), timeout=1)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    clock.set(_NOW + dt.timedelta(seconds=60))
     await asyncio.wait_for(reconciler.tick(), timeout=1)
     assert _assigned(repo, server) is None
 

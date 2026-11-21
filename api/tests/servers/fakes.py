@@ -14,12 +14,13 @@ import zipfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
 from mc_server_dashboard_api.servers.adapters.file_store import _rel_path
+from mc_server_dashboard_api.servers.application.stop_intents import StopIntentCounter
 from mc_server_dashboard_api.servers.domain.backup import (
     Backup,
     BackupHealth,
@@ -1924,6 +1925,60 @@ class FakeUnitOfWork(UnitOfWork):
         yield
 
 
+class ExitHookUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` that runs a hook as its next block exits.
+
+    The exit is an await, the point where another task, such as a Worker
+    session's teardown, interleaves with the use case (issue #3963).
+    """
+
+    def __init__(self, servers: FakeServerRepository | None = None) -> None:
+        super().__init__(servers=servers)
+        self._on_exit: Callable[[], None] | None = None
+
+    def arm(self, on_exit: Callable[[], None]) -> None:
+        self._on_exit = on_exit
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        on_exit, self._on_exit = self._on_exit, None
+        if on_exit is not None:
+            on_exit()
+
+
+@dataclass
+class BumpHookStopIntents(StopIntentCounter):
+    """A :class:`StopIntentCounter` that runs ``on_bump`` after the next bump."""
+
+    on_bump: Callable[[], None] | None = None
+
+    def bump(self, server_id: ServerId) -> None:
+        super().bump(server_id)
+        on_bump, self.on_bump = self.on_bump, None
+        if on_bump is not None:
+            on_bump()
+
+
+def session_ends_as_step_a_exits(
+    cp: FakeControlPlane,
+    worker_id: WorkerId,
+    *,
+    at: dt.datetime,
+    servers: FakeServerRepository | None = None,
+) -> tuple[ExitHookUnitOfWork, BumpHookStopIntents]:
+    """A unit of work and stop intents that end a session between Steps A and B.
+
+    A stale clear bumps the stop-intent count inside its Step A unit of work,
+    so the first exit after that bump is Step A's own: ``worker_id``'s session
+    ends there, at ``at`` (issue #3963). Once only.
+    """
+
+    uow = ExitHookUnitOfWork(servers=servers)
+    intents = BumpHookStopIntents(
+        on_bump=lambda: uow.arm(lambda: cp.end_session(worker_id, at=at))
+    )
+    return uow, intents
+
+
 class FakeLifecycleLock(LifecycleLock):
     """Recording :class:`LifecycleLock` double for the use-case tests.
 
@@ -2050,6 +2105,12 @@ class FakeControlPlane(ControlPlane):
 
     def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
         return self.offline_since.get(worker_id)
+
+    def end_session(self, worker_id: WorkerId, *, at: dt.datetime) -> None:
+        """``worker_id``'s session ends at ``at`` (issue #3963)."""
+
+        self._connected[worker_id] = False
+        self.offline_since[worker_id] = at
 
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int
