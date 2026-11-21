@@ -911,6 +911,79 @@ def test_the_storage_walks_take_many_members_named_at_path_max(gzipped: bool) ->
         _walk(archive, gzipped=gzipped, header_limits=UPLOAD_HEADER_LIMITS)
 
 
+# The longest member path the Worker's pack writes, relative to the working set
+# (``maxMemberPath`` in ``worker/internal/adapters/datatransfer``): 4095 bytes,
+# Linux's PATH_MAX less one, here 16 components of 255.
+_WORKER_LONGEST_PATH = "/".join(["n" * 255] * 16)
+
+# The most a snapshot may hold, so the largest size a member of one may give.
+_SNAPSHOT_BYTES = 50 * 1024**3
+
+
+def _workers_largest_member_headers(directories: int) -> bytes:
+    """``directories`` directory members, then a file member's header, each the
+    largest the Worker's pack writes of its kind (issue #3931).
+
+    The pack gives a header only a name, a type, a mode and a size. Go's
+    ``archive/tar`` writes a name past ustar's fields as a PAX ``path`` record,
+    the trailing ``/`` of a directory's included, and a size of 8 GiB or more as
+    a PAX ``size`` record, and nothing else: Python's ``tarfile`` writes the same
+    two records here. A directory at the longest path holds 8,195 characters and
+    the file 8,209, each in 5,632 bytes of headers. The file's data, 50 GiB, is
+    not written, so a walk stops once the file member is handed out.
+    """
+
+    parts = []
+    for i in range(directories):
+        info = tarfile.TarInfo(name=f"{i:04}{_WORKER_LONGEST_PATH[4:]}")
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o755
+        parts.append(info.tobuf(format=tarfile.PAX_FORMAT))
+    info = tarfile.TarInfo(name=_WORKER_LONGEST_PATH)
+    info.size = _SNAPSHOT_BYTES
+    info.mode = 0o644
+    parts.append(info.tobuf(format=tarfile.PAX_FORMAT))
+    return b"".join(parts)
+
+
+def test_the_storage_walks_take_the_workers_largest_member_headers() -> None:
+    # The snapshot ingest holds a snapshot to the storage walks' limits (issue
+    # #3931), so they must take every member header the Worker's pack writes,
+    # whatever the member count: two PAX records, under 32; 5,632 bytes, under
+    # the 1 MiB budget; and at most 8,209 characters, under the 16 Ki allowed a
+    # member. 1,100 directories and the file are past the upload gates' 8 Mi.
+    archive = _workers_largest_member_headers(1100)
+    stream = EndCheckedReader(io.BytesIO(archive), header_limits=STORAGE_HEADER_LIMITS)
+
+    with tarfile.open(fileobj=stream, mode="r:") as tar:
+        members = []
+        for member in stream.members(tar):
+            members.append(member)
+            if member.isfile():
+                break
+
+    assert len(members) == 1101
+    assert [sorted(m.pax_headers) for m in (members[0], members[-1])] == [
+        ["path"],
+        ["path", "size"],
+    ]
+    assert (members[-1].name, members[-1].size) == (
+        _WORKER_LONGEST_PATH,
+        _SNAPSHOT_BYTES,
+    )
+    with tarfile.open(
+        fileobj=(
+            upload := EndCheckedReader(
+                io.BytesIO(archive), header_limits=UPLOAD_HEADER_LIMITS
+            )
+        ),
+        mode="r:",
+    ) as tar:
+        with pytest.raises(HeaderLimitError, match="characters of names"):
+            for _member in upload.members(tar):
+                pass
+
+
 def _sparse_after_global_records(windows: list[dict[str, str]]) -> bytes:
     """Each window: a global PAX header of its records, then an old-GNU sparse
     member that stores and maps nothing.

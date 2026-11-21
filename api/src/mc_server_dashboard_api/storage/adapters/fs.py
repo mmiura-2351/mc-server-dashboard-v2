@@ -4069,12 +4069,24 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
     in order seeks back only when a member's data runs past the member, a GNU
     sparse map that takes more than the member stores, and the reader refuses
     that seek as ``ReadError`` too.
+
+    The spool is read through restore's reader stack (issue #3931), the
+    decompressor aside: :class:`CappedReader` beneath :class:`EndCheckedReader`,
+    held to the storage walks' header limits (``STORAGE_HEADER_LIMITS``). Going
+    past one, or a chain of extended headers too long for ``tarfile`` to read, is
+    ``ReadError``. The cap is the spool's own length: the data plane bounds the
+    body the spool holds, so the count refuses nothing more.
     """
 
     with (
         open(spool, "rb") as fileobj,
         tarfile.open(
-            fileobj=(stream := EndCheckedReader(fileobj)),
+            fileobj=(
+                stream := EndCheckedReader(
+                    CappedReader(fileobj, os.fstat(fileobj.fileno()).st_size),
+                    header_limits=STORAGE_HEADER_LIMITS,
+                )
+            ),
             mode="r:",
             tarinfo=HeaderCheckedTarInfo,
         ) as tar,

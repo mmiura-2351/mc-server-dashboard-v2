@@ -117,12 +117,8 @@ class GzipReadProbe:
 # (``BadGzipFile``), and a tar that does not frame, does not end at its
 # end-of-archive marker, holds more than zeros past it or goes past the header
 # limits (``ReadError``). A chain of a few hundred extended headers before one
-# member makes ``tarfile``, which reads them recursively, raise
-# ``RecursionError`` (issue #3859); it has unwound by the time it is caught. That
-# is the one ``RecursionError`` meant here. The object walks wrap only their
-# reads of the archive, but the fs restore's wrap spans the files it extracts
-# too, so it creates a member's directories one level at a time
-# (``_make_directories``): a deep member is restored, not taken for this.
+# member, which ``tarfile`` reads recursively, is a ``ReadError`` too: the header
+# read reports its ``RecursionError`` as one (:class:`HeaderCheckedTarInfo`).
 # Deliberately NOT ``tarfile.TarError`` as a whole: its ``FilterError`` branch
 # refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says
@@ -137,7 +133,6 @@ _ARCHIVE_READ_ERRORS = (
     zlib.error,
     gzip.BadGzipFile,
     tarfile.ReadError,
-    RecursionError,
 )
 
 
@@ -161,6 +156,15 @@ class HeaderCheckedTarInfo(tarfile.TarInfo):
     mistaken for one. Not ``InvalidHeaderError``: ``TarFile.next`` takes that,
     past the first header, for the end of the archive.
 
+    ``tarfile`` reads an extended header, a PAX record set or a GNU long name or
+    link, and then the header after it by calling this read again, so a chain of
+    a few hundred of them before one member raises ``RecursionError`` (issues
+    #3859, #3931). The read reports that as the same ``ReadError``, so every walk
+    that opens an archive with this class, restore, the health check and the
+    snapshot ingest, reads such an archive as one that does not read. Only the
+    header read is covered, so a ``RecursionError`` from the caller's own code
+    is not taken for one.
+
     A header whose numbers read can still not describe a file (issue #3802): a
     negative size, or a GNU sparse map with a negative offset or length, an entry
     past the member's real size, or entries that overlap or are out of order.
@@ -174,6 +178,10 @@ class HeaderCheckedTarInfo(tarfile.TarInfo):
             member = super().fromtarfile(archive)
         except (ValueError, IndexError) as exc:
             raise tarfile.ReadError(f"unreadable member header: {exc}") from exc
+        except RecursionError as exc:
+            raise tarfile.ReadError(
+                "unreadable member header: a chain of extended headers too long to read"
+            ) from exc
         _refuse_invalid_layout(member)
         return member
 

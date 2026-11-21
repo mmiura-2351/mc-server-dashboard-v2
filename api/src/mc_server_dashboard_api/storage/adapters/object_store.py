@@ -2791,23 +2791,22 @@ class _EndCheckedTar:
     closes the tar and ``source``, which ``tarfile`` leaves open when handed a
     file object.
 
-    A backup's walk passes ``max_bytes``, so every byte it takes from ``source``
-    counts toward that cap through a ``CappedReader``, and ``header_limits``
-    (issue #3859).
+    Every byte the walk takes from ``source`` counts toward ``max_bytes``
+    through a ``CappedReader``, and the walk is held to ``header_limits``
+    (issues #3859, #3931): a backup's and a snapshot's walk alike.
     """
 
     def __init__(
         self,
         source: io.BufferedIOBase,
         *,
-        max_bytes: int | None = None,
-        header_limits: HeaderLimits | None = None,
+        max_bytes: int,
+        header_limits: HeaderLimits,
     ) -> None:
         self._source = source
         try:
             self._reader = EndCheckedReader(
-                source if max_bytes is None else CappedReader(source, max_bytes),
-                header_limits=header_limits,
+                CappedReader(source, max_bytes), header_limits=header_limits
             )
             self.tar = tarfile.open(
                 fileobj=self._reader, mode="r:", tarinfo=HeaderCheckedTarInfo
@@ -2860,11 +2859,22 @@ async def _snapshot_file_members(
     members before it alone. Each member is judged as the walk reaches it, so a
     refusal can follow uploads of earlier members; the caller's abort removes
     them with the rest of the staging.
+
+    The spool is read through restore's reader stack (issue #3931), the
+    decompressor aside, held to the storage walks' header limits
+    (``STORAGE_HEADER_LIMITS``): going past one, or a chain of extended headers
+    too long for ``tarfile`` to read, is ``ReadError``. The cap is the spool's
+    own length: the data plane bounds the body the spool holds, so the count
+    refuses nothing more.
     """
 
-    archive = await _acquire_off_loop(
-        _close_abandoned, lambda: _EndCheckedTar(open(spool, "rb"))
-    )
+    def _open() -> _EndCheckedTar:
+        size = spool.stat().st_size
+        return _EndCheckedTar(
+            open(spool, "rb"), max_bytes=size, header_limits=STORAGE_HEADER_LIMITS
+        )
+
+    archive = await _acquire_off_loop(_close_abandoned, _open)
     jobs = _HandleJobs()
     try:
         while (read := await jobs.run(archive.next_member)) is not None:

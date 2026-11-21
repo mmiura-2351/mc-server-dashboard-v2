@@ -133,12 +133,14 @@ _MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024 * 1024  # 50 GiB
 
 # What reading a snapshot body raises when its own bytes are not a publishable
 # plain tar (issues #3365, #3779, #3786): a ``TarError`` (not a plain tar, a bad
-# header, a member the fs extraction refuses), or the ``PathTraversalError`` the
-# object backend's member listing raises for an escaping or non-canonical member
-# name, its only source inside the handler. Both backends read the body as a plain
-# tar, never through a decompressor, so no decompressor error can reach here. A
-# plain ``OSError`` is deliberately not here: the read shares this handler with the
-# staging's disk and object-store I/O, whose faults say nothing about the body.
+# header, headers past the storage walks' limits or a chain of extended headers
+# too long to read (issue #3931), a member the fs extraction refuses), or the
+# ``PathTraversalError`` the object backend's member listing raises for an
+# escaping or non-canonical member name, its only source inside the handler.
+# Both backends read the body as a plain tar, never through a decompressor, so
+# no decompressor error can reach here. A plain ``OSError`` is deliberately not
+# here: the read shares this handler with the staging's disk and object-store
+# I/O, whose faults say nothing about the body.
 _UNREADABLE_SNAPSHOT_ERRORS: tuple[type[Exception], ...] = (
     tarfile.TarError,
     PathTraversalError,

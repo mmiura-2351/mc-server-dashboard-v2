@@ -522,19 +522,11 @@ TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT: dict[str, bytes] = {
 }
 
 
-# Files whose tar is over each header limit the upload doors hold a walk to, and
-# which the snapshot ingest takes (issue #3810): it has no entry cap, so a large
-# working set reaches the character limit (131,072 files with 64-character names
-# do). Their PAX ``comment`` records are what is held.
 _KIB = 1024
-OVER_THE_UPLOAD_HEADER_LIMITS_FILES = {
-    "server.properties": b"k=v",
-    "world/level.dat": b"w",
-    **{f"world/data/d{i}.dat": b"r" for i in range(9)},
-}
 
 # The members over each header limit, the same for the upload doors and the
-# storage walks except the characters (issue #3859).
+# storage walks except the characters (issues #3859, #3931). Their PAX
+# ``comment`` records are what is held.
 _OVER_A_HEADER_LIMIT: dict[str, Callable[[], list[bytes]]] = {
     # 2 MiB of extended headers before one member, over the 1 MiB budget.
     "budget": lambda: [
@@ -556,14 +548,6 @@ _OVER_A_HEADER_LIMIT: dict[str, Callable[[], list[bytes]]] = {
     ],
 }
 HEADER_LIMITS = list(_OVER_A_HEADER_LIMIT)
-
-
-@functools.cache
-def over_the_upload_header_limits_tar() -> bytes:
-    """The tar of :data:`OVER_THE_UPLOAD_HEADER_LIMITS_FILES`, 10.5 MiB, built on
-    first use."""
-
-    return _tar_of(*(m for build in _OVER_A_HEADER_LIMIT.values() for m in build()))
 
 
 @functools.cache

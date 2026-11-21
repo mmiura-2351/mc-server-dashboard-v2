@@ -126,17 +126,21 @@ class HeaderLimits:
 # 8 Mi characters out of a real archive's reach.
 UPLOAD_HEADER_LIMITS = HeaderLimits(characters_a_member=0)
 
-# The limits restore and the health check hold a backup's walk to (issue #3859).
-# They have no entry cap: a backup the platform writes holds a member for every
-# file of the working set, however many. Such a member holds its name twice, as
-# the name and as its PAX ``path`` record, and a few short records (``mtime``,
-# and ``size``, ``uid``, ``gid``, ``uname`` or ``gname`` when out of the ustar
-# fields' range): under 9 Ki characters for a name of 4095 bytes, Linux's
-# PATH_MAX, which bounds every name the fs writer reads from disk and the Worker
-# packs. So 16 Ki a member takes every backup the fs writer writes, and the 8 Mi
-# on top takes every archive the upload gates admit. The object writer's names
-# are the snapshot's object keys, so its backups are taken alike only while every
-# key is at most 4095 bytes, which nothing enforces yet (issue #3931).
+# The limits restore and the health check hold a backup's walk to (issue #3859),
+# and the snapshot ingest a snapshot's (issue #3931). They have no entry cap: a
+# backup the platform writes, and a snapshot the Worker packs, hold a member for
+# every file of the working set, however many. Such a member holds its name
+# twice, as the name and as its PAX ``path`` record, and a few short records
+# (``mtime``, and ``size``, ``uid``, ``gid``, ``uname`` or ``gname`` when out of
+# the ustar fields' range): under 9 Ki characters for a name of 4095 bytes,
+# Linux's PATH_MAX, which bounds every name the fs writer reads from disk and the
+# Worker packs. The Worker's largest is a file of 8 GiB or more at that length,
+# a PAX ``path`` and ``size`` record and nothing else: 8,209 characters, in
+# 5,632 bytes of headers. So 16 Ki a member takes every backup the fs writer
+# writes and every snapshot the Worker packs, and the 8 Mi on top takes every
+# archive the upload gates admit. The object writer's names are the snapshot's
+# object keys, so its backups are taken alike only while every key is at most
+# 4095 bytes, which nothing enforces yet (issue #3973).
 STORAGE_HEADER_LIMITS = HeaderLimits(characters_a_member=16 * 1024)
 
 
@@ -231,9 +235,9 @@ class EndCheckedReader(io.RawIOBase):
     cannot be seen from here.
 
     With ``header_limits`` the walk is also held to them (:class:`HeaderLimits`):
-    the upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore
-    and the health check :data:`STORAGE_HEADER_LIMITS` (issue #3859). The
-    snapshot ingest passes none.
+    the upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore,
+    the health check and the snapshot ingest :data:`STORAGE_HEADER_LIMITS`
+    (issues #3859, #3931).
 
     - The same count bounds what the walk reads between handing out one member
       and the next to 1 MiB: the next member's header blocks and extended
