@@ -236,6 +236,17 @@ async def test_a_file_renamed_130_components_deep_is_too_deep(doors: _Doors) -> 
     assert await doors.read("seed.txt") == b"s"
 
 
+async def test_a_directory_renamed_129_levels_deep_is_too_deep(doors: _Doors) -> None:
+    # The destination itself is a directory, so it is a level: an empty one may
+    # land at level 128, not 129.
+    await doors.mkdir("src")
+
+    assert await _refusal(doors.rename("src", _nested(129))) == "path_too_deep"
+
+    await doors.rename("src", _nested(128))
+    assert await doors.names(_nested(128)) == []
+
+
 async def test_a_directory_rename_counts_the_subtree_it_moves(doors: _Doors) -> None:
     # ``src`` holds a directory 127 levels below it. Moved to ``dst`` (level 1)
     # its deepest directory is at level 128; moved to ``a/dst`` (level 2), at 129.
