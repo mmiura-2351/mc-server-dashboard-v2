@@ -73,6 +73,11 @@ const IMPORT_ERROR_KEY: Record<string, TranslationKey> = {
   // A member at the Worker's generation-marker name, refused before the row is
   // created (issue #3433).
   reserved_name: "serverCreate.import.error.reserved_name",
+  // A member the member-name rule refuses, before the row is created (issue
+  // #3973): one the Worker could not snapshot or no backend can hold.
+  path_too_deep: "serverCreate.import.error.path_too_deep",
+  name_too_long: "serverCreate.import.error.name_too_long",
+  path_too_long: "serverCreate.import.error.path_too_long",
   // Reachable from import (issue #3022: the join address is auto-assigned, and
   // a racer can take it between the assignment and the commit that inserts the
   // row). It asks for a retry rather than pointing at a field the operator

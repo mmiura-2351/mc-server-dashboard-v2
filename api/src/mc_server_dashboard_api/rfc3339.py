@@ -11,9 +11,11 @@ It lives here because it is neutral: pure formatting over
 :class:`datetime.datetime`, with no HTTP, config or wiring dependency. That is
 why `rfc3339` is absent from the "no context's domain or application imports a
 root-level module" contract in ``pyproject.toml``, so the inward layers may
-import it. :mod:`mc_server_dashboard_api.archive_member` (issue #3579) and
-:mod:`mc_server_dashboard_api.gc_pass` (issues #3906, #3934) are the two other
-modules left out of that contract, for the same reason.
+import it. :mod:`mc_server_dashboard_api.archive_member` (issue #3579),
+:mod:`mc_server_dashboard_api.gc_pass` (issues #3906, #3934),
+:mod:`mc_server_dashboard_api.name_characters` (issue #3988) and
+:mod:`mc_server_dashboard_api.member_name` (issue #3973) are the other modules
+left out of that contract, for the same reason.
 """
 
 from __future__ import annotations

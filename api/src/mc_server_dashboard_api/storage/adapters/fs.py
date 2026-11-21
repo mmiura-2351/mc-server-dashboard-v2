@@ -3122,10 +3122,15 @@ class FsStorage(Storage):
         )
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
-        """temp-sibling + fsync + atomic rename (Section 4.4)."""
+        """temp-sibling + fsync + atomic rename (Section 4.4).
+
+        The temp's name is not built from the target's (issue #3973): a name of
+        255 bytes, ``NAME_MAX``, is one the object backend holds, so fs must write
+        it too, and a temp named after it would be past ``NAME_MAX`` itself.
+        """
 
         fd, tmp_name = tempfile.mkstemp(
-            dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+            dir=str(target.parent), prefix=".", suffix=".tmp"
         )
         tmp = Path(tmp_name)
         try:

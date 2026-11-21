@@ -61,6 +61,7 @@ from mc_server_dashboard_api.servers.application.files import (
     _archive_entries,
     _refuse_dir_at_root_properties,
     _refuse_reserved_root_name,
+    _refuse_unstorable,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.plugins import (
@@ -173,6 +174,10 @@ def _validate_import_archive(
         # The Worker's generation-marker name (issue #3433): refused, not
         # dropped, so the operator learns why the archive did not import.
         _refuse_reserved_root_name(entry_path)
+        # The member-name rule (issue #3973), not the characters a files-API door
+        # refuses: the platform's own export of names a running server created
+        # must import again.
+        _refuse_unstorable(entry_path, is_dir=False)
     # ``_archive_entries`` skips directory headers, so a directory-only member at
     # the marker's name never reaches the loop above; refuse it the same way.
     with zipfile.ZipFile(io.BytesIO(content)) as zf:

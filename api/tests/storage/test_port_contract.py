@@ -2938,6 +2938,25 @@ async def test_write_file_overwrites_and_retains_prior_version(
     )
 
 
+async def test_a_255_byte_name_is_written_on_both_backends(
+    harness: StorageHarness,
+) -> None:
+    """A name of 255 bytes, ``NAME_MAX``, is written and rewritten (issue #3973).
+
+    The fs write goes through a temp sibling. Named after the target, the temp
+    was 14 bytes longer than it, so fs refused any name over 241 bytes.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"DATA"})
+    rel = RelPath("n" * 255)
+
+    await harness.storage.write_file(community, server, rel, b"one")
+    await harness.storage.write_file(community, server, rel, b"two")
+
+    assert await harness.storage.read_file(community, server, rel) == b"two"
+
+
 async def test_write_file_before_any_publish_initializes_first_version(
     harness: StorageHarness,
 ) -> None:

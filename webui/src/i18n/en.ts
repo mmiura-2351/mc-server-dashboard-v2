@@ -939,6 +939,13 @@ export const en = {
   "files.error.notDirectory": "The path is a file, not a directory.",
   "files.error.symlinkRefused": "Symbolic links are not allowed.",
   "files.error.nameTooLong": "The name is too long.",
+  // The member-name rule's other refusals at a files-API door (issue #3973).
+  "files.error.pathTooDeep":
+    "The path is nested too deeply. A server's files may be at most 128 folders deep.",
+  "files.error.pathTooLong":
+    "The path is too long. A path may be at most 4,095 bytes.",
+  "files.error.invalidNameCharacter":
+    "The name contains a character that cannot be used, such as a control character or \\. Choose another name.",
   "files.error.invalidFilename":
     "This file name cannot be used. Rename the file so its name has no control characters, / or \\, and is not too long, then upload it again.",
   // Platform-managed server.properties refusals (issues #2623, #2812, #2846).
@@ -1239,6 +1246,14 @@ export const en = {
     "That archive stores a file under server.properties/, but the platform keeps a plain file at that path. Remove or move that entry and import again.",
   "serverCreate.import.error.reserved_name":
     "That archive has a top-level entry whose name starts with .mcsd_generation. Such names are reserved for the platform. Remove or rename that entry and import again.",
+  // An entry the member-name rule refuses (issue #3973), before the row is
+  // created.
+  "serverCreate.import.error.path_too_deep":
+    "That archive has an entry nested deeper than 128 folders. Move it to a shallower folder and import again.",
+  "serverCreate.import.error.name_too_long":
+    "That archive has an entry whose name is longer than 255 bytes. Rename that entry and import again.",
+  "serverCreate.import.error.path_too_long":
+    "That archive has an entry whose path is longer than 4,095 bytes. Shorten its path and import again.",
   // The import assigns the join address itself, so a 409 here is never the
   // operator's input: another server claimed that address between the import
   // picking it and the row committing (issue #3022). Nothing was created, and a

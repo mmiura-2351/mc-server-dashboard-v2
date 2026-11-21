@@ -113,6 +113,21 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.reservedName" },
     ],
     [
+      "maps a destination nested too deep (#3973)",
+      new ApiError(422, { reason: "path_too_deep" }),
+      { key: "files.error.pathTooDeep" },
+    ],
+    [
+      "maps a destination path too long (#3973)",
+      new ApiError(422, { reason: "path_too_long" }),
+      { key: "files.error.pathTooLong" },
+    ],
+    [
+      "maps a destination name with a character no name may carry (#3973)",
+      new ApiError(422, { reason: "invalid_name_character" }),
+      { key: "files.error.invalidNameCharacter" },
+    ],
+    [
       "maps an archive that does not read back (#3769)",
       new ApiError(422, { reason: "invalid_archive" }),
       { key: "files.error.invalidArchive" },
