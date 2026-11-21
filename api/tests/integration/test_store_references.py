@@ -1,10 +1,13 @@
-"""Whether this database names any stored object, on PostgreSQL (issue #3886).
+"""This database's answers to the store owner claim, on PostgreSQL (issue #3886).
 
-The store owner claim asks it of a store that has no marker and already holds
-objects: a database with such rows is an existing deployment's and claims the
-store, and a fresh one does not. A ``server`` row and a ``resource_packs`` row
-each answer yes on their own; a database with only rows that name nothing in the
-store (its installation, a community) answers no.
+The claim asks them of a store that has no marker and already holds objects.
+
+- Whether the communities and resource packs its keys name are all rows here: a
+  probe database with a community of its own does not have the live store's.
+- For a store of JARs and plugin blobs only, whether this database names any
+  stored object: a ``server`` row and a ``resource_packs`` row each answer yes on
+  their own; a database with only rows that name nothing in the store (its
+  installation, a community) answers no.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (the CI Postgres service);
 skipped otherwise (TESTING.md Section 5).
@@ -30,7 +33,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
 from mc_server_dashboard_api.servers.adapters.store_references import (
-    database_names_stored_objects,
+    SqlAlchemyStoreDatabase,
 )
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
@@ -80,8 +83,12 @@ async def _seed_community(engine: AsyncEngine) -> uuid.UUID:
     return community.id.value
 
 
+def _database(engine: AsyncEngine) -> SqlAlchemyStoreDatabase:
+    return SqlAlchemyStoreDatabase(create_session_factory(engine))
+
+
 async def _names(engine: AsyncEngine) -> bool:
-    return await database_names_stored_objects(create_session_factory(engine))
+    return await _database(engine).names_stored_objects()
 
 
 async def test_a_fresh_database_names_nothing(engine: AsyncEngine) -> None:
@@ -114,8 +121,7 @@ async def test_a_server_row_names_its_stored_objects(engine: AsyncEngine) -> Non
     assert await _names(engine) is True
 
 
-async def test_a_resource_pack_row_names_its_stored_pack(engine: AsyncEngine) -> None:
-    # A pack belongs to no server, so it names a stored object on its own.
+async def _seed_pack(engine: AsyncEngine) -> uuid.UUID:
     pack = ResourcePack(
         id=ResourcePackId.new(),
         filename="pack.zip",
@@ -131,5 +137,48 @@ async def test_a_resource_pack_row_names_its_stored_pack(engine: AsyncEngine) ->
     async with ServersUnitOfWork(create_session_factory(engine)) as uow:
         await uow.resource_packs.add(pack)
         await uow.commit()
+    return pack.id.value
+
+
+async def test_a_resource_pack_row_names_its_stored_pack(engine: AsyncEngine) -> None:
+    # A pack belongs to no server, so it names a stored object on its own.
+    await _seed_pack(engine)
 
     assert await _names(engine) is True
+
+
+async def test_it_has_the_communities_and_packs_that_are_rows(
+    engine: AsyncEngine,
+) -> None:
+    community = await _seed_community(engine)
+    pack = await _seed_pack(engine)
+
+    has = _database(engine).has
+    assert await has(communities=frozenset({community}), resource_packs=frozenset())
+    assert await has(communities=frozenset(), resource_packs=frozenset({pack}))
+    assert await has(
+        communities=frozenset({community}), resource_packs=frozenset({pack})
+    )
+    assert await has(communities=frozenset(), resource_packs=frozenset())
+
+
+async def test_it_lacks_a_community_or_pack_another_database_holds(
+    engine: AsyncEngine,
+) -> None:
+    # A probe database with a community and a pack of its own, asked about the
+    # live store's: one id it lacks is enough.
+    community = await _seed_community(engine)
+    pack = await _seed_pack(engine)
+    elsewhere = uuid.uuid4()
+
+    has = _database(engine).has
+    assert not await has(communities=frozenset({elsewhere}), resource_packs=frozenset())
+    assert not await has(
+        communities=frozenset({community, elsewhere}), resource_packs=frozenset()
+    )
+    assert not await has(
+        communities=frozenset({community}), resource_packs=frozenset({elsewhere})
+    )
+    assert not await has(
+        communities=frozenset(), resource_packs=frozenset({pack, elsewhere})
+    )

@@ -305,10 +305,15 @@ class S3Client(Protocol):
         """List every object whose key starts with ``prefix`` (a prefix scan)."""
         ...
 
-    async def any_object(self, prefix: str) -> bool:
-        """Whether some object's key starts with ``prefix``, from a one-key listing.
+    async def first_key(
+        self, prefix: str, *, start_after: str | None = None
+    ) -> str | None:
+        """The lowest key that starts with ``prefix`` (and sorts after
+        ``start_after``), or ``None`` if there is none.
 
-        A bucket that does not exist yet holds none (issue #3886).
+        It reads listing pages of the store's default size and stops at the first
+        key, following a truncated page that holds none. A bucket that does not
+        exist yet holds none (issue #3886).
         """
         ...
 

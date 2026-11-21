@@ -342,20 +342,38 @@ class _Aioboto3S3Client:
                 raise
         return out
 
-    async def any_object(self, prefix: str) -> bool:
-        # One key answers it, so the store owner claim's probe of a large bucket
-        # costs one request per namespace (issue #3886). A bucketless store holds
-        # nothing (issue #946); an outage is typed, as for ``list_objects``.
+    async def first_key(
+        self, prefix: str, *, start_after: str | None = None
+    ) -> str | None:
+        # The store owner claim's probe (issue #3886). A page of the store's default
+        # size, not a one-key window: SeaweedFS keeps the directories of deleted
+        # keys, and 4.33 reads only MaxKeys + 2 entries of a directory, so a
+        # one-key listing behind three emptied siblings came back empty although a
+        # key followed. A truncated page without a key is followed too: it shows
+        # nothing. A bucketless store holds nothing (issue #946); an outage is
+        # typed, as for ``list_objects``.
+        request: dict[str, str] = {"Bucket": self._bucket, "Prefix": prefix}
+        if start_after is not None:
+            request["StartAfter"] = start_after
         with _translating_backend_faults("list", prefix):
             try:
-                page = await self._client.list_objects_v2(
-                    Bucket=self._bucket, Prefix=prefix, MaxKeys=1
-                )
+                while True:
+                    page = await self._client.list_objects_v2(**request)
+                    contents = page.get("Contents")
+                    if contents:
+                        key: str = contents[0]["Key"]
+                        return key
+                    if not page.get("IsTruncated"):
+                        return None
+                    request = {
+                        "Bucket": self._bucket,
+                        "Prefix": prefix,
+                        "ContinuationToken": page["NextContinuationToken"],
+                    }
             except ClientError as exc:
                 if _is_no_such_bucket(exc):
-                    return False
+                    return None
                 raise
-        return bool(page.get("Contents"))
 
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         # Paginate ListMultipartUploads so a crash-leftover orphan upload is found

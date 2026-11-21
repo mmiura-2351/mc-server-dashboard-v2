@@ -450,44 +450,80 @@ async def test_list_objects_other_error_reraises() -> None:
         await client.list_objects("communities/")
 
 
-async def test_any_object_no_such_bucket_is_false() -> None:
+async def test_first_key_no_such_bucket_is_none() -> None:
     client = _Aioboto3S3Client(_RaisingListClient("NoSuchBucket"), "bucket")
 
-    assert await client.any_object("communities/") is False
+    assert await client.first_key("communities/") is None
 
 
-async def test_any_object_other_error_reraises() -> None:
+async def test_first_key_other_error_reraises() -> None:
     client = _Aioboto3S3Client(_RaisingListClient("AccessDenied"), "bucket")
 
     with pytest.raises(ClientError):
-        await client.any_object("communities/")
+        await client.first_key("communities/")
 
 
-class _OnePageClient:
-    """A client double answering ``list_objects_v2`` with one page; records calls."""
+class _PagesClient:
+    """A client double answering ``list_objects_v2`` with set pages; records calls."""
 
-    def __init__(self, contents: list[dict[str, object]]) -> None:
-        self._contents = contents
+    def __init__(self, pages: list[dict[str, object]]) -> None:
+        self._pages = pages
         self.calls: list[dict[str, object]] = []
 
     async def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
-        return {"Contents": self._contents} if self._contents else {"KeyCount": 0}
+        return self._pages[len(self.calls) - 1]
 
 
-@pytest.mark.parametrize(
-    ("contents", "expected"), [([{"Key": "jars/a.jar"}], True), ([], False)]
-)
-async def test_any_object_asks_the_store_for_one_key(
-    contents: list[dict[str, object]], expected: bool
-) -> None:
-    # A probe of a namespace with millions of keys must not list them all
-    # (issue #3886).
-    double = _OnePageClient(contents)
+async def test_first_key_reads_one_default_size_page_and_stops_at_a_key() -> None:
+    # The store's own page size, not a one-key window: a store that spends a small
+    # window on emptied directories reports none of the keys behind them (SeaweedFS
+    # 4.33, issue #3886).
+    double = _PagesClient(
+        [
+            {
+                "Contents": [{"Key": "jars/a.jar"}, {"Key": "jars/b.jar"}],
+                "IsTruncated": True,
+                "NextContinuationToken": "t1",
+            }
+        ]
+    )
     client = _Aioboto3S3Client(double, "bucket")
 
-    assert await client.any_object("jars/") is expected
-    assert double.calls == [{"Bucket": "bucket", "Prefix": "jars/", "MaxKeys": 1}]
+    assert await client.first_key("jars/") == "jars/a.jar"
+    assert double.calls == [{"Bucket": "bucket", "Prefix": "jars/"}]
+
+
+async def test_first_key_follows_a_truncated_page_that_holds_no_key() -> None:
+    # A truncated page without keys proves nothing: the next one may hold one.
+    double = _PagesClient(
+        [
+            {"KeyCount": 0, "IsTruncated": True, "NextContinuationToken": "t1"},
+            {"KeyCount": 0, "IsTruncated": True, "NextContinuationToken": "t2"},
+            {"Contents": [{"Key": "jars/z.jar"}], "IsTruncated": False},
+        ]
+    )
+    client = _Aioboto3S3Client(double, "bucket")
+
+    assert await client.first_key("jars/", start_after="jars/a") == "jars/z.jar"
+    assert double.calls == [
+        {"Bucket": "bucket", "Prefix": "jars/", "StartAfter": "jars/a"},
+        {"Bucket": "bucket", "Prefix": "jars/", "ContinuationToken": "t1"},
+        {"Bucket": "bucket", "Prefix": "jars/", "ContinuationToken": "t2"},
+    ]
+
+
+async def test_first_key_is_none_only_on_the_final_page() -> None:
+    double = _PagesClient(
+        [
+            {"KeyCount": 0, "IsTruncated": True, "NextContinuationToken": "t1"},
+            {"KeyCount": 0, "IsTruncated": False},
+        ]
+    )
+    client = _Aioboto3S3Client(double, "bucket")
+
+    assert await client.first_key("jars/") is None
+    assert len(double.calls) == 2
 
 
 async def test_list_multipart_uploads_no_such_bucket_returns_empty() -> None:
@@ -608,7 +644,7 @@ _READ_CALLS: dict[str, Callable[[_Aioboto3S3Client], Awaitable[object]]] = {
     "head_object": lambda c: c.head_object("communities/k"),
     "copy_object": lambda c: c.copy_object("src/k", "dst/k"),
     "list_objects": lambda c: c.list_objects("communities/"),
-    "any_object": lambda c: c.any_object("communities/"),
+    "first_key": lambda c: c.first_key("communities/"),
 }
 
 
