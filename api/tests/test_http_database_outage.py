@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api import http_problem
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.core.adapters.database import DatabaseConnectError
 from mc_server_dashboard_api.dependencies import get_authenticate_request
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_request import (
@@ -210,16 +211,23 @@ def test_an_outage_warns_at_most_every_30_seconds(
     assert len(_records(logs, logging.DEBUG)) == 5
 
 
-def test_a_refused_connect_answers_503(
-    monkeypatch: pytest.MonkeyPatch, logs: pytest.LogCaptureFixture
-) -> None:
-    # The app's own engine, against a port nothing listens on: what the driver
-    # really raises, not a hand-built error.
+def _refused_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    """The real app, its lifespan open, its database a port nothing listens on."""
+
     monkeypatch.setenv(
         "MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@127.0.0.1:5/none"
     )
-    app = create_app()
-    client = enter_client(TestClient(app, raise_server_exceptions=False))
+    return enter_client(TestClient(create_app(), raise_server_exceptions=False))
+
+
+def test_a_refused_connect_answers_503(
+    monkeypatch: pytest.MonkeyPatch, logs: pytest.LogCaptureFixture
+) -> None:
+    # The app's own engine: what the driver really raises, not a hand-built
+    # error.
+    client = _refused_client(monkeypatch)
+    app = client.app
+    assert isinstance(app, FastAPI)
     key = app.state.settings.auth.token.signing_key
     assert isinstance(key, str)
     tokens = JwtTokenService(
@@ -239,3 +247,21 @@ def test_a_refused_connect_answers_503(
     [warning] = _records(logs, logging.WARNING)
     assert warning.exc_info is None
     assert _records(logs, logging.ERROR) == []
+
+
+@pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])
+def test_each_app_engine_raises_a_refused_connect_typed(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # Typed, the refused connect is told apart from a disk fault's bare
+    # ``OSError``, which stays a 500.
+    client = _refused_client(monkeypatch)
+    app = client.app
+    assert isinstance(app, FastAPI) and client.portal is not None
+
+    async def connect() -> None:
+        async with getattr(app.state, engine).connect():
+            pass
+
+    with pytest.raises(DatabaseConnectError):
+        client.portal.call(connect)
