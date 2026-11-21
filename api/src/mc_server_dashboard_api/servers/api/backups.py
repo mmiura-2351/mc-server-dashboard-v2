@@ -319,6 +319,18 @@ async def create_backup(
             server_id,
         )
         raise _service_unavailable("storage_unavailable") from exc
+    except LifecycleLockLostError as exc:
+        # The lock was lost before the backup row's commit (issue #3927): nothing
+        # was created, and a retry takes the lock afresh.
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.ERROR,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise _service_unavailable("lifecycle_lock_lost") from exc
     except CommandDispatchError as exc:
         # ``worker_unavailable`` (issue #3678): the Worker's backend did not answer,
         # or a leftover container may be running against a stopped working set.
