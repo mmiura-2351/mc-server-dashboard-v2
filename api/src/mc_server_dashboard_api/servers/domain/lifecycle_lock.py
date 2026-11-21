@@ -28,7 +28,10 @@ flip or prune, an in-place working-set write, an archive write or delete, a row
 commit that assumed the server at rest. A lost lock raises
 :class:`~mc_server_dashboard_api.servers.domain.errors.LifecycleLockLostError`
 there, so the operation stops before those writes. A loss from the check until
-they are done goes unnoticed (``docs/app/DATABASE.md`` Section 7).
+they are done goes unnoticed (``docs/app/DATABASE.md`` Section 7). A loss that
+only the release finds is not raised: every guarded write ran after a check that
+passed, so the operation keeps its own outcome, the result it returned or the
+error it raised.
 """
 
 from __future__ import annotations

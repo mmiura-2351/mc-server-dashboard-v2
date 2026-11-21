@@ -31,15 +31,17 @@ the lock while the first still runs. :meth:`_PgHeldLifecycleLock.ensure_held` is
 the holder's check: it asks ``pg_locks``, on the lock's own connection, whether
 this session still holds the key. A connection that fails, a check that does not
 answer within a few seconds, or an answer of no all mean the lock is lost, and
-raise :class:`~...domain.errors.LifecycleLockLostError`; asking whether the
+raise :class:`~...domain.errors.LifecycleLockLostError`. Asking whether the
 session holds the key, rather than whether the connection answers, also catches a
-connection that now reaches a backend which never took the lock. The use cases
-call it immediately before each write, or run of writes, that relies on the
-exclusion. Leaving the hold reports a loss the body never checked for as the same
-error, since the body's last writes may have run outside the exclusion. A loss
-from a check until the writes it guards are done still goes unnoticed: closing
-that window would take fencing tokens that neither the database writes nor the
-storage backends check.
+live session that stopped holding it. The use cases call it immediately before
+each write, or run of writes, that relies on the exclusion. A loss from a check
+until the writes it guards are done still goes unnoticed: closing that window
+would take fencing tokens that neither the database writes nor the storage
+backends check.
+
+A loss that only the release finds is logged and never raised. A body that
+finished made every write it made after a check that passed, so it answers as
+finished; a body that raised, or was cancelled, keeps its own outcome.
 
 Advisory locks are a PostgreSQL feature. This adapter is wired only behind the
 real Postgres engine; the unit suite uses the in-memory ``LifecycleLock`` fake
@@ -51,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 from collections.abc import AsyncIterator
 
 from sqlalchemy import text
@@ -65,6 +68,8 @@ from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     LifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+_LOG = logging.getLogger(__name__)
 
 # A constant namespace mixed into the lock key so the server-UUID-derived key
 # cannot collide with an advisory lock any other subsystem takes on a bare id.
@@ -84,10 +89,13 @@ _LOCK_NAMESPACE = "server-lifecycle"
 _ACQUIRE_BUDGET_SECONDS = 5.0
 _ACQUIRE_POLL_SECONDS = 0.1
 
-# How long a held-lock check may take (issue #3927). The check is one catalog read
-# on an open connection; a connection that does not answer it in time counts as
-# lost, because the storage fences await this check under the per-server storage
-# lock, and a check left hanging on a dead peer would hold that lock with it.
+# How long a held-lock check may wait for its answer (issue #3927). The check is one
+# catalog read on an open connection; a connection that does not answer it in time
+# counts as lost, because the storage fences await this check under the per-server
+# storage lock, and a check left hanging on a dead peer would hold that lock with
+# it. The worst case is longer: closing a connection that stopped answering adds
+# the driver's graceful close, up to 2 s, so the storage lock can be held for about
+# 7 s.
 _CHECK_TIMEOUT_SECONDS = 5.0
 
 # Whether THIS session holds the session-level advisory lock on ``key``. A bigint
@@ -157,12 +165,21 @@ class _PgHeldLifecycleLock(HeldLifecycleLock):
             await self._conn.execute(
                 text("SELECT pg_advisory_unlock(:key)"), {"key": self._key}
             )
-        except Exception as exc:
-            # The session ended before the release, which released the lock at
-            # that moment: the body's writes since its last check may have run
-            # outside the exclusion.
+        except BaseException as exc:
+            # The connection is unusable, so it is closed, which ends the lock if
+            # the session still held it. A cancellation of the release goes on as
+            # itself; any other failure is logged and not raised (issue #3927).
+            # A body that finished made every write after a check that passed,
+            # so it answers as finished; one that raised keeps its own error.
             await self._lose()
-            raise LifecycleLockLostError(str(self._server_id.value)) from exc
+            if not isinstance(exc, Exception):
+                raise
+            _LOG.warning(
+                "the lifecycle lock's session ended before its release; writes "
+                "made after the last check ran in the window that check leaves",
+                exc_info=exc,
+                extra={"server_id": str(self._server_id.value)},
+            )
 
     async def _lose(self) -> None:
         self._lost = True
