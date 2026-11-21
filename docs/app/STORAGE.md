@@ -498,17 +498,17 @@ the gate admits. The object writer's names are the snapshot's object keys, so
 its backups pass alike only while every key is at most 4095 bytes. The
 member-name rule holds every name the files API creates and every member the
 backup upload admits to that (Section 6.2); a snapshot's keys are bounded by
-the Worker's pack, and the ingest does not check them yet (issue #3975). No walk keeps a member it has walked past
-(issue #3931): `tarfile` keeps every member it reads, its PAX records
-included, unless the `TarFile` is opened with `stream=True`, as every walk's
-now is, and the fs snapshot ingest extracts each member as it reaches it
-rather than through `extractall`, which kept every directory member. So a
-walk's memory no longer grows with its member count: a walk of 1,000 members
-holding all the characters the limit allows, 8 Mi plus 16 Ki a member, peaked
-at 24 MiB with ASCII values and at 95 MiB with UCS-4 ones, and peaks at
-0.1 MiB and 0.9 MiB. Past any of these limits restore and the probe raise
-`ArchiveUnreadableError`. They take a member at any depth the path length
-allows, on fs as on object: the fs adapter creates a member's
+the Worker's pack, and the ingest does not check them yet (issue #3975). No
+walk keeps a member it has walked past (issue #3931): `tarfile` keeps every
+member it reads, its PAX records included, unless the `TarFile` is opened
+with `stream=True`, as every walk's now is, and the fs snapshot ingest
+extracts each member as it reaches it rather than through `extractall`, which
+kept every directory member. So a walk's memory no longer grows with its member
+count: a walk of 1,000 members holding all the characters the limit allows, 8 Mi
+plus 16 Ki a member, peaked at 24 MiB with ASCII values and at 95 MiB with UCS-4
+ones, and peaks at 0.1 MiB and 0.9 MiB. Past any of these limits restore and the
+probe raise `ArchiveUnreadableError`. They take a member at any depth the path
+length allows, on fs as on object: the fs adapter creates a member's
 directories, and packs a working set for hydrate, backup create and prune, one
 level at a time (issue #3859). `tarfile.add` and `Path.mkdir` recursed once a
 level and raised `RecursionError` for a tree about 1,000 levels deep. The fs
@@ -1814,12 +1814,20 @@ which the API's constants and the Worker's walk bounds are each tested against:
 The rule is the application's, above this Port: every door that creates a name
 asks it before anything is written, and answers a refusal with that `422`
 reason. The files-API write (at rest, and running, before the Worker is asked),
-make-dir, upload and each archive member joined to the upload's directory, and
-a rename's destination; a directory rename asks it of every name the move
-creates below the destination, so a subtree too deep or too long to move is
-refused whole. A server import refuses such a member before its row exists, and
-the backup upload gate refuses one as `422 invalid_archive`, its `detail`
-naming the member and the reason, before the archive is stored.
+make-dir, upload and each archive member joined to the upload's directory, and a
+rename's destination. A directory rename also judges the names the move creates
+below the destination, each the destination plus a path below the source. A
+destination with no more components and no more bytes than the source creates
+none deeper or longer than one already there, so it is not measured: a tree
+already too deep can still be renamed at its own level. Any other is judged by
+the subtree's extent, its deepest directory and longest path below the source,
+measured as stored in one walk on fs and one prefix listing on object
+(`subtree_extent`), so a subtree too deep or too long to move is refused whole.
+The moved names keep their characters and are not asked about them, so a
+directory whose name no path can spell moves with the rest. A server import
+refuses such a member before its row exists, and the backup upload gate refuses
+one as `422 invalid_archive`, its `detail` naming the member and the reason,
+before the archive is stored.
 
 The files-API doors also refuse the characters an uploaded file's name may not
 carry (issues #3922, #3969): a `\`, a control character (C0, DEL or C1), a lone
