@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import threading
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import replace
 
 import pytest
@@ -1328,6 +1329,49 @@ async def test_install_that_lost_the_lifecycle_lock_commits_and_writes_nothing()
 
     assert uow.commits == 0
     assert fs.files == {}
+
+
+class _TimelineCache(FakePluginCacheStore):
+    """A cache that records each ingest on a lock's event timeline."""
+
+    def __init__(self, events: list[tuple[ServerId, str]], server_id: ServerId) -> None:
+        super().__init__()
+        self._events = events
+        self._server_id = server_id
+
+    async def put(self, sha256: str, stream: AsyncIterator[bytes]) -> None:
+        self._events.append((self._server_id, "cache-put"))
+        await super().put(sha256, stream)
+
+
+async def test_install_confirms_the_lock_after_the_cache_ingest() -> None:
+    # The ingest is the slow storage write inside the hold: a check before it
+    # would leave that whole window unguarded.
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    lock = FakeLifecycleLock()
+
+    await InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=_TimelineCache(lock.events, server.id),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )(
+        community_id=_COMMUNITY,
+        server_id=server.id,
+        filename="fabric-api.jar",
+        display_name="Fabric API",
+        content=b"fake-jar-bytes",
+    )
+
+    assert lock.events == [
+        (server.id, "acquire"),
+        (server.id, "cache-put"),
+        (server.id, "check"),
+        (server.id, "release"),
+    ]
 
 
 async def test_remove_that_lost_the_lifecycle_lock_commits_and_deletes_nothing() -> (
