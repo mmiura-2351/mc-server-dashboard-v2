@@ -767,19 +767,19 @@ Notes:
   `observed=unknown`, guarded on that Worker and stamped with the instant the
   start placed the server there, so a report the Worker sent while the hydrate
   waited stands. The value the server carried was not reported by this Worker,
-  which reports nothing on a server no record names. With `unknown`, the reconciler re-sends the start to that Worker once
-  its grace lapses, even where the server read a stale `running`. A stop whose
-  dispatch fails is sent again rather than released under the instance on the
-  strength of a stale `stopped`. In the same write the API owes again the
-  player-file marks the start cleared before its hydrate, for a launch that
-  did not happen, and every group-managed file, as for an `INVALID_STATE`
-  hydrate (the previous note). If the Worker turns out to run the server, the
-  re-sent start keeps that instance without owing anything (issue #3901), and
-  its snapshots publish its own player files, so the next start after a stop
-  regenerates them. Once the reservation, orphan, leftover or queue clears, the re-sent
-  start hydrates and launches there. If the Worker's session ends instead, the
-  server waits for it as any of its servers does, until an operator stop
-  releases it (Section 4.4).
+  which reports nothing on a server no record names. With `unknown`, the
+  reconciler re-sends the start to that Worker once its grace lapses, even
+  where the server read a stale `running`. A stop whose dispatch fails is sent
+  again rather than released under the instance on the strength of a stale
+  `stopped`. In the same write the API owes again the player-file marks the
+  start cleared before its hydrate, for a launch that did not happen, and every
+  group-managed file, as for an `INVALID_STATE` hydrate (the previous note). If
+  the Worker turns out to run the server, the re-sent start keeps that instance
+  without owing anything (issue #3901), and its snapshots publish its own
+  player files, so the next start after a stop regenerates them. Once the
+  reservation, orphan, leftover or queue clears, the re-sent start hydrates and
+  launches there. If the Worker's session ends instead, the server waits for it
+  as any of its servers does, until an operator stop releases it (Section 4.4).
   Every other answer to a hydrate gives the Worker back. `TRANSFER_FAILED`
   comes after both checks passed, with the reservation held through the
   transfer. The one site that answers it before them needs a Worker with no
@@ -813,16 +813,17 @@ Notes:
 
   The mark clears once the Worker holds the store's working set: its hydrate
   succeeded, or the generation it holds is at least the store's, so the start
-  skips the hydrate. Only the start whose placement it is clears it: one whose
-  server a stop released and a newer start placed on the same Worker during its
-  hydrate leaves the newer placement's mark. If the Worker then refuses that start because the working
-  set is not on its disk (Section 7), the mark is set again for the hydrate
-  the start replays. A `running` report from the Worker clears it too, as does
-  an `INVALID_STATE` hydrate: from then on the instance's working set is the
-  server's (the note before last). A release clears it with the assignment.
-  The mark is stored with the server, so it also covers a start whose API
-  process stopped between the commit and the hydrate, and a start cancelled
-  while a hydrate it sent was refused.
+  skips the hydrate. If the Worker then refuses a start that skipped its
+  hydrate because the working set is not on its disk (Section 7), the mark is
+  set again for the hydrate that start replays. Only the start whose placement
+  it is clears the mark: if a stop released the server during a start's
+  hydrate and a newer start placed it on the same Worker, the older start
+  leaves the newer placement's mark. A `running` report from the Worker clears
+  it too, as does an `INVALID_STATE` hydrate: from then on the instance's
+  working set is the server's (the note before last). A release clears it with
+  the assignment. The mark is stored with the server, so it also covers a start
+  whose API process stopped between the commit and the hydrate, and a start
+  cancelled while a hydrate it sent was refused.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it
