@@ -2001,28 +2001,70 @@ async def test_backup_within_the_storage_header_limits_is_healthy_and_restores(
     )
 
 
-async def test_a_member_1100_directories_deep_is_healthy_and_restores(
-    harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A file 1,100 directories deep, with no directory members, is healthy and
-    restores on BOTH backends (issue #3859). The fs restore creates a member's
-    directories one level at a time: ``Path.mkdir(parents=True)`` recursed once
-    for each and raised ``RecursionError``."""
+def _name_levels_deep(levels: int) -> str:
+    """A file name of ``levels`` path components, under ``levels - 1`` directories."""
 
-    # The fs publish syncs each of the 1,100 directories, which this does not
-    # pin, and which would hold a gate under I/O load (issue #3651).
-    monkeypatch.setattr(os, "fsync", lambda fd: None)
-    name = "/".join(["d"] * 1100) + "/f"
+    return "/".join(["d"] * (levels - 1) + ["f"])
+
+
+@pytest.mark.parametrize("levels", [513, 1100])
+async def test_a_member_past_the_fs_depth_bound_restores_on_object_only(
+    harness: StorageHarness, backend: str, levels: int
+) -> None:
+    """The object backend restores a member of any depth (issue #3859). The fs
+    backend packs a working set with ``tarfile``'s recursive ``add``, which cannot
+    pack a tree about 1,000 levels deep, so a restore would leave a server it
+    could not start, back up or delete: its restore and health probe refuse a
+    member more than 512 levels deep, naming the bound, and the live world
+    stays (until issue #3931)."""
+
+    name = _name_levels_deep(levels)
     community, server = new_scope()
+    await harness.publish(community, server, {"world/level.dat": b"live"})
     key = await harness.storage.put_backup(
         community, server, stream_of(gzip.compress(tar_bytes({name: b"deep"})))
     )
 
+    if backend == "object":
+        health = await harness.storage.check_backup_health(community, server, key)
+        assert health.healthy
+        await harness.storage.restore_backup(community, server, key)
+        read = await harness.storage.read_file(community, server, RelPath(name))
+        assert read == b"deep"
+    else:
+        with pytest.raises(ArchiveUnreadableError, match="more than 512 levels deep"):
+            await harness.storage.check_backup_health(community, server, key)
+        with pytest.raises(ArchiveUnreadableError, match="more than 512 levels deep"):
+            await harness.storage.restore_backup(community, server, key)
+        live = await harness.storage.read_file(
+            community, server, RelPath("world/level.dat")
+        )
+        assert live == b"live"
+
+
+async def test_a_member_512_levels_deep_restores_and_is_packed_again(
+    harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member 512 levels deep, the fs bound, is healthy and restores on BOTH
+    backends (issue #3859), and the working set it leaves is hydrated, backed up
+    and pruned: the server can start, be backed up and be deleted."""
+
+    # The fs publish syncs each of the 511 directories, which this does not pin,
+    # and which would hold a gate under I/O load (issue #3651).
+    monkeypatch.setattr(os, "fsync", lambda fd: None)
+    files = {_name_levels_deep(512): b"deep"}
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(tar_bytes(files)))
+    )
+
     assert (await harness.storage.check_backup_health(community, server, key)).healthy
     await harness.storage.restore_backup(community, server, key)
-    # One file read back, not a hydrate: the fs adapter packs a tree with
-    # ``tarfile``'s recursive ``add``, which cannot pack one this deep either.
-    assert await harness.storage.read_file(community, server, RelPath(name)) == b"deep"
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
+    backup = await harness.storage.create_backup_from_current(community, server)
+    assert backup in await harness.storage.list_backups(community, server)
+    await harness.storage.prune_to_final_snapshot(community, server)
 
 
 # Each a chain of 500 extended headers of one kind before a member.

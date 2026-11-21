@@ -153,6 +153,13 @@ _SPOOL_SWEEP_MIN_AGE_S = 3600
 # and the backup writer stays under it (issue #3859).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 
+# The deepest member restore and the health check take, in path components
+# (issue #3859). This adapter packs a working set with ``tarfile``'s recursive
+# ``add`` (``_add_plain``), which raises ``RecursionError`` near 1,000 levels, so a
+# deeper member would restore into a working set the server could not start
+# from, back up or be deleted with. Until the pack is iterative (issue #3931).
+_MAX_RESTORE_DEPTH = 512
+
 # The backoff of ``_under_server_lock``'s wait for the server lock (issues #3552,
 # #3569).
 _LOCK_POLL_INITIAL_SECONDS = 0.005
@@ -4214,6 +4221,10 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     may be at most 10,000 of them (issue #3835); anything else is
     :class:`ArchiveUnreadableError`.
 
+    A member more than ``_MAX_RESTORE_DEPTH`` (512) levels deep is
+    :class:`ArchiveUnreadableError` (issue #3859): this adapter could not pack
+    the working set it would restore (issue #3931).
+
     A member at, or under, the reserved generation-marker root name is left out
     and counted (issue #3433): a backup stored before the name was reserved can
     carry one, and refusing it would leave that backup unrestorable. Its data is
@@ -4252,6 +4263,11 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
                     dropped += 1
                     total = _drain_member_capped(tar, safe, total, max_bytes)
                     continue
+                if safe.name.count("/") + 1 > _MAX_RESTORE_DEPTH:
+                    raise ArchiveUnreadableError(
+                        f"archive holds a member more than {_MAX_RESTORE_DEPTH}"
+                        " levels deep, deeper than this store can pack again"
+                    )
                 total = _extract_member_capped(tar, safe, dest, total, max_bytes)
             for _zeros in stream.read_past_end_marker():
                 pass

@@ -28,6 +28,7 @@ from mc_server_dashboard_api.storage.adapters.fs import (
     _DEFAULT_MAX_RESTORE_BYTES,
     FsStorage,
     _extract_tar_gz_into,
+    _make_directories,
     _new_version_id,
 )
 from mc_server_dashboard_api.storage.domain.errors import (
@@ -1347,6 +1348,20 @@ def test_restore_extract_preserves_file_mode_and_mtime(tmp_path: Path) -> None:
     stat = extracted.stat()
     assert stat.st_mode & 0o777 == 0o750
     assert int(stat.st_mtime) == mtime
+
+
+def test_restore_creates_a_members_directories_without_recursing(
+    tmp_path: Path,
+) -> None:
+    """The fs restore creates a member's missing directories one level at a time
+    (issue #3859): ``Path.mkdir(parents=True)`` recursed once for each, so 1,100
+    of them raised ``RecursionError``. Restore refuses a member that deep for
+    now (``_MAX_RESTORE_DEPTH``, issue #3931), so this calls the helper itself."""
+
+    deep = tmp_path.joinpath(*["d"] * 1100)
+    _make_directories(deep)
+    assert deep.is_dir()
+    _make_directories(deep)  # every level there already: no raise
 
 
 # --- a mutation's raw fs errnos become storage-domain outcomes (issue #2433) ---
