@@ -5,8 +5,8 @@ when no row of its database names a stored object. The command claims such a
 store for this database: it writes the owner marker naming this installation,
 whatever the store holds, and deletes nothing. It never replaces a marker,
 whichever installation that marker names. It exits 0 when it claimed the store, 1
-when it refused, and 2, with one line and no traceback, when the database or the
-store failed.
+when it refused, and 2, with one line and no traceback, when the configuration,
+the database or the store failed. It logs through the app's handler.
 
 These run ``main`` over the config-selected store the API builds (object, over
 the in-memory S3 stub, and fs), with the real marker in place of the app suite's
