@@ -34,6 +34,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidResourcePackError,
+    LifecycleLockLostError,
     PermissionDeniedError,
     ResourcePackInUseError,
     ResourcePackNotFoundError,
@@ -1258,3 +1259,73 @@ class TestGetResourcePackAssignment:
                 community_id=_COMMUNITY_ID,
                 server_id=ServerId(uuid.uuid4()),
             )
+
+
+# -- A lost lifecycle lock (issue #3927) --
+
+
+async def test_assign_checks_the_lock_right_before_its_rewrite() -> None:
+    server = _at_rest_server()
+    servers = FakeServerRepository()
+    servers.seed(server)
+    uow = FakeUnitOfWork(servers=servers)
+    pack = _seed_pack(uow)
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = b"motd=hi\n"
+    lock = FakeLifecycleLock()
+    file_store.events = lock.events
+
+    async def _assign() -> None:
+        await AssignResourcePack(
+            uow=uow, file_store=file_store, clock=FakeClock(_NOW), lifecycle_lock=lock
+        )(
+            community_id=_COMMUNITY_ID,
+            server_id=server.id,
+            resource_pack_id=pack.id,
+            require_resource_pack=True,
+            resource_pack_prompt=None,
+            assigned_by=uuid.uuid4(),
+            public_base_url=_BASE_URL,
+        )
+
+    await _assign()
+    write_at = lock.events.index((server.id, "write-file"))
+    assert lock.events[write_at - 1] == (server.id, "check")
+
+    file_store.files["server.properties"] = b"motd=hi\n"
+    lock.checks_before_loss = 0
+    with pytest.raises(LifecycleLockLostError):
+        await _assign()
+    assert file_store.files["server.properties"] == b"motd=hi\n"
+    assert uow.commits == 1
+
+
+async def test_unassign_that_lost_the_lock_rewrites_and_commits_nothing() -> None:
+    server = _at_rest_server()
+    servers = FakeServerRepository()
+    servers.seed(server)
+    uow = FakeUnitOfWork(servers=servers)
+    pack = _seed_pack(uow)
+    props = b"motd=hi\nresource-pack=url\nresource-pack-sha1=sha\n"
+    file_store = FakeFileStore()
+    file_store.files["server.properties"] = props
+    uow.resource_packs.assignments[server.id] = ResourcePackAssignment(
+        server_id=server.id,
+        resource_pack_id=pack.id,
+        require_resource_pack=False,
+        resource_pack_prompt=None,
+        assigned_by=uuid.uuid4(),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await UnassignResourcePack(uow=uow, file_store=file_store, lifecycle_lock=lock)(
+            community_id=_COMMUNITY_ID, server_id=server.id
+        )
+
+    assert file_store.files["server.properties"] == props
+    assert server.id in uow.resource_packs.assignments
+    assert uow.commits == 0

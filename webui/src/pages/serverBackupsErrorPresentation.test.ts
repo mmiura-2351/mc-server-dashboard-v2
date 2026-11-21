@@ -101,15 +101,17 @@ describe("backupRestoreErrorPresentation", () => {
   // The backup WAS published and only a follow-up step failed (issue #3269):
   // the bare-503 arm would blame the server host, while the remedy is to retry
   // the restore.
-  it.each(["seed_failed", "plugin_reconcile_incomplete", "publish_incomplete"])(
-    "names the incomplete follow-up step for a 503 %s",
-    (reason) => {
-      const key = backupRestoreErrorPresentation(503, reason);
-      expect(key).toBe("backups.error.restoreIncomplete");
-      expect(en[key]).toMatch(/restored.*retry the restore/i);
-      expect(ja[key]).toMatch(/復元.*もう一度/);
-    },
-  );
+  it.each([
+    "seed_failed",
+    "plugin_reconcile_incomplete",
+    "publish_incomplete",
+    "restore_incomplete",
+  ])("names the incomplete follow-up step for a 503 %s", (reason) => {
+    const key = backupRestoreErrorPresentation(503, reason);
+    expect(key).toBe("backups.error.restoreIncomplete");
+    expect(en[key]).toMatch(/restored.*retry the restore/i);
+    expect(ja[key]).toMatch(/復元.*もう一度/);
+  });
 
   // The store could not confirm whether the backup went live (issue #3564):
   // the message must not claim it was restored, only that it may have been.

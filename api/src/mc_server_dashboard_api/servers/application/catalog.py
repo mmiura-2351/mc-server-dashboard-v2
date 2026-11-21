@@ -407,7 +407,7 @@ class InstallFromCatalog:
 
         # Phase 4: At-rest gate + write (hold lock, short duration).
         rel_path = f"{content_dir}/{safe_filename}"
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
@@ -468,6 +468,9 @@ class InstallFromCatalog:
                     port_range=self.bedrock_port_range,
                     now=now,
                 )
+                # The row and the working-set write right behind it rely on the
+                # lifecycle lock (issue #3927).
+                await lock.ensure_held()
                 await self.uow.commit()
                 # Side-aware deploy (issue #1308): only a server-relevant,
                 # enabled jar goes into the working set; a client-only jar is
@@ -693,7 +696,7 @@ class UpdatePlugin:
         new_path = working_set_path(
             clean_path=new_clean_path, enabled=plugin.enabled, side=plugin.side
         )
-        async with self.lifecycle_lock.hold(server_id):
+        async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
                 if not server.is_at_rest():
@@ -738,6 +741,8 @@ class UpdatePlugin:
                     catalog_dependencies=catalog_dependencies,
                 )
                 await self.uow.plugins.update(updated_plugin)
+                # As in InstallFromCatalog (issue #3927).
+                await lock.ensure_held()
                 await self.uow.commit()
                 # Write the fresh bytes at the desired path and remove the old
                 # file after the DB commit so a commit failure does not leave

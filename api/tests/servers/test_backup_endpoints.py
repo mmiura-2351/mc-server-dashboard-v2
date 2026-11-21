@@ -120,6 +120,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidFilePathError,
     InvalidRetentionPolicyError,
+    LifecycleLockLostError,
     PluginReconcileIncompleteError,
     ServerBusyError,
     ServerNotFoundError,
@@ -129,7 +130,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
+    NullHeldLifecycleLock,
     NullLifecycleLock,
 )
 from mc_server_dashboard_api.servers.domain.plugin import ServerPlugin
@@ -165,6 +168,7 @@ from tests.servers.fakes import (
     FakeBackupArchiveStore,
     FakeBackupRepository,
     FakeFileStore,
+    FakeLifecycleLock,
     FakePluginCacheStore,
     FakePluginRepository,
     FakeServerRepository,
@@ -475,6 +479,21 @@ def test_create_storage_unavailable_is_503_with_reason() -> None:
     # No Retry-After: nothing in the request path knows when the store recovers.
     assert "Retry-After" not in resp.headers
     # Mirrors the worker-down path: an ERROR against the server (no backup id).
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.ERROR
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
+
+
+def test_create_that_lost_the_lifecycle_lock_is_503_and_audited() -> None:
+    # The lock was lost before the backup row's commit (issue #3927): nothing
+    # was created, and the create is audited like its other transient failures.
+    use_case = _FakeUseCase(error=LifecycleLockLostError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
     assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
     assert recorder.events[0].outcome is Outcome.ERROR
     assert recorder.events[0].target_type == ops.TARGET_SERVER
@@ -881,16 +900,18 @@ def test_a_failure_after_a_forced_corrupt_publish_records_force_restore(
 
 
 class _UnlockFailingLifecycleLock(LifecycleLock):
-    """A lock whose release fails, as ``pg_advisory_unlock`` on a lost connection."""
+    """A lock whose exit raises, which the restore survives whatever it raised."""
 
     @contextlib.asynccontextmanager
-    async def _hold(self) -> AsyncIterator[None]:
+    async def _hold(self) -> AsyncIterator[HeldLifecycleLock]:
         try:
-            yield
+            yield NullHeldLifecycleLock()
         finally:
             raise OSError("connection to the lock's database was lost")
 
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         return self._hold()
 
 
@@ -931,6 +952,40 @@ def test_a_lock_release_failure_after_the_publish_keeps_the_restore_audit(
     assert resp.status_code == status
     if fail_properties:
         assert resp.json()["reason"] == "seed_failed"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.ERROR
+
+
+def _lost_lock(*, checks_before_loss: int) -> FakeLifecycleLock:
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = checks_before_loss
+    return lock
+
+
+@pytest.mark.parametrize(
+    ("checks_before_loss", "reason", "operation"),
+    [
+        # Lost before the store published: nothing was restored.
+        (0, "lifecycle_lock_lost", ops.BACKUP_RESTORE),
+        # Lost after it: the forced corrupt restore is live, the steps after it
+        # were skipped, and it is audited as the force-restore it was.
+        (1, "restore_incomplete", ops.BACKUP_FORCE_RESTORE),
+    ],
+)
+def test_a_restore_that_lost_its_lifecycle_lock_is_a_503(
+    checks_before_loss: int, reason: str, operation: str
+) -> None:
+    resp, recorder, _, _ = _force_restore_through_the_route(
+        backup_store=_corrupt_fake_archive(),
+        file_store=FakeFileStore(),
+        storage_ref="ref",
+        community_id=uuid.uuid4(),
+        server_id=uuid.uuid4(),
+        lifecycle_lock=_lost_lock(checks_before_loss=checks_before_loss),
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == reason
     assert [e.operation for e in recorder.events] == [operation]
     assert recorder.events[0].outcome is Outcome.ERROR
 
@@ -3133,7 +3188,9 @@ class _HeldLifecycleLock(LifecycleLock):
     Gives up the way PgLifecycleLock's bounded acquire does (issue #876).
     """
 
-    def hold(self, server_id: ServerId) -> contextlib.AbstractAsyncContextManager[None]:
+    def hold(
+        self, server_id: ServerId
+    ) -> contextlib.AbstractAsyncContextManager[HeldLifecycleLock]:
         raise ServerBusyError(str(server_id.value))
 
 

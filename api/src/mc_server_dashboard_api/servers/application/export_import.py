@@ -72,6 +72,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidExportMetadataError,
     InvalidFilePathError,
+    LifecycleLockLostError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
     ServerFilesUnsettledError,
@@ -497,14 +498,17 @@ class ImportServer:
         #243/#252 seed-failure posture --
         :class:`WorkingSetSeedFailedError` (503 ``seed_failed``) -- rather than
         the install paths' distinct ``bedrock_port_range_exhausted`` / 409
-        ``bedrock_port_taken`` (which imply nothing was created yet).
+        ``bedrock_port_taken`` (which imply nothing was created yet). A lifecycle
+        lock lost before the plugin commit (issue #3927) is the same post-commit
+        failure, rather than ``lifecycle_lock_lost``, whose retry would only meet
+        the name this import already took.
         """
 
         if not plugin_dicts:
             return server
         uow = self.create_server.uow
         try:
-            async with self.lifecycle_lock.hold(server.id):
+            async with self.lifecycle_lock.hold(server.id) as lock:
                 async with uow:
                     # Re-fetch the current row so the whole-entity write-back in
                     # allocate_bedrock_port_if_geyser does not clobber a concurrent
@@ -522,13 +526,18 @@ class ImportServer:
                             port_range=self.bedrock_port_range,
                             now=now,
                         )
+                    # The rows rely on the lifecycle lock (issue #3927).
+                    await lock.ensure_held()
                     await uow.commit()
             return fresh
-        except (PortAlreadyTakenError, PortRangeExhaustedError) as exc:
+        except (
+            PortAlreadyTakenError,
+            PortRangeExhaustedError,
+            LifecycleLockLostError,
+        ) as exc:
             _logger.warning(
-                "import plugin metadata failed (Bedrock port allocation: %s); "
-                "server row committed but plugin rows are unpublished (repairable "
-                "via the plugins API)",
+                "import plugin metadata failed (%s); server row committed but "
+                "plugin rows are unpublished (repairable via the plugins API)",
                 type(exc).__name__,
                 extra={"server_id": str(server.id.value)},
             )

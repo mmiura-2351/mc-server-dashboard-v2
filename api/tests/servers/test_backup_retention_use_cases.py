@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidRetentionPolicyError,
+    LifecycleLockLostError,
     ServerNotFoundError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -374,7 +375,32 @@ async def test_prune_holds_the_lifecycle_lock_around_its_work() -> None:
     # in the shared timeline pins "around its work" (issue #2515).
     assert env.events == [
         (env.server.id, "acquire"),
+        (env.server.id, "check"),
         (env.server.id, "delete-archive"),
         (env.server.id, "delete-row"),
         (env.server.id, "release"),
     ]
+
+
+async def test_prune_confirms_the_lock_before_each_deletion_and_stops_once_lost() -> (
+    None
+):
+    # Issue #3927: the lifecycle lock can be lost mid-prune; each deletion is
+    # preceded by a check, and the first failed check stops the rest.
+    env = _Env()
+    await env.seed_retention({"keep_last": 1})
+    first, second = (
+        _backup(env.server.id, _NOW - dt.timedelta(days=3)),
+        _backup(env.server.id, _NOW - dt.timedelta(days=2)),
+    )
+    for backup in (first, second, _backup(env.server.id, _NOW)):
+        env.seed_backup(backup)
+    env.lock.checks_before_loss = 1
+
+    with pytest.raises(LifecycleLockLostError):
+        await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert len(env.store.deleted) == 1
+    deletion = env.events.index((env.server.id, "delete-archive"))
+    assert env.events[deletion - 1] == (env.server.id, "check")
+    assert env.events[-2:] == [(env.server.id, "check"), (env.server.id, "release")]

@@ -277,6 +277,17 @@ fails while it reads `server.properties`. These statuses describe the object
 storage backend, which reports an outage as such; the filesystem backend
 reports a device fault on these routes as a 500.
 
+**A lost lifecycle lock.** A route that runs under the server's lifecycle lock
+(DATABASE.md Section 7) answers **503 `lifecycle_lock_lost`** when the lock's
+database session ended before a write that relied on the lock: it stopped
+before that write. Retrying takes the lock afresh. What it wrote before
+stopping stands, as after any other failure at that point. A restore that had
+already published answers **503 `restore_incomplete`** instead (Section 6.7).
+An import whose server already exists, and an update whose row change has
+committed, answer 503 `seed_failed`, as for their other failures after that
+commit. A loss found only when the operation releases the lock, after its last
+write, changes nothing: the operation answers as it finished.
+
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `mc_version`, `server_type`, `config` (full blob),
 `memory_limit_mb` (derived from `config['memory_limit_mb']`, null when unset),
@@ -819,10 +830,11 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   storage) cannot be restored at all: its restore action is disabled with a
   hover explanation, and its condition badge names the storage-side remedy
   rather than the damaged-world one.
-  A restore answering 503 `seed_failed`, `plugin_reconcile_incomplete` or
-  `publish_incomplete` (the store failed after it published, #3564) published
-  the backup and then failed a follow-up step, so its message says the backup
-  was restored and asks the user to retry the restore. A restore answering 503
+  A restore answering 503 `seed_failed`, `plugin_reconcile_incomplete`,
+  `publish_incomplete` (the store failed after it published, #3564) or
+  `restore_incomplete` (the lifecycle lock was lost after the publish, #3927)
+  published the backup and then failed or skipped a follow-up step, so its
+  message says the backup was restored and asks the user to retry the restore. A restore answering 503
   `publish_unknown` (the store could not confirm whether it published, #3564)
   says the backup may have been restored and asks the user to retry.
 - Create backup button (works on running servers — on-demand snapshot path);
