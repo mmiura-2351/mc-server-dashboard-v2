@@ -150,6 +150,15 @@ def _assert_checked_right_before(
         assert events[at - 1] == (server_id, "check"), (label, events)
 
 
+def _assert_checked_right_after(
+    events: list[tuple[ServerId, str]], server_id: ServerId, label: str
+) -> None:
+    """Assert the held lock was confirmed immediately after the ``label`` event."""
+
+    at = events.index((server_id, label))
+    assert events[at + 1] == (server_id, "check"), (label, events)
+
+
 def _at_rest() -> Server:
     return Server(
         id=ServerId(uuid.uuid4()),
@@ -704,20 +713,23 @@ async def test_delete_group_takes_lock_around_its_work() -> None:
 
 
 def _restore_case(
-    *, file_store: FakeFileStore | None = None
+    *,
+    file_store: FakeFileStore | None = None,
+    server_type: ServerType = ServerType.VANILLA,
+    uow: FakeUnitOfWork | None = None,
 ) -> tuple[Server, Backup, FakeBackupArchiveStore, RestoreBackup, FakeLifecycleLock]:
     server = _at_rest()
-    repo = FakeServerRepository()
-    repo.seed(server)
-    backups = FakeBackupRepository()
+    server.server_type = server_type
+    uow = uow or FakeUnitOfWork()
+    uow.servers.seed(server)
     backup = _backup(server.id)
-    backups.seed(backup)
+    uow.backups.seed(backup)
     archive = FakeBackupArchiveStore()
     archive.archives.add("ref")
     lock = FakeLifecycleLock()
     archive.events = lock.events
     restore = RestoreBackup(
-        uow=FakeUnitOfWork(servers=repo, backups=backups),
+        uow=uow,
         backup_store=archive,
         lifecycle_lock=lock,
         file_store=file_store,
@@ -739,6 +751,48 @@ async def test_restore_confirms_the_lock_in_the_store_before_it_publishes() -> N
     assert archive.restored == []
 
 
+@pytest.mark.parametrize("verdict", [BackupHealth.QUARANTINED, BackupHealth.UNREADABLE])
+async def test_a_refused_restore_that_lost_the_lock_records_no_verdict(
+    verdict: BackupHealth,
+) -> None:
+    # The verdict is a write under the lock like the integrity sweep's, and is
+    # confirmed the same way.
+    uow = FakeUnitOfWork()
+    server, backup, archive, restore, lock = _restore_case(uow=uow)
+    if verdict is BackupHealth.QUARANTINED:
+        archive.corrupt_refs.add("ref")
+    else:
+        archive.unreadable_refs.add("ref")
+    lock.checks_before_loss = 0
+
+    with pytest.raises(LifecycleLockLostError):
+        await restore(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    assert uow.backups.by_id[backup.id].health is BackupHealth.HEALTHY
+
+
+async def test_a_forced_corrupt_restore_that_lost_the_lock_records_no_quarantine() -> (
+    None
+):
+    uow = FakeUnitOfWork()
+    server, backup, archive, restore, lock = _restore_case(uow=uow)
+    archive.corrupt_refs.add("ref")
+    archive.corrupt_count = 2
+    lock.checks_before_loss = 1  # the publish fence passes
+
+    with pytest.raises(BackupRestoreIncompleteError) as exc_info:
+        await restore(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            backup_id=backup.id,
+            force=True,
+        )
+
+    assert isinstance(exc_info.value.cause, LifecycleLockLostError)
+    assert archive.restored == [(server.id, "ref")]
+    assert uow.backups.by_id[backup.id].health is BackupHealth.HEALTHY
+
+
 async def test_restore_that_loses_the_lock_after_publishing_writes_nothing_more() -> (
     None
 ):
@@ -756,6 +810,40 @@ async def test_restore_that_loses_the_lock_after_publishing_writes_nothing_more(
     assert (server.id, "write-file") not in lock.events
 
 
+async def test_restore_checks_the_lock_again_before_committing_the_plugin_rows() -> (
+    None
+):
+    # The reconcile lists the restored content directory and reads every jar in
+    # it before its one commit, which can take long on a large modpack.
+    def _case(
+        uow: FakeUnitOfWork,
+    ) -> tuple[Server, Backup, RestoreBackup, FakeLifecycleLock]:
+        store = FakeFileStore()
+        store.files["mods/ghost.jar"] = b"not-a-real-jar"
+        server, backup, _archive, restore, lock = _restore_case(
+            file_store=store, server_type=ServerType.FABRIC, uow=uow
+        )
+        return server, backup, restore, lock
+
+    held_uow = FakeUnitOfWork()
+    server, backup, restore, held_lock = _case(held_uow)
+    held_uow.plugins.events = held_lock.events
+    await restore(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+    # After the jar reads, right before the commit: the ghost's row is staged
+    # only once its jar was read.
+    _assert_checked_right_after(held_lock.events, server.id, "add-plugin")
+    lost_uow = FakeUnitOfWork()
+    server, backup, restore, lock = _case(lost_uow)
+    # The publish fence and the check before the properties re-apply pass.
+    lock.checks_before_loss = 2
+
+    with pytest.raises(BackupRestoreIncompleteError) as exc_info:
+        await restore(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    assert isinstance(exc_info.value.cause, LifecycleLockLostError)
+    assert lost_uow.commits == held_uow.commits - 1
+
+
 def _delete_server_case() -> tuple[
     Server,
     FakeServerRepository,
@@ -769,7 +857,7 @@ def _delete_server_case() -> tuple[
     backups = FakeBackupRepository()
     backups.seed(_backup(server.id))
     archive = FakeBackupArchiveStore()
-    archive.archives.update({"ref", "orphan"})
+    archive.archives.update({"ref", "orphan-1", "orphan-2"})
     lock = FakeLifecycleLock()
     repo.events = lock.events
     archive.events = lock.events
@@ -791,21 +879,29 @@ async def test_delete_server_confirms_the_lock_in_the_prune_and_before_each_writ
     assert lock.events.index((server.id, "prune-final")) < lock.events.index(
         (server.id, "check")
     )
-    _assert_checked_right_before(
-        lock.events, server.id, "delete-archive", "delete-server"
-    )
+    # Each archive delete is confirmed on its own, as one may be slow.
+    archive_deletes = [
+        at
+        for at, event in enumerate(lock.events)
+        if event == (server.id, "delete-archive")
+    ]
+    assert len(archive_deletes) == 2
+    for at in archive_deletes:
+        assert lock.events[at - 1] == (server.id, "check"), lock.events
+    _assert_checked_right_before(lock.events, server.id, "delete-server")
 
 
 @pytest.mark.parametrize(
-    ("checks_before_loss", "pruned", "archives_deleted"),
+    ("checks_before_loss", "pruned", "archives_left"),
     [
-        (0, False, False),  # in the prune's fence
-        (1, True, False),  # before the other archives go
-        (2, True, True),  # before the row goes
+        (0, False, {"ref", "orphan-1", "orphan-2"}),  # in the prune's fence
+        (1, True, {"ref", "orphan-1", "orphan-2"}),  # before the first archive
+        (2, True, {"ref", "orphan-2"}),  # before the second archive
+        (3, True, {"ref"}),  # before the row goes
     ],
 )
 async def test_delete_server_that_loses_the_lock_stops_before_the_next_write(
-    checks_before_loss: int, pruned: bool, archives_deleted: bool
+    checks_before_loss: int, pruned: bool, archives_left: set[str]
 ) -> None:
     server, repo, archive, delete, lock = _delete_server_case()
     lock.checks_before_loss = checks_before_loss
@@ -814,7 +910,7 @@ async def test_delete_server_that_loses_the_lock_stops_before_the_next_write(
         await delete(community_id=_COMMUNITY, server_id=server.id)
 
     assert (archive.pruned == [server.id]) is pruned
-    assert ("orphan" not in archive.archives) is archives_deleted
+    assert archive.archives == archives_left
     assert server.id in repo.by_id
 
 

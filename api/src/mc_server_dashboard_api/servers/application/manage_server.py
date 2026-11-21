@@ -977,11 +977,11 @@ class DeleteServer:
                 all_refs = await self.backup_store.list_archive_refs(
                     community_id=community_id, server_id=server_id
                 )
-                # The archive deletes and the row delete each rely on the lock
-                # (issue #3927).
-                await lock.ensure_held()
+                # Each archive delete and the row delete rely on the lock (issue
+                # #3927).
                 for ref in all_refs:
                     if ref != head_ref:
+                        await lock.ensure_held()
                         await self.backup_store.delete(
                             community_id=community_id,
                             server_id=server_id,
