@@ -512,6 +512,12 @@ Section 5.1), which is set comfortably above the interval (FR-WRK-2).
    watchdog on a session that a newer one has replaced exits without clobbering
    the reconnected worker.
 
+A heartbeat counts only on the Worker's current session. A replaced session
+still reads its stream until its watchdog's next poll, and the registry ignores
+a heartbeat it reads then. So the heartbeat cannot bring back a Worker whose
+newer session has ended, or move the instant it first read disconnected
+(Section 4.4, issue #3983).
+
 ### 4.4 Disconnect and reconnect
 
 A stream ends on a clean close, a transport error, or a missed-heartbeat

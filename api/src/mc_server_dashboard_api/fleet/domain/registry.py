@@ -27,9 +27,10 @@ from mc_server_dashboard_api.fleet.domain.value_objects import (
 )
 
 # An opaque per-registration token. Each ``register`` call mints a fresh token
-# identifying that Session's record; ``mark_disconnected`` carries it back so a
-# stale stream's teardown only offlines the Worker if its Session is still the
-# current one (CONTROL_PLANE.md Section 4.4, reconnect race).
+# identifying that Session's record; every per-Session write (``record_heartbeat``,
+# ``set_assignment``, ``mark_disconnected``) carries it back so a stale stream's
+# write only lands if its Session is still the current one (CONTROL_PLANE.md
+# Section 4.4, reconnect race; issue #3983).
 SessionToken = int
 
 
@@ -73,8 +74,9 @@ class WorkerRegistry(abc.ABC):
         """Add or replace the record for ``worker.id`` (FR-WRK-1).
 
         Return a fresh :data:`SessionToken` identifying this registration; the
-        caller passes it back to :meth:`mark_disconnected` so a stale Session's
-        teardown cannot offline a Worker that has since reconnected.
+        caller passes it back to :meth:`record_heartbeat`, :meth:`set_assignment`
+        and :meth:`mark_disconnected` so a stale Session cannot write over the
+        record of a Worker that has since reconnected.
 
         ``held_servers`` maps each server id whose working set the Worker reported
         it already holds in its persistent scratch to the GENERATION that set is at
@@ -135,7 +137,12 @@ class WorkerRegistry(abc.ABC):
     ) -> None:
         """Refresh the Worker's liveness to heartbeat time ``at`` (FR-WRK-2).
 
-        A heartbeat for an unknown Worker is ignored.
+        Only the Session that is still current for ``worker_id`` may refresh it. A
+        superseded Session reads its stream until its watchdog's next poll, and a
+        heartbeat it reads then is ignored: it would revive a record the newer
+        Session's teardown marked disconnected, moving the drop instant
+        (``offline_since``), or hide the newer Session's lapse (issue #3983). A
+        heartbeat for an unknown Worker is ignored.
         """
 
     @abc.abstractmethod
@@ -285,6 +292,11 @@ class WorkerRegistry(abc.ABC):
         #778), while a reservation NOT yet in the tally (its commit not yet visible)
         is kept so its later confirm still counts. A call for an unknown Worker is
         ignored.
+
+        Only the Session that is still current for ``worker_id`` may rebuild. A
+        superseded Session's tally can return after the newer Session's rebuild,
+        and the newer registration reset the confirm and decrement stamps that the
+        epoch guards above rely on, so that tally is ignored (issue #3983).
         """
 
     @abc.abstractmethod

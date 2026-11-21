@@ -138,6 +138,62 @@ def test_heartbeat_for_unknown_worker_is_ignored() -> None:
     assert registry.list_workers() == []
 
 
+def test_a_superseded_sessions_heartbeat_leaves_the_record_disconnected() -> None:
+    # A superseded session's reader runs until its watchdog's next poll, so it can
+    # read a heartbeat after the newer session's stream ended (issue #3983).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    superseded = registry.register(make_worker(at=_T0))
+    registered = _T0 + dt.timedelta(seconds=1)
+    current = registry.register(make_worker(at=registered))
+    dropped = _T0 + dt.timedelta(seconds=2)
+    clock.set(dropped)
+    registry.mark_disconnected(WorkerId("worker-1"), current)
+
+    registry.record_heartbeat(
+        WorkerId("worker-1"), superseded, _T0 + dt.timedelta(seconds=3)
+    )
+
+    snapshot = registry.get(WorkerId("worker-1"))
+    assert snapshot is not None
+    assert snapshot.status is WorkerStatus.OFFLINE
+    assert snapshot.offline_since == dropped
+    assert snapshot.last_heartbeat_at == registered
+
+
+def test_a_superseded_sessions_heartbeat_does_not_hide_the_current_ones_lapse() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    superseded = registry.register(make_worker(at=_T0))
+    registry.register(make_worker(at=_T0))
+
+    registry.record_heartbeat(
+        WorkerId("worker-1"), superseded, _T0 + dt.timedelta(seconds=25)
+    )
+    clock.set(_T0 + _TIMEOUT + dt.timedelta(seconds=1))
+
+    snapshot = registry.get(WorkerId("worker-1"))
+    assert snapshot is not None
+    assert snapshot.status is WorkerStatus.OFFLINE
+    assert snapshot.offline_since == _T0 + _TIMEOUT
+
+
+def test_heartbeat_on_the_current_session_refreshes_beside_a_newer_workers() -> None:
+    # Tokens are minted across Workers, so the current session of one Worker is
+    # not the newest token: the guard compares against that Worker's own.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    session = registry.register(make_worker(at=_T0))
+    registry.register(make_worker(worker_id="worker-2", at=_T0))
+
+    later = _T0 + dt.timedelta(seconds=25)
+    registry.record_heartbeat(WorkerId("worker-1"), session, later)
+
+    snapshot = registry.get(WorkerId("worker-1"))
+    assert snapshot is not None
+    assert snapshot.last_heartbeat_at == later
+
+
 # --- drain state (FR-WRK-5) ------------------------------------------------
 
 
@@ -622,6 +678,46 @@ def test_rebuild_keeps_row_when_decrement_then_reconfirm_both_in_window() -> Non
 
     # Re-confirm seq ≥ epoch → preserved wins over tombstone; row must be KEPT.
     assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
+
+
+def test_a_superseded_sessions_rebuild_is_ignored() -> None:
+    # A superseded session's tally read can return after the newer session's
+    # rebuild; the newer register reset the confirms and decrements that the
+    # epoch guards rely on, so the stale tally must not land (issue #3983).
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    superseded = registry.register(make_worker(at=_T0))
+    stale_epoch = registry.assignment_epoch(WorkerId("worker-1"))
+    current = registry.register(make_worker(at=_T0))
+    registry.set_assignment(
+        WorkerId("worker-1"),
+        current,
+        {"server-a": 0},
+        registry.assignment_epoch(WorkerId("worker-1")),
+    )
+
+    registry.set_assignment(
+        WorkerId("worker-1"), superseded, {"server-b": 512}, stale_epoch
+    )
+
+    assert registry.list_workers()[0].assigned_count == 1
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
+
+
+def test_rebuild_on_the_current_session_lands_beside_a_newer_workers() -> None:
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    session = registry.register(make_worker(at=_T0))
+    registry.register(make_worker(worker_id="worker-2", at=_T0))
+
+    registry.set_assignment(
+        WorkerId("worker-1"),
+        session,
+        {"server-a": 512},
+        registry.assignment_epoch(WorkerId("worker-1")),
+    )
+
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
 
 
