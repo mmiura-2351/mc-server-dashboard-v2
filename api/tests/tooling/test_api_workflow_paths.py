@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import re
-from fnmatch import fnmatchcase
 from pathlib import Path
 
 import pytest
@@ -46,8 +45,22 @@ def _filter_paths(trigger: str) -> list[str]:
     return re.findall(r'^      - "([^"]+)"$', block[1], re.MULTILINE)
 
 
+_WILDCARDS = {"**/": "(?:.*/)?", "**": ".*", "*": "[^/]*"}
+
+
 def _listed(path: str, patterns: list[str]) -> bool:
-    return any(fnmatchcase(path, pattern) for pattern in patterns)
+    # GitHub's filter globs: `*` stays within one path segment, `**` crosses
+    # `/`, and `**/` also matches no directory. The last pattern that matches
+    # decides, and a `!` one excludes. GitHub's `?`, `+` and `[]` match
+    # themselves here; no filter entry uses them.
+    listed = False
+    for pattern in patterns:
+        glob = pattern.removeprefix("!")
+        tokens = re.split(r"(\*\*/|\*\*|\*)", glob)
+        regex = "".join(_WILDCARDS.get(token, re.escape(token)) for token in tokens)
+        if re.fullmatch(regex, path):
+            listed = glob == pattern
+    return listed
 
 
 @pytest.mark.parametrize(
