@@ -37,7 +37,6 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI
 from uvicorn.protocols.http.h11_impl import H11Protocol
-from uvicorn.server import ServerState
 
 from mc_server_dashboard_api.core.api import metrics
 
@@ -105,14 +104,8 @@ class _UnloggedH11Protocol(H11Protocol):
     connections decide no themselves and leave the logger alone.
     """
 
-    def __init__(
-        self,
-        config: uvicorn.Config,
-        server_state: ServerState,
-        app_state: dict[str, Any],
-        _loop: asyncio.AbstractEventLoop | None = None,
-    ) -> None:
-        super().__init__(config, server_state, app_state, _loop)
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
         self.access_log = False
 
 

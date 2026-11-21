@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -404,6 +405,10 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 type escapingWriter struct{ w io.Writer }
 
 func (e escapingWriter) Write(p []byte) (int, error) {
+	// Almost every record has nothing to escape: hand it on without a copy.
+	if bytes.IndexFunc(p, escapedInLog) < 0 {
+		return e.w.Write(p)
+	}
 	out := make([]byte, 0, len(p))
 	for i := 0; i < len(p); {
 		r, size := utf8.DecodeRune(p[i:])

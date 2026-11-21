@@ -723,6 +723,7 @@ def _serve_main_app(
         server.should_exit = True
         thread.join(timeout=30)
         sock.close()
+    assert not thread.is_alive(), "the API server did not stop"
 
 
 @pytest.mark.usefixtures("_restore_logging")

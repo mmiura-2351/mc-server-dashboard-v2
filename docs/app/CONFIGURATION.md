@@ -599,11 +599,12 @@ clients via `GET /api/meta` so the create wizard can pre-fill and cap the value.
 Both formats also carry uvicorn's own server and access lines and Python's
 warnings (logger `py.warnings`), which therefore go to stderr with every other
 line. `log.level` does not filter uvicorn's lines: uvicorn keeps its own loggers
-at `INFO`. Under uvicorn's `--reload` or `--workers` supervisor
-(`api/README.md`) the parent process never builds the app, so its own lines keep
-uvicorn's format; the image's entry point uses neither. A warning raised before
-the app is built keeps Python's plain format, such as the one uvicorn raises for
-`--ws websockets`.
+at `INFO`. It does filter the warnings, which are `WARNING` records, so
+`log.level=error` drops them. Under uvicorn's `--reload` or `--workers`
+supervisor (`api/README.md`) the parent process never builds the app, so its own
+lines keep uvicorn's format; the image's entry point uses neither. A warning
+raised before the app is built keeps Python's plain format, such as the one
+uvicorn raises for `--ws websockets`.
 
 Neither format writes a control character raw, so text a client controls (a
 crafted URL path, a header, a filename) cannot put a terminal escape sequence or

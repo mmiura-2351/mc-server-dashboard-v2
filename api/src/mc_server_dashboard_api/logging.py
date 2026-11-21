@@ -182,6 +182,10 @@ def configure_logging(level: str, log_format: str) -> None:
 
     # A warning is otherwise written to stderr by ``warnings`` itself, past this
     # handler: a plain-text line in the json format, unescaped (issue #3939).
+    # A test trap: this replaces ``warnings.showwarning``, so a ``pytest.warns``
+    # or ``recwarn`` entered before the first call in a test process stops
+    # seeing warnings. Later calls change nothing while ``logging`` still
+    # records the capture, until ``logging.captureWarnings(False)``.
     logging.captureWarnings(True)
     route_uvicorn_logging()
 
