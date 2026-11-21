@@ -113,6 +113,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupNotFoundError,
     BackupRestoreIncompleteError,
     BackupStorageUnavailableError,
+    BackupTooLargeError,
     BackupUnreadableError,
     BackupUnsettledError,
     CommandDispatchError,
@@ -528,6 +529,22 @@ def test_create_unclassified_dispatch_failure_is_command_failed() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "command_failed"
+
+
+def test_create_of_a_working_set_too_large_to_archive_is_409() -> None:
+    # The working set's archive would be past the decompressed-size cap restore
+    # and the upload gate hold a backup to (issue #3859): nothing was written,
+    # and the same create succeeds once the working set is smaller.
+    use_case = _FakeUseCase(error=BackupTooLargeError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "working_set_too_large"
+    assert [(e.operation, e.outcome) for e in recorder.events] == [
+        (ops.BACKUP_CREATE, Outcome.DENIED)
+    ]
 
 
 def test_create_corrupt_working_set_is_500_with_reason() -> None:

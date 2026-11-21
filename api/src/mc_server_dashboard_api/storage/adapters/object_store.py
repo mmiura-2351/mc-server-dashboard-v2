@@ -65,8 +65,11 @@ from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 import anyio
 
 from mc_server_dashboard_api.archive_member import (
+    STORAGE_HEADER_LIMITS,
+    CappedReader,
     EndCheckedReader,
     GzipReader,
+    HeaderLimits,
     is_canonical_name,
     without_tar_root_prefix,
 )
@@ -76,6 +79,7 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 )
 from mc_server_dashboard_api.storage.adapters.fs import (
     _acquire_off_loop,
+    _CappedTarGz,
     _close_abandoned,
     _close_off_loop,
     _create_spool,
@@ -128,7 +132,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.integrity.archive import (
     GzipReadProbe,
     HeaderCheckedTarInfo,
-    archive_read_errors_as_unreadable,
+    archive_read_errors_as_verdicts,
     refuse_unrestorable_member,
 )
 from mc_server_dashboard_api.storage.integrity.region import (
@@ -148,7 +152,9 @@ _DEFAULT_VERSION_RETENTION = 10
 # bounded on the way in, but a gzip member can expand ~1000x; the cumulative
 # DECOMPRESSED bytes are counted as members are streamed to staging so a bomb
 # cannot fill the store (#287). 8 GiB bounds the amplification while covering a real
-# Minecraft world; a constant is intentional (no config knob requested).
+# Minecraft world; a constant is intentional (no config knob requested). Every byte
+# of the decompressed stream counts, as at the upload gate, whose cap is the same
+# 8 GiB, and the backup writer stays under it (issue #3859).
 _DEFAULT_MAX_RESTORE_BYTES = 8 * 1024 * 1024 * 1024
 # The single pointer object naming the live snapshot prefix (Section 4.2).
 _POINTER = "current.json"
@@ -1615,7 +1621,9 @@ class ObjectStorage(Storage):
                 # the bodies are not all held at once), then upload it as one object.
                 spool = await _create_spool(".backup.", ".tar.gz")
                 try:
-                    await _write_backup_targz(client, snapshot_prefix, objs, spool)
+                    await _write_backup_targz(
+                        client, snapshot_prefix, objs, spool, self._max_restore_bytes
+                    )
                     await client.upload_multipart(
                         self._backup_key(community_id, server_id, key),
                         _file_parts(spool),
@@ -2761,12 +2769,25 @@ class _EndCheckedTar:
     :meth:`next_member`, then read :meth:`past_end_marker` to the end. Closing it
     closes the tar and ``source``, which ``tarfile`` leaves open when handed a
     file object.
+
+    A backup's walk passes ``max_bytes``, so every byte it takes from ``source``
+    counts toward that cap through a ``CappedReader``, and ``header_limits``
+    (issue #3859).
     """
 
-    def __init__(self, source: io.BufferedIOBase) -> None:
+    def __init__(
+        self,
+        source: io.BufferedIOBase,
+        *,
+        max_bytes: int | None = None,
+        header_limits: HeaderLimits | None = None,
+    ) -> None:
         self._source = source
         try:
-            self._reader = EndCheckedReader(source)
+            self._reader = EndCheckedReader(
+                source if max_bytes is None else CappedReader(source, max_bytes),
+                header_limits=header_limits,
+            )
             self.tar = tarfile.open(
                 fileobj=self._reader, mode="r:", tarinfo=HeaderCheckedTarInfo
             )
@@ -2855,19 +2876,21 @@ class _RestoreBudget:
     The running sum is checked after every chunk, so a single high-ratio member
     aborts mid-stream (:class:`ArchiveTooLargeError`) rather than being uploaded to
     staging in full first — the gzip-bomb defence (#287). The count is over actual
-    bytes read, not the forgeable member header.
+    bytes read, not the forgeable member header. It is what the members hold,
+    which for a sparse member includes holes nothing decompresses; the walk counts
+    every byte it decompresses toward :attr:`max_bytes` on its own (issue #3859).
     """
 
     def __init__(self, max_bytes: int) -> None:
-        self._max_bytes = max_bytes
+        self.max_bytes = max_bytes
         self._total = 0
 
     async def count(self, parts: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
         async for chunk in parts:
             self._total += len(chunk)
-            if self._total > self._max_bytes:
+            if self._total > self.max_bytes:
                 raise ArchiveTooLargeError(
-                    f"restore archive exceeds {self._max_bytes} decompressed bytes"
+                    f"restore archive exceeds {self.max_bytes} decompressed bytes"
                 )
             yield chunk
 
@@ -2914,7 +2937,7 @@ class _HandleJobs:
             raise
 
     async def close(
-        self, handle: tarfile.TarFile | io.BufferedReader | _EndCheckedTar
+        self, handle: io.BufferedReader | _EndCheckedTar | _CappedTarGz
     ) -> None:
         if self._closed:
             return
@@ -2956,11 +2979,19 @@ async def _archive_file_member_streams(
 
     The archive is read to its end, as the upload gate reads it (issue #3798):
     the walk goes through :class:`EndCheckedReader` and must stop at the
-    end-of-archive marker, only zeros may follow it (counted against ``budget``
-    too), each gzip member's header, CRC32 and ISIZE must check, only another
-    gzip member or zero padding may follow one, and there may be at most 10,000
-    of them (issue #3835). ``GzipReader`` reads every gzip member, so a
-    ``tar.gz`` of several restores whole.
+    end-of-archive marker, only zeros may follow it, each gzip member's header,
+    CRC32 and ISIZE must check, only another gzip member or zero padding may
+    follow one, and there may be at most 10,000 of them (issue #3835).
+    ``GzipReader`` reads every gzip member, so a ``tar.gz`` of several restores
+    whole.
+
+    As at the upload gate, every byte the walk decompresses counts toward the
+    budget's cap through a ``CappedReader`` (issue #3859): headers,
+    extended-header data, skipped data, padding and the zeros past the marker as
+    well as member data. Past it is :class:`ArchiveTooLargeError`. The walk is
+    held to the storage walks' header limits (``STORAGE_HEADER_LIMITS``): going
+    past one, or a chain of extended headers too long for ``tarfile`` to read,
+    is :class:`ArchiveUnreadableError`.
 
     With ``dropped``, a member landing at or under the reserved generation-marker
     root name is not yielded but its name appended (issue #3433); its data is read
@@ -2969,14 +3000,19 @@ async def _archive_file_member_streams(
     directory at a relative, ``..``-free name reaches that decision.
     """
 
-    with archive_read_errors_as_unreadable():
+    with archive_read_errors_as_verdicts():
         archive = await _acquire_off_loop(
-            _close_abandoned, lambda: _EndCheckedTar(GzipReader(open(spool, "rb")))
+            _close_abandoned,
+            lambda: _EndCheckedTar(
+                GzipReader(open(spool, "rb")),
+                max_bytes=budget.max_bytes,
+                header_limits=STORAGE_HEADER_LIMITS,
+            ),
         )
     jobs = _HandleJobs()
     try:
         while True:
-            with archive_read_errors_as_unreadable():
+            with archive_read_errors_as_verdicts():
                 read = await jobs.run(archive.next_member)
             if read is None:
                 break
@@ -2999,8 +3035,8 @@ async def _archive_file_member_streams(
                 continue
             if parts is not None:
                 yield member.name, parts
-        with archive_read_errors_as_unreadable():
-            async for _zeros in budget.count(archive.past_end_marker(jobs)):
+        with archive_read_errors_as_verdicts():
+            async for _zeros in archive.past_end_marker(jobs):
                 pass
     finally:
         await jobs.close(archive)
@@ -3031,7 +3067,7 @@ async def _fileobj_parts(member_file: Any, jobs: _HandleJobs) -> AsyncIterator[b
     """
 
     while True:
-        with archive_read_errors_as_unreadable():
+        with archive_read_errors_as_verdicts():
             chunk = await jobs.run(member_file.read, _PART)
         if not chunk:
             return
@@ -3058,16 +3094,20 @@ async def _write_backup_targz(
     snapshot_prefix: str,
     objs: list[S3Object],
     spool: Path,
+    max_bytes: int | None = None,
 ) -> None:
     """Write a self-contained ``tar.gz`` of the snapshot objects to ``spool``.
 
     A #1944 poisoned key is left out, as hydrate leaves it out: its member would be
     absolute, which the member rule refuses (issue #3574). So is a legacy
     non-canonical key, with a warning: the member rule refuses its name too.
+
+    With ``max_bytes``, a tar longer than that is :class:`ArchiveTooLargeError`
+    (``_CappedTarGz``, issue #3859).
     """
 
-    tar = await _run_spool_writer(
-        spool, tarfile.open, str(spool), "w:gz", reclaim=_close_abandoned
+    archive = await _run_spool_writer(
+        spool, _CappedTarGz, spool, max_bytes, reclaim=_close_abandoned
     )
     jobs = _HandleJobs()
     try:
@@ -3084,9 +3124,11 @@ async def _write_backup_targz(
             async for chunk in await client.get_object(obj.key):
                 buf.write(chunk)
             buf.seek(0)
-            await jobs.run(tar.addfile, info, buf)
+            await jobs.run(archive.tar.addfile, info, buf)
+        # The end-of-archive marker, only once every member is in (issue #3859).
+        await jobs.run(archive.tar.close)
     finally:
-        await jobs.close(tar)
+        await jobs.close(archive)
 
 
 class _ObjectWorkingSetView(WorkingSetView):

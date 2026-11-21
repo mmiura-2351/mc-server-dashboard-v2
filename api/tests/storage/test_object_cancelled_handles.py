@@ -24,6 +24,7 @@ from typing import Any
 import pytest
 
 from mc_server_dashboard_api.storage.adapters import object_store
+from mc_server_dashboard_api.storage.adapters.fs import _CappedTarGz
 from mc_server_dashboard_api.storage.adapters.object_store import (
     S3Object,
     _archive_file_member_streams,
@@ -127,6 +128,28 @@ def _patch_spool_open(monkeypatch: pytest.MonkeyPatch, held: _Held, pause: str) 
     )
 
 
+def _patch_backup_writer(
+    monkeypatch: pytest.MonkeyPatch, held: _Held, pause: str
+) -> None:
+    """Track the gzip stream the backup writer's spool is open through.
+
+    The writer's handle is a ``_CappedTarGz``, whose close closes that stream
+    and, after a failure, leaves its tar unfinished (issue #3859). ``pause`` is
+    ``"open"`` or a method of its tar the writer runs as a job.
+    """
+
+    def _open(*args: Any) -> _CappedTarGz:
+        if pause == "open":
+            held.pausing(lambda: None)()
+        archive = _CappedTarGz(*args)
+        held.track(archive._gz)
+        if pause != "open":
+            setattr(archive.tar, pause, held.pausing(getattr(archive.tar, pause)))
+        return archive
+
+    monkeypatch.setattr(object_store, "_CappedTarGz", _open)
+
+
 # A budget no test archive comes near.
 _BUDGET = 1024 * 1024
 
@@ -186,7 +209,7 @@ _SITES: dict[str, tuple[_Patch, _Run]] = {
     "snapshot_file_members": (_patch_tarfile, _snapshot_member_parts),
     "archive_file_member_streams": (_patch_tarfile, _consume_streams),
     "file_parts": (_patch_spool_open, _file_first_part),
-    "write_backup_targz": (_patch_tarfile, _write_targz),
+    "write_backup_targz": (_patch_backup_writer, _write_targz),
 }
 
 
@@ -238,6 +261,8 @@ _JOBS: list[tuple[str, str]] = [
     ("archive_file_member_streams", "member_read"),
     ("file_parts", "read"),
     ("write_backup_targz", "addfile"),
+    # The end-of-archive marker, written once every member is in (issue #3859).
+    ("write_backup_targz", "close"),
 ]
 
 

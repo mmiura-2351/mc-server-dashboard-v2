@@ -723,6 +723,8 @@ export const en = {
   "backups.error.serverPropertiesUnreadable":
     "Backup not taken: the server's server.properties is not a regular file (for example, a symbolic link) or is larger than 4 MiB, so the running world could not be paused for the backup. A stopped server can be backed up; restore a regular server.properties before starting it again.",
   "backups.error.tooLarge": "That file exceeds the 512 MiB upload limit.",
+  "backups.error.workingSetTooLarge":
+    "Backup not taken: the server's files would make a backup archive larger than the 8 GiB limit. Nothing was saved. Remove or move some files out of the server, then take the backup.",
   "backups.error.generic": "Something went wrong. Please try again.",
 
   // Schedules tab (WEBUI_SPEC.md 6.13, issue #1842). One contiguous block to
