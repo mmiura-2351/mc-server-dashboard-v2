@@ -3,8 +3,12 @@
 import json
 import logging
 import sys
+import weakref
+from collections.abc import Iterator
 
 import pytest
+import uvicorn
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.app import create_app
@@ -13,6 +17,10 @@ from mc_server_dashboard_api.config import (
     LogSettings,
     RelaySettings,
     Settings,
+)
+from mc_server_dashboard_api.http_problem import (
+    install_problem_handlers,
+    unhandled_exception_middleware,
 )
 from mc_server_dashboard_api.logging import (
     _TAG,
@@ -355,3 +363,298 @@ def test_startup_warnings_use_configured_json_format() -> None:
             "relay.bedrock_enabled warning was emitted before "
             "configure_logging installed the JsonFormatter"
         )
+
+
+# ---------------------------------------------------------------------------
+# No raw control character reaches a log line (issue #3928): a crafted URL path
+# put ESC / C1 sequences into the problem handlers' ERROR line, which a terminal
+# reading the log would execute.
+# ---------------------------------------------------------------------------
+
+
+# Line and paragraph separators (some readers break a line on them) and the
+# bidi controls (a bidi-aware terminal reorders the rest of the line).
+_SEPARATORS_AND_BIDI = frozenset(
+    "\u061c\u200e\u200f\u2028\u2029\u202a\u202b\u202c\u202d\u202e"
+    "\u2066\u2067\u2068\u2069"
+)
+
+
+def _is_control(ch: str) -> bool:
+    """C0 (CR, LF and TAB included), DEL, C1, a separator or a bidi control."""
+
+    return ord(ch) < 0x20 or 0x7F <= ord(ch) < 0xA0 or ch in _SEPARATORS_AND_BIDI
+
+
+def _raised(message: str) -> ValueError:
+    try:
+        raise ValueError(message)
+    except ValueError as exc:
+        return exc
+
+
+_CONTROLS = [
+    pytest.param("\x00", "\\x00", id="c0-nul"),
+    pytest.param("\x1b[2J", "\\x1b[2J", id="c0-esc"),
+    pytest.param("\x1f", "\\x1f", id="c0-last"),
+    pytest.param("\t", "\\t", id="tab"),
+    pytest.param("\r", "\\r", id="cr"),
+    pytest.param("\x7f", "\\x7f", id="del"),
+    pytest.param("\x80", "\\x80", id="c1-first"),
+    pytest.param("\x85", "\\x85", id="c1-nel"),
+    pytest.param("\x9b", "\\x9b", id="c1-csi"),
+    pytest.param("\x9f", "\\x9f", id="c1-last"),
+    pytest.param("\u061c", "\\u061c", id="bidi-alm"),
+    pytest.param("\u200e", "\\u200e", id="bidi-lrm"),
+    pytest.param("\u200f", "\\u200f", id="bidi-rlm"),
+    pytest.param("\u2028", "\\u2028", id="line-separator"),
+    pytest.param("\u2029", "\\u2029", id="paragraph-separator"),
+    pytest.param("\u202a", "\\u202a", id="bidi-lre"),
+    pytest.param("\u202e", "\\u202e", id="bidi-rlo"),
+    pytest.param("\u2066", "\\u2066", id="bidi-lri"),
+    pytest.param("\u2069", "\\u2069", id="bidi-pdi"),
+    # NBSP, the ideographic space, ZWNJ and ZWJ belong in legitimate names.
+    pytest.param(
+        " é\xa0~\u3000\u200c\u200d", " é\xa0~\u3000\u200c\u200d", id="printable-kept"
+    ),
+    pytest.param(
+        "\u061b\u061d\u2027\u202f\u2065\u206a",
+        "\u061b\u061d\u2027\u202f\u2065\u206a",
+        id="neighbours-kept",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("raw", "escaped"), [*_CONTROLS, pytest.param("\n", "\\n", id="lf")]
+)
+def test_text_formatter_escapes_controls_on_the_message_line(
+    raw: str, escaped: str
+) -> None:
+    record = _record("serving %s")
+    record.args = (f"/a{raw}b",)
+
+    assert TextFormatter().format(record) == f"INFO test serving /a{escaped}b"
+
+
+def test_text_formatter_escapes_controls_in_the_fields() -> None:
+    # A str field is repr-ed already; an object whose repr carries the raw
+    # character is not.
+    class _Raw:
+        def __repr__(self) -> str:
+            return "<\x1b[31m\x85>"
+
+    record = _record("x")
+    record.subject = _Raw()
+
+    assert TextFormatter().format(record) == "INFO test x subject=<\\x1b[31m\\x85>"
+
+
+@pytest.mark.parametrize(("raw", "escaped"), _CONTROLS)
+def test_text_formatter_escapes_controls_in_a_traceback_but_keeps_its_lines(
+    raw: str, escaped: str
+) -> None:
+    exc = _raised(f"bad{raw}name")
+    record = _record("failed")
+    record.exc_info = (type(exc), exc, exc.__traceback__)
+
+    first, *traceback_lines = TextFormatter().format(record).split("\n")
+
+    assert first == "INFO test failed"
+    assert traceback_lines[0] == "Traceback (most recent call last):"
+    assert traceback_lines[-1] == f"ValueError: bad{escaped}name"
+
+
+def test_text_formatter_escapes_a_traceback_another_handler_rendered_first() -> None:
+    # ``Formatter.format`` caches the traceback text on the record, so a handler
+    # that formatted the record first decides what every later one appends. It
+    # also leaves ``message`` and ``asctime`` on the record, which are no fields.
+    exc = _raised("bad\x1bname")
+    record = _record("failed")
+    record.exc_info = (type(exc), exc, exc.__traceback__)
+    logging.Formatter("%(asctime)s %(message)s").format(record)
+
+    lines = TextFormatter().format(record).split("\n")
+
+    assert lines[0] == "INFO test failed"
+    assert lines[-1] == "ValueError: bad\\x1bname"
+
+
+def test_text_formatter_escapes_controls_in_the_stack() -> None:
+    record = _record("here")
+    record.stack_info = "Stack (most recent call last):\n  frame\x1b[2J\x85"
+
+    assert TextFormatter().format(record) == (
+        "INFO test here\nStack (most recent call last):\n  frame\\x1b[2J\\x85"
+    )
+
+
+def test_json_formatter_writes_no_raw_control_character() -> None:
+    raw = "\x00\x1b[2J\t\r\n\x7f\x85\x9b\u2028\u202e"
+    exc = _raised(raw)
+    record = _record("serving %s")
+    record.args = (raw,)
+    record.subject = raw
+    record.exc_info = (type(exc), exc, exc.__traceback__)
+
+    line = JsonFormatter().format(record)
+
+    assert [ch for ch in line if _is_control(ch)] == []
+    parsed = json.loads(line)
+    assert parsed["message"] == f"serving {raw}"
+    assert parsed["subject"] == raw
+    assert parsed["exception"].endswith(f"ValueError: {raw}")
+
+
+class _Connection:
+    def __str__(self) -> str:
+        return "conn-1"
+
+
+@pytest.mark.parametrize(
+    ("formatter", "expected"),
+    [
+        pytest.param(
+            JsonFormatter(),
+            '{"level": "info", "logger": "test.adapter", '
+            '"message": "connection open", "websocket": "conn-1"}',
+            id="json",
+        ),
+        pytest.param(
+            TextFormatter(),
+            "INFO test.adapter connection open websocket=conn-1",
+            id="text",
+        ),
+    ],
+)
+def test_an_extra_json_cannot_encode_keeps_its_line(
+    formatter: logging.Formatter, expected: str
+) -> None:
+    # uvicorn's ``websockets`` backend logs on ``uvicorn.error`` through the
+    # library's LoggerAdapter, which attaches the connection object itself;
+    # those lines reach these formatters since configure_logging routes uvicorn
+    # here.
+    connection = _Connection()
+    logger = logging.getLogger("test.adapter")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    handler = _CapturingHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    try:
+        adapter = logging.LoggerAdapter(
+            logger, {"websocket": weakref.proxy(connection)}
+        )
+        adapter.info("connection open")
+    finally:
+        logger.removeHandler(handler)
+
+    assert handler.lines == [expected]
+
+
+def _dead_proxy() -> object:
+    target = _Connection()
+    proxy = weakref.proxy(target)
+    del target
+    return proxy
+
+
+_UNENCODABLE = [
+    pytest.param({(1, 2): "x"}, id="non-str-key"),
+    pytest.param(_dead_proxy(), id="dead-proxy"),
+]
+
+
+@pytest.mark.parametrize("value", _UNENCODABLE)
+def test_json_formatter_writes_an_extra_it_cannot_encode_as_its_repr(
+    value: object,
+) -> None:
+    record = _record("x")
+    record.subject = value
+
+    assert json.loads(JsonFormatter().format(record))["subject"] == repr(value)
+
+
+@pytest.mark.parametrize("value", _UNENCODABLE)
+def test_text_formatter_writes_an_extra_it_cannot_encode_as_its_repr(
+    value: object,
+) -> None:
+    record = _record("x")
+    record.subject = value
+
+    assert TextFormatter().format(record) == f"INFO test x subject={value!r}"
+
+
+def test_a_crafted_path_reaches_the_problem_error_line_escaped() -> None:
+    # The whole path from the issue: a request on a route that answers 500.
+    # ``urlsplit`` drops TAB, CR and LF from ``request.url.path``; the path
+    # carries everything else, and the formatter tests above cover those three.
+    app = FastAPI()
+    install_problem_handlers(app)
+    app.middleware("http")(unhandled_exception_middleware)
+
+    @app.get("/boom/{name}")
+    def boom(name: str) -> None:  # noqa: ARG001 — the path is the payload
+        raise RuntimeError("kaboom")
+
+    handler = _CapturingHandler()
+    handler.setFormatter(TextFormatter())
+    problem_logger = logging.getLogger("mc_server_dashboard_api.http_problem")
+    problem_logger.addHandler(handler)
+    try:
+        resp = TestClient(app, raise_server_exceptions=False).get(
+            "/boom/%1B%5B2J%7F%C2%85%C2%9B%E2%80%A8%E2%80%AE"
+        )
+    finally:
+        problem_logger.removeHandler(handler)
+
+    assert resp.status_code == 500
+    [line] = handler.lines
+    assert line.split("\n")[0] == (
+        "ERROR mc_server_dashboard_api.http_problem unhandled exception serving "
+        "GET /boom/\\x1b[2J\\x7f\\x85\\x9b\\u2028\\u202e"
+    )
+    assert [ch for ch in line if _is_control(ch) and ch != "\n"] == []
+
+
+@pytest.fixture
+def _restore_logging() -> Iterator[None]:
+    """Put back the loggers these tests reconfigure process-wide."""
+
+    names = ("", "uvicorn", "uvicorn.error", "uvicorn.access")
+    loggers = [logging.getLogger(n) for n in names]
+    saved = [(lg, lg.handlers[:], lg.propagate, lg.level) for lg in loggers]
+    yield
+    for lg, handlers, propagate, level in saved:
+        lg.handlers[:] = handlers
+        lg.propagate = propagate
+        lg.setLevel(level)
+
+
+@pytest.mark.usefixtures("_restore_logging")
+def test_uvicorn_lines_go_through_the_app_handler(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # uvicorn applies its own logging config before it calls the app factory
+    # (serve.py), giving its error and access loggers handlers of their own.
+    uvicorn.Config(FastAPI())
+    configure_logging("info", "text")
+
+    logging.getLogger("uvicorn.error").error("bad \x1b[2J")
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", "/x", "1.1", 200
+    )
+    # uvicorn's ANSI-coloured copy of the message is no field of the line.
+    logging.getLogger("uvicorn.error").info(
+        "Started server process [%d]",
+        42,
+        extra={"color_message": "Started server process [\x1b[36m%d\x1b[0m]"},
+    )
+
+    out = capsys.readouterr()
+    assert out.out == ""
+    assert out.err.splitlines() == [
+        "ERROR uvicorn.error bad \\x1b[2J",
+        'INFO uvicorn.access 127.0.0.1:5000 - "GET /x HTTP/1.1" 200',
+        "INFO uvicorn.error Started server process [42]",
+    ]

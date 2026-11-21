@@ -241,6 +241,154 @@ func TestHydrateRejectsPathEscape(t *testing.T) {
 	}
 }
 
+// An absolute member name must be refused before anything is created. The
+// hydrate names members relative to its staging directory's descriptor, and a
+// *at system call ignores the descriptor for an absolute path, so this refusal is
+// the one thing that keeps such a member out of the rest of the host. Root runs
+// the hydrate in the shipped topology.
+func TestHydrateRejectsAbsoluteMember(t *testing.T) {
+	for name, typeflag := range map[string]byte{"file": tar.TypeReg, "directory": tar.TypeDir} {
+		t.Run(name, func(t *testing.T) {
+			outside := filepath.Join(t.TempDir(), "abs-target")
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			hdr := &tar.Header{Name: outside, Typeflag: typeflag, Mode: 0o640}
+			if typeflag == tar.TypeDir {
+				hdr.Name += "/"
+			} else {
+				hdr.Size = int64(len("pwned"))
+			}
+			if err := tw.WriteHeader(hdr); err != nil {
+				t.Fatal(err)
+			}
+			if typeflag == tar.TypeReg {
+				if _, err := tw.Write([]byte("pwned")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write(buf.Bytes())
+			}))
+			defer srv.Close()
+
+			dest := filepath.Join(t.TempDir(), "working")
+			_, err := New(srv.Client()).Hydrate(context.Background(), srv.URL, "tok", dest)
+			if err == nil || !strings.Contains(err.Error(), "refusing absolute member") {
+				t.Fatalf("Hydrate = %v, want the absolute member refused", err)
+			}
+			if _, err := os.Lstat(outside); !os.IsNotExist(err) {
+				t.Fatalf("the absolute member was created outside the staging dir: %v", err)
+			}
+		})
+	}
+}
+
+// The member file is created without following a link at its own name: one in
+// the unpack directory fails the unpack and its target is left untouched.
+func TestUnpackDoesNotWriteThroughALinkAtAMembersName(t *testing.T) {
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside-secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(base, "dest")
+	if err := os.Mkdir(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dest, "server.properties")); err != nil {
+		t.Fatal(err)
+	}
+
+	err := unpackTar(bytes.NewReader(tarOf(map[string]string{"server.properties": "from-tar"})), openDirFd(t, dest))
+	if !errors.Is(err, unix.ELOOP) {
+		t.Fatalf("unpackTar = %v, want ELOOP from the link at the member's name", err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "secret" {
+		t.Fatalf("the link's target reads %q, %v; want it untouched", got, err)
+	}
+}
+
+// Directories the unpack creates, named by a member or implied by a file's path,
+// get mode 0750 (under a 022 umask).
+func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
+	old := unix.Umask(0o022)
+	t.Cleanup(func() { unix.Umask(old) })
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "logs/latest.log", Typeflag: tar.TypeReg, Mode: 0o640}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+
+	if err := unpackTar(&buf, openDirFd(t, dest)); err != nil {
+		t.Fatalf("unpackTar: %v", err)
+	}
+	for _, dir := range []string{"world", "logs"} {
+		info, err := os.Stat(filepath.Join(dest, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o750 {
+			t.Errorf("%s has mode %o, want 750", dir, got)
+		}
+	}
+}
+
+// A directory member whose name an entry other than a directory already holds
+// fails the unpack, as os.MkdirAll failed it: here a dangling link, which a stat
+// that follows it reports as absent, so the mkdir meets EEXIST.
+func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
+	dest := t.TempDir()
+	if err := os.Symlink(filepath.Join(dest, "nowhere"), filepath.Join(dest, "world")); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := unpackTar(&buf, openDirFd(t, dest)); !errors.Is(err, unix.EEXIST) {
+		t.Fatalf("unpackTar = %v, want EEXIST for the link at the directory's name", err)
+	}
+}
+
+// ignoringEINTR retries a call the kernel interrupted, as the os package does
+// around its own system calls, and returns any other outcome as it is.
+func TestIgnoringEINTRRetriesOnlyAnInterruptedCall(t *testing.T) {
+	for _, tc := range []struct {
+		results []error
+		want    error
+		calls   int
+	}{
+		{[]error{unix.EINTR, unix.EINTR, nil}, nil, 3},
+		{[]error{unix.EINTR, unix.ENOENT, nil}, unix.ENOENT, 2},
+		{[]error{unix.EEXIST, nil}, unix.EEXIST, 1},
+		{[]error{nil}, nil, 1},
+	} {
+		calls := 0
+		err := ignoringEINTR(func() error {
+			calls++
+			return tc.results[calls-1]
+		})
+		if !errors.Is(err, tc.want) || (tc.want == nil && err != nil) || calls != tc.calls {
+			t.Errorf("results %v: ignoringEINTR = %v after %d calls, want %v after %d", tc.results, err, calls, tc.want, tc.calls)
+		}
+	}
+}
+
 func TestHydrateRejectsSymlinkMember(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
