@@ -766,6 +766,18 @@ describe("Modal focus on a scroller with no control in it", () => {
     expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
     expect(document.activeElement).toBe(done());
   });
+
+  // As a browser that does not stop Tab on the body runs past it; one that
+  // takes focus from a script is still the stop it goes to (#3971).
+  it("pulls a Shift+Tab the browser runs past a scrolling body, out of the dialog, back to the body", async () => {
+    const body = renderDialog(disabledRows, doneButton);
+    overflow(body, "y");
+    done().focus();
+
+    await browserTab(screen.getByTestId("modal-backdrop"), true);
+
+    expect(document.activeElement).toBe(body);
+  });
 });
 
 // A dialog that disables the control holding focus, as a confirm does while
