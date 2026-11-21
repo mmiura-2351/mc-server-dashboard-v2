@@ -4109,15 +4109,16 @@ def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
     keeps.
     """
 
-    entered: list[str] = []
+    # Whether the filter kept the entry just added as a directory, to enter.
+    entered = False
 
     def _plain(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        nonlocal entered
         if info.islnk():
             info.type = tarfile.REGTYPE
             info.linkname = ""
             info.size = os.lstat(directory / info.name).st_size
-        if info.isdir():
-            entered.append(info.name)
+        entered = info.isdir()
         return info if info.isfile() or info.isdir() else None
 
     pending = [child.name]
@@ -4125,9 +4126,9 @@ def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
         arcname = pending.pop()
         tar.add(directory / arcname, arcname=arcname, recursive=False, filter=_plain)
         if entered:
-            parent = entered.pop()
-            names = sorted(os.listdir(directory / parent), reverse=True)
-            pending.extend(f"{parent}/{name}" for name in names)
+            entered = False
+            names = sorted(os.listdir(directory / arcname), reverse=True)
+            pending.extend(f"{arcname}/{name}" for name in names)
 
 
 def _write_tar_gz(directory: Path, archive: Path, max_bytes: int | None = None) -> None:
