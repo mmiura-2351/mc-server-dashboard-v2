@@ -44,7 +44,12 @@ one pack that keeps failing must not starve every pack after it (issue #3871). F
 failed deletes in a row end the pass, and its summary is then at WARNING with the
 reason (``gc_pass``, issue #3906). A store that gives no answer at all
 (:class:`ResourcePackStorageUnreachableError`) ends the pass at once, as does a
-cancellation; neither logs a summary.
+cancellation; neither logs a summary. A pass that ends early, on a delete that got
+no answer or at the fifth failed delete in a row, leaves the key it ended at in the
+GC's :class:`ResumePoint`. The next pass walks the blobs in key order starting after
+it, so failures tied in fact to those packs cannot starve the packs after them
+(issue #3934). A pass that walks every blob without ending early clears it, and a
+pass without one starts at a random place in key order.
 """
 
 from __future__ import annotations
@@ -56,6 +61,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.gc_pass import (
     MAX_CONSECUTIVE_FAILED_DELETES,
     STOPPED_AFTER_CONSECUTIVE_FAILURES,
+    ResumePoint,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -96,6 +102,7 @@ class RunResourcePackGc:
     store: ResourcePackStore
     clock: Clock
     ownership: StoreOwnership
+    resume_point: ResumePoint
 
     async def __call__(self) -> ResourcePackGcResult:
         refusal = await self.ownership.refusal()
@@ -113,11 +120,17 @@ class RunResourcePackGc:
         failed = 0
         failed_in_a_row = 0
         stopped = False
+        if self.resume_point.key is not None:
+            _LOG.debug(
+                "resource-pack GC pass starts after %r, where the last pass ended "
+                "early",
+                self.resume_point.key,
+            )
         # The window is judged per blob, while ``store.delete`` removes every blob
         # under the pack id. The two agree because each upload puts one blob under
         # a freshly minted id; a second blob per pack would need the window judged
         # on the pack's newest blob instead.
-        for entry in entries:
+        for entry in self.resume_point.order(entries, lambda e: e.key):
             if entry.pack_id in live:
                 continue
             if entry.modified_at > cutoff:
@@ -135,7 +148,9 @@ class RunResourcePackGc:
                 await self.store.delete(entry.pack_id)
             except ResourcePackStorageUnreachableError:
                 # Not this pack but the store: every later delete would fail the
-                # same way, so the pass ends here.
+                # same way, so the pass ends here. If it is this pack after all,
+                # the next pass starts after it (issue #3934).
+                self.resume_point.key = entry.key
                 raise
             except Exception as exc:  # noqa: BLE001 - one pack must not end the pass
                 failed += 1
@@ -151,7 +166,10 @@ class RunResourcePackGc:
                 )
                 if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_DELETES:
                     # Likely the store rather than these packs: stop paying each
-                    # later one its retries and a WARNING (issue #3906).
+                    # later one its retries and a WARNING (issue #3906). The next
+                    # pass starts after this one, in case they are these packs
+                    # after all (issue #3934).
+                    self.resume_point.key = entry.key
                     stopped = True
                     break
                 continue
@@ -167,6 +185,9 @@ class RunResourcePackGc:
                 entry.size_bytes,
                 now - entry.modified_at,
             )
+        if not stopped:
+            # The pass came round without ending early (issue #3934).
+            self.resume_point.key = None
         level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(
             logging.WARNING if stopped else level,

@@ -28,7 +28,12 @@ skipped, and the pass goes on: one blob that keeps failing must not starve every
 blob after it (issue #3871). Five failed deletes in a row end the pass, and its
 summary is then at WARNING with the reason (``gc_pass``, issue #3906). A store that
 gives no answer at all (:class:`PluginCacheStorageUnreachableError`) ends the pass
-at once, as does a cancellation; neither logs a summary.
+at once, as does a cancellation; neither logs a summary. A pass that ends early, on
+a delete that got no answer or at the fifth failed delete in a row, leaves the blob
+it ended at in the GC's :class:`ResumePoint`. The next pass walks the blobs in key
+order starting after it, so failures tied in fact to those blobs cannot starve the
+blobs after them (issue #3934). A pass that walks every blob without ending early
+clears it, and a pass without one starts at a random place in key order.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.gc_pass import (
     MAX_CONSECUTIVE_FAILED_DELETES,
     STOPPED_AFTER_CONSECUTIVE_FAILURES,
+    ResumePoint,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.errors import (
@@ -88,6 +94,7 @@ class RunPluginCacheGc:
     references: LivePluginCacheReferences
     clock: Clock
     ownership: StoreOwnership
+    resume_point: ResumePoint
 
     async def __call__(self) -> PluginCacheGcResult:
         refusal = await self.ownership.refusal()
@@ -104,7 +111,13 @@ class RunPluginCacheGc:
         failed = 0
         failed_in_a_row = 0
         stopped = False
-        for entry in entries:
+        if self.resume_point.key is not None:
+            _LOG.debug(
+                "plugin-cache GC pass starts after blob %s, where the last pass "
+                "ended early",
+                self.resume_point.key,
+            )
+        for entry in self.resume_point.order(entries, lambda e: e.sha256):
             if entry.sha256 in live:
                 continue
             if entry.modified_at > cutoff:
@@ -125,7 +138,9 @@ class RunPluginCacheGc:
                 await self.cache.delete(entry.sha256)
             except PluginCacheStorageUnreachableError:
                 # Not this blob but the store: every later delete would fail the
-                # same way, so the pass ends here.
+                # same way, so the pass ends here. If it is this blob after all,
+                # the next pass starts after it (issue #3934).
+                self.resume_point.key = entry.sha256
                 raise
             except Exception as exc:  # noqa: BLE001 - one blob must not end the pass
                 failed += 1
@@ -139,7 +154,10 @@ class RunPluginCacheGc:
                 )
                 if failed_in_a_row >= MAX_CONSECUTIVE_FAILED_DELETES:
                     # Likely the store rather than these blobs: stop paying each
-                    # later one its retries and a WARNING (issue #3906).
+                    # later one its retries and a WARNING (issue #3906). The next
+                    # pass starts after this one, in case they are these blobs
+                    # after all (issue #3934).
+                    self.resume_point.key = entry.sha256
                     stopped = True
                     break
                 continue
@@ -153,6 +171,9 @@ class RunPluginCacheGc:
                 entry.size_bytes,
                 now - entry.modified_at,
             )
+        if not stopped:
+            # The pass came round without ending early (issue #3934).
+            self.resume_point.key = None
         level = logging.INFO if deleted or failed else logging.DEBUG
         _LOG.log(
             logging.WARNING if stopped else level,

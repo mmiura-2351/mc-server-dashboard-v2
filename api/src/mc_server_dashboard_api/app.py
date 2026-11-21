@@ -80,6 +80,7 @@ from mc_server_dashboard_api.fleet.application.set_worker_drain import (
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     WorkerId as FleetWorkerId,
 )
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitMiddleware
 from mc_server_dashboard_api.http_problem import (
     install_problem_handlers,
@@ -794,6 +795,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await read_installation_id(create_session_factory(engine))
         )
         app.state.store_ownership = store_ownership
+        # Where the JAR-pool GC's next pass starts (issue #3934). The periodic
+        # pass and the manual trigger share it, so either resumes past a JAR at
+        # which the other ended on an unreachable store. Set here, not under the
+        # control plane, because the manual trigger runs without it.
+        app.state.jar_gc_resume_point = ResumePoint()
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
@@ -1325,6 +1331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 clock=VersionsSystemClock(),
                 ownership=store_ownership,
+                resume_point=app.state.jar_gc_resume_point,
             )
             jar_gc_task = asyncio.create_task(
                 run_jar_gc_loop(
@@ -1346,6 +1353,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 clock=ServersSystemClock(),
                 ownership=store_ownership,
+                resume_point=ResumePoint(),
             )
             plugin_cache_gc_task = asyncio.create_task(
                 run_plugin_cache_gc_loop(
@@ -1365,6 +1373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 store=resource_pack_store,
                 clock=ServersSystemClock(),
                 ownership=store_ownership,
+                resume_point=ResumePoint(),
             )
             resource_pack_gc_task = asyncio.create_task(
                 run_resource_pack_gc_loop(

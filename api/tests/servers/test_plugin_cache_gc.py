@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
@@ -80,6 +81,13 @@ class _FakeReferences(LivePluginCacheReferences):
         return self._keys
 
 
+def _resume_point() -> ResumePoint:
+    """A resume point whose pass without a mark starts at the first key in key
+    order, so a pass meets the keys in the order a test seeds them (issue #3934)."""
+
+    return ResumePoint(start=lambda count: 0)
+
+
 def _old() -> dt.datetime:
     # Comfortably older than the safety window: never spared by it.
     return _NOW - GC_SAFETY_WINDOW - dt.timedelta(hours=1)
@@ -101,12 +109,14 @@ def _gc(
     cache: PluginCacheStore,
     refs: _FakeReferences,
     ownership: FakeStoreOwnership | None = None,
+    resume_point: ResumePoint | None = None,
 ) -> RunPluginCacheGc:
     return RunPluginCacheGc(
         cache=cache,
         references=refs,
         clock=_FixedClock(_NOW),
         ownership=ownership or FakeStoreOwnership(),
+        resume_point=resume_point or _resume_point(),
     )
 
 
@@ -286,6 +296,21 @@ class _ObjectCache:
             op == "delete_object" and any(sha in key for sha in shas)
         )
 
+    def answer_no_delete(self) -> list[str]:
+        """Give no answer to any delete; the blobs they were for, as they come."""
+
+        attempted: list[str] = []
+
+        def _fails(op: str, key: str) -> bool:
+            if op != "delete_object":
+                return False
+            attempted.append(key.removeprefix("plugin-cache/"))
+            return True
+
+        self.faults.when = _fails
+        self.faults.error = ObjectStoreUnreachableError
+        return attempted
+
     async def keys(self) -> list[str]:
         return [entry.sha256 for entry in await self.cache.list_entries()]
 
@@ -454,3 +479,121 @@ async def test_a_skipped_blob_leaves_the_count_of_failed_deletes_alone() -> None
 
     assert await store.keys() == keys
     assert (result.scanned, result.deleted, result.failed) == (9, 0, 5)
+
+
+async def test_a_blob_the_store_gives_no_answer_for_starves_no_other() -> None:
+    # A delete that gets no answer ends the pass (issue #3871). When that failure
+    # is in fact tied to one blob, the next pass starts after it and comes round to
+    # it last, so every other orphan is reclaimed within two passes, and the blob
+    # is still tried (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(5)
+    bad = keys[1]
+    store.fail_deletes_of(bad)
+    store.faults.error = ObjectStoreUnreachableError
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=_resume_point())
+
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await gc()
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await gc()
+
+    assert await store.keys() == [bad]
+
+
+async def test_a_store_that_answers_no_delete_ends_each_pass_at_its_first() -> None:
+    # A store that is truly down still ends each pass at once. Each pass starts
+    # after the blob the last one ended at, so the passes take the blobs in turn,
+    # and the resume point is only ever that one blob (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(3)
+    attempted = store.answer_no_delete()
+    resume_point = _resume_point()
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
+
+    for _ in range(7):
+        with pytest.raises(PluginCacheStorageUnreachableError):
+            await gc()
+
+    assert attempted == [*keys, *keys, keys[0]]
+    assert resume_point.key == keys[0]
+    assert await store.keys() == keys
+
+
+async def test_a_pass_that_comes_round_clears_the_resume_point() -> None:
+    # A pass that walks the whole listing without a store failure leaves no resume
+    # point, so the pass after it starts at the beginning (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(3)
+    store.fail_deletes_of(keys[1])
+    store.faults.error = ObjectStoreUnreachableError
+    resume_point = _resume_point()
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await gc()
+    assert resume_point.key == keys[1]
+    store.faults.clear()
+
+    await gc()
+
+    assert resume_point.key is None
+
+
+async def test_a_resumed_pass_logs_where_it_starts_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Where a pass starts is worth a line only when debugging (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(3)
+    store.fail_deletes_of(keys[1])
+    store.faults.error = ObjectStoreUnreachableError
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=_resume_point())
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await gc()
+    store.faults.clear()
+
+    with caplog.at_level(logging.DEBUG, logger="mc_server_dashboard_api"):
+        await gc()
+
+    (resumed,) = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.DEBUG and keys[1] in r.getMessage()
+    ]
+    assert "after" in resumed.getMessage()
+
+
+async def test_a_pass_five_failures_in_a_row_end_resumes_after_the_fifth() -> None:
+    # A pass that stops after five failed deletes in a row ends early too, so the
+    # next pass starts after the blob whose failure ended it, wherever the last
+    # pass started (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(6)
+    store.fail_deletes_of(keys[0])
+    store.faults.error = ObjectStoreUnreachableError
+    resume_point = _resume_point()
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=resume_point)
+    with pytest.raises(PluginCacheStorageUnreachableError):
+        await gc()
+    store.faults.clear()
+    store.fail_deletes_of(*keys[1:])
+
+    result = await gc()
+
+    assert result.failed == 5
+    assert resume_point.key == keys[5]
+
+
+async def test_ten_standing_failures_in_a_row_starve_no_blob_after_them() -> None:
+    # Ten blobs whose deletes keep failing, next to each other in key order: each
+    # pass stops after five of them. Each starts after the last, so the third pass
+    # reaches the blob above them (issue #3934).
+    store = _ObjectCache()
+    keys = await store.seed(11)
+    store.fail_deletes_of(*keys[:10])
+    gc = _gc(store.cache, _FakeReferences(set()), resume_point=_resume_point())
+
+    results = [await gc() for _ in range(3)]
+
+    assert [result.failed for result in results] == [5, 5, 5]
+    assert await store.keys() == keys[:10]
