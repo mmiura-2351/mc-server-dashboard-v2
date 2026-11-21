@@ -79,12 +79,16 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
-# What a database outage raises, by when it hits (#3313). asyncpg's connect is
-# not translated by SQLAlchemy, so a refused or timed-out connect is the raw
-# ``OSError`` and a server starting up, shutting down or full is asyncpg's raw
-# class 08 / 57 / ``TooManyConnections`` error; a pool that cannot hand out a
-# connection is SQLAlchemy's ``TimeoutError``; a connection lost mid-query is a
-# translated error (see :func:`is_transient_database_error`).
+# What a database outage raises, by when it hits (#3313, #3995). SQLAlchemy does
+# not translate a socket error, so a refused, timed-out or unresolvable connect is
+# the raw ``OSError``. A pool that cannot hand out a connection is SQLAlchemy's
+# ``TimeoutError``. A server that is full, starting up or shutting down answers a
+# connect with an error that reaches the caller as the generic ``DBAPIError``,
+# its SQLSTATE on ``orig`` (``_OUTAGE_SQLSTATES``). A connection lost mid-query,
+# to a terminated backend or a server shutdown or crash, is the generic
+# ``DBAPIError`` too, with the connection invalidated. asyncpg's own outage
+# classes count for an error that reaches a caller untranslated; through
+# SQLAlchemy 2.1 none does.
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     OSError,
     sqlalchemy.exc.TimeoutError,
@@ -95,18 +99,31 @@ _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     asyncpg.TooManyConnectionsError,
 )
 
+# The SQLSTATEs of a server that cannot take the connection now, besides all of
+# class 08 (connection exception): an administrator or crash shutdown, a server
+# starting up, shutting down or recovering, and a full connection table. A wrong
+# password or database (28xxx, 3D000) is a configuration fault, not an outage.
+_OUTAGE_SQLSTATES = frozenset({"57P01", "57P02", "57P03", "53300"})
+
 
 def is_transient_database_error(exc: BaseException) -> bool:
     """Whether ``exc`` means the database is unavailable for now, not a bug.
 
-    Retrying later may succeed. A connection lost mid-query is the generic
-    ``DBAPIError`` asyncpg's errors translate to, told apart by SQLAlchemy
-    having invalidated the connection.
+    Retrying later may succeed. A generic ``DBAPIError`` is one when SQLAlchemy
+    invalidated the connection, or when the driver's error it wraps carries an
+    outage's SQLSTATE.
     """
 
     if isinstance(exc, _TRANSIENT_ERRORS):
         return True
-    return isinstance(exc, sqlalchemy.exc.DBAPIError) and exc.connection_invalidated
+    if not isinstance(exc, sqlalchemy.exc.DBAPIError):
+        return False
+    sqlstate = getattr(exc.orig, "sqlstate", None) or ""
+    return (
+        exc.connection_invalidated
+        or sqlstate.startswith("08")
+        or sqlstate in _OUTAGE_SQLSTATES
+    )
 
 
 class DatabaseConnectError(Exception):
