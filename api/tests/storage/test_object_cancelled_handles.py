@@ -134,7 +134,8 @@ def _patch_backup_writer(
     """Track the gzip stream the backup writer's spool is open through.
 
     The writer's handle is a ``_CappedTarGz``, whose close closes that stream
-    and, after a failure, leaves its tar unfinished (issue #3859).
+    and, after a failure, leaves its tar unfinished (issue #3859). ``pause`` is
+    ``"open"`` or a method of its tar the writer runs as a job.
     """
 
     def _open(*args: Any) -> _CappedTarGz:
@@ -142,8 +143,8 @@ def _patch_backup_writer(
             held.pausing(lambda: None)()
         archive = _CappedTarGz(*args)
         held.track(archive._gz)
-        if pause == "addfile":
-            archive.tar.addfile = held.pausing(archive.tar.addfile)  # type: ignore[method-assign]
+        if pause != "open":
+            setattr(archive.tar, pause, held.pausing(getattr(archive.tar, pause)))
         return archive
 
     monkeypatch.setattr(object_store, "_CappedTarGz", _open)
@@ -260,6 +261,8 @@ _JOBS: list[tuple[str, str]] = [
     ("archive_file_member_streams", "member_read"),
     ("file_parts", "read"),
     ("write_backup_targz", "addfile"),
+    # The end-of-archive marker, written once every member is in (issue #3859).
+    ("write_backup_targz", "close"),
 ]
 
 
