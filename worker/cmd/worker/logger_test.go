@@ -152,6 +152,33 @@ func hasRecord(recs []map[string]any, level, msg string) bool {
 	})
 }
 
+// jsonErrorRecord returns the error of the json ERROR record msg in out, and
+// whether out holds one. A line that is not json fails t.
+func jsonErrorRecord(t *testing.T, out, msg string) (string, bool) {
+	t.Helper()
+	for _, rec := range jsonRecords(t, out) {
+		if err, ok := rec["error"].(string); ok && rec["level"] == "ERROR" && rec["msg"] == msg {
+			return err, true
+		}
+	}
+	return "", false
+}
+
+// textErrorRecord returns the error of the text ERROR record msg in out,
+// unquoted, and whether out holds one.
+func textErrorRecord(out, msg string) (string, bool) {
+	for line := range strings.Lines(out) {
+		_, quoted, ok := strings.Cut(strings.TrimSuffix(line, "\n"), " level=ERROR msg="+strconv.Quote(msg)+" error=")
+		if !ok {
+			continue
+		}
+		if err, unquoteErr := strconv.Unquote(quoted); unquoteErr == nil {
+			return err, true
+		}
+	}
+	return "", false
+}
+
 // TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler pins what main sets up
 // before it dials (issue #3960): the standard log package's lines and grpc-go's
 // are records of the configured format, escaped like any other, and grpc keeps
@@ -226,27 +253,32 @@ func TestMainSendsGRPCLogsThroughTheHandler(t *testing.T) {
 }
 
 // TestMainLogsAFatalErrorThroughTheConfiguredLogger: once main has built the
-// logger, it logs the error it exits on through it (issue #3960), here a dial
-// that cannot read a CA file whose path holds controls.
+// logger, it logs the error it exits on through it, in the configured format
+// (issue #3960): here a dial that cannot read a CA file whose path holds
+// controls.
 func TestMainLogsAFatalErrorThroughTheConfiguredLogger(t *testing.T) {
 	if isChild(t) {
 		main()
 		return
 	}
 	caFile := filepath.Join(t.TempDir(), "ca"+hostile+".pem")
-	env := bootEnv(t.TempDir(), "unix:///no-such-docker.sock", "127.0.0.1:1")
-	env["MCD_WORKER_API_TLS_INSECURE"] = "false"
-	env["MCD_WORKER_API_TLS_CA_FILE"] = caFile
-	out, code := runChild(t, env)
-	if code != 1 {
-		t.Errorf("exit code %d, want 1", code)
-	}
-	assertNoRawControls(t, out)
-	if !slices.ContainsFunc(jsonRecords(t, out), func(rec map[string]any) bool {
-		err, _ := rec["error"].(string)
-		return rec["level"] == "ERROR" && rec["msg"] == "worker failed" && strings.Contains(err, caFile)
-	}) {
-		t.Errorf("no ERROR record \"worker failed\" naming %q in:\n%s", caFile, out)
+	for _, format := range []string{"json", "text"} {
+		env := bootEnv(t.TempDir(), "unix:///no-such-docker.sock", "127.0.0.1:1")
+		env["MCD_WORKER_API_TLS_INSECURE"] = "false"
+		env["MCD_WORKER_API_TLS_CA_FILE"] = caFile
+		env["MCD_WORKER_LOG_FORMAT"] = format
+		out, code := runChild(t, env)
+		if code != 1 {
+			t.Errorf("%s: exit code %d, want 1", format, code)
+		}
+		assertNoRawControls(t, out)
+		err, ok := textErrorRecord(out, "worker failed")
+		if format == "json" {
+			err, ok = jsonErrorRecord(t, out, "worker failed")
+		}
+		if !ok || !strings.Contains(err, caFile) {
+			t.Errorf("%s: no ERROR record \"worker failed\" naming %q in:\n%s", format, caFile, out)
+		}
 	}
 }
 
@@ -265,10 +297,8 @@ func TestMainLogsAConfigErrorAsAnEscapedTextRecord(t *testing.T) {
 		t.Errorf("exit code %d, want 1", code)
 	}
 	assertNoRawControls(t, out)
-	head, quoted, _ := strings.Cut(strings.TrimSuffix(out, "\n"), " error=")
-	msg, err := strconv.Unquote(quoted)
-	if !strings.HasSuffix(head, ` level=ERROR msg="worker failed"`) || err != nil || !strings.Contains(msg, path) {
-		t.Errorf("want one text record at ERROR whose error names %q, got:\n%s", path, out)
+	if err, ok := textErrorRecord(out, "worker failed"); !ok || !strings.Contains(err, path) {
+		t.Errorf("no text ERROR record \"worker failed\" naming %q in:\n%s", path, out)
 	}
 }
 

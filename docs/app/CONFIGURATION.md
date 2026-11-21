@@ -1088,7 +1088,7 @@ decodes back to the same text: DEL in either format, and the C1 controls and the
 bidi controls U+061C, U+200E, U+200F, U+202A to U+202E and U+2066 to U+2069 in
 `json`. The relay's log does the same ([`RELAY.md`](RELAY.md) Section 13).
 
-Every line the Worker writes goes through that handler, so each follows
+Every log line the Worker writes goes through that handler, so each follows
 `log.format` and the escaping above:
 
 - its own records;
