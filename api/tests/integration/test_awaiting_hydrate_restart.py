@@ -26,6 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.dependencies import (
     WorkerAssignment,
     get_assigned_worker_lookup,
@@ -118,7 +119,9 @@ def _start(
         control_plane=cp,
         clock=clock,
         jar_provisioner=FakeJarProvisioner(),
-        store_generation=StorageGenerationReader(storage=storage),
+        store_generation=StorageGenerationReader(
+            storage=storage, uploads=SnapshotUploads(), upload_wait_seconds=60
+        ),
         file_store=StorageFileStoreAdapter(storage=storage),
     )
 

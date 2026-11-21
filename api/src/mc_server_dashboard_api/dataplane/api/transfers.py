@@ -49,11 +49,13 @@ from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 from starlette.types import Message, Send
 
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.dependencies import (
     AssignedWorkerLookup,
     ResolvedJarLookup,
     get_assigned_worker_lookup,
     get_resolved_jar_lookup,
+    get_snapshot_uploads,
     get_storage,
     get_transfer_semaphore,
     get_worker_credential,
@@ -428,6 +430,7 @@ async def publish_snapshot(
         AssignedWorkerLookup, Depends(get_assigned_worker_lookup)
     ],
     transfer_semaphore: Annotated[asyncio.Semaphore, Depends(get_transfer_semaphore)],
+    uploads: Annotated[SnapshotUploads, Depends(get_snapshot_uploads)],
     content_length: Annotated[int | None, Header()] = None,
     base_generation: Annotated[
         int | None, Header(alias=_BASE_GENERATION_HEADER)
@@ -512,6 +515,13 @@ async def publish_snapshot(
     this check before the placement was marked still commits, since the
     commit-time fence stays keyed on the Worker id.
 
+    A publish that names its Worker counts as in flight from the moment it
+    arrives until it has committed or been refused (issue #3950). A start that
+    hydrates that Worker waits for it first, so the hydrate serves what it
+    publishes: a Worker's command can end before the commit of its upload does,
+    and a Worker hydrated in between would run on the older generation while the
+    commit published a world that run does not contain.
+
     The content-integrity gate uses the single region rule set (issue #927): a
     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
     every snapshot source. The earlier source-keyed strict/live split (issue #923)
@@ -528,7 +538,11 @@ async def publish_snapshot(
     if content_length > _MAX_SNAPSHOT_BYTES:
         raise problem(status.HTTP_413_CONTENT_TOO_LARGE, "snapshot_too_large")
 
-    async with transfer_semaphore:
+    # Counted as in flight before the transfer-slot wait and the first read below
+    # (issue #3950), until the commit has published or the upload has given up:
+    # a start that hydrates this Worker waits for it, so the hydrate serves what
+    # it publishes. See ``uploads.py``.
+    async with uploads.track(server_id, publisher), transfer_semaphore:
         scope = (CommunityId(community_id), ServerId(server_id))
         # Nothing publishes from a Worker that has not hydrated its placement
         # (issue #3890), whatever the base header says; see the docstring.

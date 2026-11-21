@@ -24,6 +24,7 @@ import abc
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
+    WorkerId,
 )
 
 
@@ -43,4 +44,17 @@ class StoreGenerationReader(abc.ABC):
         Read after the caller's assignment commits, it therefore sees every
         publish that fence lets through, so a late publish of the previous
         Worker's final snapshot cannot land after a skip-hydrate decision.
+        """
+
+    @abc.abstractmethod
+    async def uploads_settled(
+        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        """Wait for the server's snapshot uploads from ``worker_id`` (issue #3950).
+
+        Returns once none of them is still being received or committed, and so
+        once each one that lands has published. False if one still is when the
+        wait's bound runs out. A hydrate of ``worker_id`` sent after a True
+        therefore serves at least what those uploads publish. The wait holds no
+        lock an upload needs.
         """

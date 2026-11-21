@@ -114,6 +114,7 @@ from mc_server_dashboard_api.core.adapters.readiness import (
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.core.domain.readiness import ControlPlaneReadiness
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.download_cookie import (
     DOWNLOAD_COOKIE_NAME,
     remember_download_cookie,
@@ -484,6 +485,23 @@ def get_transfer_semaphore(request: Request) -> asyncio.Semaphore:
         sem = asyncio.Semaphore(_MAX_CONCURRENT_TRANSFERS)
         state.transfer_semaphore = sem
     return sem
+
+
+def get_snapshot_uploads(request: Request) -> SnapshotUploads:
+    """Return the per-process count of snapshot uploads in flight (issue #3950).
+
+    The data plane counts each upload in it, and every start that hydrates a
+    Worker waits in it for that Worker's uploads, so both must get this one
+    instance. The app factory creates it; this falls back to creating it only for
+    an app that was not built by the factory.
+    """
+
+    state = request.app.state
+    uploads: SnapshotUploads | None = getattr(state, "snapshot_uploads", None)
+    if uploads is None:
+        uploads = SnapshotUploads()
+        state.snapshot_uploads = uploads
+    return uploads
 
 
 def get_archive_upload_admission(request: Request) -> ArchiveUploadAdmission:
@@ -2133,7 +2151,11 @@ def get_start_server(
         control_plane=control_plane,
         clock=ServersSystemClock(),
         jar_provisioner=CatalogJarProvisioner(ensure_jar=ensure_jar),
-        store_generation=StorageGenerationReader(storage=get_storage(request)),
+        store_generation=StorageGenerationReader(
+            storage=get_storage(request),
+            uploads=get_snapshot_uploads(request),
+            upload_wait_seconds=get_settings(request).control.upload_wait_seconds,
+        ),
         file_store=file_store,
         lifecycle_lock=get_lifecycle_lock(request),
         bedrock_tunnel_sync=get_bedrock_tunnel_sync(request),

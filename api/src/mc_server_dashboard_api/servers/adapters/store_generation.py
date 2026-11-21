@@ -6,18 +6,24 @@ with the published working set — read as ``settled_generation``, so it waits f
 a publish in progress (issue #3552). It maps the servers value objects onto
 the storage value objects at the bounded-context boundary (the lifecycle layer
 never imports the storage domain).
+
+The wait for a Worker's snapshot uploads before a hydrate (issue #3950) waits in
+the data plane's count of the uploads in flight, for ``upload_wait_seconds`` at
+most.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.servers.domain.store_generation import (
     StoreGenerationReader,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
+    WorkerId,
 )
 from mc_server_dashboard_api.storage.domain.port import Storage
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -33,6 +39,8 @@ class StorageGenerationReader(StoreGenerationReader):
     """Read Storage's authoritative working-set generation (issue #763)."""
 
     storage: Storage
+    uploads: SnapshotUploads
+    upload_wait_seconds: float
 
     async def current_generation(
         self, *, community_id: CommunityId, server_id: ServerId
@@ -40,4 +48,11 @@ class StorageGenerationReader(StoreGenerationReader):
         return await self.storage.settled_generation(
             StorageCommunityId(community_id.value),
             StorageServerId(server_id.value),
+        )
+
+    async def uploads_settled(
+        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        return await self.uploads.settled(
+            server_id.value, str(worker_id.value), timeout=self.upload_wait_seconds
         )

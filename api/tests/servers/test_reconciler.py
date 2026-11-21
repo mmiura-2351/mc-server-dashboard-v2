@@ -676,6 +676,11 @@ class _BumpingStoreGenerationReader(StoreGenerationReader):
         self.calls += 1
         return self._first if self.calls == 1 else self._bumped
 
+    async def uploads_settled(
+        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        return True
+
 
 async def test_held_redispatch_start_carries_grace_generation_over_a_bump() -> None:
     # TOCTOU pin (issue #2482): the reconciler grants the SHORT held-start grace on a

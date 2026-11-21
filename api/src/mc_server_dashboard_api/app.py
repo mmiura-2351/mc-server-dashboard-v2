@@ -45,6 +45,7 @@ from mc_server_dashboard_api.core.adapters.installation import read_installation
 from mc_server_dashboard_api.core.adapters.metrics import HTTP_TELEMETRY
 from mc_server_dashboard_api.core.api import health, meta, readiness
 from mc_server_dashboard_api.dataplane.api import transfers
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.dependencies import (
     build_brute_force_config,
     build_registration_config,
@@ -738,6 +739,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # backend (or, by construction, a missing fs root) fails fast at boot rather
     # than on first use (CONFIGURATION.md Section 3; STORAGE.md Section 7).
     storage, store_ownership = _build_storage(settings)
+    # The snapshot uploads in flight (issue #3950): the data plane counts each one
+    # in it, and every start that hydrates a Worker waits in it for that Worker's
+    # uploads first. One per process, as the uploads are.
+    snapshot_uploads = SnapshotUploads()
 
     # Build the resource pack store (issue #1176): only available for the object
     # backend; None for fs/remote-fs.
@@ -789,6 +794,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.assignment_fence_engine = assignment_fence_engine
         app.state.settings = settings
         app.state.storage = storage
+        app.state.snapshot_uploads = snapshot_uploads
         app.state.resource_pack_store = resource_pack_store
         app.state.plugin_cache_store = plugin_cache_store
         app.state.version_catalog = version_catalog
@@ -1158,7 +1164,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 pool=StorageJarPool(jars=storage),
                             )
                         ),
-                        store_generation=StorageGenerationReader(storage=storage),
+                        store_generation=StorageGenerationReader(
+                            storage=storage,
+                            uploads=snapshot_uploads,
+                            upload_wait_seconds=settings.control.upload_wait_seconds,
+                        ),
                         file_store=StorageFileStoreAdapter(storage=storage),
                         lifecycle_lock=PgLifecycleLock(engine=engine),
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
@@ -1280,7 +1290,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             pool=StorageJarPool(jars=storage),
                         )
                     ),
-                    store_generation=StorageGenerationReader(storage=storage),
+                    store_generation=StorageGenerationReader(
+                        storage=storage,
+                        uploads=snapshot_uploads,
+                        upload_wait_seconds=settings.control.upload_wait_seconds,
+                    ),
                     file_store=StorageFileStoreAdapter(storage=storage),
                     # Carry the real per-server lock as insurance for future locked
                     # reconciler paths (issue #876): a tick that eventually acquires
@@ -1303,7 +1317,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     stop_intents=app.state.stop_intents,
                 ),
                 control_plane=reconciler_control_plane,
-                store_generation=StorageGenerationReader(storage=storage),
+                store_generation=StorageGenerationReader(
+                    storage=storage,
+                    uploads=snapshot_uploads,
+                    upload_wait_seconds=settings.control.upload_wait_seconds,
+                ),
                 clock=ServersSystemClock(),
                 stop_refusals=app.state.stop_dispatch_refusals,
                 unrecorded_stops=app.state.unrecorded_stops,

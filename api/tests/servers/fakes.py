@@ -208,6 +208,11 @@ class FakeStoreGenerationReader(StoreGenerationReader):
     ) -> int:
         return self._generation
 
+    async def uploads_settled(
+        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        return True
+
 
 class FakeVersionValidator(VersionValidator):
     """Catalog seam double for create tests.

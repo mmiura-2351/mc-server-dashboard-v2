@@ -174,6 +174,11 @@ class _StoreGeneration(StoreGenerationReader):
     ) -> int:
         return self.generation
 
+    async def uploads_settled(
+        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        return True
+
 
 class _PublishingControlPlane(FakeControlPlane):
     """A fake whose successful snapshot publishes: the store generation advances.

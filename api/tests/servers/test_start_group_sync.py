@@ -107,6 +107,11 @@ class _VersionedFileStore(FakeFileStore, StoreGenerationReader):
     ) -> int:
         return self.generation
 
+    async def uploads_settled(
+        self, *, community_id: CommunityId, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        return True
+
 
 def _server(*, worker: WorkerId | None = None) -> Server:
     return Server(
