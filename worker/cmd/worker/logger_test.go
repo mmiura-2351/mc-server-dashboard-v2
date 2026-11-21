@@ -85,6 +85,9 @@ func TestNewLoggerKeepsOtherCharacters(t *testing.T) {
 // with nothing to escape is handed on as it is, so the writer adds no allocation
 // to what slog itself makes.
 func TestEscapingWriterAddsNoAllocationToAPlainRecord(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector makes sync.Pool drop items at random, so allocation counts are noise")
+	}
 	handlers := map[string]func(io.Writer) slog.Handler{
 		"json": func(w io.Writer) slog.Handler { return slog.NewJSONHandler(w, nil) },
 		"text": func(w io.Writer) slog.Handler { return slog.NewTextHandler(w, nil) },
