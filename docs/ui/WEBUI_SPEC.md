@@ -240,8 +240,11 @@ of a running server then fail with `409` `command_expired` instead of
 `command_failed`: nothing was applied, so retrying is safe. The lifecycle toast
 and the Console line say the host was busy and ask the user to try again; the
 Console line does not say the console connection failed, since it was never
-opened. A failed start is set back to stopped as for any refused start, and a
-stop keeps its intent, so the system replays it on its own as well. The Files
+opened. A start whose start command expired is set back to stopped as for any
+refused start. One whose hydrate expired stays pending on its host, since the
+answer does not rule out an instance of the server there, and the system
+retries it (`CONTROL_PLANE.md` Section 5). A stop keeps its intent, so the
+system replays it on its own as well. The Files
 tab keeps its generic failure message, and a backup keeps the Backups tab's
 generic one. A stop's final snapshot never fails this way: it runs however long
 it waits.
@@ -1239,8 +1242,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   the action in time, so it was not applied and the operator tries again
   (Section 2, "A command the host did not get to"). It is the same message on
   every verb, because what it reports holds on each: the host never ran that
-  command, so nothing was half-done and retrying is safe. A start or a restart
-  leaves nothing pending, so the restart message below would be wrong. A stop
+  command, so nothing was half-done and retrying is safe. A restart leaves
+  nothing pending, so the restart message below would be wrong, and so does a
+  start whose start command expired. A start whose hydrate expired stays
+  pending on its Worker for the reconciler, since the answer does not rule out
+  an instance there, so a retry answers `invalid_transition`
+  ([`CONTROL_PLANE.md`](../app/CONTROL_PLANE.md) Section 5). A stop
   keeps its stop intent, and the system replays the stop on its own after a
   short wait, even though the host reports the server still running at about the
   same time. The wait is the full reconcile wait (about 11 minutes by default)
@@ -1330,10 +1337,12 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   keeps `desired_state=running` and the assignment so `redispatch_start` can
   converge once the raced command settles — the start is pending; a
   **pre-dispatch** one — a refused hydrate before the start command was sent —
-  compensates back to stopped, so nothing is pending. The client sees one bare
-  `worker_busy` for both, so the message cannot promise the start will happen: it
-  says the start *may* still be applied on its own and to start again only if the
-  server stays stopped, rather than the generic "wait and try again". That
+  keeps them too, since another command or a failed-stop orphan may still run
+  the server on that Worker
+  ([`CONTROL_PLANE.md`](../app/CONTROL_PLANE.md) Section 5). The message still
+  does not promise the start will happen: it says the start *may* still be
+  applied on its own and to start again only if the server stays stopped,
+  rather than the generic "wait and try again". That
   generic retry is actively misleading on the pending path — a retry while
   `desired_state=running` raises `invalid_transition`, which on **start** carries
   its own message ("already running or starting up") rather than the generic
@@ -1344,8 +1353,10 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   that demonstrably did not happen is compensated back to stopped, but a
   **post-dispatch** timeout or lost session is not (the start may have been
   applied), while its pre-dispatch twin — a failed hydrate, or a call that never
-  reached the Worker — compensates, and so does a start or hydrate the Worker
-  answered it could not carry out because its container runtime did not. This is the identical pre/post ambiguity as `worker_busy`
+  reached the Worker — compensates, and so does a start the Worker answered it
+  could not carry out because its container runtime did not. A hydrate the
+  Worker answered that way keeps the start pending, since the container it
+  could not end may still be running. This is the identical pre/post ambiguity as `worker_busy`
   above, but a timeout answers *nothing*, so there is no honest thing to say
   beyond "could not reach the server host" — hence the verb-agnostic message.
   The `worker_state` member does not resolve it: each state arises both before

@@ -183,6 +183,12 @@ class ServerRepository(abc.ABC):
         A write that changes the desired state (issue #3428) or the assignment
         (issue #3818) is announced to live subscribers as a status event once
         the transaction commits, carrying the fields it changed.
+
+        A write that changes the assignment also sets ``awaiting_hydrate`` (issue
+        #3890): to ``True`` when it places the server on a Worker, which has not
+        hydrated it yet, and to ``False`` when it releases the row. A write that
+        keeps the assignment leaves the mark as the row holds it, so one built
+        from a stale read cannot restore a mark a hydrate has cleared since.
         """
 
     @abc.abstractmethod
@@ -219,6 +225,11 @@ class ServerRepository(abc.ABC):
         let the stale worker's (freshest-stamped) report overwrite the new
         owner's state. API-driven convergence writers do not assert a worker:
         they converge their own dispatch outcome, not a worker's report.
+
+        A write that lands with ``unassign``, or of ``running``, also clears
+        ``awaiting_hydrate`` (issue #3890). A release owes no hydrate. A running
+        instance's working set is the one its snapshots capture, whatever the
+        store holds, so a hydrate is no longer what makes them safe.
 
         ``detail`` and ``reason`` are the report's free text and crash reason.
         A write of ``crashed`` stores them as the server's last crash
@@ -264,7 +275,8 @@ class ServerRepository(abc.ABC):
         no-op rather than a clobber if the row moved out from under us by any other
         path. Returns ``True`` when the assignment was cleared, ``False`` when the
         guard matched no row. A clear is announced to live subscribers as a status
-        event once the transaction commits (issue #3818).
+        event once the transaction commits (issue #3818). It clears
+        ``awaiting_hydrate`` with the assignment (issue #3890).
         """
 
     @abc.abstractmethod
@@ -287,7 +299,38 @@ class ServerRepository(abc.ABC):
         has landed since the read, a first one included. Returns ``True`` when
         the assignment was cleared, ``False`` when the guard matched no row. A
         clear is announced to live subscribers as a status event once the
-        transaction commits (issue #3818).
+        transaction commits (issue #3818). It clears ``awaiting_hydrate`` with
+        the assignment (issue #3890).
+        """
+
+    @abc.abstractmethod
+    async def clear_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId, *, updated_at: dt.datetime
+    ) -> bool:
+        """Clear ``awaiting_hydrate`` for the placement the caller read (#3890).
+
+        A start clears it once the Worker holds the store's working set. The
+        write lands only while ``worker_id`` holds the row and its ``updated_at``
+        is still the one the caller read when it checked that the placement is
+        its own, so a newer placement on the same Worker keeps its mark (r2
+        review). Returns ``True`` when the row changed. Not announced: the mark
+        is the API's own bookkeeping, not a state a client reads.
+        """
+
+    @abc.abstractmethod
+    async def mark_awaiting_hydrate(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        """Set ``awaiting_hydrate`` again while ``worker_id`` holds the row (#3890).
+
+        A start sets it when the Worker proves it holds no working set for the
+        server after a skipped hydrate (#2499). Guarded on the assignment only,
+        not on ``updated_at``: an edit committed while the start was on the
+        Worker must not leave a refused replay's scratch publishable. A newer
+        placement on the same Worker cannot have cleared its own mark by then,
+        because its hydrate runs on the Worker's per-server lane behind this
+        start, whose answer the caller acts on with this one write. Returns
+        ``True`` when the row changed. Not announced.
         """
 
     @abc.abstractmethod

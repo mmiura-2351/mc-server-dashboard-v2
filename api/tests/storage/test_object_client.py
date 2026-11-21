@@ -395,13 +395,16 @@ class _RaisingObjectClient:
 
 
 class _RaisingListClient:
-    """A client double whose paginators raise a set code on iteration."""
+    """A client double whose listings raise a set code (paginators on iteration)."""
 
     def __init__(self, code: str) -> None:
         self._code = code
 
     def get_paginator(self, _name: str) -> _RaisingPaginator:
         return _RaisingPaginator(self._code)
+
+    async def list_objects_v2(self, **_kwargs: object) -> dict[str, object]:
+        raise _client_error(self._code)
 
 
 # --- Bucketless store reads as empty/not-found (issue #946) ------------------
@@ -445,6 +448,82 @@ async def test_list_objects_other_error_reraises() -> None:
 
     with pytest.raises(ClientError):
         await client.list_objects("communities/")
+
+
+async def test_first_key_no_such_bucket_is_none() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("NoSuchBucket"), "bucket")
+
+    assert await client.first_key("communities/") is None
+
+
+async def test_first_key_other_error_reraises() -> None:
+    client = _Aioboto3S3Client(_RaisingListClient("AccessDenied"), "bucket")
+
+    with pytest.raises(ClientError):
+        await client.first_key("communities/")
+
+
+class _PagesClient:
+    """A client double answering ``list_objects_v2`` with set pages; records calls."""
+
+    def __init__(self, pages: list[dict[str, object]]) -> None:
+        self._pages = pages
+        self.calls: list[dict[str, object]] = []
+
+    async def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return self._pages[len(self.calls) - 1]
+
+
+async def test_first_key_reads_one_default_size_page_and_stops_at_a_key() -> None:
+    # The store's own page size, not a one-key window: a store that spends a small
+    # window on emptied directories reports none of the keys behind them (SeaweedFS
+    # 4.33, issue #3886).
+    double = _PagesClient(
+        [
+            {
+                "Contents": [{"Key": "jars/a.jar"}, {"Key": "jars/b.jar"}],
+                "IsTruncated": True,
+                "NextContinuationToken": "t1",
+            }
+        ]
+    )
+    client = _Aioboto3S3Client(double, "bucket")
+
+    assert await client.first_key("jars/") == "jars/a.jar"
+    assert double.calls == [{"Bucket": "bucket", "Prefix": "jars/"}]
+
+
+async def test_first_key_follows_a_truncated_page_that_holds_no_key() -> None:
+    # A truncated page without keys proves nothing: the next one may hold one.
+    double = _PagesClient(
+        [
+            {"KeyCount": 0, "IsTruncated": True, "NextContinuationToken": "t1"},
+            {"KeyCount": 0, "IsTruncated": True, "NextContinuationToken": "t2"},
+            {"Contents": [{"Key": "jars/z.jar"}], "IsTruncated": False},
+        ]
+    )
+    client = _Aioboto3S3Client(double, "bucket")
+
+    assert await client.first_key("jars/", start_after="jars/a") == "jars/z.jar"
+    assert double.calls == [
+        {"Bucket": "bucket", "Prefix": "jars/", "StartAfter": "jars/a"},
+        {"Bucket": "bucket", "Prefix": "jars/", "ContinuationToken": "t1"},
+        {"Bucket": "bucket", "Prefix": "jars/", "ContinuationToken": "t2"},
+    ]
+
+
+async def test_first_key_is_none_only_on_the_final_page() -> None:
+    double = _PagesClient(
+        [
+            {"KeyCount": 0, "IsTruncated": True, "NextContinuationToken": "t1"},
+            {"KeyCount": 0, "IsTruncated": False},
+        ]
+    )
+    client = _Aioboto3S3Client(double, "bucket")
+
+    assert await client.first_key("jars/") is None
+    assert len(double.calls) == 2
 
 
 async def test_list_multipart_uploads_no_such_bucket_returns_empty() -> None:
@@ -554,14 +633,18 @@ class _RaisingReadClient:
     def get_paginator(self, _name: str) -> _RaisingErrorPaginator:
         return _RaisingErrorPaginator(self._error)
 
+    async def list_objects_v2(self, **_kwargs: object) -> dict[str, object]:
+        raise self._error
 
-# The four read operations that reach the store before a response body starts, each
+
+# The read operations that reach the store before a response body starts, each
 # with the call shape its test needs.
 _READ_CALLS: dict[str, Callable[[_Aioboto3S3Client], Awaitable[object]]] = {
     "get_object": lambda c: c.get_object("communities/k"),
     "head_object": lambda c: c.head_object("communities/k"),
     "copy_object": lambda c: c.copy_object("src/k", "dst/k"),
     "list_objects": lambda c: c.list_objects("communities/"),
+    "first_key": lambda c: c.first_key("communities/"),
 }
 
 

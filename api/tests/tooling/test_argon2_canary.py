@@ -59,7 +59,7 @@ def _gone(pid: int) -> bool:
     """Whether ``pid`` has exited, reaped or not."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
     return stat.rsplit(")", 1)[1].split()[0] == "Z"
 
@@ -161,6 +161,20 @@ def test_a_parent_gone_before_the_canary_starts_still_stops_it(
     finally:
         if not _gone(pid):
             os.kill(pid, signal.SIGKILL)
+
+
+def test_a_process_reaped_while_its_stat_is_read_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Reaped between the open and the read of /proc/<pid>/stat, a process
+    # fails the read with ESRCH rather than ENOENT (issue #3955). The pid is
+    # this live process, so only the stubbed read can make it gone.
+    def read_text(self: Path) -> str:
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+    assert _gone(os.getpid())
 
 
 class _AfterTheFirstCheck(Exception):

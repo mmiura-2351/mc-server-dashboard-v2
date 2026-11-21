@@ -311,6 +311,18 @@ class S3Client(Protocol):
         """List every object whose key starts with ``prefix`` (a prefix scan)."""
         ...
 
+    async def first_key(
+        self, prefix: str, *, start_after: str | None = None
+    ) -> str | None:
+        """The lowest key that starts with ``prefix`` (and sorts after
+        ``start_after``), or ``None`` if there is none.
+
+        It reads listing pages of the store's default size and stops at the first
+        key, following a truncated page that holds none. A bucket that does not
+        exist yet holds none (issue #3886).
+        """
+        ...
+
     async def list_multipart_uploads(self, prefix: str) -> list[S3MultipartUpload]:
         """List in-progress multipart uploads whose key starts with ``prefix``.
 

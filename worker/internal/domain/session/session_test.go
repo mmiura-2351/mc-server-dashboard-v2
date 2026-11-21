@@ -427,6 +427,103 @@ func TestSuccessfulCommandResultIsNotWarnLogged(t *testing.T) {
 	<-done
 }
 
+// releasedFailure answers its command with a failure once the test releases it,
+// whether or not the session is still alive by then, as a snapshot whose work
+// outlives the session's end does.
+type releasedFailure struct {
+	entered chan struct{}
+	release chan struct{}
+	message string
+}
+
+func (h *releasedFailure) Handle(_ context.Context, cmd Command) CommandResult {
+	close(h.entered)
+	<-h.release
+	return CommandResult{CommandID: cmd.CommandID, ErrorCode: CommandErrorTransferFailed, ErrorMessage: h.message}
+}
+
+func (h *releasedFailure) Events() <-chan StatusEvent   { return nil }
+func (h *releasedFailure) Logs() <-chan LogEvent        { return nil }
+func (h *releasedFailure) Metrics() <-chan MetricsEvent { return nil }
+
+// recordsWithMessage returns the captured records at level whose message is msg.
+func recordsWithMessage(capture *captureHandler, level slog.Level, msg string) []slog.Record {
+	var out []slog.Record
+	for _, rec := range capture.recordsAtLevel(level) {
+		if rec.Message == msg {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// A failure its session can still deliver is logged at WARN. One that comes back
+// after the session ended reaches no one, so it is logged at INFO, with its kind
+// and capped message: teardown is what failed it, and a WARN per in-flight command
+// would alarm on every stream drop and shutdown (issue #3940).
+func TestAFailedResultIsLoggedAtInfoOnceItsSessionHasEnded(t *testing.T) {
+	const failedMsg = "command failed"
+	const undeliveredMsg = "command result not delivered: its session ended before the command finished"
+	message := strings.Repeat("a", maxLoggedErrorMessageBytes) + "b"
+	capped := strings.Repeat("a", maxLoggedErrorMessageBytes) + loggedErrorMessageTruncationMarker
+	for _, tc := range []struct {
+		name         string
+		sessionEnded bool
+	}{
+		{"delivered", false},
+		{"after the session ended", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := newFakeTransport(acceptedAck())
+			dialer := &fakeDialer{transports: []*fakeTransport{transport}}
+			logger, capture := captureLogger()
+			handler := &releasedFailure{entered: make(chan struct{}), release: make(chan struct{}), message: message}
+			r := NewRunner(dialer, testCaps(), newFakeClock(), logger, WithCommandHandler(handler))
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() { _ = r.Run(ctx); close(done) }()
+
+			transport.commands <- Command{CommandID: "cmd-9", ServerID: "srv-1", Kind: "SnapshotTrigger"}
+			<-handler.entered
+			if tc.sessionEnded {
+				cancel()
+				<-done
+			}
+			close(handler.release)
+
+			want, other := failedMsg, undeliveredMsg
+			level, otherLevel := slog.LevelWarn, slog.LevelInfo
+			if tc.sessionEnded {
+				want, other = undeliveredMsg, failedMsg
+				level, otherLevel = slog.LevelInfo, slog.LevelWarn
+			}
+			waitFor(t, func() bool { return len(recordsWithMessage(capture, level, want)) == 1 })
+			rec := recordsWithMessage(capture, level, want)[0]
+			for key, value := range map[string]string{
+				"command_id":    "cmd-9",
+				"server_id":     "srv-1",
+				"kind":          "SnapshotTrigger",
+				"error_code":    CommandErrorTransferFailed.String(),
+				"error_message": capped,
+			} {
+				if got, _ := recordAttr(rec, key); got != value {
+					t.Errorf("%s %q: %s is %d bytes %.20q, want %d bytes %.20q", rec.Level, want, key, len(got), got, len(value), value)
+				}
+			}
+			if !tc.sessionEnded {
+				waitFor(t, func() bool { return len(transport.resultsCopy()) == 1 })
+				cancel()
+				<-done
+			}
+			if n := len(recordsWithMessage(capture, otherLevel, other)); n != 0 {
+				t.Errorf("%d %s %q records, want none", n, otherLevel, other)
+			}
+		})
+	}
+}
+
 func TestFileCommandDispatchedToHandler(t *testing.T) {
 	transport := newFakeTransport(acceptedAck())
 	dialer := &fakeDialer{transports: []*fakeTransport{transport}}

@@ -570,7 +570,8 @@ def get_jar_pool_gc(request: Request) -> RunJarPoolGc:
     The pool seam over storage's ``JarStore`` (list + delete) plus the live
     reference set read from server rows (the ``ServerJarReferences`` adapter over
     the servers repository). The same use case the periodic loop drives, gated on
-    the same store owner marker the lifespan claimed (issue #3870).
+    the same store owner marker the lifespan claimed (issue #3870), and starting
+    where the last pass of either ended (issue #3934).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -579,6 +580,7 @@ def get_jar_pool_gc(request: Request) -> RunJarPoolGc:
         references=ServerJarReferences(uow=ServersUnitOfWork(session_factory)),
         clock=VersionsSystemClock(),
         ownership=request.app.state.store_ownership,
+        resume_point=request.app.state.jar_gc_resume_point,
     )
 
 
@@ -616,18 +618,35 @@ def get_resolved_jar_lookup(request: Request) -> ResolvedJarLookup:
     return _lookup
 
 
-# An async lookup of a server's currently-assigned worker id (as a string), or
-# None if unassigned. The data-plane snapshot endpoint uses it to fence late
-# publishes from a worker that is no longer assigned (issue #1703).
-AssignedWorkerLookup = Callable[[uuid.UUID, uuid.UUID], Awaitable[str | None]]
+@dataclass(frozen=True)
+class WorkerAssignment:
+    """A server's assigned Worker, as the data plane reads it (issue #1703).
+
+    ``awaiting_hydrate`` is the row's mark that this Worker has not hydrated the
+    server under the assignment yet (issue #3890): its scratch may be older than
+    the store.
+    """
+
+    worker_id: str
+    awaiting_hydrate: bool
+
+
+# An async lookup of a server's current assignment, or None if unassigned. The
+# data-plane snapshot endpoint uses it to fence late publishes from a worker that
+# is no longer assigned (issue #1703), and to refuse every publish from the
+# assigned worker while it has not hydrated the server yet (issue #3890).
+AssignedWorkerLookup = Callable[
+    [uuid.UUID, uuid.UUID], Awaitable[WorkerAssignment | None]
+]
 
 
 def get_assigned_worker_lookup(request: Request) -> AssignedWorkerLookup:
-    """Provide a lookup of a server's currently-assigned worker id (#1703).
+    """Provide a lookup of a server's current assignment (#1703, #3890).
 
-    Returns the ``assigned_worker_id`` value (as a string) when the server
-    exists and belongs to the given community, or ``None`` when the server is
-    unknown, belongs to a different community, or has no assignment.
+    Returns the ``assigned_worker_id`` value (as a string) and the row's
+    ``awaiting_hydrate`` mark when the server exists and belongs to the given
+    community, or ``None`` when the server is unknown, belongs to a different
+    community, or has no assignment. One read, so the two agree.
 
     Reads through the app's dedicated assignment-fence engine, not the shared
     pool (issue #3544): the snapshot commit runs this lookup while it holds the
@@ -643,14 +662,19 @@ def get_assigned_worker_lookup(request: Request) -> AssignedWorkerLookup:
     engine: AsyncEngine = request.app.state.assignment_fence_engine
     session_factory = create_session_factory(engine)
 
-    async def _lookup(community_id: uuid.UUID, server_id: uuid.UUID) -> str | None:
+    async def _lookup(
+        community_id: uuid.UUID, server_id: uuid.UUID
+    ) -> WorkerAssignment | None:
         async with ServersUnitOfWork(session_factory) as uow:
             server = await uow.servers.get_by_id(ServersServerId(server_id))
         if server is None or server.community_id.value != community_id:
             return None
         if server.assigned_worker_id is None:
             return None
-        return str(server.assigned_worker_id.value)
+        return WorkerAssignment(
+            worker_id=str(server.assigned_worker_id.value),
+            awaiting_hydrate=server.awaiting_hydrate,
+        )
 
     return _lookup
 

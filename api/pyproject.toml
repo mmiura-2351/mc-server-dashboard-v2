@@ -657,10 +657,12 @@ forbidden_modules = [
 # a file format, not an HTTP header) — and `archive_member`, the standard-library
 # backup archive member rule that storage's restore and the servers upload gate
 # both judge members by (issue #3579), and the end-of-archive read beside it
-# (issue #3778); and `gc_pass`, the import-free limit on failed deletes in a row
-# at which the versions and servers GCs both end a pass (issue #3906). Keep the
+# (issue #3778); and `gc_pass`, the standard-library limit on failed deletes in a
+# row at which the versions and servers GCs both end a pass (issue #3906), and the
+# resume point their next pass starts after (issue #3934). Keep the
 # list in step with that `ls`: a new root-level module belongs here unless it is
-# neutral in the same way.
+# neutral in the same way. `tests/tooling/test_root_module_contract.py` holds the
+# list to the `ls` and repeats the exemptions, so an exemption changes in both.
 [[tool.importlinter.contracts]]
 name = "no context's domain or application imports a root-level module"
 type = "forbidden"
@@ -693,6 +695,7 @@ forbidden_modules = [
     "mc_server_dashboard_api.docs",
     "mc_server_dashboard_api.download_cookie",
     "mc_server_dashboard_api.export_openapi",
+    "mc_server_dashboard_api.http_body_limit",
     "mc_server_dashboard_api.http_content_disposition",
     "mc_server_dashboard_api.http_datetime",
     "mc_server_dashboard_api.http_head",
@@ -703,6 +706,8 @@ forbidden_modules = [
     "mc_server_dashboard_api.logging",
     "mc_server_dashboard_api.middleware",
     "mc_server_dashboard_api.observability",
+    "mc_server_dashboard_api.serve",
+    "mc_server_dashboard_api.store_claim_cli",
     "mc_server_dashboard_api.webui",
 ]
 

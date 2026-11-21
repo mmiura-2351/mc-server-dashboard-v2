@@ -822,6 +822,63 @@ def test_start_answers_each_row_as_the_web_ui_expects(row: dict[str, Any]) -> No
         assert cp.dispatched == []
 
 
+# --- a start whose hydrate may meet an instance (issue #3890) ---------------
+
+
+@pytest.mark.parametrize(
+    ("precondition", "status_code", "reason"),
+    [
+        ("command_in_flight", 409, "worker_busy"),
+        ("orphan_pending", 409, "worker_busy"),
+        ("untracked_container", 503, "worker_unavailable"),
+        ("command_expired", 409, "command_expired"),
+    ],
+)
+def test_a_start_whose_hydrate_may_meet_an_instance_keeps_its_worker(
+    precondition: str, status_code: int, reason: str
+) -> None:
+    # The placed Worker refused the hydrate with an answer that leaves an instance
+    # of the server there possible. The route answers that refusal as before, and
+    # the server stays desired-running on that Worker for the reconciler.
+    community = uuid.uuid4()
+    worker = WorkerId(uuid.uuid4())
+    server = dataclasses.replace(
+        _server(community),
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = FakeControlPlane(
+        place_to=worker,
+        outcomes={
+            "hydrate": CommandOutcome(
+                status=worker_status("HydrateTrigger", precondition),
+                message="refused",
+            )
+        },
+    )
+    use_case = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_start_server] = lambda: use_case
+
+    resp = _client(app).post(_url(community, server.id.value, "start"))
+
+    assert (resp.status_code, resp.json()["reason"]) == (status_code, reason)
+    stored = uow.servers.by_id[server.id]
+    assert (stored.desired_state, stored.assigned_worker_id) == (
+        DesiredState.RUNNING,
+        worker,
+    )
+
+
 # --- a Worker whose backend is unavailable (issues #3673, #3678) ------------
 
 
