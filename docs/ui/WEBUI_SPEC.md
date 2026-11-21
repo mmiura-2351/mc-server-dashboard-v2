@@ -1365,14 +1365,14 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   returns, and nothing moves them on its own
   ([CONFIGURATION.md](../app/CONFIGURATION.md#56-divergence-reconciler)
   Section 5.6, "A Worker that never reconnects"). The stop message says the
-  host is unreachable and the stop still stands: the server stays assigned to
-  the host until it returns or a grace period passes, and a stop retried once
-  it is back in time completes the stop with the final snapshot. That holds
-  for a server still running there and for one whose process is gone and is
-  owed only its final snapshot (issue #3983). A host back after the release
-  keeps its instance, and nothing stops it. A second stop while the host is
-  down releases the server at once, and a start then moves it to another
-  host. The restart message says the system cannot restart the server
+  host is not reachable and the stop still stands: a host back in time gets
+  the stop, with the final snapshot, and a stop retried once it is back does
+  that at once. That holds for a server still running there and for one whose
+  process is gone and is owed only its final snapshot (issue #3983). "Not
+  reachable" also fits a Worker already back on a new session, which the
+  same 503 can name. A host back after the release keeps its instance, and
+  nothing stops it. A second stop while the host is down releases the server
+  at once, without that snapshot, and a start then moves it to another host. The restart message says the system cannot restart the server
   and the restart is not sent again, so the operator restarts it once the host
   is back, or moves it: stop, stop again, start. Both say to move it only once
   the old host is known to be down: the release stops nothing there, and

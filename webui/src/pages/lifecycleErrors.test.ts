@@ -294,9 +294,10 @@ describe("lifecycleErrorMessage", () => {
 
   // What the copy promises is the contract for these messages, so each claim
   // is pinned in both locales (issue #3820):
-  // - an offline stop keeps the server on the unreachable host until it returns
-  //   or the grace passes, and a retry once it is back takes the final snapshot
-  //   (issue #3983): the release stops nothing on the host;
+  // - an offline stop completes on a host back in time, with the final
+  //   snapshot, and a retry once it is back does that at once (issue #3983);
+  //   a stop again while it is away releases the server without that snapshot,
+  //   and the release stops nothing on the host;
   // - an offline restart is never re-sent;
   // - moving the server is safe only once the old host is down, since nothing
   //   fences an instance still alive there (CONFIGURATION.md 5.6);
@@ -307,17 +308,17 @@ describe("lifecycleErrorMessage", () => {
     [
       "en",
       "dashboard.lifecycle.stopWorkerOffline",
-      /^The server host is unreachable\./,
+      /^The server host is not reachable\./,
     ],
     [
       "en",
       "dashboard.lifecycle.stopWorkerOffline",
-      /the server stays assigned to that host until the host returns or a grace period passes/,
+      /if the host comes back in time, the stop completes there with a final snapshot, and stopping again once it is back does that at once/,
     ],
     [
       "en",
       "dashboard.lifecycle.stopWorkerOffline",
-      /If the host is back in time, stopping again completes the stop with a final snapshot/,
+      /stop the server again to release it now, without that snapshot, then start it to move it to another host/,
     ],
     [
       "ja",
@@ -327,12 +328,22 @@ describe("lifecycleErrorMessage", () => {
     [
       "ja",
       "dashboard.lifecycle.stopWorkerOffline",
-      /ホストが戻るか一定の猶予時間が過ぎるまで、サーバーはこのホストに割り当てられたままです/,
+      /猶予時間内にホストが戻れば、そのホストで最終スナップショットを取って停止が完了します。ホストが戻ったあとでもう一度停止すれば、すぐに完了します/,
     ],
     [
       "ja",
       "dashboard.lifecycle.stopWorkerOffline",
-      /猶予時間内にホストが戻れば、もう一度停止すると最終スナップショットを取って停止が完了します/,
+      /もう一度停止すると最終スナップショットを取らずにすぐ切り離せます。そのあと起動すると別のホストへ移せます/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /^The server host is not reachable, so the system cannot restart the server/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.restartWorkerOffline",
+      /^サーバーホストに接続できないため、システムはこのサーバーを再起動できません/,
     ],
     [
       "en",

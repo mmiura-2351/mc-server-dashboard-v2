@@ -721,6 +721,24 @@ def test_rebuild_on_the_current_session_lands_beside_a_newer_workers() -> None:
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
 
 
+def test_rebuild_for_an_unknown_worker_is_ignored() -> None:
+    # The token is another Worker's current one: an unknown id has no session.
+    clock = FakeClock(_T0)
+    registry = _registry(clock)
+    session = registry.register(make_worker(at=_T0))
+
+    registry.set_assignment(
+        WorkerId("ghost"),
+        session,
+        {"server-a": 512},
+        registry.assignment_epoch(WorkerId("ghost")),
+    )
+
+    assert registry.committed_memory_mb(WorkerId("ghost")) == 0
+    assert registry.get(WorkerId("ghost")) is None
+    assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
+
+
 # --- per-id lookup (#322) --------------------------------------------------
 
 

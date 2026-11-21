@@ -330,9 +330,9 @@ export const en = {
   // nothing fences an instance still alive there. The copy carries the steps
   // and the precondition itself: not every reader has the repository docs.
   "dashboard.lifecycle.stopWorkerOffline":
-    "The server host is unreachable. The stop still stands, and the server stays assigned to that host until the host returns or a grace period passes. If the host is back in time, stopping again completes the stop with a final snapshot. If the host is down for good, stop the server again to release it now, then start it to move it to another host. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
+    "The server host is not reachable. The stop still stands: if the host comes back in time, the stop completes there with a final snapshot, and stopping again once it is back does that at once. If the host is down for good, stop the server again to release it now, without that snapshot, then start it to move it to another host. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
   "dashboard.lifecycle.restartWorkerOffline":
-    "The server host is offline, so the system cannot restart the server. Restart it again once the host is back. To move it to another host instead, stop it, stop it again, then start it. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
+    "The server host is not reachable, so the system cannot restart the server. Restart it again once the host is back. To move it to another host instead, stop it, stop it again, then start it. Do this only once you know the old host is down; otherwise the same world may run on two hosts.",
   // Live-status degraded indicator: WS down, polling fallback (SPEC 6.2 / 7.2).
   "dashboard.liveDegraded": "Reconnecting — updates may lag",
   // Clickable join-hostname copy feedback (ServerAddressBadges, shared by the
