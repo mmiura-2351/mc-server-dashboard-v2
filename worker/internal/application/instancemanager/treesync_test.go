@@ -106,8 +106,10 @@ func TestSnapshotMakesTheTreeDurableBeforeTheMarker(t *testing.T) {
 			if !res.Success {
 				t.Fatalf("SnapshotTrigger = %+v, want success: the publish does not depend on the local sync", res)
 			}
+			// Errorf, not Fatalf: an order that is wrong but still stamps the right
+			// marker must report the order alone.
 			if !equalLines(seq, tc.wantSeq) {
-				t.Fatalf("operation order = %v, want %v", seq, tc.wantSeq)
+				t.Errorf("operation order = %v, want %v", seq, tc.wantSeq)
 			}
 			if !tc.running {
 				if _, err := os.Stat(dir); !os.IsNotExist(err) {
