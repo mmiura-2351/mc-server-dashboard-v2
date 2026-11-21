@@ -2237,6 +2237,17 @@ flushes whatever else is dirty on that filesystem. Writes after the sync are not
 synced, so a power loss can still tear them; the boot region fsck is what catches
 that (CONTROL_PLANE.md Section 4.1).
 
+The guarantee holds only where `syncfs` makes one, so the scratch directory must
+sit on a **local filesystem**: not FUSE, which need not pass the sync on to its
+daemon, and not a network filesystem. `syncfs` reports a writeback error only
+from **Linux 5.8** on; on an older kernel a write the disk refused can go
+unreported, and the marker then advances over it. `syncfs` also waits on
+everything else dirty on that filesystem, so a scratch that shares it with the
+store or Postgres waits on their writeback too; a separate filesystem is
+recommended ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 3). Each
+successful sync logs `snapshot made the working set durable` at `INFO` with its
+duration as `sync_ms`.
+
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
 split. MC 26.x pads region files to a 4096-byte sector boundary only on

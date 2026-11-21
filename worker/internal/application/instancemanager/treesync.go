@@ -27,13 +27,16 @@ import (
 // whatever the size of the tree, and a single device flush. That filesystem holds
 // whatever else shares it as well, so the call also flushes any other dirty data
 // there; the snapshot removes its spool beside the working dir first, so that the
-// spool's pages are dropped rather than written.
+// spool's pages are dropped rather than written. What it promises depends on that
+// filesystem and the kernel (STORAGE.md Section 8): it reports a writeback error
+// only from Linux 5.8, and it is a durability guarantee only on a local
+// filesystem, not on FUSE or a network filesystem.
 //
 // Where syncfs is unavailable it walks the tree instead and fsyncs each regular file
-// and directory (fsyncTree). An older kernel answers ENOSYS, and a seccomp profile
-// that does not know syncfs answers EPERM, which syncfs has no use for itself. Any
-// other syncfs error is returned as it is: a walk then would report a failed sync as
-// a durable tree.
+// and directory (fsyncWorkingSetTree). An older kernel answers ENOSYS, and a seccomp
+// profile that does not know syncfs answers EPERM, which syncfs has no use for
+// itself. Any other syncfs error is returned as it is: a walk then would report a
+// failed sync as a durable tree.
 func syncWorkingSet(ctx context.Context, workingDir string) error {
 	dirFd, err := nofollow.OpenDir(workingDir)
 	if err != nil {
@@ -46,7 +49,7 @@ func syncWorkingSet(ctx context.Context, workingDir string) error {
 		}
 		return nil
 	}
-	return fsyncTree(ctx, dirFd, workingDir, 0)
+	return fsyncWorkingSetTree(ctx, dirFd, workingDir, 0)
 }
 
 // syncfs is the one syncfs call syncWorkingSet makes, and fsyncFd the fsync the
@@ -73,15 +76,16 @@ const (
 	syncOpenFileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_NONBLOCK | unix.O_NOCTTY | unix.O_CLOEXEC
 )
 
-// fsyncTree fsyncs every regular file and directory beneath the directory behind
-// dirFd, and then that directory, so a name is synced after what it names. It takes
-// ownership of dirFd. rel names the directory in errors and is never resolved; depth
-// is its level below the working dir. Unlike the hydrate's walk, which syncs
-// directories only because the hydrate fsynced each file as it wrote it, this one
-// syncs file contents too: the server wrote them. Symlinks and special files are
+// fsyncWorkingSetTree fsyncs every regular file and directory beneath the directory
+// behind dirFd, and then that directory, so a name is synced after what it names. It
+// takes ownership of dirFd. rel names the directory in errors and is never resolved;
+// depth is its level below the working dir. Unlike the hydrate's fsyncTree, which
+// syncs directories only because the hydrate fsynced each file as it wrote it, this
+// one syncs file contents too: the server wrote them. Symlinks and special files are
 // left alone, and an entry that vanishes or changes type mid-walk is skipped, as the
-// pack skips it. The walk stops once ctx is done.
-func fsyncTree(ctx context.Context, dirFd int, rel string, depth int) error {
+// pack skips it. Any fsync that fails fails the walk. The walk checks ctx before
+// each entry and stops once it is done.
+func fsyncWorkingSetTree(ctx context.Context, dirFd int, rel string, depth int) error {
 	dir := os.NewFile(uintptr(dirFd), rel)
 	defer func() { _ = dir.Close() }()
 	entries, err := dir.ReadDir(-1)
@@ -105,7 +109,7 @@ func fsyncTree(ctx context.Context, dirFd int, rel string, depth int) error {
 			if err != nil {
 				return &os.PathError{Op: "open", Path: entryRel, Err: err}
 			}
-			if err := fsyncTree(ctx, fd, entryRel, depth+1); err != nil {
+			if err := fsyncWorkingSetTree(ctx, fd, entryRel, depth+1); err != nil {
 				return err
 			}
 		case 0:

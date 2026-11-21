@@ -1903,13 +1903,18 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 		// published, since the store gains the newest world either way, but it is not
 		// stamped: the marker keeps its older generation, which costs the next start a
 		// hydrate. ctx, not cmdCtx: this is the committed tail, which may outlive the
-		// command's deadline, as the stamp it gates does.
+		// command's deadline, as the stamp it gates does. The sync's duration is logged,
+		// so its cost on a real host can be read off the Worker's log.
 		removeSpool()
 		treeDurable := true
+		syncStart := time.Now()
 		if err := syncWorkingSet(ctx, workingDir); err != nil {
 			treeDurable = false
 			m.logger.Warn("snapshot could not make the working set durable; it is published, but the generation marker is not advanced",
 				"server_id", cmd.ServerID, "error", err)
+		} else {
+			m.logger.Info("snapshot made the working set durable",
+				"server_id", cmd.ServerID, "sync_ms", time.Since(syncStart).Milliseconds())
 		}
 		// Record the NEW generation the publish produced (issue #763): the scratch we
 		// just pushed is the source of this store generation, so its local generation

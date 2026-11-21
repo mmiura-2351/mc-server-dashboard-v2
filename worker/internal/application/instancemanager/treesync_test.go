@@ -3,6 +3,7 @@ package instancemanager
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -26,6 +28,13 @@ func stubSyncfs(t *testing.T, fn func(fd int) error) {
 // fsyncs nothing.
 func recordFsyncs(t *testing.T) *[]string {
 	t.Helper()
+	return stubFsyncs(t, func(string) error { return nil })
+}
+
+// stubFsyncs records the path of every descriptor the tree walk fsyncs and answers
+// each fsync with answer(path), fsyncing nothing.
+func stubFsyncs(t *testing.T, answer func(path string) error) *[]string {
+	t.Helper()
 	var synced []string
 	orig := fsyncFd
 	fsyncFd = func(fd int) error {
@@ -34,7 +43,7 @@ func recordFsyncs(t *testing.T) *[]string {
 			t.Errorf("readlink fd %d: %v", fd, err)
 		}
 		synced = append(synced, path)
-		return nil
+		return answer(path)
 	}
 	t.Cleanup(func() { fsyncFd = orig })
 	return &synced
@@ -70,12 +79,14 @@ func TestSnapshotMakesTheTreeDurableBeforeTheMarker(t *testing.T) {
 		name     string
 		running  bool
 		syncErr  error
+		fsyncErr error // what the fallback walk's fsyncs answer, where syncErr sends it there
 		wantSeq  []string
 		wantMark uint64
 	}{
-		{"running", true, nil, append(quiesced[:len(quiesced):len(quiesced)], "stamp"), 12},
-		{"running, sync fails", true, unix.EIO, quiesced, 5},
-		{"stopped", false, nil, []string{"transfer"}, 0},
+		{"running", true, nil, nil, append(quiesced[:len(quiesced):len(quiesced)], "stamp"), 12},
+		{"running, sync fails", true, unix.EIO, nil, quiesced, 5},
+		{"running, the walk's fsync fails", true, unix.ENOSYS, unix.EIO, quiesced, 5},
+		{"stopped", false, nil, nil, []string{"transfer"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var seq []string
@@ -99,6 +110,7 @@ func TestSnapshotMakesTheTreeDurableBeforeTheMarker(t *testing.T) {
 				markerAtSync = append(markerAtSync, readGeneration(dir))
 				return tc.syncErr
 			})
+			stubFsyncs(t, func(string) error { return tc.fsyncErr })
 			recordStamps(t, &seq)
 
 			res := m.Handle(context.Background(), snapshotCmd())
@@ -125,11 +137,86 @@ func TestSnapshotMakesTheTreeDurableBeforeTheMarker(t *testing.T) {
 				t.Fatalf("marker = %d after the snapshot, want %d", got, tc.wantMark)
 			}
 			declared := res.HeldGeneration != nil
-			if wantDeclared := tc.syncErr == nil; declared != wantDeclared {
+			if wantDeclared := tc.wantMark == 12; declared != wantDeclared {
 				t.Fatalf("declared a held generation: %v, want %v (it must follow the stamp)", declared, wantDeclared)
 			}
 		})
 	}
+}
+
+// The tail's sync runs on the request's context, not the command's deadline (issue
+// #3999): it belongs to the committed tail, which may outlive that deadline, as the
+// stamp it gates does. A walk cut short by the deadline would withhold a stamp over
+// a tree about to be durable. Here the deadline passes as the sync starts, and the
+// fallback walk, which stops with its context, must still finish and let the stamp
+// land.
+func TestRunningSnapshotSyncsOnTheRequestContextNotTheDeadline(t *testing.T) {
+	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{gen: 12})
+	dir := seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	if err := writeGeneration(dir, 5); err != nil {
+		t.Fatal(err)
+	}
+	var endDeadline context.CancelFunc
+	m.snapshotContextHook = func(ctx context.Context, _ bool) (context.Context, context.CancelFunc) {
+		var cmdCtx context.Context
+		cmdCtx, endDeadline = context.WithCancel(ctx)
+		return cmdCtx, endDeadline
+	}
+	exited := make(chan struct{})
+	m.snapshotBodyExited = func(string) { close(exited) }
+	stubSyncfs(t, func(int) error {
+		endDeadline()
+		return unix.ENOSYS
+	})
+	recordFsyncs(t)
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success: the upload had published", res)
+	}
+	<-exited
+
+	if got := readGeneration(dir); got != 12 {
+		t.Fatalf("marker = %d, want 12: the sync stopped with the command's deadline instead of "+
+			"running on the request's context", got)
+	}
+}
+
+// A running snapshot logs how long its sync took (issue #3999), so the cost of the
+// sync on a real host can be read off the Worker's log.
+func TestRunningSnapshotLogsHowLongTheSyncTook(t *testing.T) {
+	h := &capturingSlogHandler{}
+	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithTransfer(&fakeTransfer{gen: 12})
+	seedScratch(t, m, s1)
+	if res := m.Handle(context.Background(), startCmd()); !res.Success {
+		t.Fatalf("start = %+v, want success", res)
+	}
+	m.WithLogger(slog.New(h))
+	stubSyncfs(t, func(int) error { return nil })
+
+	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+		t.Fatalf("SnapshotTrigger = %+v, want success", res)
+	}
+
+	for _, r := range h.records {
+		var serverID string
+		var syncMs bool
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "server_id":
+				serverID = a.Value.String()
+			case "sync_ms":
+				syncMs = a.Value.Kind() == slog.KindInt64
+			}
+			return true
+		})
+		if r.Level == slog.LevelInfo && serverID == s1 && syncMs {
+			return
+		}
+	}
+	t.Fatalf("no INFO line carrying sync_ms for %s; records = %v", s1, h.records)
 }
 
 // seedSyncTree builds a small working set under dir holding everything the walk
@@ -233,37 +320,136 @@ func TestSyncWorkingSetWalksOnlyWhereSyncfsIsUnavailable(t *testing.T) {
 
 // The walk holds one descriptor per level, and the tree's shape is the server's
 // to choose, so it refuses a tree deeper than the pack takes rather than run the
-// Worker's shared descriptor table out.
-func TestSyncWorkingSetRefusesATreeDeeperThanThePackTakes(t *testing.T) {
-	dir := t.TempDir()
-	deep := dir
-	for range maxSyncDepth + 1 {
-		deep = filepath.Join(deep, "d")
-	}
-	if err := os.MkdirAll(deep, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	stubSyncfs(t, func(int) error { return unix.ENOSYS })
-	recordFsyncs(t)
+// Worker's shared descriptor table out. A tree as deep as the pack takes is walked:
+// refusing it would leave a server whose snapshots publish never stamped.
+func TestSyncWorkingSetWalksATreeAsDeepAsThePackTakesAndNoDeeper(t *testing.T) {
+	for _, tc := range []struct {
+		levels int
+		refuse bool
+	}{
+		{maxSyncDepth, false},
+		{maxSyncDepth + 1, true},
+	} {
+		t.Run(strconv.Itoa(tc.levels), func(t *testing.T) {
+			dir := t.TempDir()
+			deep := dir
+			for range tc.levels {
+				deep = filepath.Join(deep, "d")
+			}
+			if err := os.MkdirAll(deep, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			stubSyncfs(t, func(int) error { return unix.ENOSYS })
+			synced := recordFsyncs(t)
 
-	if err := syncWorkingSet(context.Background(), dir); err == nil {
-		t.Fatal("syncWorkingSet = nil, want a refusal of the over-deep tree")
+			err := syncWorkingSet(context.Background(), dir)
+
+			if tc.refuse && err == nil {
+				t.Fatal("syncWorkingSet = nil, want a refusal of the over-deep tree")
+			}
+			if !tc.refuse && (err != nil || len(*synced) != tc.levels+1) {
+				t.Fatalf("syncWorkingSet = %v after %d fsyncs, want nil after %d", err, len(*synced), tc.levels+1)
+			}
+		})
 	}
 }
 
-// The walk stops once its command's context is done, as the pack does.
+// A walk whose fsync fails, on a file or on a directory, reports it (issue #3999):
+// swallowing the error would report a tree that may not be on the disk as durable,
+// and the snapshot would stamp it.
+func TestSyncWorkingSetReportsAFailedFsync(t *testing.T) {
+	for _, target := range []string{filepath.Join("world", "region", "r.0.0.mca"), filepath.Join("world", "region")} {
+		t.Run(target, func(t *testing.T) {
+			dir := t.TempDir()
+			seedSyncTree(t, dir)
+			stubSyncfs(t, func(int) error { return unix.ENOSYS })
+			failing := filepath.Join(dir, target)
+			stubFsyncs(t, func(path string) error {
+				if path == failing {
+					return unix.EIO
+				}
+				return nil
+			})
+
+			if err := syncWorkingSet(context.Background(), dir); !errors.Is(err, unix.EIO) {
+				t.Fatalf("syncWorkingSet = %v, want the fsync's %v", err, unix.EIO)
+			}
+		})
+	}
+}
+
+// An entry replaced by a link or a FIFO between the listing and its open is neither
+// followed, nor blocked on, nor fsynced: the open does not follow a link nor wait
+// for a FIFO's writer, and only what fstat finds regular is synced.
+func TestSyncWorkingSetSkipsAnEntryReplacedAfterTheListing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(path, outside string) error
+	}{
+		{"symlink", func(path, outside string) error { return os.Symlink(filepath.Join(outside, "secret"), path) }},
+		{"fifo", func(path, _ string) error { return unix.Mkfifo(path, 0o640) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, outside := t.TempDir(), t.TempDir()
+			for _, f := range []string{filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(outside, "secret")} {
+				if err := os.WriteFile(f, []byte("x"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stubSyncfs(t, func(int) error { return unix.ENOSYS })
+			// The first file synced replaces the other, which the walk has listed as a
+			// regular file and not yet opened.
+			replaced := false
+			synced := stubFsyncs(t, func(path string) error {
+				if replaced {
+					return nil
+				}
+				replaced = true
+				other := filepath.Join(dir, "a")
+				if path == other {
+					other = filepath.Join(dir, "b")
+				}
+				if err := os.Remove(other); err != nil {
+					return err
+				}
+				return tc.plant(other, outside)
+			})
+			done := make(chan error, 1)
+
+			go func() { done <- syncWorkingSet(context.Background(), dir) }()
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("syncWorkingSet = %v, want nil", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("syncWorkingSet blocked on the replaced entry")
+			}
+			if len(*synced) != 2 || (*synced)[1] != dir {
+				t.Fatalf("fsynced %v, want the first file and the working dir only", *synced)
+			}
+		})
+	}
+}
+
+// The walk checks its context before each entry, as the pack does, so a walk whose
+// context ends part way stops at the next entry rather than at the next directory.
 func TestSyncWorkingSetWalkStopsWithItsContext(t *testing.T) {
 	dir := t.TempDir()
-	seedSyncTree(t, dir)
+	for _, f := range []string{"a", "b", "c"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
 	stubSyncfs(t, func(int) error { return unix.ENOSYS })
-	synced := recordFsyncs(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	synced := stubFsyncs(t, func(string) error { cancel(); return nil })
 
 	if err := syncWorkingSet(ctx, dir); !errors.Is(err, context.Canceled) {
 		t.Fatalf("syncWorkingSet = %v, want %v", err, context.Canceled)
 	}
-	if len(*synced) != 0 {
-		t.Fatalf("fsynced %v after the context was done", *synced)
+	if len(*synced) != 1 {
+		t.Fatalf("fsynced %v after the context ended during the first, want that one only", *synced)
 	}
 }

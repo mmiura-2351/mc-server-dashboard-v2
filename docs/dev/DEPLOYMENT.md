@@ -179,6 +179,27 @@ first boot; because the scratch dir is a host bind mount, that id survives worke
 container recreation, so the worker re-registers under the same identity after a
 restart or rebuild.
 
+### What filesystem the scratch dir belongs on
+
+After each periodic snapshot of a running server the worker makes the working set
+durable with one `syncfs(2)` before it advances the set's generation marker, which
+decides whether the server's next start may skip the hydrate
+([`../app/STORAGE.md`](../app/STORAGE.md) Section 8). So:
+
+- **Put `MCSD_SCRATCH_DIR` on a local filesystem.** A FUSE filesystem need not
+  pass the sync on to its daemon, and a network filesystem (NFS, CIFS) is not
+  made durable by this host's sync. On either, a power loss can leave the marker
+  newer than the world on disk.
+- **Run Linux 5.8 or later.** Only from 5.8 does `syncfs` report a writeback error;
+  on an older kernel a failed write goes unreported and the marker advances over it.
+- **Prefer a filesystem of its own.** `syncfs` waits for everything dirty on its
+  filesystem, not only the working set. On a single-host deploy the scratch dir,
+  Docker's volumes (the object store's and Postgres's) and the rest of the host
+  usually share the root filesystem, so each snapshot's sync waits on their
+  writeback as well. A dedicated partition or volume for the scratch dir keeps
+  the wait to the servers' own data. The worker logs each sync's duration
+  (`snapshot made the working set durable`, `sync_ms`) at `INFO`.
+
 ## 4. Bring the stack up
 
 `docker compose` builds the images from this checkout (the repo root is the

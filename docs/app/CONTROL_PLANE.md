@@ -272,9 +272,10 @@ Worker structurally fsck's each held set's region files: a periodic running-id
 snapshot syncs the tree after its upload and before its gen-N marker
 ([`STORAGE.md`](STORAGE.md) Section 8), but the server keeps writing after that
 sync, and the Worker does not sync those writes, so a power loss can leave a
-durable gen-N marker next to a world they tore. A held set whose
-region is torn is advertised at **generation 0** — treated as stale, forcing the
-hydrate that recovers the consistent store copy rather than booting the torn world. The Worker makes that verdict stick by
+durable gen-N marker next to a world they tore. A held set whose region is torn
+is advertised at **generation 0** — treated as stale, forcing the hydrate that
+recovers the consistent store copy rather than booting the torn world. The
+Worker makes that verdict stick by
 **rewriting the set's generation marker to 0** (atomically and fsynced; skipped when
 it already reads 0), because what every `Register` carries, the first included, is a
 fresh read of the markers with no fsck: the boot verdict reaches the API only through
