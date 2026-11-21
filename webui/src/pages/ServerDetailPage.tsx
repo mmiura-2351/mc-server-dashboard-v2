@@ -16,7 +16,7 @@ import { MAX_CONSOLE_LINE_BYTES, utf8ByteLength } from "../api/limits.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
-import { Modal } from "../components/Modal.tsx";
+import { Modal, topmostDialog } from "../components/Modal.tsx";
 import { useToast } from "../components/Toast.tsx";
 import { useServerToast } from "../components/useServerToast.ts";
 import { shortId } from "../format.ts";
@@ -705,7 +705,8 @@ function StopControl({
       }
     };
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
+      // Escape under an open modal closes the modal, not this menu (#3920).
+      if (event.key === "Escape" && topmostDialog() === null) {
         setOpen(false);
         triggerRef.current?.focus();
       }

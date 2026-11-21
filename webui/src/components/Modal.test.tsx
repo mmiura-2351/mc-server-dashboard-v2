@@ -73,6 +73,17 @@ describe("Modal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  // So a page listener that runs after it, once the dialog has closed, can
+  // still tell the Escape was the dialog's (#3920).
+  it("marks the Escape that closes it as handled", () => {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}}>
+        <p>Body</p>
+      </Modal>,
+    );
+    expect(fireEvent.keyDown(document, { key: "Escape" })).toBe(false);
+  });
+
   it("does not call onClose when the dialog body is clicked", () => {
     const onClose = vi.fn();
     render(
@@ -628,6 +639,132 @@ describe("Modal focus on controls that cannot take it", () => {
     await browserTab(screen.getByRole("button", { name: "Behind" }));
 
     expect(document.activeElement).toBe(screen.getByRole("dialog"));
+  });
+});
+
+// Chromium makes a scroller a Tab stop while its content overflows and
+// nothing in it takes Tab, as a `.modal-body` whose controls are all disabled
+// (WEBUI_SPEC.md 7.4). The trap counts it among its edges, so Tab wraps where
+// the browser's walk does.
+describe("Modal focus on a scroller with no control in it", () => {
+  // Gives `el` content that overflows it on one axis, which the test DOM,
+  // laying nothing out, never has.
+  function overflow(el: HTMLElement, axis: "x" | "y", value = "auto") {
+    const [scroll, client] =
+      axis === "y"
+        ? ["scrollHeight", "clientHeight"]
+        : ["scrollWidth", "clientWidth"];
+    el.style[axis === "y" ? "overflowY" : "overflowX"] = value;
+    Object.defineProperty(el, scroll, { configurable: true, value: 600 });
+    Object.defineProperty(el, client, { configurable: true, value: 200 });
+  }
+
+  function renderDialog(body: ReactNode, footer?: ReactNode) {
+    render(
+      <Modal open={true} title="Title" onClose={() => {}} footer={footer}>
+        {body}
+      </Modal>,
+    );
+    return screen
+      .getByRole("dialog")
+      .querySelector(".modal-body") as HTMLElement;
+  }
+
+  const disabledRows = (
+    <>
+      <button type="button" disabled>
+        Row 1
+      </button>
+      <button type="button" disabled>
+        Row 2
+      </button>
+    </>
+  );
+  // Not "Close", the name the backdrop has.
+  const doneButton = <button type="button">Done</button>;
+  const done = () => screen.getByRole("button", { name: "Done" });
+
+  it("wraps Tab from the last control to a scrolling body", () => {
+    const body = renderDialog(disabledRows, doneButton);
+    overflow(body, "y");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(body);
+  });
+
+  it("wraps Shift+Tab from a scrolling body to the last control", () => {
+    const body = renderDialog(disabledRows, doneButton);
+    overflow(body, "y");
+    body.focus();
+
+    expect(fireEvent.keyDown(body, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(done());
+  });
+
+  it("wraps Tab to a body that scrolls sideways only", () => {
+    const body = renderDialog(disabledRows, doneButton);
+    overflow(body, "x");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(body);
+  });
+
+  it("leaves Tab from a dialog with no control to the browser, to reach a scrolling body", () => {
+    overflow(renderDialog(disabledRows), "y");
+    const dialog = screen.getByRole("dialog");
+    expect(document.activeElement).toBe(dialog);
+
+    expect(fireEvent.keyDown(dialog, { key: "Tab" })).toBe(true);
+  });
+
+  it("stops on a scroller nested in the body instead of the body", () => {
+    const body = renderDialog(
+      <div data-testid="inner">{disabledRows}</div>,
+      doneButton,
+    );
+    overflow(body, "y");
+    const inner = screen.getByTestId("inner");
+    overflow(inner, "y");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(inner);
+  });
+
+  it("does not stop on a scrolling body with a control in it", () => {
+    const body = renderDialog(<button type="button">Row</button>, doneButton);
+    overflow(body, "y");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Row" }),
+    );
+  });
+
+  it("does not stop on a scroller that tabindex -1 takes out of the Tab order", () => {
+    renderDialog(
+      <div data-testid="minus" tabIndex={-1}>
+        {disabledRows}
+      </div>,
+      doneButton,
+    );
+    overflow(screen.getByTestId("minus"), "y");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(done());
+  });
+
+  it("does not stop on a box that clips its overflow", () => {
+    renderDialog(<div data-testid="clip">{disabledRows}</div>, doneButton);
+    overflow(screen.getByTestId("clip"), "y", "hidden");
+    done().focus();
+
+    expect(fireEvent.keyDown(done(), { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(done());
   });
 });
 

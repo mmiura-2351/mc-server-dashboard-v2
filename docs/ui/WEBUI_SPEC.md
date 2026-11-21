@@ -1198,7 +1198,19 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   scrolling, and focus does not go back when the control is enabled again.
   Only that loss moves focus, so focus moves at most once per confirm, not on
   every busy toggle, and a screen reader is not given the dialog to announce
-  anew each time.
+  anew each time. A scroller the browser stops Tab on counts as a control at
+  its place: Chromium does so while its content overflows and nothing in it
+  takes Tab, as with a `.modal-body` whose controls are all disabled, or a
+  list nested in it that scrolls on its own. The trap looks for one only in a
+  `.modal-body` with no control in it.
+- **Keys behind a modal.** While a modal is open, the page behind it acts on
+  no key: the Files tab's shortcuts do nothing, and a menu or popover outside
+  the topmost dialog leaves Escape to the dialog. So a key never acts on a
+  selection or a menu the dialog hides. The dialog marks the Escape that
+  closes it as handled, and the Files tab's Escape clears the selection only
+  when nothing has handled it, so the selection stays even when the dialog
+  has closed before the tab sees the key. The same holds for an Escape the
+  stop menu handled.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast
