@@ -443,7 +443,9 @@ restore and the probe reach the same verdict for an archive on either backend
 (issue #3550). The upload gate judges an uploaded archive's members by the same
 code (`archive_member.unrestorable_reason`) before it is stored, so an archive
 restore would refuse is a `422 invalid_archive` at upload, not a backup that
-fails later (issue #3579). The gate also refuses a `..` between backslashes
+fails later (issue #3579). The gate also refuses a member the member-name rule
+refuses (Section 6.2, issue #3973), as `422 invalid_archive` naming the member
+and the reason, and a `..` between backslashes
 (`world\..\level.dat`), a separator only on Windows; restore reads `\` as an
 ordinary name character. The gate, restore and the probe all read the archive
 whole (issues #3778, #3798, `archive_member.EndCheckedReader`): the tar is
@@ -493,8 +495,10 @@ name and as its PAX `path` record, and a few short records (`mtime`; `size`,
 name the fs writer reads from disk and the Worker packs. So every backup the
 fs writer writes passes, whatever its member count, and so does every archive
 the gate admits. The object writer's names are the snapshot's object keys, so
-its backups pass alike only while every key is at most 4095 bytes, which
-nothing enforces yet (issue #3973). No walk keeps a member it has walked past
+its backups pass alike only while every key is at most 4095 bytes. The
+member-name rule holds every name the files API creates and every member the
+backup upload admits to that (Section 6.2); a snapshot's keys are bounded by
+the Worker's pack, and the ingest does not check them yet (issue #3975). No walk keeps a member it has walked past
 (issue #3931): `tarfile` keeps every member it reads, its PAX records
 included, unless the `TarFile` is opened with `stream=True`, as every walk's
 now is, and the fs snapshot ingest extracts each member as it reaches it
@@ -508,8 +512,9 @@ allows, on fs as on object: the fs adapter creates a member's
 directories, and packs a working set for hydrate, backup create and prune, one
 level at a time (issue #3859). `tarfile.add` and `Path.mkdir` recursed once a
 level and raised `RecursionError` for a tree about 1,000 levels deep. The fs
-files API's writes and the snapshot ingest still create directories that way
-(issue #3973). A sparse member's map is not bounded yet (issue #3869). The
+files API's writes still create directories that way, but the member-name rule
+bounds them at 128 levels (Section 6.2); the snapshot ingest's depth is issue
+#3975's. A sparse member's map is not bounded yet (issue #3869). The
 snapshot ingest reads a snapshot through the same reader stack and holds it to
 the same limits as restore (issue #3931, Section 8): its cap is the spool's
 own length, since the data plane bounds the body at 50 GiB. All three, and the
@@ -582,9 +587,10 @@ staging directory, a component past `NAME_MAX` (255 bytes) or a path past
 `PATH_MAX` once joined to it, is refused the same way: restore and the probe
 raise `ArchiveUnreadableError` naming the member and saying its name is too
 long for this filesystem, rather than a raw `OSError` (`ENAMETOOLONG`, issue
-#3931). The object backend restores such a member, as a key. No rule yet says
-which names a member may have, so the two backends differ there until issue
-#3973 decides one.
+#3931). The object backend restores such a member, as a key. The member-name
+rule (Section 6.2) keeps such a member out of an uploaded backup; restore does
+not apply it to one stored before it yet, so the two backends differ there until
+issue #3975.
 
 **Backups stored before the read to the end.** Until PR #3800 (issue #3778)
 the upload gate read an archive with `tarfile`, which stops at the
@@ -623,9 +629,10 @@ only, so an upload stored before then can be the first too, as can a backup
 the platform wrote of a working set near 8 GiB. No backup the platform writes
 now is any of them while every object key is at most 4095 bytes: the writers
 stay under the cap, and within the header limits for names of that length.
-Nothing enforces that bound on keys yet (issue #3973), so a backup the object
-writer packs of longer keys can pass the character limit and read as
-`ArchiveUnreadableError`.
+The member-name rule holds the keys the files API creates and the members an
+upload admits to that bound (Section 6.2). A key stored before it, or one a
+snapshot ingest took past it (issue #3975), can still make a backup the object
+writer packs pass the character limit and read as `ArchiveUnreadableError`.
 
 **Backup size impact of plugin/mod JARs.** Backups archive the
 entire authoritative `current/` working set, which includes all plugin and mod
@@ -669,6 +676,13 @@ directory), is re-packed into the next snapshot, and is carried into
 persists as a `.dir` marker throughout the working-set lifecycle rather than as a
 true directory entry. On both backends `make_dir` bumps the generation marker
 (Section 4.4), so the store generation stays in lockstep across adapters.
+
+**The names a door may create.** Above this Port, every door that creates a
+name refuses one the member-name rule refuses (Section 6.2, issue #3973): more
+than 128 directory levels, a component past 255 bytes or a path past 4,095
+bytes, on both backends alike. The files-API doors also refuse the characters
+an uploaded file's name may not carry. `RelPath` itself stays permissive, so
+the reads, deletes and a rename away reach a name created before the rule.
 
 **The Worker's generation-marker name is reserved at the root.** The Worker
 stamps `.mcsd_generation` in the working-set root on every hydrate and treats
@@ -1774,6 +1788,56 @@ Consequences worth stating:
   is not provided.
 - On a backend without symlinks (object storage, Section 7.3) step 2 is vacuous.
 
+### 6.2 The member-name rule
+
+A working set the Worker cannot settle, check or snapshot is a trap: the server
+restores and starts, then cannot be stopped without losing what it wrote. So the
+platform does not create one. One rule says how deep and how long a working
+set's names may be (`member_name.member_name_refusal`, issue #3973), and its
+numbers are the cross-language contract
+[`proto/contract/member_name_limits.json`](../../proto/contract/member_name_limits.json),
+which the API's constants and the Worker's walk bounds are each tested against:
+
+- **at most 128 directory levels**, counted as the Worker counts them: the
+  working-set root is level 0 and only directories count, so a directory may
+  have 128 components and a file 129 (`path_too_deep`). It is the bound of the
+  Worker's settle scan, region check and snapshot walk ([SECURITY.md](SECURITY.md)
+  Section 6);
+- **at most 255 bytes in one component**, in UTF-8, Linux's `NAME_MAX`
+  (`name_too_long`);
+- **at most 4,095 bytes in the path**, the Worker's snapshot member bound
+  (`path_too_long`). It is an upper bound only: on fs the path is joined to the
+  store's own directories, so a path near it cannot be written there and answers
+  `name_too_long`, and on object it is joined to a key prefix; issue #3979
+  decides the final number.
+
+The rule is the application's, above this Port: every door that creates a name
+asks it before anything is written, and answers a refusal with that `422`
+reason. The files-API write (at rest, and running, before the Worker is asked),
+make-dir, upload and each archive member joined to the upload's directory, and
+a rename's destination; a directory rename asks it of every name the move
+creates below the destination, so a subtree too deep or too long to move is
+refused whole. A server import refuses such a member before its row exists, and
+the backup upload gate refuses one as `422 invalid_archive`, its `detail`
+naming the member and the reason, before the archive is stored.
+
+The files-API doors also refuse the characters an uploaded file's name may not
+carry (issues #3922, #3969): a `\`, a control character (C0, DEL or C1), a lone
+surrogate or a Unicode noncharacter, in any component, as `422
+invalid_name_character`. C0 and DEL keep the path's own `invalid_path` (Section
+6). The import and the backup upload do not: a running server can create any
+name its game or a plugin writes, its snapshot and backup carry it as it is, and
+the platform's own export or backup must upload again.
+
+Reads, deletes and a rename *away* do not ask, so a name created before the
+rule, or by a running server, stays reachable: it can be listed, read,
+downloaded, deleted or renamed to one the rule admits. Restore, the health
+check and the snapshot ingest do not ask yet either (issue #3975).
+
+On fs the write's temp sibling is not named after its target, so a 255-byte
+name is written there as on object (issue #3973); named after it, the temp was
+14 bytes longer than the target and fs refused a name past 241 bytes.
+
 ---
 
 ## 7. Adapter families
@@ -2136,7 +2200,8 @@ member by its path joined to the staging directory,
 root, so a path the Worker may pack can join to past `PATH_MAX` there: such a
 member, or a component past `NAME_MAX`, is `422 invalid_archive` too, naming
 the member, rather than a raw `OSError` and a `500` (issue #3931). Which paths
-a snapshot may hold, so that every layer takes the same ones, is issue #3973's.
+a snapshot may hold is the member-name rule's (Section 6.2); the ingest's
+refusals of it are issue #3975's.
 
 **Endpoints** (scoped by `(community_id, server_id)`). Like the rest of the HTTP
 API these are namespaced under `/api`; the API builds the full

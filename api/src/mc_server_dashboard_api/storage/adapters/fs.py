@@ -4125,8 +4125,8 @@ def _name_too_long_refused(name: str) -> Iterator[None]:
     directory it is extracted into, raises ``ENAMETOOLONG``, from the filter's
     path resolution or from the extraction, whichever reaches the name first.
     Refused, it is a member the ingest refuses and an archive nothing can be
-    restored from, rather than a raw ``OSError``. No rule decides here which
-    names a member may have: issue #3973 does.
+    restored from, rather than a raw ``OSError``. The member-name rule (issue
+    #3973) is not applied here yet: that is issue #3975.
     """
 
     try:

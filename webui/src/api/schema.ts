@@ -593,6 +593,13 @@ export interface paths {
          *     under one is 422 ``reserved_name``, refused before the row is created rather
          *     than dropped. A same-named member deeper in the tree is ordinary user data.
          *
+         *     **The member-name rule (issue #3973).** A member more than 128 directory
+         *     levels deep (the root is level 0 and only directories count) is 422
+         *     ``path_too_deep``, one with a component past 255 bytes in UTF-8
+         *     ``name_too_long`` and one with a path past 4,095 bytes ``path_too_long``,
+         *     refused before the row is created. The characters the files-API writes refuse
+         *     are not refused here: an export carries the names its working set held.
+         *
          *     A racer taking the auto-assigned game port or slug between the assignment and
          *     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
          *     exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same
@@ -808,6 +815,15 @@ export interface paths {
          *     root name starting ``.mcsd_generation`` — the Worker's generation marker — or
          *     under one is 422 ``reserved_name``, refused before the archive is stored. A
          *     same-named member deeper in the tree is ordinary user data.
+         *
+         *     **The member-name rule (issue #3973).** A member more than 128 directory
+         *     levels deep (the root is level 0 and only directories count), with a
+         *     component past 255 bytes in UTF-8 or with a path past 4,095 bytes is 422
+         *     ``invalid_archive``, refused before the archive is stored; its ``detail``
+         *     names the member and the reason (``path_too_deep``, ``name_too_long`` or
+         *     ``path_too_long``). The characters the files-API writes refuse are not
+         *     refused here: a backup the platform wrote of names a running server created
+         *     uploads again.
          *
          *     **Only a few archive uploads at a time (issue #3843).** This route, the files
          *     upload's extract and the server import validate on one small pool, and admit
@@ -1301,6 +1317,16 @@ export interface paths {
          *     or running, to a root name starting ``.mcsd_generation`` — the Worker's
          *     generation marker — or under one is 422 ``reserved_name``. A same-named entry
          *     deeper in the tree is ordinary user data.
+         *
+         *     **The member-name rule (issues #3969, #3973).** A path more than 128
+         *     directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+         *     directories count, so a file path may have 129 components), one with a
+         *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+         *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
+         *     control character, a lone surrogate or a Unicode noncharacter in any
+         *     component is 422 ``invalid_name_character``; C0 and DEL stay
+         *     ``invalid_path``.
+         *     Running or at rest alike, before the Worker is asked.
          */
         put: operations["write_file_api_communities__community_id__servers__server_id__files_put"];
         post?: never;
@@ -1348,6 +1374,16 @@ export interface paths {
          *     issue #1125). A root name starting ``.mcsd_generation`` — the Worker's
          *     generation marker — or a path under one is 422 ``reserved_name`` (issue
          *     #3433); a same-named directory deeper in the tree is ordinary user data.
+         *
+         *     **The member-name rule (issues #3969, #3973).** A path more than 128
+         *     directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+         *     directories count, so a file path may have 129 components), one with a
+         *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+         *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
+         *     control character, a lone surrogate or a Unicode noncharacter in any
+         *     component is 422 ``invalid_name_character``; C0 and DEL stay
+         *     ``invalid_path``.
+         *     The new directory counts as a level, so it may have 128 components.
          */
         post: operations["make_directory_api_communities__community_id__servers__server_id__files_directories_post"];
         delete?: never;
@@ -1528,6 +1564,19 @@ export interface paths {
          *     a root name starting ``.mcsd_generation`` — the Worker's generation marker —
          *     or under one is 422 ``reserved_name``. The source is not guarded, so an entry
          *     planted there before the guard can still be moved away.
+         *
+         *     **The member-name rule (issues #3969, #3973).** A path more than 128
+         *     directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+         *     directories count, so a file path may have 129 components), one with a
+         *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+         *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
+         *     control character, a lone surrogate or a Unicode noncharacter in any
+         *     component is 422 ``invalid_name_character``; C0 and DEL stay
+         *     ``invalid_path``.
+         *     A directory rename also judges every name the move creates below the
+         *     destination, so a subtree that would end up too deep or too long is
+         *     refused with nothing moved. The source is not judged, so a name created
+         *     before the rule can be renamed to one it admits.
          */
         post: operations["rename_file_api_communities__community_id__servers__server_id__files_rename_post"];
         delete?: never;
@@ -1656,6 +1705,18 @@ export interface paths {
          *     archive member landing at a root name starting ``.mcsd_generation`` — the
          *     Worker's generation marker — or under one is 422 ``reserved_name``, refused in
          *     the same pre-write scan on the resulting path.
+         *
+         *     **The member-name rule (issues #3969, #3973).** A path more than 128
+         *     directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+         *     directories count, so a file path may have 129 components), one with a
+         *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+         *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
+         *     control character, a lone surrogate or a Unicode noncharacter in any
+         *     component is 422 ``invalid_name_character``; C0 and DEL stay
+         *     ``invalid_path``.
+         *     Judged on the resulting path, of the upload and of each member once
+         *     joined to ``path``, in the same pre-write scan, so one refused member
+         *     refuses the whole extract with nothing written.
          *
          *     **Only a few extracts at a time (issue #3843).** With ``extract=true`` this
          *     route and the backup upload validate on one small pool, and admit at most four

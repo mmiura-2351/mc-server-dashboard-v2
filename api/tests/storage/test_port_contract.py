@@ -2279,8 +2279,8 @@ async def test_a_member_named_past_the_name_limit_restores_on_object_only(
     (ENAMETOOLONG), and the live world stays (issue #3931). Writing the file
     raises it, or, once its directory is there, the member filter's resolution
     of its path. The object store holds it as a key, so there the backup is
-    healthy and restores. Which names a backup may hold is issue #3973's to
-    decide."""
+    healthy and restores. Restore's refusals of the member-name rule (issue
+    #3973) are issue #3975's."""
 
     harness = build_harness(backend, tmp_path)
     files = {f"world/{'n' * 300}.dat": b"long"}
