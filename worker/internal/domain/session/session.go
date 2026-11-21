@@ -447,16 +447,27 @@ func (r *Runner) expired(q queuedCommand) (outcome, bool) {
 // flows back through here, so a single failure-logging site (issue #194) covers
 // every handler: a failed result is logged at WARN with the command context the
 // CommandResult itself does not carry (server_id, kind).
+//
+// A failure that comes back after the session's context is done is logged at
+// INFO instead (issue #3940): the session sends nothing once it has ended, the
+// API has already failed the command with the rest of that session's in-flight
+// commands, and the cause is almost always the teardown itself, so a WARN per
+// in-flight command would alarm on every stream drop and shutdown.
 func (r *Runner) handle(ctx context.Context, cmd Command) outcome {
 	result := r.handleCommand(ctx, cmd)
 	if !result.Success {
-		r.logger.Warn("command failed",
+		attrs := []any{
 			"command_id", cmd.CommandID,
 			"server_id", cmd.ServerID,
 			"kind", cmd.Kind,
 			"error_code", result.ErrorCode,
-			"error_message", cappedForLog(result.ErrorMessage),
-		)
+			"error_message", CappedForLog(result.ErrorMessage),
+		}
+		if ctx.Err() != nil {
+			r.logger.Info("command result not delivered: its session ended before the command finished", attrs...)
+		} else {
+			r.logger.Warn("command failed", attrs...)
+		}
 	}
 	return outcome{result: result, serverID: cmd.ServerID, kind: cmd.Kind}
 }
@@ -471,9 +482,10 @@ const maxLoggedErrorMessageBytes = 1024
 // loggedErrorMessageTruncationMarker ends a capped error message.
 const loggedErrorMessageTruncationMarker = "…[truncated]"
 
-// cappedForLog returns message cut to maxLoggedErrorMessageBytes on a rune
-// boundary, with the truncation marker appended when it was cut.
-func cappedForLog(message string) string {
+// CappedForLog returns message cut to maxLoggedErrorMessageBytes on a rune
+// boundary, with the truncation marker appended when it was cut. The instance
+// manager caps the detail it logs with it too.
+func CappedForLog(message string) string {
 	if len(message) <= maxLoggedErrorMessageBytes {
 		return message
 	}

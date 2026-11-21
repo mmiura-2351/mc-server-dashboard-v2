@@ -9,8 +9,13 @@ installation id is fixed.
 
 With a marker naming another installation, none of them deletes anything. With
 no marker, the app writes one naming its own installation and the startup sweep
-runs. On the default fs backend, a marker file at the root naming another
-installation blocks the startup and periodic sweeps the same way.
+runs, but only on evidence that the store is this database's (issue #3886): an
+empty store, or one whose communities and resource packs are rows of the
+database. A probe database with a community of its own, on a store that holds
+another community, does not claim it, and every pass refuses. On the default fs
+backend, a marker file at the root naming another installation blocks the
+startup and periodic sweeps the same way, and so does an unmarked root such a
+database does not claim.
 """
 
 from __future__ import annotations
@@ -39,15 +44,22 @@ from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
 from mc_server_dashboard_api.versions.domain.errors import StoreNotOwnedError
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+from tests.store_ownership import FakeStoreDatabase
 
 _OURS = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _THEIRS = uuid.UUID("00000000-0000-4000-8000-000000000002")
 _LONG_AGO = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
-_STAGED = "communities/c/servers/s/incoming/t1/level.dat"
+# The community and resource pack the seeded objects belong to, and a probe
+# database's own community, which no seeded object belongs to.
+_COMMUNITY = uuid.UUID("10000000-0000-4000-8000-000000000001")
+_PACK_ID = uuid.UUID("40000000-0000-4000-8000-000000000004")
+_PROBE_COMMUNITY = uuid.UUID("30000000-0000-4000-8000-000000000003")
+
+_STAGED = f"communities/{_COMMUNITY}/servers/s/incoming/t1/level.dat"
 _JAR = f"jars/{'a' * 64}.jar"
 _PLUGIN = f"plugin-cache/{'b' * 64}"
-_PACK = f"resource-packs/{uuid.uuid4()}/pack.zip"
+_PACK = f"resource-packs/{_PACK_ID}/pack.zip"
 
 
 def _marker(installation_id: uuid.UUID) -> bytes:
@@ -92,6 +104,31 @@ async def _ours(_session_factory: object) -> uuid.UUID:
     return _OURS
 
 
+def _deployment() -> FakeStoreDatabase:
+    """The database of the deployment the seeded objects belong to."""
+
+    return FakeStoreDatabase(
+        rows=True, communities=[_COMMUNITY], resource_packs=[_PACK_ID]
+    )
+
+
+def _probe() -> FakeStoreDatabase:
+    """A probe or dev stack's database, with a community of its own."""
+
+    return FakeStoreDatabase(rows=True, communities=[_PROBE_COMMUNITY])
+
+
+def _use_database(monkeypatch: pytest.MonkeyPatch, database: FakeStoreDatabase) -> None:
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.SqlAlchemyStoreDatabase",
+        lambda _session_factory: database,
+    )
+
+
+_CLAIM_COMMAND = "python -m mc_server_dashboard_api.store_claim_cli"
+_OWNERSHIP_LOGGER = ownership_module.__name__
+
+
 @pytest.fixture
 def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
     backing = FakeS3Store()
@@ -115,6 +152,7 @@ def store(monkeypatch: pytest.MonkeyPatch) -> FakeS3Store:
     )
 
     monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
+    _use_database(monkeypatch, _deployment())
 
     async def _drained(self: SqlAlchemyWorkerDrainStore) -> frozenset[WorkerId]:
         return frozenset()
@@ -177,6 +215,8 @@ async def test_a_bucket_another_database_owns_blocks_every_gc_and_sweep(
 async def test_an_unmarked_bucket_is_claimed_and_swept(
     store: FakeS3Store, captured: _Captured
 ) -> None:
+    # The upgrade of an existing deployment: the store holds objects of the
+    # community and resource pack its database has (the fixture's database).
     _seed(store)
     app = create_app()
 
@@ -186,6 +226,61 @@ async def test_an_unmarked_bucket_is_claimed_and_swept(
         # The startup sweep reclaimed the orphan staging and the old upload.
         assert _STAGED not in store.objects
         assert "upload-old" not in store.multipart_uploads
+
+
+async def test_an_empty_bucket_is_claimed_by_a_fresh_database(
+    store: FakeS3Store, captured: _Captured, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_database(monkeypatch, FakeStoreDatabase())
+    app = create_app()
+
+    async with app.router.lifespan_context(app):
+        await asyncio.sleep(0)
+        assert json.loads(store.objects[OWNER_MARKER])["installation_id"] == str(_OURS)
+
+
+def _claim_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelno == logging.ERROR and rec.name == _OWNERSHIP_LOGGER
+    ]
+
+
+async def test_a_probe_database_leaves_a_bucket_of_another_community_unclaimed(
+    store: FakeS3Store,
+    captured: _Captured,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A probe or dev stack with a database of its own, pointed at the live bucket
+    # (issue #3886): claiming it would make every live object an orphan.
+    _use_database(monkeypatch, _probe())
+    _seed(store)
+    app = create_app()
+
+    with caplog.at_level(logging.ERROR):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            assert OWNER_MARKER not in store.objects
+            # The startup sweep ran and was refused.
+            assert _survivors(store) == _EVERYTHING
+            # The claim logged one ERROR naming the store and the operator step.
+            (startup_error,) = _claim_errors(caplog)
+            assert "'mcsd'" in startup_error
+            assert _CLAIM_COMMAND in startup_error
+            # Each periodic pass refuses too.
+            await captured.loops["run_storage_sweep_loop"]()
+            with pytest.raises(StoreNotOwnedError):
+                await captured.loops["run_jar_gc_loop"]()
+            await captured.loops["run_plugin_cache_gc_loop"]()
+            await captured.loops["run_resource_pack_gc_loop"]()
+            # And the manual JAR-pool GC.
+            with pytest.raises(StoreNotOwnedError):
+                await dependencies.get_jar_pool_gc(_request(app))()
+
+    assert _survivors(store) == _EVERYTHING
+    assert OWNER_MARKER not in store.objects
 
 
 async def test_an_fs_root_another_database_owns_blocks_both_sweeps(
@@ -224,3 +319,38 @@ async def test_an_fs_root_another_database_owns_blocks_both_sweeps(
         and str(_THEIRS) in rec.getMessage()
         for rec in caplog.records
     )
+
+
+async def test_a_probe_database_leaves_an_fs_root_of_another_community_unclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    captured: _Captured,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership",
+        ownership_module.FsStoreOwnership,
+    )
+    monkeypatch.setattr("mc_server_dashboard_api.app.read_installation_id", _ours)
+    _use_database(monkeypatch, _probe())
+    staged = (
+        tmp_path / "communities" / str(_COMMUNITY) / "servers" / "s" / "incoming" / "t1"
+    )
+    staged.mkdir(parents=True)
+    (staged / "level.dat").write_bytes(b"in flight")
+    app = create_app()
+
+    with caplog.at_level(logging.ERROR):
+        async with app.router.lifespan_context(app):
+            await asyncio.sleep(0)
+            assert not (tmp_path / OWNER_MARKER).exists()
+            assert staged.exists()
+            (startup_error,) = _claim_errors(caplog)
+            assert str(tmp_path) in startup_error
+            assert _CLAIM_COMMAND in startup_error
+            await asyncio.to_thread(captured.loops["run_storage_sweep_loop"])
+
+    assert staged.exists()
+    assert not (tmp_path / OWNER_MARKER).exists()

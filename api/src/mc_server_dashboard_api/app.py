@@ -80,6 +80,7 @@ from mc_server_dashboard_api.fleet.application.set_worker_drain import (
 from mc_server_dashboard_api.fleet.domain.value_objects import (
     WorkerId as FleetWorkerId,
 )
+from mc_server_dashboard_api.gc_pass import ResumePoint
 from mc_server_dashboard_api.http_body_limit import RequestBodyLimitMiddleware
 from mc_server_dashboard_api.http_problem import (
     install_problem_handlers,
@@ -166,6 +167,9 @@ from mc_server_dashboard_api.servers.adapters.session_sink import ServersSession
 from mc_server_dashboard_api.servers.adapters.snapshot_loop import run_snapshot_loop
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
+)
+from mc_server_dashboard_api.servers.adapters.store_references import (
+    SqlAlchemyStoreDatabase,
 )
 from mc_server_dashboard_api.servers.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as ServersUnitOfWork,
@@ -785,15 +789,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await storage.check_reachable(endpoint=obj.endpoint, bucket=obj.bucket)
         # Claim the store for this database before anything destructive runs
         # (STORAGE.md Section 4.3, issue #3870): write the owner marker naming
-        # this database's installation id if the store has none. Every GC and
-        # sweep below re-reads it and refuses to run unless it names this
-        # installation, so a store shared with another database is never diffed
-        # against this one. A marker naming another database does not stop the
-        # app: serving and uploads go on, only the destructive passes refuse.
+        # this database's installation id if the store has none, but only on
+        # evidence that the store is this database's (issue #3886): it is empty,
+        # or the communities and resource packs its keys name are rows here, or
+        # it holds only JARs and plugin blobs and this database is not a fresh
+        # one. Every GC and sweep below re-reads it and refuses to run unless it
+        # names this installation, so a store shared with another database is
+        # never diffed against this one. A store this API did not claim does not
+        # stop the app: serving and uploads go on, only the destructive passes
+        # refuse.
+        session_factory = create_session_factory(engine)
         await store_ownership.claim(
-            await read_installation_id(create_session_factory(engine))
+            await read_installation_id(session_factory),
+            database=SqlAlchemyStoreDatabase(session_factory),
         )
         app.state.store_ownership = store_ownership
+        # Where the JAR-pool GC's next pass starts (issue #3934). The periodic
+        # pass and the manual trigger share it, so either resumes past a JAR at
+        # which the other ended on an unreachable store. Set here, not under the
+        # control plane, because the manual trigger runs without it.
+        app.state.jar_gc_resume_point = ResumePoint()
         # Crash-recovery orphan sweep on startup (STORAGE.md Section 4.3, epic #8
         # note): reclaim any staging dir/prefix or superseded snapshot left by a
         # crash before this process serves. Idempotent and keyed off the live
@@ -1325,6 +1340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 clock=VersionsSystemClock(),
                 ownership=store_ownership,
+                resume_point=app.state.jar_gc_resume_point,
             )
             jar_gc_task = asyncio.create_task(
                 run_jar_gc_loop(
@@ -1346,6 +1362,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 clock=ServersSystemClock(),
                 ownership=store_ownership,
+                resume_point=ResumePoint(),
             )
             plugin_cache_gc_task = asyncio.create_task(
                 run_plugin_cache_gc_loop(
@@ -1365,6 +1382,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 store=resource_pack_store,
                 clock=ServersSystemClock(),
                 ownership=store_ownership,
+                resume_point=ResumePoint(),
             )
             resource_pack_gc_task = asyncio.create_task(
                 run_resource_pack_gc_loop(
