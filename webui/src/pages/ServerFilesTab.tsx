@@ -1160,8 +1160,8 @@ export function ServerFilesTab({
       }
 
       if (e.key === "Escape") {
-        // An Escape a modal or a menu already handled keeps the selection
-        // (#3920).
+        // An Escape a menu already handled keeps the selection (#3920,
+        // #3971).
         if (selected.size > 0 && !e.defaultPrevented) {
           setSelected(new Set());
         }

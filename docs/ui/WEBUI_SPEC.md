@@ -1211,13 +1211,14 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Keys behind a modal.** While a modal is open, the page behind it acts on
   no key: the Files tab's shortcuts do nothing, and a menu or popover outside
   the topmost dialog leaves Escape to the dialog. So a key never acts on a
-  selection or a menu the dialog hides. The dialog marks the Escape that
-  closes it as handled, and the Files tab's Escape clears the selection only
-  when nothing has handled it, so the selection stays even when the dialog
-  has closed before the tab sees the key. The same holds for an Escape the
-  stop menu handled, with focus in the menu or outside it. Inside the
-  topmost dialog, Escape closes only the innermost layer: a popover open in
-  it closes and marks the Escape handled, and the dialog leaves a handled
+  selection or a menu the dialog hides. The dialog hears a key after every
+  listener on the page, so the dialog is still open when the Files tab sees
+  it, and it marks the Escape that closes it as handled. The Files tab's
+  Escape clears the selection only when nothing has handled it, so an Escape
+  the stop menu handled, with focus in the menu or outside it, keeps the
+  selection even when the menu has closed before the tab sees the key. Inside
+  the topmost dialog, Escape closes only the innermost layer: a popover open
+  in it closes and marks the Escape handled, and the dialog leaves a handled
   Escape alone, so the next Escape closes the dialog.
 - **Keys behind a menu.** While a page menu is open (the Files tab's context
   menu, the stop menu), the Files tab's shortcuts do nothing, so a key never

@@ -224,8 +224,8 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         if (event.defaultPrevented) {
           return;
         }
-        // Handled, so a page listener that runs after this one, once the
-        // dialog has closed, leaves the Escape alone (#3920).
+        // Handled, so a listener that hears the Escape after this one leaves
+        // it alone (#3920).
         event.preventDefault();
         onCloseRef.current();
         return;

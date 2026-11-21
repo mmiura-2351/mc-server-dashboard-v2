@@ -79,8 +79,9 @@ it("takes a Shift+Tab from the footer past a scroller that takes no focus, to th
   const done = screen.getByRole("button", { name: "Done" });
   done.focus();
 
-  // Past the body, the browser lands on the backdrop before the dialog.
-  await tab(screen.getByTestId("modal-backdrop"), true);
+  // Left to the browser, as the body is listed: past the body it lands on
+  // the backdrop before the dialog.
+  expect(await tab(screen.getByTestId("modal-backdrop"), true)).toBe(true);
 
   expect(document.activeElement).toBe(toast());
 });
