@@ -113,6 +113,8 @@ export function Popover({
       if (dialog !== null && !dialog.contains(wrapperRef.current)) {
         return;
       }
+      // Handled, so a dialog that holds this popover stays open (#3971).
+      event.preventDefault();
       setOpen(false);
       triggerRef.current?.focus();
     };
