@@ -167,8 +167,8 @@ async def upload_resource_pack(
     """Upload a resource pack (server:update in any community, issue #1176).
 
     The display name is stored stripped. Stripped, one that is empty, over 200
-    characters, or carries a control character or a lone surrogate is 422
-    ``invalid_display_name`` (issue #3922).
+    characters, or carries a control character, a line or paragraph separator or
+    a lone surrogate is 422 ``invalid_display_name`` (issues #3922, #3988).
     """
 
     # The name goes into the object key, the public download URL and the GC's

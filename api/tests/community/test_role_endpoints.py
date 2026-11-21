@@ -16,6 +16,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mc_server_dashboard_api.community.application.manage_role import (
+    CreateRole,
+    UpdateRole,
+)
+from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Role
 from mc_server_dashboard_api.community.domain.errors import (
     PermissionCeilingExceededError,
@@ -48,9 +53,15 @@ from mc_server_dashboard_api.dependencies import (
     get_update_role,
 )
 from tests.client_utils import enter_client
+from tests.community.fakes import FakeAuthzUnitOfWork
 from tests.identity.fakes import make_user
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+
+
+class _FixedClock(Clock):
+    def now(self) -> dt.datetime:
+        return _NOW
 
 
 class _FakeVisibility(MembershipVisibility):
@@ -263,6 +274,50 @@ def test_create_role_ceiling_exceeded_returns_403() -> None:
 
 
 # --- update -----------------------------------------------------------------
+
+
+# A role's name follows the server-name rule (issue #3988): the route answers
+# the use case's refusal with the existing reason.
+_REFUSED_NAMES = [
+    pytest.param("a\x1bb", id="esc"),
+    pytest.param("a\u2028b", id="u+2028"),
+    pytest.param("a\u2029b", id="u+2029"),
+]
+
+
+@pytest.mark.parametrize("name", _REFUSED_NAMES)
+def test_create_role_refuses_a_name_the_rule_refuses(name: str) -> None:
+    uow = FakeAuthzUnitOfWork()
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_create_role] = lambda: CreateRole(
+        uow=uow, clock=_FixedClock()
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/roles",
+        json={"name": name, "permissions": ["server:read"]},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_name"
+    assert uow.roles.by_id == {}
+
+
+@pytest.mark.parametrize("name", _REFUSED_NAMES)
+def test_update_role_refuses_a_name_the_rule_refuses(name: str) -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    role = _role(community)
+    uow.roles.by_id[role.id] = role
+    app = _app(member=True, allow=True)
+    _shared_app.dependency_overrides[get_update_role] = lambda: UpdateRole(
+        uow=uow, clock=_FixedClock()
+    )
+    resp = _client(app).patch(
+        f"/api/communities/{community.value}/roles/{role.id.value}",
+        json={"name": name},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_name"
+    assert uow.roles.by_id[role.id].name == RoleName("Editor")
 
 
 def test_update_role_preset_returns_409() -> None:
