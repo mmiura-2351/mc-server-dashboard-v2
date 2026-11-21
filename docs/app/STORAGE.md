@@ -855,31 +855,54 @@ root on the object backend, or a file at `<root>/` on fs and remote-fs. It holds
 a GC or sweep lists. At startup, before the startup sweep, the API claims its
 store:
 
-- **No marker, and the store is empty or the database names stored objects:**
-  the API writes one naming its installation. The store is empty when no
-  namespace a GC or sweep lists holds an object; the API asks one key of each
-  namespace on the object store, and the first entry of `communities/` and
-  `jars/` on fs. The database names stored objects when it has a `server` or a
-  `resource_packs` row; every other row that names one (a backup, a plugin, a
-  pooled JAR) hangs off a server. So a fresh deployment claims its new store, and
-  an existing deployment claims its store at the first start after the upgrade.
+- **No marker:** the API writes one naming its installation only on evidence
+  that the store is this database's (issue #3886). Claiming another database's
+  store would make every one of its objects an orphan. The evidence comes from a
+  sample of the namespaces a GC or sweep lists, and the store is claimed if:
+  - **the store is empty.** No namespace holds an object, so a fresh deployment
+    claims its new store. An in-progress multipart upload is not an object: a
+    store holding only uploads in flight counts as empty, and once it is claimed,
+    the sweep aborts them when they are an hour old.
+  - **the ids in its keys are rows of this database.** A key under
+    `communities/<id>/` names a community, and one under `resource-packs/<id>/`
+    a resource pack. The API samples up to three distinct ids of each, the lowest
+    first, and claims the store only if every one is a `community` or
+    `resource_packs` row. A key whose segment is not an id refuses too. An
+    existing deployment therefore claims its store at the first start after the
+    upgrade, and a probe database with communities of its own does not claim the
+    live store.
+  - **it holds only content-addressed objects, and this database names stored
+    objects.** `jars/` and `plugin-cache/` name content, not rows, so there is no
+    id to match. The API then claims the store if this database has a `server` or
+    a `resource_packs` row; every other row that names a stored object (a backup,
+    a plugin, a pooled JAR) hangs off a server. A fresh database does not claim
+    it.
+
+  On the object store, the sample is one listing per id (one per content
+  namespace), each read at the store's default page size until it finds a key,
+  following a page that is truncated but holds none. SeaweedFS keeps the
+  directories of deleted keys, and 4.33 reads only `MaxKeys + 2` entries of a
+  directory, so a one-key listing reported a store holding a live object as
+  empty. On fs, the sample is up to three entries each of `communities/` and
+  `jars/`; there are no resource packs on fs, and a directory left empty by
+  deletes counts, which errs on the side of refusing.
+
   The write is conditional, so when two APIs start together on an unmarked store,
   exactly one claims it. On the object store it is a PUT with `If-None-Match: *`,
   which SeaweedFS honors. On fs, a fully written temporary file is hard-linked
   into place. A store that rejects the conditional PUT gets a plain PUT; the
   marker is then read back, and the read before each pass catches a lost race.
-- **No marker, a store that holds objects, and a database with no such row:**
-  the store may be another database's, and claiming it would make every one of
-  its objects an orphan. The API does not claim it (issue #3886). It logs one
-  ERROR that names the store and the claim command below, and every destructive
-  pass refuses as unclaimed.
+
+  Without that evidence the API does not claim the store. It logs one ERROR that
+  names the store, the ids or the rule that failed and the claim command below,
+  and every destructive pass refuses as unclaimed.
 - **A marker naming this installation:** the store is this database's.
 - **A marker naming another installation, or none it can read:** the store is
   not this database's. The API logs an ERROR at startup and keeps the marker.
 
-Both probes run only at startup, and only when the store has no marker. The
-claim reads the database and writes the store, so the API fails to start if
-either is unreachable.
+The sample and the database's answers are taken only at startup, and only when
+the store has no marker. The claim reads the database and writes the store, so
+the API fails to start if either is unreachable.
 
 **The claim command.** An operator claims a store the API left unclaimed with
 
@@ -892,11 +915,16 @@ compose; it reads the same `MCD_API_*` settings as the API). It writes the marke
 naming this database's installation, whatever the store holds, so run it only
 for the database that owns the store: the API's GCs then reclaim every object in
 it that no row of this database names. It refuses when a marker already exists,
-whichever installation it names, and it deletes nothing. Restart the API
-afterwards; a running API takes up a marker only at its next start. A legitimate
-deployment needs it once when its database has no server and no resource pack
-but its store still holds objects, such as the `final.tar.gz` of deleted servers
-or pooled JARs.
+whichever installation it names, and it deletes nothing. On a store without
+conditional writes it reads the marker back and reports it when another
+claimant's write landed last. It exits 0 when it claimed the store, 1 when it
+refused, and 2, with one line, when the configuration, the database or the store
+failed. Restart the API afterwards: an API that left the store unclaimed at
+startup claims it only at its next start. A legitimate deployment needs the
+command once when the sample does not show its store to be its own: its store
+still holds the objects of a deleted community (the `final.tar.gz` of its
+servers), or its database has no server and no resource pack while the store
+still holds pooled JARs.
 
 Before **every** pass, each destructive GC and sweep reads the marker again. It
 runs only if the marker names this installation. This covers the storage sweep
@@ -908,8 +936,11 @@ installation ids. Everything
 else continues: serving, uploads, publishes, backups. Readiness (`/readyz`) is
 not affected either, because the data path still works; a refused pass only
 stops reclaiming space and orphaned staging, which the ERROR reports. A marker
-removed while the API runs is not claimed again until the next start, and the
-passes refuse until then. The passes that do not diff the store against the
+removed while the API runs is not written again until the next start or the
+claim command, and the passes refuse until a marker names this installation
+again; an API that claimed the store at startup then resumes at its next pass.
+An API that left the store unclaimed at startup keeps refusing until it
+restarts. The passes that do not diff the store against the
 database are not gated: the backup retention prune and the post-delete prune
 remove the objects of rows this database holds, by their ids.
 
@@ -935,28 +966,31 @@ Cases the marker does not cover:
   must therefore never be pointed at the live store. A dump taken before
   `0045_installation` is the opposite case: upgrading it mints a new id, which
   the existing marker does not name, so its passes refuse until the reset below.
-- **An unmarked store that holds objects is claimed by the first API to start
-  on it whose database has a server or resource-pack row**: at the first start
+- **The claim of an unmarked store rests on a sample**: at the first start
   after the upgrade that introduced the marker, and again after the marker is
-  deleted or lost. A fresh database does not claim it (issue #3886), but the
-  probe cannot tell this database's rows from another's. If that API is a stack
-  with rows of its own (a dev stack with its own servers, or a clone), it becomes
-  the owner: its startup sweep runs at once, and its GCs run on their intervals
-  against every object its database does not name, which on a live store is the
-  live data. The live API's passes refuse, but that does not protect the live
-  objects. A probe stack must therefore never point at a live store.
+  deleted or lost. The API sees up to three communities and three resource packs
+  (issue #3886), not every object. A stack with a database of its own claims
+  another database's unmarked store when every id the claim samples is one of
+  its own: its uploads to that store sort lowest and fill the sample, or the
+  store holds only JARs and plugin blobs and its database has a server or a
+  resource pack. A clone carries the live ids, so it matches them. The API that
+  claims becomes the owner: its startup sweep runs at once, and its GCs run on
+  their intervals against every object its database does not name, which on a
+  live store is the live data. The live API's passes refuse, but that does not
+  protect the live objects. A probe stack must therefore never point at a live
+  store.
 - **The owner is not the only writer.** The marker stops a foreign API's GCs, not
   its writes, and not the owner's GCs: the owner reclaims a foreign API's uploads
   as orphans.
 
 To hand a store to another database, or to settle a refusal: stop every API that
 uses the store, delete `mcsd-owner.json`, and start the API whose database should
-own it. It claims the store at startup if the store is empty or its database has
-a server or resource-pack row; otherwise run the claim command above and restart
-it. Its next passes reclaim everything in the store that its database does not
-name. A downgrade of migration `0045_installation` followed by an upgrade mints a
-new installation id, which the marker no longer names, and so does upgrading a
-dump taken before it; the passes then refuse until this reset.
+own it. It claims the store at startup if the sample shows it to be its own;
+otherwise run the claim command above and restart it. Its next passes reclaim
+everything in the store that its database does not name. A downgrade of
+migration `0045_installation` followed by an upgrade mints a new installation
+id, which the marker no longer names, and so does upgrading a dump taken before
+it; the passes then refuse until this reset.
 
 ### 4.4 Single-file writes
 
