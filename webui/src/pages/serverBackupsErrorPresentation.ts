@@ -94,8 +94,9 @@ export function backupErrorPresentation(
  * archive cannot be read back, so no retry or override will restore it. A 503
  * `seed_failed` or `plugin_reconcile_incomplete` (#3269), `publish_incomplete`
  * (#3564), or `restore_incomplete` (#3927), means the backup WAS published and
- * only a follow-up step failed or was skipped, so retrying the restore heals it. A 503 `publish_unknown` (#3564) means the store
- * could not confirm whether it was published, so it only may have been.
+ * only a follow-up step failed or was skipped, so retrying the restore heals
+ * it. A 503 `publish_unknown` (#3564) means the store could not confirm whether
+ * it was published, so it only may have been.
  */
 export function backupRestoreErrorPresentation(
   status: number | undefined,

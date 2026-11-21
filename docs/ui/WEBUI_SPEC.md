@@ -837,9 +837,10 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   `publish_incomplete` (the store failed after it published, #3564) or
   `restore_incomplete` (the lifecycle lock was lost after the publish, #3927)
   published the backup and then failed or skipped a follow-up step, so its
-  message says the backup was restored and asks the user to retry the restore. A restore answering 503
-  `publish_unknown` (the store could not confirm whether it published, #3564)
-  says the backup may have been restored and asks the user to retry.
+  message says the backup was restored and asks the user to retry the restore.
+  A restore answering 503 `publish_unknown` (the store could not confirm whether
+  it published, #3564) says the backup may have been restored and asks the user
+  to retry.
 - Create backup button (works on running servers — on-demand snapshot path);
   upload backup (file picker). A create answering 409 `working_set_too_large`
   (the server's files would make an archive past the 8 GiB backup cap, #3859)

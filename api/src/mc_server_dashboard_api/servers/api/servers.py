@@ -1146,6 +1146,7 @@ async def update_server(
         raise _conflict("slug_taken") from exc
     except WorkingSetSeedFailedError as exc:
         # Rewriting server.properties for the port change hit a storage failure,
+        # or the lifecycle lock was lost before that rewrite (issue #3927),
         # surfaced as a mapped 503 (issue #311). That write is deferred to after
         # the commit (#1705), so the row already carries the new port while the
         # file does not; re-issuing the update rewrites the file. The committed

@@ -597,10 +597,13 @@ more. A restore and a server delete check inside the storage call, under the
 per-server storage lock, right before the restore's flip and the prune's first
 removal, so the slow copy or pack before them is covered too. A restore that
 loses the lock after its flip answers `503 restore_incomplete` instead, as the
-restored files are live and only the steps after the flip were skipped. A loss
-that only the release finds is logged, not raised: every write the operation
-made followed a check that passed, so it answers as it finished, with its result
-or its own error.
+restored files are live and only the steps after the flip were skipped. An
+import whose server row is committed, and an update whose row change is, answer
+`503 seed_failed` instead, as for their other failures after that commit
+(Section 9). A route that audits a busy lock records a lost one as an `error`
+event. A loss that only the release finds is logged, not raised: every write the
+operation made followed a check that passed, so it answers as it finished, with
+its result or its own error.
 
 The lock needs a direct or session-pooled connection to PostgreSQL. Behind a
 transaction-mode pooler a session-level lock does not hold, and the check passes
@@ -1044,6 +1047,8 @@ caller. Routes that follow this rule:
 - server create, import, and update answering 503 `seed_failed` (#3483).
 
 A failure raised before the commit records no event, since nothing changed.
+A route that audits a busy lifecycle lock still records one there: `denied` for
+a busy lock and `error` for a lost one (Section 7, #3927).
 Backup restore is the exception: any failure after its publish records `error`.
 That covers 503 `seed_failed`, 503 `plugin_reconcile_incomplete`, 503
 `publish_incomplete` from a store that failed after its flip, 503

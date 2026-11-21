@@ -418,7 +418,8 @@ class RestoreBackup:
     :class:`PluginReconcileIncompleteError` with the rows untouched (issue #3221),
     and so does a listed jar that cannot be read (issue #3269). Any failure after
     the publish — a store failure past its flip (issue #3564), the quarantine
-    write and the lifecycle lock's release included —
+    write, and an error the lifecycle lock's hold raises on exit included (the
+    real lock logs a lost session there instead of raising, issue #3927) —
     surfaces as :class:`BackupRestoreIncompleteError`, wrapping the step's own
     error and carrying the corrupt count of a forced corrupt backup that
     published, so the edge audits the force-restore whatever failed after it.
@@ -455,9 +456,11 @@ class RestoreBackup:
         # ``current`` republish underneath it. The lock spans the two transactions
         # the at-rest check and the (re)publish straddle.
         # The corrupt count once Storage has published (``None`` before): the
-        # lock's release on exit comes after the publish, so a release that fails
-        # is a post-publish failure too and keeps the restore's identity (issue
-        # #3269) -- it never replaces a step failure already on its way out.
+        # lock's hold exits after the publish, so an error it raises on exit is a
+        # post-publish failure too and keeps the restore's identity (issue #3269)
+        # -- it never replaces a step failure already on its way out. The real
+        # lock raises none for a lost session (issue #3927); only another error
+        # from the hold's exit still reaches this.
         published: int | None = None
         incomplete: BackupRestoreIncompleteError | None = None
         partial: BackupRestorePartiallyPublishedError | None = None
