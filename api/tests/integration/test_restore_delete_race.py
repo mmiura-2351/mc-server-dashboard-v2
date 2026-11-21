@@ -441,8 +441,10 @@ async def test_a_delete_whose_lock_session_ended_mid_pack_removes_nothing(
         loop = asyncio.get_running_loop()
         write_tar_gz = fs_mod._write_tar_gz
 
-        def _write_then_hold(directory: Path, archive: Path) -> None:
-            write_tar_gz(directory, archive)
+        def _write_then_hold(
+            directory: Path, archive: Path, max_bytes: int | None = None
+        ) -> None:
+            write_tar_gz(directory, archive, max_bytes)
             prune_hold.on_thread(loop)
 
         monkeypatch.setattr(fs_mod, "_write_tar_gz", _write_then_hold)
