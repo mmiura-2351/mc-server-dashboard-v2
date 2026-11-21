@@ -402,15 +402,18 @@ resource-pack GC (Section 4.3) run a pass the same way:
     down from it at random, wrapping round (issue #3965). That is the first pass
     of a process, and the pass after one that came round. A pass with a key
     always walks up from after it, so the pass after one that walked down walks
-    back over the keys that one met.
+    back over the keys that one met. In one process that costs at worst one more
+    pass: six adjacent keys whose deletes keep failing can then hold back the
+    orphan above them for up to two passes, as many as ten do.
   - At the default daily intervals, an API process that lives under a day never
     runs the pass that resumes, so across restarts only passes with no key run.
     With one key that gets no answer, such a pass reaches any other orphan with a
-    chance of one half, wherever it lies: two restarts on average (1.9 to 2.0
-    measured over 100 listed keys). With several such keys, the chance for an
-    orphan is about half the share of listed keys between the two bad keys
-    around it. Two that split the listing in half take about four restarts on
-    average (3.6 to 4.1 measured) for every key between them.
+    chance of exactly one half, wherever it lies: two restarts on average. With
+    several such keys, an orphan with k keys strictly between the two bad keys
+    around it is reached with a chance of (k + 1) / 2N, where N is the number of
+    keys listed. Two that split the listing in half give one quarter, four
+    restarts on average, for every key between them. Sampled over 100 listed
+    keys in 400 runs each, the means were 1.9 to 2.0 and 3.6 to 4.1 restarts.
   - A pass that starts after a key says so in a DEBUG line.
 - A cancellation (shutdown) ends the pass at once too. A pass that ends at once
   logs no summary; the per-object INFO lines still record what it reclaimed. The

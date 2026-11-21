@@ -673,11 +673,13 @@ async def test_a_pass_after_one_that_walked_down_to_a_bad_jar_walks_up_after_it(
 async def test_a_pass_after_a_downward_stop_walks_up_after_the_fifth() -> None:
     # A pass that walks down and stops after five failed deletes in a row leaves
     # the fifth, the lowest of them, as its mark. The next pass walks up from
-    # after it: it meets the other four again, then goes on past them and comes
-    # round (issue #3965).
+    # after it, whatever the direction picker says: it meets the other four again
+    # and the sixth failing JAR above them, and stops there. One that walked down
+    # from the mark would reach the two orphans and come round instead. The pass
+    # after that reaches them (issue #3965).
     store = _ObjectPool()
-    keys = await store.seed(7)
-    store.fail_deletes_of(*keys[1:6])
+    keys = await store.seed(8)
+    store.fail_deletes_of(*keys[1:7])
     resume_point = ResumePoint(start=lambda count: 5, descending=lambda: True)
     gc = _gc(store.pool, _FakeReferences(set()), resume_point=resume_point)
 
@@ -686,6 +688,9 @@ async def test_a_pass_after_a_downward_stop_walks_up_after_the_fifth() -> None:
     assert resume_point.key == keys[1]
 
     resumed = await gc()
-    assert (resumed.deleted, resumed.failed) == (2, 5)
-    assert resume_point.key is None
-    assert await store.keys() == keys[1:6]
+    assert (resumed.deleted, resumed.failed) == (0, 5)
+    assert resume_point.key == keys[6]
+
+    after = await gc()
+    assert (after.deleted, after.failed) == (2, 5)
+    assert await store.keys() == keys[1:7]
