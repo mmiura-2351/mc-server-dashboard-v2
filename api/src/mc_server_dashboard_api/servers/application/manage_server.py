@@ -292,6 +292,9 @@ class CreateServer:
         game_port: int | None = None,
         slug: str | None = None,
     ) -> Server:
+        # The name is refused before any other check, as an update refuses it
+        # first (issue #3988).
+        server_name = ServerName(name)
         if mc_edition != _SUPPORTED_EDITION:
             # The catalog is Java-only at M1 (FR-VER-1); reject other editions
             # before staging the row so an unprovisionable server is never created.
@@ -355,7 +358,7 @@ class CreateServer:
             server = Server(
                 id=ServerId.new(),
                 community_id=community_id,
-                name=ServerName(name),
+                name=server_name,
                 mc_edition=mc_edition,
                 mc_version=mc_version,
                 server_type=parsed_type,

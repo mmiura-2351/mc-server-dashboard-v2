@@ -1521,7 +1521,10 @@ function Settings({
         }),
         {
           body: JSON.stringify({
-            name,
+            // Send the name only when it changed (#3988): a server stored with
+            // a name the rule now refuses can then still save its other
+            // settings, and an unchanged name does not make the edit a rename.
+            ...(name !== server.name ? { name } : {}),
             // In relay mode the port is hidden and API-managed, so omit it from
             // the PATCH; in direct mode send the edited value (#1002).
             ...(relayEnabled

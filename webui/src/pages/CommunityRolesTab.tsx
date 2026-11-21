@@ -210,7 +210,7 @@ function RoleEditor({
   const [error, setError] = useState<string | null>(null);
 
   const save = useMutation({
-    mutationFn: (body: { name: string; permissions: string[] }) =>
+    mutationFn: (body: { name?: string; permissions: string[] }) =>
       role === null
         ? api.post(
             apiPath("/api/communities/{community_id}/roles", {
@@ -282,7 +282,12 @@ function RoleEditor({
       return;
     }
     setError(null);
-    save.mutate({ name: trimmed, permissions: [...selected] });
+    // An edit sends the name only when it changed (#3988), so a role stored
+    // with a name the rule now refuses can still have its permissions edited.
+    save.mutate({
+      ...(role === null || trimmed !== role.name ? { name: trimmed } : {}),
+      permissions: [...selected],
+    });
   };
 
   return (

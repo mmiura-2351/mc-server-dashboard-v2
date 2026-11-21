@@ -84,6 +84,17 @@ def test_names_trim_a_surrounding_line_break_rather_than_refusing_it() -> None:
     assert RoleName("\u2028Builder\u2029").value == "Builder"
 
 
+def test_a_stored_community_name_is_read_back_as_stored() -> None:
+    # A row stored before the rule keeps its name.
+    assert CommunityName.stored("a\nb").value == "a\nb"
+    assert CommunityName.stored("a\nb") == CommunityName.stored("a\nb")
+
+
+def test_a_stored_role_name_is_read_back_as_stored() -> None:
+    assert RoleName.stored("a\nb").value == "a\nb"
+    assert RoleName.stored("a\nb") == RoleName.stored("a\nb")
+
+
 def test_permission_accepts_resource_action_shape() -> None:
     assert Permission("server:start").value == "server:start"
 

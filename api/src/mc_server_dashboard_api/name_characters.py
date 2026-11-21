@@ -19,8 +19,9 @@ def is_refused_name_character(c: str) -> bool:
     """Whether no name may carry ``c``.
 
     A control character (Unicode ``Cc``: C0, DEL and C1) would break the line the
-    name is shown on or drive the terminal showing it, and a lone surrogate
+    name is shown on or drive the terminal showing it, and so would the line and
+    paragraph separators (``Zl`` and ``Zp``: U+2028 and U+2029). A lone surrogate
     (``Cs``) has no UTF-8 encoding, so could not be stored.
     """
 
-    return unicodedata.category(c) in ("Cc", "Cs")
+    return unicodedata.category(c) in ("Cc", "Cs", "Zl", "Zp")

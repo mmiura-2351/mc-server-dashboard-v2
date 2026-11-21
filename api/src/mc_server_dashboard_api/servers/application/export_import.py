@@ -67,6 +67,7 @@ from mc_server_dashboard_api.servers.application.plugins import (
     allocate_bedrock_port_if_geyser,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.display_name import fitted_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
@@ -90,13 +91,21 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginId,
     PluginSource,
     ServerPlugin,
+    sanitize_plugin_filename,
 )
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.server_properties import (
     apply_platform_properties,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId,
+    ServerId,
+    ServerName,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -303,7 +312,13 @@ class ImportServer:
     ordinary user data. Only after both the metadata and the entries validate does the
     row commit; the write pass then publishes the entries as the initial working
     set, with the metadata member itself excluded. The name comes from the caller,
-    not the metadata.
+    not the metadata, and is checked before the archive is read (issue #3988).
+
+    Each exported plugin entry is checked before the row is created too (issue
+    #3988): its ``filename`` is sanitized as a catalog file's is and must then
+    pass the upload rule, and its ``rel_path`` must be a safe relative path. An
+    entry that fails either is :class:`InvalidExportMetadataError`. Its display
+    name is made to fit the display-name rule, as a catalog title is.
 
     Each read of the archive (the metadata, the dry run and the publish pass) runs
     on the archive-validation pool it shares with the backup upload and the files
@@ -351,6 +366,9 @@ class ImportServer:
         name: str,
         content: bytes,
     ) -> Server:
+        # The name is refused before the archive is read, as an update refuses it
+        # first (issue #3988).
+        ServerName(name)
         if len(content) > self.max_bytes:
             raise FileTooLargeError(str(len(content)))
 
@@ -360,6 +378,7 @@ class ImportServer:
         # runs there (issue #3912). Opening the zip parses its whole directory,
         # so even the metadata read costs seconds for a crafted archive.
         metadata = await run_archive_validation(_parse_metadata, content)
+        plugin_dicts = [self._checked_plugin(raw) for raw in metadata.plugins]
         # Validate the whole archive (zip-slip / size / entry-count, and the root
         # server.properties path of #2869) BEFORE the row is created, so a hostile
         # archive 413/422s with no server row left behind (issue #277). The metadata
@@ -392,9 +411,39 @@ class ImportServer:
         )
         return await self._import_plugins(
             server=server,
-            plugin_dicts=metadata.plugins,
+            plugin_dicts=plugin_dicts,
             now=self.create_server.clock.now(),
         )
+
+    def _checked_plugin(self, raw: object) -> dict[str, object]:
+        """An exported plugin entry with its ``filename`` sanitized (issue #3988).
+
+        The entry is the archive's, so its ``filename`` gets the catalog's
+        treatment: the basename, with each character the upload rule refuses
+        replaced. Its ``rel_path`` names the archive member the plugin's file is,
+        so it is kept as it is, and only checked. Raises
+        :class:`InvalidExportMetadataError` for an entry that is not an object, a
+        ``filename`` the upload rule still refuses, or a ``rel_path`` that is no
+        safe relative path.
+        """
+
+        if not isinstance(raw, dict):
+            raise InvalidExportMetadataError("plugin entry is not an object")
+        filename = raw.get("filename")
+        rel_path = raw.get("rel_path")
+        if not isinstance(filename, str) or not isinstance(rel_path, str):
+            raise InvalidExportMetadataError("plugin filename or rel_path is missing")
+        try:
+            safe = sanitize_plugin_filename(filename)
+        except ValueError as exc:
+            raise InvalidExportMetadataError("plugin filename is not allowed") from exc
+        if not is_valid_upload_filename(safe):
+            raise InvalidExportMetadataError("plugin filename is not allowed")
+        try:
+            self.file_store.validate_rel_path(rel_path)
+        except InvalidFilePathError as exc:
+            raise InvalidExportMetadataError("plugin rel_path is not allowed") from exc
+        return {**raw, "filename": safe}
 
     async def _publish_working_set(
         self,
@@ -653,14 +702,22 @@ def _serialize_plugin(plugin: ServerPlugin) -> dict[str, object]:
 def _deserialize_plugin(
     raw: dict[str, object], *, server_id: ServerId, now: dt.datetime
 ) -> ServerPlugin:
-    """Reconstruct a :class:`ServerPlugin` from an exported dict."""
+    """Reconstruct a :class:`ServerPlugin` from an exported dict.
 
+    ``raw`` is an entry :meth:`ImportServer._checked_plugin` returned.
+    """
+
+    filename = str(raw["filename"])
     return ServerPlugin(
         id=PluginId.new(),
         server_id=server_id,
-        rel_path=str(raw.get("rel_path", "")),
-        filename=str(raw.get("filename", "")),
-        display_name=str(raw.get("display_name", "")),
+        rel_path=str(raw["rel_path"]),
+        filename=filename,
+        # The user did not type the archive's display name, so one the rule
+        # refuses is made to fit it (issue #3988).
+        display_name=fitted_display_name(
+            str(raw.get("display_name", "")), filename=filename
+        ),
         description=raw.get("description"),  # type: ignore[arg-type]
         loader_type=LoaderType(raw.get("loader_type", "mod")),
         source=PluginSource(raw.get("source", "local")),

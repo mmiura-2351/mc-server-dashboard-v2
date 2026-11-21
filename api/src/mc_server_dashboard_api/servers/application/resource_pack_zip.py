@@ -73,7 +73,7 @@ def validate_and_normalize(content: bytes, *, _depth: int = 0) -> bytes:
         for info in infos:
             name = info.filename
             if name.startswith("/") or ".." in name.split("/"):
-                raise InvalidResourcePackError(f"path traversal: {name}")
+                raise InvalidResourcePackError(f"path traversal: {name!r}")
             if not info.is_dir():
                 _, total_size = _read_entry_chunked(zf, name, total_size)
 

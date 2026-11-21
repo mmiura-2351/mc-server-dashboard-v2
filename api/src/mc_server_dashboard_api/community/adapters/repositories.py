@@ -62,7 +62,7 @@ from mc_server_dashboard_api.servers.adapters.models import ServerModel
 def _to_community(row: CommunityModel) -> Community:
     return Community(
         id=CommunityId(row.id),
-        name=CommunityName(row.name),
+        name=CommunityName.stored(row.name),
         max_servers=row.max_servers,
         max_members=row.max_members,
         created_at=row.created_at,
@@ -83,7 +83,7 @@ def _to_role(row: RoleModel) -> Role:
     return Role(
         id=RoleId(row.id),
         community_id=CommunityId(row.community_id),
-        name=RoleName(row.name),
+        name=RoleName.stored(row.name),
         permissions={Permission(code) for code in row.permissions},
         is_preset=row.is_preset,
         created_at=row.created_at,
@@ -165,7 +165,7 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
         return [
             CommunitySummary(
                 id=CommunityId(row.id),
-                name=CommunityName(row.name),
+                name=CommunityName.stored(row.name),
                 created_at=row.created_at,
                 member_count=member_counts.get(row.id, 0),
                 server_count=server_counts.get(row.id, 0),

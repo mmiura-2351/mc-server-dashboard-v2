@@ -24,8 +24,9 @@ def is_valid_upload_filename(filename: str) -> bool:
     The name becomes one segment of a path or of an object key, and of a public
     download URL for a resource pack, and logs name it. So it must be one segment,
     with no ``/`` or ``\\``. It must carry no control character (Unicode ``Cc``: C0,
-    DEL and C1), which would split a log line or drive the terminal showing it,
-    no lone surrogate, which has no UTF-8 encoding at all, and no noncharacter:
+    DEL and C1) and no line or paragraph separator (``Zl``, ``Zp``), which would
+    split a log line or drive the terminal showing it (issue #3988), no lone
+    surrogate, which has no UTF-8 encoding at all, and no noncharacter:
     U+FFFE and U+FFFF, which XML 1.0 cannot carry while the object store lists its
     keys in XML, and the other 64 (U+FDD0 to U+FDEF, and the last two code points
     of every other plane), which Unicode reserves for a program's internal use and
@@ -48,8 +49,8 @@ def is_valid_upload_filename(filename: str) -> bool:
 def is_refused_filename_character(c: str) -> bool:
     """Whether no uploaded file's name may carry ``c``.
 
-    ``/``, ``\\``, a control character, a lone surrogate or a noncharacter; see
-    :func:`is_valid_upload_filename` for why.
+    ``/``, ``\\``, a control character, a line or paragraph separator, a lone
+    surrogate or a noncharacter; see :func:`is_valid_upload_filename` for why.
     """
 
     return c in "/\\" or is_refused_name_character(c) or _is_noncharacter(c)

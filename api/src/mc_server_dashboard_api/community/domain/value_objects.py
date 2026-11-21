@@ -20,6 +20,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     InvalidPermissionError,
     InvalidRoleNameError,
 )
+from mc_server_dashboard_api.name_characters import is_refused_name_character
 
 
 @dataclass(frozen=True)
@@ -121,8 +122,13 @@ class ResourceRef:
 class CommunityName:
     """A community's display name.
 
-    Surrounding whitespace is trimmed and a blank name is rejected; the schema's
+    Surrounding whitespace is trimmed. A blank name is rejected, and so is one
+    that carries a character no name may carry (issue #3988): a control
+    character, a line or paragraph separator, or a lone surrogate. The schema's
     ``UNIQUE(name)`` (DATABASE.md Section 5) handles uniqueness exactly.
+
+    A name read back from a row is built with :meth:`stored` instead, which
+    checks nothing, so a row stored before the rule keeps its name.
     """
 
     value: str
@@ -131,14 +137,32 @@ class CommunityName:
         trimmed = value.strip()
         if not trimmed:
             raise InvalidCommunityNameError("community name must not be blank")
+        if any(is_refused_name_character(c) for c in trimmed):
+            raise InvalidCommunityNameError(
+                "community name must carry no control character, line separator "
+                "or lone surrogate"
+            )
         object.__setattr__(self, "value", trimmed)
+
+    @classmethod
+    def stored(cls, value: str) -> CommunityName:
+        """The name a community row holds, exactly as it holds it."""
+
+        name = object.__new__(cls)
+        object.__setattr__(name, "value", value)
+        return name
 
 
 @dataclass(frozen=True)
 class RoleName:
     """A role's name, unique within its community (DATABASE.md Section 5).
 
-    Surrounding whitespace is trimmed and a blank name is rejected.
+    Surrounding whitespace is trimmed. A blank name is rejected, and so is one
+    that carries a character no name may carry, as :class:`CommunityName` says
+    (issue #3988).
+
+    A name read back from a row is built with :meth:`stored` instead, which
+    checks nothing, so a row stored before the rule keeps its name.
     """
 
     value: str
@@ -147,7 +171,20 @@ class RoleName:
         trimmed = value.strip()
         if not trimmed:
             raise InvalidRoleNameError("role name must not be blank")
+        if any(is_refused_name_character(c) for c in trimmed):
+            raise InvalidRoleNameError(
+                "role name must carry no control character, line separator "
+                "or lone surrogate"
+            )
         object.__setattr__(self, "value", trimmed)
+
+    @classmethod
+    def stored(cls, value: str) -> RoleName:
+        """The name a role row holds, exactly as it holds it."""
+
+        name = object.__new__(cls)
+        object.__setattr__(name, "value", value)
+        return name
 
 
 @dataclass(frozen=True)
