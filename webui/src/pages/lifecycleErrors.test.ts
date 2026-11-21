@@ -294,8 +294,9 @@ describe("lifecycleErrorMessage", () => {
 
   // What the copy promises is the contract for these messages, so each claim
   // is pinned in both locales (issue #3820):
-  // - an offline stop holds only until the release, which stops nothing on the
-  //   host, so only a host back before then gets the stop;
+  // - an offline stop keeps the server on the unreachable host until it returns
+  //   or the grace passes, and a retry once it is back takes the final snapshot
+  //   (issue #3983): the release stops nothing on the host;
   // - an offline restart is never re-sent;
   // - moving the server is safe only once the old host is down, since nothing
   //   fences an instance still alive there (CONFIGURATION.md 5.6);
@@ -306,12 +307,32 @@ describe("lifecycleErrorMessage", () => {
     [
       "en",
       "dashboard.lifecycle.stopWorkerOffline",
-      /released from that host after a while; if the host comes back before then, the server is stopped there/,
+      /^The server host is unreachable\./,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /the server stays assigned to that host until the host returns or a grace period passes/,
+    ],
+    [
+      "en",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /If the host is back in time, stopping again completes the stop with a final snapshot/,
     ],
     [
       "ja",
       "dashboard.lifecycle.stopWorkerOffline",
-      /しばらくするとサーバーはこのホストから切り離されます。それまでにホストが戻れば、サーバーはそこで停止されます/,
+      /^サーバーホストに接続できません。/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /ホストが戻るか一定の猶予時間が過ぎるまで、サーバーはこのホストに割り当てられたままです/,
+    ],
+    [
+      "ja",
+      "dashboard.lifecycle.stopWorkerOffline",
+      /猶予時間内にホストが戻れば、もう一度停止すると最終スナップショットを取って停止が完了します/,
     ],
     [
       "en",
