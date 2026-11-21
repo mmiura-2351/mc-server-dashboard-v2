@@ -101,7 +101,7 @@ from mc_server_dashboard_api.identity.api import admin_users, auth, users
 from mc_server_dashboard_api.identity.application.prune_login_attempts import (
     PruneLoginAttempts,
 )
-from mc_server_dashboard_api.logging import configure_logging
+from mc_server_dashboard_api.logging import configure_logging, route_uvicorn_logging
 from mc_server_dashboard_api.middleware import (
     correlation_id_middleware,
     security_headers_middleware,
@@ -1440,6 +1440,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 port=settings.metrics.port,
             )
         app.state.metrics_listener = metrics_listener
+        # A uvicorn ``Config`` built since create_app with its default
+        # ``log_config`` has taken uvicorn's loggers off the app handler again
+        # (route_uvicorn_logging); serve with them routed back (issue #3939).
+        route_uvicorn_logging()
         try:
             yield
         finally:
