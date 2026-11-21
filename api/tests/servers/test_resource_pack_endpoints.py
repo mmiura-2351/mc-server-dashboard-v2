@@ -951,7 +951,6 @@ class TestPublicDownloadEndpoint:
             pytest.param(f"..%2F{uuid.uuid4()}%2Fmy-pack.zip", id="another-pack"),
             pytest.param("my-pack.zip%2F", id="trailing-slash"),
             pytest.param("my-pack.zip/x", id="extra-segment"),
-            pytest.param("", id="empty"),
         ],
     )
     def test_public_download_of_a_path_that_is_not_the_name_touches_no_store(

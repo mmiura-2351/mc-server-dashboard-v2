@@ -24,6 +24,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Form, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from starlette.convertors import Convertor, register_url_convertor
 
 from mc_server_dashboard_api.audit.domain import operations as ops
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
@@ -83,6 +84,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackId,
+    is_valid_pack_display_name,
 )
 from mc_server_dashboard_api.servers.domain.upload_filename import (
     is_valid_upload_filename,
@@ -160,23 +162,32 @@ async def upload_resource_pack(
     recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
     base_url: Annotated[str, Depends(_public_base_url)],
 ) -> ResourcePackResponse:
-    """Upload a resource pack (server:update in any community, issue #1176)."""
+    """Upload a resource pack (server:update in any community, issue #1176).
+
+    The display name is stored stripped. Stripped, one that is empty, over 200
+    characters, or carries a control character or a lone surrogate is 422
+    ``invalid_display_name`` (issue #3922).
+    """
 
     # The name goes into the object key, the public download URL and the GC's
-    # log lines, so one none of them can carry is refused before anything is
-    # stored (issue #3907). A missing name is blank, and refused too.
+    # log lines, so one none of them can carry is refused before the body is read
+    # (issues #3907, #3922). A part with no ``filename=`` parameter never gets
+    # here: FastAPI answers it 422 ``validation_error``, so the ``or ""`` only
+    # narrows the type.
     filename = file.filename or ""
     if not is_valid_upload_filename(filename):
         raise _unprocessable("invalid_filename")
     if not filename.lower().endswith(".zip"):
         raise _unprocessable("filename_not_zip")
+    if not is_valid_pack_display_name(display_name):
+        raise _unprocessable("invalid_display_name")
 
     content = await _read_capped_upload(file)
 
     try:
         pack = await use_case(
             filename=filename,
-            display_name=display_name,
+            display_name=display_name.strip(),
             content=content,
             uploaded_by=user.id.value,
         )
@@ -388,7 +399,35 @@ def _download_headers(pack: ResourcePack, *, size_bytes: int) -> dict[str, str]:
 # HEAD from a GET route, so the probe has to be declared (issue #2632). Both
 # registrations point at the same endpoint function, so the gate, the headers and
 # the error mapping cannot drift apart between the two methods.
-_PUBLIC_DOWNLOAD_PATH = "/public/resource-packs/{resource_pack_id}/{filename}"
+#
+# ``filename`` takes the rest of the path, slashes included (issue #3922): a pack
+# stored before the upload refused ``/`` in a name keeps it, and its URL, written
+# to server.properties, ends in that name. The segment is only ever compared with
+# the stored name, and the blob is located from the row, so a path shaped like a
+# traversal names nothing.
+_PUBLIC_DOWNLOAD_PATH = (
+    "/public/resource-packs/{resource_pack_id}/{filename:rest_of_path}"
+)
+
+
+class _RestOfPathConvertor(Convertor[str]):
+    """The rest of the path, newlines included, and at least one character.
+
+    Starlette's own ``path`` matches ``.*``, which stops at a newline, and a pack
+    stored before the upload refused control characters may have one in its name
+    (issue #3907). This matches every name the plain segment did, and a ``/`` too.
+    """
+
+    regex = "(?s:.+)"
+
+    def convert(self, value: str) -> str:
+        return value
+
+    def to_string(self, value: str) -> str:
+        return value
+
+
+register_url_convertor("rest_of_path", _RestOfPathConvertor())
 
 
 @public_router.get(_PUBLIC_DOWNLOAD_PATH)
@@ -401,9 +440,10 @@ async def public_download_resource_pack(
 ) -> StreamingResponse:
     """Public download endpoint for Minecraft clients (no auth, issue #1176).
 
-    Validates that ``filename`` matches the stored filename (404 otherwise). The
-    response declares the pack's exact size as ``Content-Length``, which the game
-    client shows as download progress.
+    Validates that ``filename`` matches the stored filename (404 otherwise). It is
+    the rest of the path, so a stored name with a ``/`` matches too, escaped or not
+    (issue #3922). The response declares the pack's exact size as
+    ``Content-Length``, which the game client shows as download progress.
 
     **Probe** (issue #2632): a ``HEAD`` answers with the ``GET``'s status and
     headers and no body, so a resumable-download client — this is the

@@ -13,10 +13,33 @@ and an optional ``resource_pack_prompt``.
 from __future__ import annotations
 
 import datetime as dt
+import unicodedata
 import uuid
 from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+
+# The longest display name a pack may carry, in characters, once stripped: the
+# bound a plugin's display name has (issue #3922).
+MAX_DISPLAY_NAME_LENGTH = 200
+
+
+def is_valid_pack_display_name(display_name: str) -> bool:
+    """Whether ``display_name``, stripped, can name an uploaded pack (issue #3922).
+
+    The name is shown in the library and typed to confirm a delete. Stripped, it
+    must not be empty, must fit :data:`MAX_DISPLAY_NAME_LENGTH`, and must carry no
+    control character (Unicode ``Cc``), which would break the line it is shown on
+    or drive a terminal, and no lone surrogate, which has no UTF-8 encoding and so
+    could not be stored. Any other character is a legitimate name.
+    """
+
+    name = display_name.strip()
+    return (
+        name != ""
+        and len(name) <= MAX_DISPLAY_NAME_LENGTH
+        and not any(unicodedata.category(c) in ("Cc", "Cs") for c in name)
+    )
 
 
 @dataclass(frozen=True)
