@@ -4,8 +4,8 @@
 connection. When that session ends, PostgreSQL releases the lock and another
 holder can take it. These tests end the session with ``pg_terminate_backend``
 and pin what the held lock then reports: ``ensure_held`` raises
-:class:`LifecycleLockLostError` (and keeps raising), and leaving the ``hold``
-surfaces that typed error rather than a raw driver error from the release.
+:class:`LifecycleLockLostError` (and keeps raising), while a loss that only the
+release finds is logged and never raised over the body's own outcome.
 
 DB-gated: skipped unless ``MCD_TEST_DATABASE_URL`` is set.
 """
@@ -13,6 +13,7 @@ DB-gated: skipped unless ``MCD_TEST_DATABASE_URL`` is set.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -25,7 +26,11 @@ from mc_server_dashboard_api.servers.adapters import (
     lifecycle_lock as lifecycle_lock_mod,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
-from mc_server_dashboard_api.servers.domain.errors import LifecycleLockLostError
+from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleLockLostError,
+    ServerNotStoppedError,
+)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import HeldLifecycleLock
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -89,35 +94,132 @@ async def test_a_lock_whose_session_ended_reports_itself_lost(
         await held.ensure_held()
 
 
-async def test_leaving_a_lock_whose_session_ended_reports_it_lost(
-    engine: AsyncEngine,
+_ADAPTER_LOGGER = lifecycle_lock_mod.__name__
+
+
+def _release_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        r
+        for r in caplog.records
+        if r.name == _ADAPTER_LOGGER and r.levelno == logging.WARNING
+    ]
+
+
+async def test_a_loss_only_the_release_finds_is_logged_and_the_hold_ends_normally(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The body wrote without checking again, so its last writes may have run
-    # outside the exclusion: the release tells the caller instead of passing.
+    # Every write the body made ran after a check that passed, and the window
+    # after the last one is the documented one: the operation finished, so it
+    # answers as finished. The loss is logged, and the lock is gone with the
+    # session.
     server_id = ServerId(uuid.uuid4())
     lock = PgLifecycleLock(engine=engine)
 
-    with pytest.raises(LifecycleLockLostError):
+    async with lock.hold(server_id):
+        await terminate_lock_session(engine, server_id)
+
+    assert len(_release_warnings(caplog)) == 1
+    async with lock.hold(server_id) as held:
+        await held.ensure_held()
+
+
+async def test_the_release_never_replaces_what_the_body_raised(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+
+    with pytest.raises(ServerNotStoppedError):
         async with lock.hold(server_id):
             await terminate_lock_session(engine, server_id)
+            raise ServerNotStoppedError(str(server_id.value))
+
+    assert len(_release_warnings(caplog)) == 1
+
+
+async def test_a_cancelled_body_stays_cancelled_when_the_release_finds_no_session(
+    engine: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+    ended = asyncio.Event()
+
+    async def _gated() -> None:
+        async with lock.hold(server_id):
+            await terminate_lock_session(engine, server_id)
+            ended.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(_gated())
+    await ended.wait()
+    task.cancel()
+    await asyncio.wait({task})
+
+    assert task.cancelled()
+    assert len(_release_warnings(caplog)) == 1
 
 
 async def test_a_session_that_no_longer_holds_the_lock_reports_it_lost(
     engine: AsyncEngine,
 ) -> None:
     # The check asks whether THIS session still holds the lock, not merely
-    # whether the connection answers: a live session can stop holding it (a
-    # pooler handing the connection a different backend), and a plain ping would
-    # pass there. Released by hand on the lock's own connection to get one.
+    # whether the connection answers: a live session can stop holding it, and a
+    # plain ping would pass there. Released by hand on the lock's own connection
+    # to get one.
     server_id = ServerId(uuid.uuid4())
     lock = PgLifecycleLock(engine=engine)
 
     with pytest.raises(LifecycleLockLostError):
         async with lock.hold(server_id) as held:
+            await _release_by_hand(held, server_id)
+            await held.ensure_held()
+
+
+async def _release_by_hand(held: HeldLifecycleLock, server_id: ServerId) -> None:
+    """Release the lock on the held lock's own connection, leaving it alive."""
+
+    assert isinstance(held, lifecycle_lock_mod._PgHeldLifecycleLock)
+    await held._conn.execute(
+        text("SELECT pg_advisory_unlock(:key)"),
+        {"key": lifecycle_lock_mod._lock_key(server_id)},
+    )
+
+
+async def test_the_key_held_by_another_session_is_not_held_here(
+    engine: AsyncEngine,
+) -> None:
+    # Only this session's hold counts: once another session has the key, this
+    # one is no longer excluding anybody, whoever holds it now.
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+
+    async with engine.connect() as other:
+        other = await other.execution_options(isolation_level="AUTOCOMMIT")
+        with pytest.raises(LifecycleLockLostError):
+            async with lock.hold(server_id) as held:
+                await _release_by_hand(held, server_id)
+                assert await other.scalar(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": lifecycle_lock_mod._lock_key(server_id)},
+                )
+                await held.ensure_held()
+
+
+async def test_another_key_this_session_holds_does_not_count(
+    engine: AsyncEngine,
+) -> None:
+    # Only the server's own key counts: an advisory lock this session holds on
+    # any other key excludes nobody from this server.
+    server_id = ServerId(uuid.uuid4())
+    lock = PgLifecycleLock(engine=engine)
+
+    with pytest.raises(LifecycleLockLostError):
+        async with lock.hold(server_id) as held:
+            await _release_by_hand(held, server_id)
             assert isinstance(held, lifecycle_lock_mod._PgHeldLifecycleLock)
-            await held._conn.execute(
-                text("SELECT pg_advisory_unlock(:key)"),
-                {"key": lifecycle_lock_mod._lock_key(server_id)},
+            other_key = lifecycle_lock_mod._lock_key(ServerId(uuid.uuid4()))
+            assert await held._conn.scalar(
+                text("SELECT pg_try_advisory_lock(:key)"), {"key": other_key}
             )
             await held.ensure_held()
 
