@@ -10,7 +10,8 @@ import { t } from "../i18n/index.ts";
 // - Focus restore: the element focused when the dialog opened is refocused on
 //   close, so keyboard users land back on the trigger.
 // - Focus trap: Tab / Shift+Tab cycle within the dialog's focusable elements
-//   rather than escaping to the page behind the backdrop. The toast stack
+//   rather than escaping to the page behind the backdrop; a scroller the
+//   browser stops Tab on counts as one of them. The toast stack
 //   joins the cycle: it sits outside every dialog, but an error raised over
 //   one must stay reachable (WEBUI_SPEC.md Section 7.4). A Tab that lands
 //   anywhere else is pulled back into the dialog, and a control disabled
@@ -25,7 +26,8 @@ import { t } from "../i18n/index.ts";
 // regardless of order.
 const dialogStack: HTMLElement[] = [];
 
-// The topmost open dialog, or null when none is open.
+// The topmost open dialog, or null when none is open. A document-level key
+// handler of the page behind leaves keys to it while one is open (#3920).
 export function topmostDialog(): HTMLElement | null {
   return dialogStack.at(-1) ?? null;
 }
@@ -39,11 +41,40 @@ export function setToastZone(zone: HTMLElement | null): void {
 
 // `:disabled`, unlike `[disabled]`, also matches a control inside a disabled
 // fieldset.
+const CONTROLS =
+  'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
+// The controls under `root`, and the scrollers the browser also stops Tab on,
+// in document order.
 function focusableWithin(root: HTMLElement): HTMLElement[] {
   return Array.from(
-    root.querySelectorAll<HTMLElement>(
-      'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    ),
+    root.querySelectorAll<HTMLElement>(`${CONTROLS}, .modal-body`),
+  ).flatMap((el) => (el.matches(CONTROLS) ? [el] : tabbableScrollers(el)));
+}
+
+// Chromium makes a scroller a Tab stop while its content overflows on an axis
+// the user can scroll and nothing in it takes Tab, as a `.modal-body` whose
+// controls are all disabled. A scroller nested in it that qualifies takes the
+// stop instead. Only a body with no control in it is searched, so a Tab in a
+// long list of controls stays cheap.
+function tabbableScrollers(body: HTMLElement): HTMLElement[] {
+  if (body.querySelector(CONTROLS) !== null) {
+    return [];
+  }
+  const scrolls = (overflow: string) =>
+    overflow === "auto" || overflow === "scroll";
+  const scrollers = [
+    body,
+    ...body.querySelectorAll<HTMLElement>("*:not([tabindex])"),
+  ].filter((el) => {
+    const style = getComputedStyle(el);
+    return (
+      (scrolls(style.overflowY) && el.scrollHeight > el.clientHeight) ||
+      (scrolls(style.overflowX) && el.scrollWidth > el.clientWidth)
+    );
+  });
+  return scrollers.filter(
+    (outer) => !scrollers.some((el) => el !== outer && outer.contains(el)),
   );
 }
 
