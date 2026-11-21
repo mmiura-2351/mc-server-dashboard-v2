@@ -378,6 +378,66 @@ func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) 
 	}
 }
 
+// Every descriptor the unpack opens on a member's path is closed again, whether
+// the unpack succeeds or a link on the path fails it, with openat2 or without it.
+func TestUnpackLeavesNoDescriptorOpen(t *testing.T) {
+	openFds := func() int {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Skipf("no /proc/self/fd to count descriptors with: %v", err)
+		}
+		return len(entries)
+	}
+	archive := func() io.Reader {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		for _, h := range []tar.Header{
+			{Name: "world/region/", Typeflag: tar.TypeDir, Mode: 0o750},
+			{Name: "world/region/r.0.0.mca", Typeflag: tar.TypeReg, Mode: 0o640},
+			{Name: "world/level.dat", Typeflag: tar.TypeReg, Mode: 0o640},
+			{Name: "server.properties", Typeflag: tar.TypeReg, Mode: 0o640},
+			{Name: "logs/", Typeflag: tar.TypeDir, Mode: 0o750},
+		} {
+			if err := tw.WriteHeader(&h); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return &buf
+	}
+	for _, kernel := range []string{"openat2", "without openat2"} {
+		t.Run(kernel, func(t *testing.T) {
+			if kernel == "without openat2" {
+				withoutOpenat2(t)
+			}
+			clean := openDirFd(t, t.TempDir())
+			// The link is one directory down, so the walk holds a descriptor of
+			// its own when the link fails it.
+			linked := t.TempDir()
+			if err := os.Mkdir(filepath.Join(linked, "world"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(t.TempDir(), filepath.Join(linked, "world", "region")); err != nil {
+				t.Fatal(err)
+			}
+			linkedFd := openDirFd(t, linked)
+
+			before := openFds()
+			if err := unpackTar(archive(), clean); err != nil {
+				t.Fatalf("unpackTar: %v", err)
+			}
+			if err := unpackTar(archive(), linkedFd); err == nil {
+				t.Fatal("unpackTar = nil, want the link on the members' path refused")
+			}
+			if after := openFds(); after != before {
+				t.Fatalf("open descriptors: %d before, %d after", before, after)
+			}
+		})
+	}
+}
+
 // Directories the unpack creates, named by a member or implied by a file's path,
 // get mode 0750 (under a 022 umask).
 func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
