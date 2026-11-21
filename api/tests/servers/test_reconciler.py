@@ -98,6 +98,9 @@ _REFUSED_GRACE = 5
 # divergence age between them and prove the budget, not a grace, held the start back.
 _RESTART_BUDGET = 120
 _PAST_GRACE = _NOW - dt.timedelta(seconds=_GRACE + 1)
+# This process's control-plane listener started well before every other instant
+# here, unless a test says otherwise (issue #3916).
+_STARTED_LONG_AGO = _NOW - dt.timedelta(days=1)
 
 
 def _server(
@@ -163,6 +166,7 @@ def _reconciler(
     store_reader: StoreGenerationReader | None = None,
     stop_refusals: StopDispatchRefusals | None = None,
     unrecorded_stops: UnrecordedStops | None = None,
+    listener_started_at: dt.datetime = _STARTED_LONG_AGO,
 ) -> RunReconcilerTick:
     stop_refusals = stop_refusals or StopDispatchRefusals()
     unrecorded_stops = unrecorded_stops or UnrecordedStops()
@@ -201,6 +205,7 @@ def _reconciler(
         restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=listener_started_at,
     )
 
 
@@ -3082,6 +3087,7 @@ def _concurrent_reconciler(
         restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_STARTED_LONG_AGO,
     )
 
 
@@ -3201,6 +3207,7 @@ async def test_failure_in_one_action_does_not_poison_others() -> None:
         restart_timeout_seconds=_RESTART_BUDGET,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_STARTED_LONG_AGO,
     )
 
     await reconciler.tick()
@@ -3539,6 +3546,143 @@ async def test_stopped_starting_assigned_is_not_reconcilable() -> None:
     clock = FakeClock(_NOW)
     await _reconciler(uow, cp, clock).tick()
     assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+# --- a full grace for each Worker after an API start (issue #3916) ---------
+#
+# The reconciler's first tick runs as the API starts, before any Worker has
+# registered with it, so every Worker reads disconnected then. Each stopped-intent
+# row a disconnected Worker's release covers is held until a full grace has passed
+# since this process's listener started, so a Worker that re-registers within it
+# still gets the final snapshot or the stop.
+
+_RELEASED_WHEN_AWAY = [
+    ObservedState.STOPPED,
+    ObservedState.CRASHED,
+    ObservedState.UNKNOWN,
+    ObservedState.STOPPING,
+]
+# What a connected Worker is sent for each: the final snapshot of a process that is
+# gone, or the stop (then its final snapshot) of one that may not be.
+_OWED_WHEN_BACK = {
+    ObservedState.STOPPED: ["snapshot"],
+    ObservedState.CRASHED: ["snapshot"],
+    ObservedState.UNKNOWN: ["stop", "snapshot"],
+    ObservedState.STOPPING: ["stop", "snapshot"],
+}
+
+
+def _stop_side_row(observed: ObservedState, *, since: dt.datetime) -> Server:
+    return _server(
+        desired=DesiredState.STOPPED,
+        observed=observed,
+        worker=_WORKER,
+        observed_at=since,
+        updated_at=since,
+    )
+
+
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_the_boot_tick_releases_nothing_for_a_worker_not_back_yet(
+    observed: ObservedState,
+) -> None:
+    # The row's own grace lapsed before this process started.
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, listener_started_at=_NOW).tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_a_worker_back_within_a_grace_of_the_api_start_keeps_its_row(
+    observed: ObservedState,
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    connected = {_WORKER: False}
+    cp = FakeControlPlane(connected=connected)
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, listener_started_at=_NOW)
+    await reconciler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    connected[_WORKER] = True
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == _OWED_WHEN_BACK[observed]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_a_worker_that_never_returns_is_released_a_grace_after_the_api_start(
+    observed: ObservedState,
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    reconciler = _reconciler(uow, cp, clock, listener_started_at=_NOW)
+    await reconciler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE - 1))
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(_NOW + dt.timedelta(seconds=_GRACE))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_a_disconnected_workers_row_still_waits_its_own_grace(
+    observed: ObservedState,
+) -> None:
+    # Long after the API start, the row's own stamp is the later of the two.
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_NOW - dt.timedelta(seconds=_GRACE - 1))
+    uow.servers.seed(server)
+    cp = FakeControlPlane(connected={_WORKER: False})
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock).tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+
+@pytest.mark.parametrize("observed", _RELEASED_WHEN_AWAY, ids=lambda s: s.value)
+async def test_a_connected_workers_row_is_not_held_by_the_api_start(
+    observed: ObservedState,
+) -> None:
+    uow = FakeUnitOfWork()
+    server = _stop_side_row(observed, since=_PAST_GRACE)
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, listener_started_at=_NOW).tick()
+    assert [k for k, _, _ in cp.dispatched] == _OWED_WHEN_BACK[observed]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_a_row_with_no_worker_is_placed_at_the_boot_tick() -> None:
+    # No Worker is assigned, so there is none to wait for.
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.UNKNOWN,
+        worker=None,
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(place_to=_WORKER)
+    clock = FakeClock(_NOW)
+    await _reconciler(uow, cp, clock, listener_started_at=_NOW).tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate", "start"]
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 

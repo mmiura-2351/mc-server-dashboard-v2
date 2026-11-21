@@ -130,6 +130,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+# The API's control-plane listener started long before each scenario (issue #3916).
+_STARTED_LONG_AGO = _NOW - dt.timedelta(days=1)
 
 
 class _AdvancingClock(Clock):
@@ -353,6 +355,7 @@ async def _reconciler_tick(
         restart_timeout_seconds=restart_timeout_seconds,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
+        listener_started_at=_STARTED_LONG_AGO,
     ).tick()
 
 
