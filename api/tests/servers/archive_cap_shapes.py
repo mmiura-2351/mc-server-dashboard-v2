@@ -241,6 +241,34 @@ def directories(count: int) -> bytes:
     return buf.getvalue()
 
 
+# How many characters each member of :func:`commented_directories` holds in its
+# PAX ``comment``: inside the 16 Ki a member the storage walks allow, and 500
+# of them inside the upload gates' 8 Mi.
+_COMMENT = 15 * 1024
+
+
+@functools.cache
+def commented_directories(count: int, character: str = "c") -> bytes:
+    """``count`` directory members, each with a PAX ``comment`` of 15 Ki
+    ``character``, then one file, built once: ``tarfile`` would hold the
+    comment a member, were it to keep every member it reads (issue #3931), 15
+    KiB of ``c``s or 60 KiB of a character outside the BMP, which Python holds
+    in four bytes. A directory has no data, so a walk of it writes next to
+    nothing."""
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT) as tar:
+        for i in range(count):
+            info = tarfile.TarInfo(name=f"d{i:03}")
+            info.type = tarfile.DIRTYPE
+            info.pax_headers = {"comment": character * _COMMENT}
+            tar.addfile(info)
+        info = tarfile.TarInfo(name="a.txt")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"A"))
+    return buf.getvalue()
+
+
 # The shapes CAP refuses: each decompresses past it outside member data.
 OVER_CAP = [
     pytest.param(sparse_data_not_mapped, id="sparse-data-not-mapped"),

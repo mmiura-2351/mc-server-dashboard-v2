@@ -127,6 +127,28 @@ describe("Popover", () => {
     expect(screen.queryByText("panel content")).not.toBeInTheDocument();
   });
 
+  it("takes an Escape inside a dialog for itself, and leaves the next one to the dialog", () => {
+    const onClose = vi.fn();
+    render(
+      <Modal open={true} title="Title" onClose={onClose}>
+        <Popover label="Menu">
+          <p>panel content</p>
+        </Popover>
+      </Modal>,
+    );
+    // Opened once the dialog is up, as a popover in a dialog would be.
+    fireEvent.click(screen.getByRole("button", { name: "Menu" }));
+
+    fireEvent.keyDown(document.activeElement ?? document, { key: "Escape" });
+
+    expect(screen.queryByText("panel content")).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document.activeElement ?? document, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the panel within the viewport when the trigger sits near the right edge", () => {
     // Regression (#2239 review): at ~375px the trigger sits at x≈289 and a
     // 160px left-aligned panel overflowed the right edge by 74px. The offset

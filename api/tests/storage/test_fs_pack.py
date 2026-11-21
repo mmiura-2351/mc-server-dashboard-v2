@@ -12,6 +12,7 @@ from __future__ import annotations
 import gzip
 import io
 import os
+import stat
 import tarfile
 from collections.abc import Callable
 from pathlib import Path
@@ -63,7 +64,8 @@ _DIRECTORIES = {
 def _ordinary_tree(root: Path) -> Path:
     """A working set holding what a pack meets: nested and empty directories,
     modes and mtimes, a hard-linked file, and symlinks, to a file and to a
-    directory, and a FIFO, which the pack leaves out and does not enter."""
+    directory, a FIFO and a socket, which the pack leaves out and does not
+    enter. ``tarfile`` drops a socket before the filter sees it."""
 
     for name in _DIRECTORIES:
         (root / name).mkdir(parents=True)
@@ -74,6 +76,9 @@ def _ordinary_tree(root: Path) -> Path:
     (root / "world/latest").symlink_to("level.dat")
     (root / "world/regions").symlink_to("region", target_is_directory=True)
     os.mkfifo(root / "world/pipe")
+    # Listed right after an empty directory, which the walk enters and finds
+    # nothing in: the filter never sees a socket to say it is not one to enter.
+    os.mknod(root / "world/empty.sock", stat.S_IFSOCK | 0o600)
     # Deepest first, so setting a directory's mtime is not undone below it.
     paths = sorted(root.rglob("*"), key=lambda p: -len(p.parts))
     for offset, path in enumerate(paths):
@@ -136,7 +141,7 @@ def test_the_walk_packs_the_tar_the_recursive_add_packed(
     """The walk writes, byte for byte, the tar ``tarfile.add``'s recursion
     wrote: the same members in the same order, with the same modes, mtimes and
     data, empty directories kept, the hard link as a regular file, and the
-    symlinks, the FIFO and an excluded name left out."""
+    symlinks, the FIFO, the socket and an excluded name left out."""
 
     run, names = _PACKS[pack]
     tree = _ordinary_tree(tmp_path / "tree")
@@ -151,3 +156,49 @@ def test_the_walk_packs_the_tar_the_recursive_add_packed(
     assert [m.name for m in members] == names
     assert {m.name: m.mode for m in members if m.isdir()} == _DIRECTORIES
     assert all(m.isfile() or m.isdir() for m in members)
+
+
+def _pack_error(run: Callable[[Path, Path], bytes], tree: Path, out: Path) -> OSError:
+    """The ``OSError`` packing ``tree`` raises: hydrate hands it to the consumer
+    in its holder, backup create and prune raise it."""
+
+    if run is _hydrate_pack:
+        holder: list[BaseException] = []
+        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fs._tar_into_fd(tree, fd, None, holder, frozenset(), lambda: None)
+        [error] = holder
+    else:
+        with pytest.raises(OSError) as raised:
+            run(tree, out)
+        error = raised.value
+    assert isinstance(error, OSError)
+    return error
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 entry")
+@pytest.mark.parametrize("entry", ["world/a", "world/a-b.dat"], ids=["dir", "file"])
+@pytest.mark.parametrize("pack", list(_PACKS))
+def test_the_walk_fails_where_the_recursive_add_failed(
+    pack: str, entry: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An entry the pack cannot read fails it, as ``tarfile.add``'s recursion
+    failed it: the same error, at the same path. A pack that went on without
+    the entry would hydrate or back up a working set with files missing and no
+    error. A mode-000 directory fails its listing, a mode-000 file its read."""
+
+    run, _ = _PACKS[pack]
+    tree = _ordinary_tree(tmp_path / "tree")
+    (tree / entry).chmod(0)
+    try:
+        walked = _pack_error(run, tree, tmp_path / "walked")
+        monkeypatch.setattr(fs, "_add_plain", _recursive_add_plain)
+        recursed = _pack_error(run, tree, tmp_path / "recursed")
+    finally:
+        (tree / entry).chmod(0o755)
+
+    assert (type(walked), walked.errno, walked.filename) == (
+        type(recursed),
+        recursed.errno,
+        recursed.filename,
+    )
+    assert (type(walked), walked.filename) == (PermissionError, str(tree / entry))

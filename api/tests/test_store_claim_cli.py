@@ -5,8 +5,8 @@ when no row of its database names a stored object. The command claims such a
 store for this database: it writes the owner marker naming this installation,
 whatever the store holds, and deletes nothing. It never replaces a marker,
 whichever installation that marker names. It exits 0 when it claimed the store, 1
-when it refused, and 2, with one line and no traceback, when the database or the
-store failed.
+when it refused, and 2, with one line and no traceback, when the configuration,
+the database or the store failed. It logs through the app's handler.
 
 These run ``main`` over the config-selected store the API builds (object, over
 the in-memory S3 stub, and fs), with the real marker in place of the app suite's
@@ -16,6 +16,7 @@ stand-in and the database's installation id fixed.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
@@ -29,6 +30,9 @@ from mc_server_dashboard_api import store_claim_cli
 from mc_server_dashboard_api.storage.adapters import ownership as ownership_module
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
+
+# ``main`` installs the app's log handler (issue #3942); take it off afterwards.
+pytestmark = pytest.mark.usefixtures("app_log_handler_restored")
 
 _OURS = uuid.UUID("00000000-0000-4000-8000-000000000001")
 _THEIRS = uuid.UUID("00000000-0000-4000-8000-000000000002")
@@ -185,3 +189,63 @@ def test_a_store_fault_exits_2_without_a_traceback(
     err = capsys.readouterr().err
     assert err.startswith("store claim failed: NotADirectoryError: ")
     assert "Traceback" not in err
+
+
+def test_a_configuration_fault_exits_2_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The database URL is a required key, so the settings do not load. The line
+    # names the first failing key and how many failed, not pydantic's message.
+    monkeypatch.delenv("MCD_API_DATABASE__URL")
+
+    assert store_claim_cli.main([]) == 2
+
+    err = capsys.readouterr().err
+    assert err == (
+        "store claim failed: invalid configuration: database: Field required "
+        "(1 error)\n"
+    )
+
+
+def test_a_bad_argument_exits_2_before_the_configuration_is_read(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command takes no arguments; argparse refuses one before the settings
+    # load, so a bad configuration does not hide it.
+    monkeypatch.delenv("MCD_API_DATABASE__URL")
+
+    with pytest.raises(SystemExit) as exited:
+        store_claim_cli.main(["--bogus"])
+
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert "unrecognized arguments: --bogus" in err
+    assert "store claim failed" not in err
+
+
+def test_the_command_logs_in_the_configured_format(
+    store: _Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The command logs through the app's handler at the configured ``log.level``
+    and ``log.format`` (issue #3942), so its lines come out escaped, as the API's
+    do (issue #3938)."""
+
+    monkeypatch.setenv("MCD_API_LOG__LEVEL", "debug")
+    monkeypatch.setenv("MCD_API_LOG__FORMAT", "text")
+
+    async def _ours_logged(_session_factory: object) -> uuid.UUID:
+        logging.getLogger("mc_server_dashboard_api.core.adapters.installation").debug(
+            "installation \x1b[31mred\x1b[0m\nINFO forged"
+        )
+        return _OURS
+
+    monkeypatch.setattr(store_claim_cli, "read_installation_id", _ours_logged)
+
+    assert store_claim_cli.main([]) == 0
+
+    err = capsys.readouterr().err
+    assert (
+        "DEBUG mc_server_dashboard_api.core.adapters.installation "
+        "installation \\x1b[31mred\\x1b[0m\\nINFO forged\n"
+    ) in err
+    assert "\x1b" not in err

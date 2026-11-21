@@ -16,7 +16,14 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -1077,3 +1084,21 @@ def load_settings(config_file: Path | None) -> Settings:
 
     file_values = _read_toml(config_file) if config_file is not None else {}
     return Settings(**file_values)
+
+
+def describe_settings_error(exc: ValueError | OSError) -> str:
+    """One line for a :func:`load_settings` failure, for an operator command.
+
+    pydantic's own message runs over several lines, so a ``ValidationError`` is
+    its first failing key and message and how many keys failed (issue #3942). A
+    config file that cannot be read or parsed is its error's type and message.
+    No validator here puts a secret's value in its message.
+    """
+
+    if isinstance(exc, ValidationError):
+        first = exc.errors()[0]
+        key = ".".join(str(part) for part in first["loc"]) or "settings"
+        count = exc.error_count()
+        errors = "1 error" if count == 1 else f"first of {count} errors"
+        return f"{key}: {first['msg']} ({errors})"
+    return f"{type(exc).__name__}: {exc}"

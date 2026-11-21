@@ -51,17 +51,18 @@ _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 # a time. Real extended headers are long names, xattrs and ACLs: kilobytes.
 _BETWEEN_MEMBERS_BYTES = 1024 * 1024
 
-# What the members a walk hands out may hold. tarfile keeps every member, most
-# of them with a copy of the global PAX records dict, and the TarFile keeps the
-# global records too, so a member may hold at most this many PAX records, global
-# and its own...
+# What the members a walk hands out may hold. tarfile gives most members a copy
+# of the global PAX records dict, and the TarFile keeps the global records too,
+# so a member may hold at most this many PAX records, global and its own...
 _PAX_RECORDS_PER_MEMBER = 32
 # ...and the members' names, link names, PAX keys and PAX values together at most
 # this many characters, plus what HeaderLimits allows a member. The count
 # over-states some of it, which errs safe: a global record is one string the
 # members share but counts once a member, and a name or link name read from a PAX
 # record counts twice. Real archives hold a dozen records and a few hundred
-# characters a member.
+# characters a member. A TarFile opened with ``stream=True``, as every walk's is
+# (issue #3931), keeps no member it has handed out, so the count bounds what the
+# walk reads of them in all; opened without, tarfile keeps every member.
 _HELD_CHARACTERS = 8 * 1024 * 1024
 
 # How much of the stream past the end-of-archive marker to read at a time, so a
@@ -97,9 +98,6 @@ _GZIP_SOURCE_BYTES = 1024 * 1024
 class HeaderLimitError(tarfile.ReadError):
     """A walk read or kept more header than its header limits allow.
 
-    The limits hold only a walk whose :class:`EndCheckedReader` is given
-    :class:`HeaderLimits`.
-
     More than 1 MiB of headers between two members, a member with more than 32
     PAX records, or more characters held by the members handed out than the
     limits allow (issue #3810). A ``ReadError``, so a caller that refuses
@@ -126,17 +124,21 @@ class HeaderLimits:
 # 8 Mi characters out of a real archive's reach.
 UPLOAD_HEADER_LIMITS = HeaderLimits(characters_a_member=0)
 
-# The limits restore and the health check hold a backup's walk to (issue #3859).
-# They have no entry cap: a backup the platform writes holds a member for every
-# file of the working set, however many. Such a member holds its name twice, as
-# the name and as its PAX ``path`` record, and a few short records (``mtime``,
-# and ``size``, ``uid``, ``gid``, ``uname`` or ``gname`` when out of the ustar
-# fields' range): under 9 Ki characters for a name of 4095 bytes, Linux's
-# PATH_MAX, which bounds every name the fs writer reads from disk and the Worker
-# packs. So 16 Ki a member takes every backup the fs writer writes, and the 8 Mi
-# on top takes every archive the upload gates admit. The object writer's names
-# are the snapshot's object keys, so its backups are taken alike only while every
-# key is at most 4095 bytes, which nothing enforces yet (issue #3931).
+# The limits restore and the health check hold a backup's walk to (issue #3859),
+# and the snapshot ingest a snapshot's (issue #3931). They have no entry cap: a
+# backup the platform writes, and a snapshot the Worker packs, hold a member for
+# every file of the working set, however many. Such a member holds its name
+# twice, as the name and as its PAX ``path`` record, and a few short records
+# (``mtime``, and ``size``, ``uid``, ``gid``, ``uname`` or ``gname`` when out of
+# the ustar fields' range): under 9 Ki characters for a name of 4095 bytes,
+# Linux's PATH_MAX, which bounds every name the fs writer reads from disk and the
+# Worker packs. The Worker's largest is a file of 8 GiB or more at that length,
+# a PAX ``path`` and ``size`` record and nothing else: 8,209 characters, in
+# 5,632 bytes of headers. So 16 Ki a member takes every backup the fs writer
+# writes and every snapshot the Worker packs, and the 8 Mi on top takes every
+# archive the upload gates admit. The object writer's names are the snapshot's
+# object keys, so its backups are taken alike only while every key is at most
+# 4095 bytes, which nothing enforces yet (issue #3973).
 STORAGE_HEADER_LIMITS = HeaderLimits(characters_a_member=16 * 1024)
 
 
@@ -207,7 +209,10 @@ class EndCheckedReader(io.RawIOBase):
 
     Pass it as ``tarfile.open(fileobj=reader, mode="r:")`` over the decompressed
     stream (:class:`GzipReader` for a ``tar.gz``), walk the archive through
-    :meth:`members`, then iterate :meth:`read_past_end_marker`.
+    :meth:`members`, then iterate :meth:`read_past_end_marker`. Every walk opens
+    ``tarfile.TarFile(fileobj=reader, mode="r", stream=True)``, the same read,
+    so that ``tarfile`` keeps no member it hands out (issue #3931): typeshed's
+    ``tarfile.open`` does not take ``stream``.
 
     The walk counts as having stopped at the marker only when everything it read
     after handing out its last member is one block of 512 zeros, after at most
@@ -230,21 +235,23 @@ class EndCheckedReader(io.RawIOBase):
     ``r|`` ``tarfile`` reads the file in whole records, so where its walk stopped
     cannot be seen from here.
 
-    With ``header_limits`` the walk is also held to them (:class:`HeaderLimits`):
-    the upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore
-    and the health check :data:`STORAGE_HEADER_LIMITS` (issue #3859). The
-    snapshot ingest passes none.
+    The walk is also held to ``header_limits`` (:class:`HeaderLimits`): the
+    upload gates pass :data:`UPLOAD_HEADER_LIMITS` (issue #3810), restore, the
+    health check and the snapshot ingest :data:`STORAGE_HEADER_LIMITS` (issues
+    #3859, #3931). No walk goes without (issue #3931).
 
     - The same count bounds what the walk reads between handing out one member
       and the next to 1 MiB: the next member's header blocks and extended
       headers, which ``tarfile`` holds whole. A read then asks the stream for at
       most one byte past that. The caller's reads of member data are not held to
       it.
-    - ``tarfile`` also keeps every member it hands out, with its name, its link
-      name and its PAX records, and the ``TarFile`` keeps the global ones
+    - Each member ``tarfile`` hands out holds its name, its link name and its
+      PAX records, and the ``TarFile`` keeps the global ones
       (``TarFile.pax_headers``). It copies them into a member's own records for
       most member types, but not into an old-GNU sparse one, so each member
-      counts as holding all of them. :meth:`members` bounds what the members
+      counts as holding all of them. Unless the ``TarFile`` is opened with
+      ``stream=True``, as every walk's is (issue #3931), ``tarfile`` keeps every
+      member it hands out. :meth:`members` bounds what the members
       hold: at most 32 PAX records in a member, global and its own, and at most
       8 Mi characters of names, link names, PAX keys and PAX values in all, plus
       the limits' allowance for each member handed out. Neither bound sees a
@@ -254,7 +261,7 @@ class EndCheckedReader(io.RawIOBase):
     """
 
     def __init__(
-        self, stream: io.BufferedIOBase, *, header_limits: HeaderLimits | None = None
+        self, stream: io.BufferedIOBase, *, header_limits: HeaderLimits
     ) -> None:
         super().__init__()
         self._stream = stream
@@ -279,13 +286,12 @@ class EndCheckedReader(io.RawIOBase):
         return True
 
     def read(self, size: int = -1, /) -> bytes:
-        budgeted = self._header_limits is not None and self._walking
-        if budgeted:
+        if self._walking:
             allowed = _BETWEEN_MEMBERS_BYTES + 1 - self._read_since_member
             size = allowed if size < 0 else min(size, allowed)
         self._last_read = self._stream.read(size)
         self._read_since_member += len(self._last_read)
-        if budgeted and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
+        if self._walking and self._read_since_member > _BETWEEN_MEMBERS_BYTES:
             raise HeaderLimitError(
                 f"more than {_BETWEEN_MEMBERS_BYTES} bytes of headers before a member"
             )
@@ -314,28 +320,26 @@ class EndCheckedReader(io.RawIOBase):
 
         The count of what the walk reads starts over each time the walk resumes
         after a member, which is after the caller has read that member's data.
-        With header limits, only the walk's own reads are held to the budget
-        between two members, and each member is held to what members may hold
-        before it is handed out.
+        Only the walk's own reads are held to the budget between two members, and
+        each member is held to what members may hold before it is handed out.
         """
 
         held = 0
         allowed = _HELD_CHARACTERS
         for member in tar:
-            if self._header_limits is not None:
-                records = {**tar.pax_headers, **member.pax_headers}
-                if len(records) > _PAX_RECORDS_PER_MEMBER:
-                    raise HeaderLimitError(
-                        f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
-                    )
-                held += (
-                    len(member.name)
-                    + len(member.linkname)
-                    + sum(len(key) + len(value) for key, value in records.items())
+            records = {**tar.pax_headers, **member.pax_headers}
+            if len(records) > _PAX_RECORDS_PER_MEMBER:
+                raise HeaderLimitError(
+                    f"a member with more than {_PAX_RECORDS_PER_MEMBER} PAX records"
                 )
-                allowed += self._header_limits.characters_a_member
-                if held > allowed:
-                    raise HeaderLimitError(_held_too_much(self._header_limits))
+            held += (
+                len(member.name)
+                + len(member.linkname)
+                + sum(len(key) + len(value) for key, value in records.items())
+            )
+            allowed += self._header_limits.characters_a_member
+            if held > allowed:
+                raise HeaderLimitError(_held_too_much(self._header_limits))
             self._walking = False
             yield member
             self._read_since_member = 0

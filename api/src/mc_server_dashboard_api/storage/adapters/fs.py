@@ -4069,19 +4069,69 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
     in order seeks back only when a member's data runs past the member, a GNU
     sparse map that takes more than the member stores, and the reader refuses
     that seek as ``ReadError`` too.
+
+    The spool is read through restore's reader stack (issue #3931), the
+    decompressor aside: :class:`CappedReader` beneath :class:`EndCheckedReader`,
+    held to the storage walks' header limits (``STORAGE_HEADER_LIMITS``). Going
+    past one, or a chain of extended headers too long for ``tarfile`` to read, is
+    ``ReadError``. The cap is the spool's own length: the data plane bounds the
+    body the spool holds, so the count refuses nothing more.
+
+    The walk keeps no member it has passed (issue #3931): ``tarfile`` is opened
+    not to keep the members it reads (``stream=True``), and each member is
+    extracted as the walk reaches it, as restore extracts one. ``extractall``
+    kept every directory member, to set its modification time once its entries
+    were in; a directory's time is now the one its last entry left, as after a
+    restore.
+
+    A member whose name this filesystem cannot hold under ``dest``
+    (ENAMETOOLONG) is refused as a ``FilterError`` too (issue #3931), not a raw
+    ``OSError``: the Worker packs paths of up to 4095 bytes, and the staging
+    directory's own path comes before them.
     """
 
     with (
         open(spool, "rb") as fileobj,
-        tarfile.open(
-            fileobj=(stream := EndCheckedReader(fileobj)),
-            mode="r:",
+        tarfile.TarFile(
+            fileobj=(
+                stream := EndCheckedReader(
+                    CappedReader(fileobj, os.fstat(fileobj.fileno()).st_size),
+                    header_limits=STORAGE_HEADER_LIMITS,
+                )
+            ),
+            mode="r",
             tarinfo=HeaderCheckedTarInfo,
+            stream=True,
         ) as tar,
     ):
-        tar.extractall(dest, members=stream.members(tar), filter=_ingest_member_filter)
+        for member in stream.members(tar):
+            with _name_too_long_refused(member.name):
+                tar.extract(member, dest, filter=_ingest_member_filter)
         for _zeros in stream.read_past_end_marker():
             pass
+
+
+@contextlib.contextmanager
+def _name_too_long_refused(name: str) -> Iterator[None]:
+    """Refuse the member ``name`` as a ``FilterError`` if the filesystem cannot
+    hold its name (issue #3931).
+
+    A component past ``NAME_MAX``, or a path past ``PATH_MAX`` once joined to the
+    directory it is extracted into, raises ``ENAMETOOLONG``, from the filter's
+    path resolution or from the extraction, whichever reaches the name first.
+    Refused, it is a member the ingest refuses and an archive nothing can be
+    restored from, rather than a raw ``OSError``. No rule decides here which
+    names a member may have: issue #3973 does.
+    """
+
+    try:
+        yield
+    except OSError as exc:
+        if exc.errno != errno.ENAMETOOLONG:
+            raise
+        raise tarfile.FilterError(
+            f"{name!r} has a name too long for this filesystem"
+        ) from exc
 
 
 def _ingest_member_filter(member: tarfile.TarInfo, dest: str) -> tarfile.TarInfo | None:
@@ -4109,15 +4159,16 @@ def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
     keeps.
     """
 
-    entered: list[str] = []
+    # Whether the filter kept the entry just added as a directory, to enter.
+    entered = False
 
     def _plain(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        nonlocal entered
         if info.islnk():
             info.type = tarfile.REGTYPE
             info.linkname = ""
             info.size = os.lstat(directory / info.name).st_size
-        if info.isdir():
-            entered.append(info.name)
+        entered = info.isdir()
         return info if info.isfile() or info.isdir() else None
 
     pending = [child.name]
@@ -4125,9 +4176,9 @@ def _add_plain(tar: tarfile.TarFile, directory: Path, child: Path) -> None:
         arcname = pending.pop()
         tar.add(directory / arcname, arcname=arcname, recursive=False, filter=_plain)
         if entered:
-            parent = entered.pop()
-            names = sorted(os.listdir(directory / parent), reverse=True)
-            pending.extend(f"{parent}/{name}" for name in names)
+            entered = False
+            names = sorted(os.listdir(directory / arcname), reverse=True)
+            pending.extend(f"{arcname}/{name}" for name in names)
 
 
 def _write_tar_gz(directory: Path, archive: Path, max_bytes: int | None = None) -> None:
@@ -4260,10 +4311,15 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     records plus 16 Ki a member. Going past one, or a chain of extended headers
     too long for ``tarfile`` to read, is :class:`ArchiveUnreadableError`.
 
+    ``tarfile`` is opened not to keep the members it reads (``stream=True``,
+    issue #3931), so the walk holds one member at a time, however many.
+
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
     holding a member the filter refuses (issue #3371): it reads, but nothing can
     be restored from it, override or not, which is the verdict that error models.
+    So does one holding a member whose name this filesystem cannot hold
+    (ENAMETOOLONG, issue #3931), which the object backend restores.
 
     The archive is read to its end (issue #3798), as the upload gate reads it: the
     tar is decompressed by ``GzipReader`` and walked through
@@ -4286,15 +4342,16 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
         with (
             archive_read_errors_as_verdicts(),
             GzipReader(open(archive, "rb")) as gz,
-            tarfile.open(
+            tarfile.TarFile(
                 fileobj=(
                     stream := EndCheckedReader(
                         CappedReader(gz, max_bytes),
                         header_limits=STORAGE_HEADER_LIMITS,
                     )
                 ),
-                mode="r:",
+                mode="r",
                 tarinfo=HeaderCheckedTarInfo,
+                stream=True,
             ) as tar,
         ):
             for read in stream.members(tar):
@@ -4305,13 +4362,14 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
                 if member is None:
                     continue
                 refuse_unrestorable_member(member)
-                safe = _plain_member_filter(member, str(dest))
-                safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
-                if is_reserved_root_member(safe.name):
-                    dropped += 1
-                    total = _drain_member_capped(tar, safe, total, max_bytes)
-                    continue
-                total = _extract_member_capped(tar, safe, dest, total, max_bytes)
+                with _name_too_long_refused(member.name):
+                    safe = _plain_member_filter(member, str(dest))
+                    safe = safe.replace(name=posixpath.normpath(safe.name), deep=False)
+                    if is_reserved_root_member(safe.name):
+                        dropped += 1
+                        total = _drain_member_capped(tar, safe, total, max_bytes)
+                        continue
+                    total = _extract_member_capped(tar, safe, dest, total, max_bytes)
             for _zeros in stream.read_past_end_marker():
                 pass
     except tarfile.FilterError as exc:
@@ -4366,7 +4424,8 @@ def _make_directories(directory: Path) -> None:
 
     ``Path.mkdir`` and ``os.makedirs`` recurse once for each missing directory,
     so a member about 1,000 directories deep raised ``RecursionError`` (issue
-    #3859), which the restore walk reports as an archive that does not read.
+    #3859), which the restore walk then reported as an archive that does not
+    read. Only ``tarfile``'s header read is reported so now (issue #3931).
     """
 
     pending = [directory]

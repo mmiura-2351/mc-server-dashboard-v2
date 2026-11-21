@@ -622,7 +622,9 @@ at `INFO`. It does filter the warnings, which are `WARNING` records, so
 supervisor (`api/README.md`) the parent process never builds the app, so its own
 lines keep uvicorn's format; the image's entry point uses neither. A warning
 raised before the app is built keeps Python's plain format, such as the one
-uvicorn raises for `--ws websockets`.
+uvicorn raises for `--ws websockets`. The operator commands
+(`integrity_sweep_cli`, `store_claim_cli`) log through the same handler, at the
+same `log.level` and `log.format`.
 
 Neither format writes a control character raw, so text a client controls (a
 crafted URL path, a header, a filename) cannot put a terminal escape sequence or

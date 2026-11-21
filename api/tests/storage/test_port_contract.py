@@ -2255,6 +2255,114 @@ async def test_a_headers_only_bomb_is_unreadable_in_bounded_memory(
         assert peak < 16 * archive_cap_shapes.MIB
 
 
+def _named_past_the_name_limit(files: dict[str, bytes], *, world: bool) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        if world:
+            info = tarfile.TarInfo("world")
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("world", [False, True], ids=["file", "after-its-directory"])
+async def test_a_member_named_past_the_name_limit_restores_on_object_only(
+    backend: str, tmp_path: Path, world: bool
+) -> None:
+    """A name component of 300 bytes is past Linux's ``NAME_MAX`` of 255. The fs
+    store cannot hold it, so its restore and health check refuse the backup as
+    ``ArchiveUnreadableError`` naming the cause, not a raw ``OSError``
+    (ENAMETOOLONG), and the live world stays (issue #3931). Writing the file
+    raises it, or, once its directory is there, the member filter's resolution
+    of its path. The object store holds it as a key, so there the backup is
+    healthy and restores. Which names a backup may hold is issue #3973's to
+    decide."""
+
+    harness = build_harness(backend, tmp_path)
+    files = {f"world/{'n' * 300}.dat": b"long"}
+    archive = _named_past_the_name_limit(files, world=world)
+
+    if backend == "object":
+        await _restore_and_health_accept(harness, archive, files)
+        return
+    community, server = new_scope()
+    live = {"world/region/r.0.0.mca": healthy_region_bytes()}
+    await harness.publish(community, server, live)
+    key = await harness.storage.put_backup(community, server, stream_of(archive))
+    too_long = "has a name too long for this filesystem"
+    with pytest.raises(ArchiveUnreadableError, match=too_long):
+        await harness.storage.restore_backup(community, server, key)
+    with pytest.raises(ArchiveUnreadableError, match=too_long):
+        await harness.storage.check_backup_health(community, server, key)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == live
+
+
+# What a storage walk of 2,000 members of 15 KiB headers may hold at its peak
+# (issue #3931): a walk that kept them would hold 30 MiB of them. Whatever the
+# member count, the object backend reads a file member 8 MiB at a time, and its
+# health probe decompresses 8 MiB at a time, which peaks at 16 MiB.
+_ONE_MEMBER_AT_A_TIME = 24 * archive_cap_shapes.MIB
+
+
+def _traced_peak() -> int:
+    _, peak = tracemalloc.get_traced_memory()
+    return peak
+
+
+async def test_restore_and_the_health_check_keep_no_member_they_walked_past(
+    harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``tarfile`` keeps every member it reads, with its PAX records, unless it
+    is opened not to (issue #3931): a walk's memory grew with the member count,
+    whatever the header limits. 2,000 members holding 30 MiB of PAX comments are
+    restored and checked on BOTH backends holding one member at a time."""
+
+    # The fs publish syncs each of the 2,000 directories, which this does not
+    # pin (issue #3651).
+    monkeypatch.setattr(os, "fsync", lambda fd: None)
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community,
+        server,
+        stream_of(archive_cap_shapes.commented_directories(2000), chunk=64 * 1024),
+    )
+
+    for read in (harness.storage.restore_backup, harness.storage.check_backup_health):
+        tracemalloc.start()
+        try:
+            await read(community, server, key)
+            peak = _traced_peak()
+        finally:
+            tracemalloc.stop()
+        assert peak < _ONE_MEMBER_AT_A_TIME
+
+
+async def test_the_snapshot_ingest_keeps_no_member_it_walked_past(
+    harness: StorageHarness,
+) -> None:
+    """The snapshot ingest holds one member at a time too (issue #3931), on BOTH
+    backends: 2,000 members holding 30 MiB of PAX comments."""
+
+    community, server = new_scope()
+    body = gzip.decompress(archive_cap_shapes.commented_directories(2000))
+    handle = await harness.storage.begin_snapshot(community, server)
+
+    tracemalloc.start()
+    try:
+        await harness.storage.write_snapshot(handle, stream_of(body, chunk=64 * 1024))
+        peak = _traced_peak()
+    finally:
+        tracemalloc.stop()
+    await harness.storage.abort_snapshot(handle)
+
+    assert peak < _ONE_MEMBER_AT_A_TIME
+
+
 # One member per shape the single archive member rule decides (issue #3550): a
 # backup restores only regular files and directories at relative, ``..``-free,
 # canonical names (no empty or ``.`` segment once the one leading ``./`` tar root
