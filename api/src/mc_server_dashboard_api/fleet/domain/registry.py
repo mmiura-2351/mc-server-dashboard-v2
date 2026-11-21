@@ -130,7 +130,9 @@ class WorkerRegistry(abc.ABC):
         """
 
     @abc.abstractmethod
-    def record_heartbeat(self, worker_id: WorkerId, at: dt.datetime) -> None:
+    def record_heartbeat(
+        self, worker_id: WorkerId, session: SessionToken, at: dt.datetime
+    ) -> None:
         """Refresh the Worker's liveness to heartbeat time ``at`` (FR-WRK-2).
 
         A heartbeat for an unknown Worker is ignored.
@@ -255,7 +257,11 @@ class WorkerRegistry(abc.ABC):
 
     @abc.abstractmethod
     def set_assignment(
-        self, worker_id: WorkerId, assignments: Mapping[str, int], snapshot_epoch: int
+        self,
+        worker_id: WorkerId,
+        session: SessionToken,
+        assignments: Mapping[str, int],
+        snapshot_epoch: int,
     ) -> None:
         """Rebuild the Worker's committed assignments from the authoritative tally.
 

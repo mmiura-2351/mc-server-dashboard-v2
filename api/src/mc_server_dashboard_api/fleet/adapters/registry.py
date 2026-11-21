@@ -146,7 +146,9 @@ class InMemoryWorkerRegistry(WorkerRegistry):
     def held_generation(self, worker_id: WorkerId, server_id: str) -> int | None:
         return self._held.get(worker_id, {}).get(server_id)
 
-    def record_heartbeat(self, worker_id: WorkerId, at: dt.datetime) -> None:
+    def record_heartbeat(
+        self, worker_id: WorkerId, session: SessionToken, at: dt.datetime
+    ) -> None:
         worker = self._workers.get(worker_id)
         if worker is not None:
             self._workers[worker_id] = worker.with_heartbeat(at)
@@ -220,7 +222,11 @@ class InMemoryWorkerRegistry(WorkerRegistry):
             self._next_seq += 1
 
     def set_assignment(
-        self, worker_id: WorkerId, assignments: Mapping[str, int], snapshot_epoch: int
+        self,
+        worker_id: WorkerId,
+        session: SessionToken,
+        assignments: Mapping[str, int],
+        snapshot_epoch: int,
     ) -> None:
         if worker_id not in self._committed:
             return

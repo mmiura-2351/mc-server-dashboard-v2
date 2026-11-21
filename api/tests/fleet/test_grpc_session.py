@@ -937,7 +937,7 @@ async def test_rebuild_keeps_a_confirm_that_lands_during_the_tally_read() -> Non
     # The servicer snapshots the confirm epoch BEFORE the await, so set_assignment
     # keeps the just-confirmed row even though it is absent from the (empty) tally.
     registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
-    registry.register(make_worker(worker_id=_WORKER_ID, at=_T0))
+    session = registry.register(make_worker(worker_id=_WORKER_ID, at=_T0))
     worker = WorkerId(_WORKER_ID)
     server_id = "33333333-3333-3333-3333-333333333333"
 
@@ -962,7 +962,7 @@ async def test_rebuild_keeps_a_confirm_that_lands_during_the_tally_read() -> Non
         real_time_events=RecordingRealTimeEvents(),
     )
 
-    await servicer._rebuild_assignments(worker)
+    await servicer._rebuild_assignments(worker, session)
 
     # The +1 (and its committed memory) survived the stale-tally rebuild.
     assert registry.list_workers()[0].assigned_count == 1

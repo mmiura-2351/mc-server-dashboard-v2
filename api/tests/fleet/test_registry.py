@@ -58,10 +58,10 @@ def test_worker_at_exactly_timeout_is_still_online() -> None:
 def test_heartbeat_refreshes_liveness() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
 
     later = _T0 + dt.timedelta(seconds=25)
-    registry.record_heartbeat(WorkerId("worker-1"), later)
+    registry.record_heartbeat(WorkerId("worker-1"), session, later)
     # Now within the window measured from the fresh heartbeat, not registration.
     clock.set(later + dt.timedelta(seconds=20))
 
@@ -133,7 +133,7 @@ def test_heartbeat_for_unknown_worker_is_ignored() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
 
-    registry.record_heartbeat(WorkerId("ghost"), _T0)
+    registry.record_heartbeat(WorkerId("ghost"), 0, _T0)
 
     assert registry.list_workers() == []
 
@@ -242,10 +242,12 @@ def test_restored_drain_can_be_cleared() -> None:
 def test_draining_survives_heartbeat() -> None:
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
     registry.set_draining(WorkerId("worker-1"), True)
 
-    registry.record_heartbeat(WorkerId("worker-1"), _T0 + dt.timedelta(seconds=5))
+    registry.record_heartbeat(
+        WorkerId("worker-1"), session, _T0 + dt.timedelta(seconds=5)
+    )
 
     assert registry.list_workers()[0].status is WorkerStatus.DRAINING
 
@@ -366,9 +368,9 @@ def test_rebuild_drops_committed_reservation_so_later_confirm_no_ops() -> None:
 
     # Re-register (resets committed count) then rebuild from the tally, which now
     # already includes server-a (its commit landed before the rebuild ran).
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
     epoch = registry.assignment_epoch(WorkerId("worker-1"))
-    registry.set_assignment(WorkerId("worker-1"), {"server-a": 0}, epoch)
+    registry.set_assignment(WorkerId("worker-1"), session, {"server-a": 0}, epoch)
     # The deferred confirm now arrives; it must NOT add a second count.
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
 
@@ -383,10 +385,10 @@ def test_rebuild_keeps_uncommitted_reservation_pending() -> None:
     registry.register(make_worker(at=_T0))
     registry.reserve(WorkerId("worker-1"), "server-a", 0)
 
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
     # The tally does NOT yet include server-a (its commit has not landed).
     epoch = registry.assignment_epoch(WorkerId("worker-1"))
-    registry.set_assignment(WorkerId("worker-1"), {}, epoch)
+    registry.set_assignment(WorkerId("worker-1"), session, {}, epoch)
     # Reservation still counts as load while pending.
     assert registry.list_workers()[0].assigned_count == 1
     # When the commit finally lands, the confirm counts it as committed.
@@ -443,10 +445,10 @@ def test_rebuild_restores_committed_memory_from_the_tally() -> None:
     # The reconnect rebuild restores committed memory, not just the count (#843).
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
 
     epoch = registry.assignment_epoch(WorkerId("worker-1"))
-    registry.set_assignment(WorkerId("worker-1"), {"server-a": 1024}, epoch)
+    registry.set_assignment(WorkerId("worker-1"), session, {"server-a": 1024}, epoch)
 
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 1024
 
@@ -462,7 +464,7 @@ def test_rebuild_keeps_a_confirm_that_landed_after_the_tally_snapshot() -> None:
     # then lands and must be preserved.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
 
     # Rebuild snapshots the epoch, then (the await) the tally read returns empty.
     snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
@@ -470,7 +472,7 @@ def test_rebuild_keeps_a_confirm_that_landed_after_the_tally_snapshot() -> None:
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
     # The stale tally (no server-a) lands; the confirm must survive.
-    registry.set_assignment(WorkerId("worker-1"), {}, snapshot_epoch)
+    registry.set_assignment(WorkerId("worker-1"), session, {}, snapshot_epoch)
 
     assert registry.list_workers()[0].assigned_count == 1
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 512
@@ -482,12 +484,12 @@ def test_rebuild_drops_a_committed_row_confirmed_before_the_snapshot() -> None:
     # spuriously preserved (#844). Otherwise a stopped server would inflate load.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
 
     snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
-    registry.set_assignment(WorkerId("worker-1"), {}, snapshot_epoch)
+    registry.set_assignment(WorkerId("worker-1"), session, {}, snapshot_epoch)
 
     assert registry.list_workers()[0].assigned_count == 0
     assert registry.committed_memory_mb(WorkerId("worker-1")) == 0
@@ -501,7 +503,7 @@ def test_rebuild_does_not_resurrect_a_decrement_that_landed_in_the_window() -> N
     # memory until the next reconnect.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
     # Commit and confirm the placement so the server is in the authoritative tally.
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
@@ -511,7 +513,9 @@ def test_rebuild_does_not_resurrect_a_decrement_that_landed_in_the_window() -> N
     # Stop path fires in the await window: decrement lands after the epoch snapshot.
     registry.decrement_assignment(WorkerId("worker-1"), "server-a")
     # Stale tally (server-a still appeared running at snapshot time) arrives.
-    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+    registry.set_assignment(
+        WorkerId("worker-1"), session, {"server-a": 512}, snapshot_epoch
+    )
 
     # The decrement must survive — the row must NOT be resurrected.
     assert registry.list_workers()[0].assigned_count == 0
@@ -525,7 +529,7 @@ def test_rebuild_keeps_tally_row_whose_decrement_preceded_the_snapshot() -> None
     # logic as the confirm side: only in-window mutations are preserved.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
     # Decrement fires BEFORE the epoch snapshot.
@@ -533,7 +537,9 @@ def test_rebuild_keeps_tally_row_whose_decrement_preceded_the_snapshot() -> None
 
     # Now snapshot the epoch; the tally still has server-a.
     snapshot_epoch = registry.assignment_epoch(WorkerId("worker-1"))
-    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+    registry.set_assignment(
+        WorkerId("worker-1"), session, {"server-a": 512}, snapshot_epoch
+    )
 
     # Decrement was before the snapshot, so the tally row wins (server still running).
     assert registry.list_workers()[0].assigned_count == 1
@@ -557,7 +563,7 @@ def test_rebuild_does_not_eat_fresh_reservation_for_tombstoned_server() -> None:
     #      filtered_assignments); expected load=1 / mem=512.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
 
     # Step 1: server-a running and confirmed.
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
@@ -573,7 +579,9 @@ def test_rebuild_does_not_eat_fresh_reservation_for_tombstoned_server() -> None:
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
 
     # Step 5: stale tally (server-a was running at snapshot time) arrives.
-    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+    registry.set_assignment(
+        WorkerId("worker-1"), session, {"server-a": 512}, snapshot_epoch
+    )
 
     # Step 6: start lifecycle DB commit confirms; increment must find the reservation.
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
@@ -591,7 +599,7 @@ def test_rebuild_keeps_row_when_decrement_then_reconfirm_both_in_window() -> Non
     # decrement_assignment pops _confirmed_seq so the re-confirm re-stamps it.
     clock = FakeClock(_T0)
     registry = _registry(clock)
-    registry.register(make_worker(at=_T0))
+    session = registry.register(make_worker(at=_T0))
 
     # Commit and confirm server-a.
     registry.reserve(WorkerId("worker-1"), "server-a", 512)
@@ -608,7 +616,9 @@ def test_rebuild_keeps_row_when_decrement_then_reconfirm_both_in_window() -> Non
     registry.increment_assignment(WorkerId("worker-1"), "server-a")
 
     # Stale tally arrives (server-a appeared running at snapshot time).
-    registry.set_assignment(WorkerId("worker-1"), {"server-a": 512}, snapshot_epoch)
+    registry.set_assignment(
+        WorkerId("worker-1"), session, {"server-a": 512}, snapshot_epoch
+    )
 
     # Re-confirm seq ≥ epoch → preserved wins over tombstone; row must be KEPT.
     assert registry.list_workers()[0].assigned_count == 1
