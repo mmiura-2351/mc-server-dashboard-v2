@@ -1028,12 +1028,13 @@ async def upload_backup(
     under one is 422 ``reserved_name``, refused before the archive is stored. A
     same-named member deeper in the tree is ordinary user data.
 
-    **Only a few archive uploads at a time (issue #3843).** This route and the
-    files upload's extract validate on one small pool, and admit at most four
-    archive uploads at a time between them: two validating and two waiting. One
-    past that is 503 ``upload_busy``, refused before its body is read into memory,
-    with nothing stored; sending it again shortly is the remedy. Once its body is
-    read, an upload whose client disconnects still runs to its end and is stored.
+    **Only a few archive uploads at a time (issue #3843).** This route, the files
+    upload's extract and the server import validate on one small pool, and admit
+    at most four archive uploads at a time between them: two validating and two
+    waiting. One past that is 503 ``upload_busy``, refused before its body is read
+    into memory, with nothing stored; sending it again shortly is the remedy. Once
+    its body is read, an upload whose client disconnects still runs to its end and
+    is stored.
     """
 
     try:

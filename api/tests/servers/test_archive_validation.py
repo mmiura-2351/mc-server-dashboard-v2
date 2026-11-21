@@ -1,11 +1,12 @@
 """The upload doors under load: the admission and the body read (issue #3843).
 
-Both upload doors take archives of up to 512 MiB: a backup upload, and a files
-upload with ``extract``. They validate on one small pool of their own, so they
-admit only a few archive uploads at a time between them and refuse the rest at
-once. Copying such a body on the event loop stalls every other request on the
-process, so the route reads the spooled part in one call that runs on another
-thread.
+Three upload doors take archives of up to 512 MiB: a backup upload, a files
+upload with ``extract``, and a server import (issue #3912). They validate on one
+small pool of their own, so they admit only a few archive uploads at a time
+between them and refuse the rest at once. Copying such a body on the event loop
+stalls every other request on the process, so each route reads the spooled part
+in one call that runs on another thread. So do the plugin and resource-pack
+uploads, whose bodies reach 512 MiB and 256 MiB (issue #3912).
 """
 
 from __future__ import annotations
@@ -22,6 +23,9 @@ from fastapi import FastAPI, Request, UploadFile
 from mc_server_dashboard_api.dependencies import get_archive_upload_admission
 from mc_server_dashboard_api.servers.api import backups as backups_api
 from mc_server_dashboard_api.servers.api import files as files_api
+from mc_server_dashboard_api.servers.api import plugins as plugins_api
+from mc_server_dashboard_api.servers.api import resource_packs as resource_packs_api
+from mc_server_dashboard_api.servers.api import servers as servers_api
 from mc_server_dashboard_api.servers.application.archive_validation import (
     ArchiveUploadAdmission,
 )
@@ -30,6 +34,9 @@ from mc_server_dashboard_api.servers.domain.errors import UploadBusyError
 _DOORS = [
     pytest.param(backups_api, id="backup-upload"),
     pytest.param(files_api, id="files-upload"),
+    pytest.param(servers_api, id="server-import"),
+    pytest.param(plugins_api, id="plugin-upload"),
+    pytest.param(resource_packs_api, id="resource-pack-upload"),
 ]
 
 
@@ -91,9 +98,9 @@ async def test_a_slot_frees_when_its_upload_is_cancelled() -> None:
     _assert_free(admission)
 
 
-def test_both_doors_count_against_one_admission() -> None:
-    # The backup upload and the files extract validate on the same pool, so the
-    # limit counts their uploads together.
+def test_every_archive_door_counts_against_one_admission() -> None:
+    # The backup upload, the files extract and the server import validate on
+    # the same pool, so the limit counts their uploads together.
     app = FastAPI()
 
     def request() -> Request:

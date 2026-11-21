@@ -275,6 +275,28 @@ class TestUploadEndpoint:
             )
         assert resp.status_code == 413
 
+    def test_upload_over_cap_body_is_413_before_use_case(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The route checks the body it read against the cap before the use case
+        # runs. Patch the cap small so the fixture stays tiny; the request body
+        # limit was fixed when the route was declared, so only the route's own
+        # check trips.
+        import mc_server_dashboard_api.servers.api.resource_packs as packs_api
+
+        monkeypatch.setattr(packs_api, "MAX_RESOURCE_PACK_BYTES", 16)
+        uc = _FakeUseCase()
+        app = _app(upload=uc)
+        with TestClient(app) as client:  # type: ignore[arg-type]
+            resp = client.post(
+                "/api/resource-packs",
+                data={"display_name": "Big"},
+                files={"file": ("big.zip", io.BytesIO(b"x" * 1024), "application/zip")},
+            )
+        assert resp.status_code == 413
+        assert resp.json()["reason"] == "too_large"
+        assert uc.calls == []  # refused before the use case ran
+
     def test_upload_storage_outage_is_503(self) -> None:
         # The blob goes to the store before the row is inserted, so an outage there
         # creates no pack and the upload is safe to send again (issue #2458):

@@ -1104,12 +1104,13 @@ class UploadFile:
             if extract:
                 # Validate the whole archive (traversal / symlink / size / entry-count)
                 # in a dry-run pass BEFORE writing anything: a mid-archive rejection
-                # then leaves no partially-written versioned files (issue #269). The
-                # archive bytes are already in memory, so the second pass is cheap.
-                # Both passes run on the archive-validation pool: decompression is
-                # CPU-bound, so on the event loop it would block every other
-                # request (issue #1620), and on the default executor a few such
-                # uploads would starve everything else that runs there (#3843).
+                # then leaves no partially-written versioned files (issue #269). A
+                # crafted archive that passes the dry run costs as much again in the
+                # second pass. Both passes run on the archive-validation pool:
+                # decompression is CPU-bound, so on the event loop it would block
+                # every other request (issue #1620), and on the default executor a
+                # few such uploads would starve everything else that runs there
+                # (#3843).
                 await run_archive_validation(
                     _validate_archive,
                     filename,

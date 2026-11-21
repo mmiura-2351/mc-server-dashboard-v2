@@ -5,6 +5,7 @@ Tests run against fakes (no database), following TESTING.md Section 4.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import io
@@ -16,6 +17,9 @@ from collections.abc import AsyncIterator
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import (
+    resource_packs as resource_packs_module,
+)
 from mc_server_dashboard_api.servers.application.resource_packs import (
     MAX_RESOURCE_PACK_BYTES,
     AssignResourcePack,
@@ -51,6 +55,11 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+)
+from tests.servers.executor_starvation import (
+    IN_FLIGHT,
+    InFlight,
+    assert_default_executor_free,
 )
 from tests.servers.fakes import (
     FakeClock,
@@ -242,6 +251,42 @@ class TestUploadResourcePack:
 
         assert list(uow.resource_packs.packs) == [pack.id]
         assert list(store.blobs) == [(pack.id, pack.filename)]
+
+    async def test_uploads_validating_together_leave_the_default_executor_free(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Validation decompresses every member, nested packs too, and may repack
+        # the pack: CPU-bound work over a body of up to 256 MiB. It runs on the
+        # archive-validation pool (issue #3912): on the default executor, a few
+        # such uploads would take every worker from the fs Storage calls, the
+        # sweep and everything else that runs there.
+        in_flight = InFlight()
+
+        def validate(content: bytes) -> bytes:
+            in_flight.block()
+            return content
+
+        monkeypatch.setattr(resource_packs_module, "validate_and_normalize", validate)
+        store = FakeResourcePackStore()
+        uploads = [
+            asyncio.ensure_future(
+                _make_upload(store=store)(
+                    filename=f"pack-{n}.zip",
+                    display_name=f"Pack {n}",
+                    content=f"pack {n}".encode(),
+                    uploaded_by=uuid.uuid4(),
+                )
+            )
+            for n in range(IN_FLIGHT)
+        ]
+        try:
+            await assert_default_executor_free(in_flight)
+        finally:
+            await asyncio.gather(*uploads)
+
+        assert sorted(store.blobs.values()) == [
+            f"pack {n}".encode() for n in range(IN_FLIGHT)
+        ]
 
 
 class TestListResourcePacks:

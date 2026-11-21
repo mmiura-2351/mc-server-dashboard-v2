@@ -20,6 +20,9 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.platform_properties import (
     pack_download_url,
     read_properties,
@@ -109,7 +112,10 @@ class UploadResourcePack:
 
         # Offloaded to a thread: zip validation/normalization and hashing are
         # CPU-bound over up to MAX_RESOURCE_PACK_BYTES (256 MiB) (issue #1620).
-        content = await asyncio.to_thread(validate_and_normalize, content)
+        # The validation decompresses every member, nested packs too, so it runs
+        # on the archive-validation pool: on the default executor a few such
+        # uploads would starve everything else that runs there (issue #3912).
+        content = await run_archive_validation(validate_and_normalize, content)
 
         sha1 = (await asyncio.to_thread(hashlib.sha1, content)).hexdigest()
         sha256 = (await asyncio.to_thread(hashlib.sha256, content)).hexdigest()

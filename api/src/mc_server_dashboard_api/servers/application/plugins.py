@@ -11,6 +11,9 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
 from mc_server_dashboard_api.servers.application.plugin_cache import (
     ingest_into_cache,
 )
@@ -254,6 +257,18 @@ class InstallPlugin:
     ``bedrock_port_range`` is the deployment's assignable Bedrock UDP window
     (issue #1541), or ``None`` when the Bedrock deployment gate is off; a Geyser
     jar detected at ingest allocates the server's ``bedrock_port`` from it.
+
+    The jar's manifest is parsed before the lifecycle lock is taken (issue
+    #3912). Opening the jar parses its whole zip directory, seconds for a crafted
+    jar near the cap, so the parse runs on the archive-validation pool, and it
+    can wait there as long as the slowest validation ahead of it. Holding the
+    lock and an open unit of work meanwhile would pin two DB connections for that
+    wait, with nothing bounding how many installs wait. So a short unit of work
+    first loads the server (404) and resolves its loader (422 for a type that
+    runs no plugins), and the parse then runs holding nothing. A server's type
+    never changes after create, so that loader stays right. Under the lock every
+    check is made again on the server as it is then, since a start or a delete
+    can land while the parse runs.
     """
 
     uow: UnitOfWork
@@ -279,6 +294,16 @@ class InstallPlugin:
             raise InvalidFilePathError(filename)
         filename = sanitize_plugin_filename(filename)
 
+        # Parse the jar manifest for dependency metadata (issue #1307), holding
+        # no lock and no unit of work (see the docstring, issue #3912). Tolerant
+        # of an unreadable jar (the install still proceeds).
+        async with self.uow:
+            server = await _load(self.uow, community_id, server_id)
+        loader = modrinth_loader_for_server_type(server.server_type)
+        manifest = await run_archive_validation(
+            parse_manifest_at_ingest, content, loader=loader
+        )
+
         async with self.lifecycle_lock.hold(server_id):
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
@@ -293,13 +318,6 @@ class InstallPlugin:
                 existing = await self.uow.plugins.get_by_rel_path(server_id, rel_path)
                 if existing is not None:
                     raise PluginAlreadyExistsError(rel_path)
-
-                # Parse the jar manifest for dependency metadata (issue #1307);
-                # tolerant of an unreadable jar (the install still proceeds).
-                manifest = parse_manifest_at_ingest(
-                    content,
-                    loader=modrinth_loader_for_server_type(server.server_type),
-                )
 
                 # Ingest into the content-addressed cache (dedup-on-ingest). The
                 # jar is the byte source for the working set; a client-only mod is

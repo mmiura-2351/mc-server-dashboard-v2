@@ -1231,6 +1231,8 @@ export const en = {
   // retry rather than pointing at a field the import tab does not have.
   "serverCreate.import.error.slug_taken":
     "Another server took this server's join address while the import was running. Nothing was created — import again to get a new one.",
+  "serverCreate.import.error.upload_busy":
+    "Too many archive uploads are being checked right now. Nothing was created. Please try again shortly.",
   "serverCreate.import.tooLarge": "That archive is too large to import.",
 
   // Community settings (WEBUI_SPEC.md 6.10) — one contiguous block to minimise

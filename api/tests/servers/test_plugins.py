@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import threading
 import uuid
+from dataclasses import replace
 
 import pytest
 
+from mc_server_dashboard_api.servers.application import plugins as plugins_module
+from mc_server_dashboard_api.servers.application.archive_validation import (
+    run_archive_validation,
+)
+from mc_server_dashboard_api.servers.application.plugin_manifest import ParsedManifest
 from mc_server_dashboard_api.servers.application.plugins import (
     GetPlugin,
     InstallPlugin,
@@ -41,9 +49,15 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerName,
     ServerType,
 )
+from tests.servers.executor_starvation import (
+    IN_FLIGHT,
+    InFlight,
+    assert_default_executor_free,
+)
 from tests.servers.fakes import (
     FakeClock,
     FakeFileStore,
+    FakeLifecycleLock,
     FakePluginCacheStore,
     FakeUnitOfWork,
 )
@@ -350,6 +364,225 @@ async def test_install_unreadable_jar_stores_empty_manifest() -> None:
     )
     assert plugin.mod_identifier is None
     assert plugin.dependencies == []
+
+
+async def test_installs_parsing_together_leave_the_default_executor_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The manifest read walks the jar's whole zip directory, which for a crafted
+    # jar near the 512 MiB cap takes seconds. It runs on the archive-validation
+    # pool (issue #3912): on the event loop it would stall every other request,
+    # and on the default executor a few such installs would take every worker
+    # from the fs Storage calls, the sweep and everything else that runs there.
+    in_flight = InFlight()
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        in_flight.block()
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    stores = [FakeFileStore() for _ in range(IN_FLIGHT)]
+    installs = []
+    for n, store in enumerate(stores):
+        uow = FakeUnitOfWork()
+        server = _server()
+        uow.servers.seed(server)
+        use_case = InstallPlugin(
+            uow=uow,
+            file_store=store,
+            cache=FakePluginCacheStore(),
+            clock=FakeClock(_NOW),
+        )
+        installs.append(
+            asyncio.ensure_future(
+                use_case(
+                    community_id=_COMMUNITY,
+                    server_id=server.id,
+                    filename="mod.jar",
+                    display_name="Mod",
+                    content=f"jar {n}".encode(),
+                )
+            )
+        )
+    try:
+        await assert_default_executor_free(in_flight)
+    finally:
+        await asyncio.gather(*installs)
+
+    assert [store.files["mods/mod.jar"] for store in stores] == [
+        f"jar {n}".encode() for n in range(IN_FLIGHT)
+    ]
+
+
+# -- what an install holds while its manifest waits for the pool (issue #3912) --
+#
+# A parse can wait for a pool thread as long as the slowest validation ahead of
+# it. An install that held its server's lifecycle lock and an open unit of work
+# meanwhile would pin two DB connections, and nothing bounds how many installs
+# wait, so the parse runs before either is taken.
+
+
+class _HeldParse:
+    """A manifest parse that signals once it runs, then waits to be released."""
+
+    def __init__(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self.running = asyncio.Event()
+        self.release = threading.Event()
+
+    def __call__(self, content: bytes, *, loader: str) -> ParsedManifest:
+        self._loop.call_soon_threadsafe(self.running.set)
+        if not self.release.wait(10):
+            raise AssertionError("the parse was never released")
+        return ParsedManifest.empty()
+
+
+class _CountingUnitOfWork(FakeUnitOfWork):
+    """A unit of work that counts how many of its blocks are open."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.open = 0
+
+    async def __aenter__(self) -> FakeUnitOfWork:
+        self.open += 1
+        return await super().__aenter__()
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.open -= 1
+        await super().__aexit__(exc_type, exc, tb)
+
+
+async def test_an_install_holds_no_lock_and_no_unit_of_work_while_it_parses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parse = _HeldParse()
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    uow = _CountingUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    lock = FakeLifecycleLock()
+    fs = FakeFileStore()
+    use_case = InstallPlugin(
+        uow=uow,
+        file_store=fs,
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=lock,
+    )
+    install = asyncio.ensure_future(
+        use_case(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="mod.jar",
+            display_name="Mod",
+            content=b"jar",
+        )
+    )
+    try:
+        await asyncio.wait_for(parse.running.wait(), 10)
+        assert lock.events == []
+        assert uow.open == 0
+    finally:
+        parse.release.set()
+        await install
+
+    assert lock.events == [(server.id, "acquire"), (server.id, "release")]
+    assert fs.files["mods/mod.jar"] == b"jar"
+
+
+async def test_a_server_that_leaves_rest_during_the_parse_is_unsettled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The parse holds no lock, so a start can land while it runs. Every check is
+    # made again under the lock, on the server as it is then.
+    parse = _HeldParse()
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    uow = FakeUnitOfWork()
+    server = _server()
+    uow.servers.seed(server)
+    fs = FakeFileStore()
+    cache = FakePluginCacheStore()
+    use_case = InstallPlugin(
+        uow=uow,
+        file_store=fs,
+        cache=cache,
+        clock=FakeClock(_NOW),
+        lifecycle_lock=FakeLifecycleLock(),
+    )
+    install = asyncio.ensure_future(
+        use_case(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            filename="mod.jar",
+            display_name="Mod",
+            content=b"jar",
+        )
+    )
+    try:
+        await asyncio.wait_for(parse.running.wait(), 10)
+        uow.servers.seed(
+            replace(
+                server,
+                desired_state=DesiredState.RUNNING,
+                observed_state=ObservedState.RUNNING,
+            )
+        )
+    finally:
+        parse.release.set()
+
+    with pytest.raises(ServerFilesUnsettledError):
+        await install
+    assert fs.files == {}
+    assert cache.blobs == {}
+    assert uow.plugins.by_id == {}
+
+
+async def test_a_vanilla_server_is_refused_without_waiting_for_the_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Vanilla runs no plugins, so the install is refused before its parse would
+    # queue: with every pool thread busy, it still answers at once.
+    parses: list[str] = []
+
+    def parse(content: bytes, *, loader: str) -> ParsedManifest:
+        parses.append(loader)
+        return ParsedManifest.empty()
+
+    monkeypatch.setattr(plugins_module, "parse_manifest_at_ingest", parse)
+    uow = FakeUnitOfWork()
+    server = _server(server_type=ServerType.VANILLA)
+    uow.servers.seed(server)
+    use_case = InstallPlugin(
+        uow=uow,
+        file_store=FakeFileStore(),
+        cache=FakePluginCacheStore(),
+        clock=FakeClock(_NOW),
+        lifecycle_lock=FakeLifecycleLock(),
+    )
+    in_flight = InFlight()
+    holders = [
+        asyncio.ensure_future(run_archive_validation(in_flight.block))
+        for _ in range(IN_FLIGHT)
+    ]
+    try:
+        await asyncio.wait_for(in_flight.all_running.wait(), 10)
+        with pytest.raises(UnsupportedPluginServerTypeError):
+            await asyncio.wait_for(
+                use_case(
+                    community_id=_COMMUNITY,
+                    server_id=server.id,
+                    filename="mod.jar",
+                    display_name="Mod",
+                    content=b"jar",
+                ),
+                5,
+            )
+    finally:
+        in_flight.release.set()
+        await asyncio.gather(*holders)
+
+    assert parses == []
 
 
 async def test_install_jar_with_unreadable_manifest_stores_empty_manifest() -> None:
