@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import time
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import asyncpg
 import pytest
@@ -191,20 +191,25 @@ def test_another_database_error_stays_a_500_with_its_traceback(
 
 
 def test_an_outage_warns_at_most_every_30_seconds(
-    client: TestClient, logs: pytest.LogCaptureFixture
+    client: TestClient,
+    logs: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The handler's own clock, so a slow request cannot move the boundary.
+    now = [1000.0]
+    monkeypatch.setattr(http_problem, "time", SimpleNamespace(monotonic=lambda: now[0]))
     full = server_error(asyncpg.TooManyConnectionsError("too many clients"))
 
     for _ in range(3):
         assert _get_me(client, full)[0] == 503
     assert len(_records(logs, logging.WARNING)) == 1
 
-    # 29 s after the WARNING the outage is still the same one.
-    http_problem._last_outage_warning = time.monotonic() - 29
+    # Just short of 30 s after the WARNING the outage is still the same one.
+    now[0] = 1029.999
     assert _get_me(client, full)[0] == 503
     assert len(_records(logs, logging.WARNING)) == 1
 
-    http_problem._last_outage_warning = time.monotonic() - 30
+    now[0] = 1030.0
     assert _get_me(client, full)[0] == 503
     assert len(_records(logs, logging.WARNING)) == 2
     # Every one of them left its traceback at DEBUG.
