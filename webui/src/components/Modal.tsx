@@ -183,6 +183,9 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         return;
       }
       if (event.key === "Escape") {
+        // Handled, so a page listener that runs after this one, once the
+        // dialog has closed, leaves the Escape alone (#3920).
+        event.preventDefault();
         onCloseRef.current();
         return;
       }

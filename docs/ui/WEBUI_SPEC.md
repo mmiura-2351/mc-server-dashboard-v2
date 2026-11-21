@@ -1192,7 +1192,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Keys behind a modal.** While a modal is open, the page behind it acts on
   no key: the Files tab's shortcuts do nothing, and a menu or popover outside
   the topmost dialog leaves Escape to the dialog. So a key never acts on a
-  selection or a menu the dialog hides.
+  selection or a menu the dialog hides. The dialog marks the Escape that
+  closes it as handled, and the Files tab's Escape clears the selection only
+  when nothing has handled it, so the selection stays even when the dialog
+  has closed before the tab sees the key. The same holds for an Escape the
+  stop menu handled.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast
