@@ -149,10 +149,12 @@ def main(argv: list[str]) -> int:
         return 3
     except DBAPIError as exc:
         # The database failed mid-pass: a dropped connection, a terminated backend
-        # (issue #3942). The asyncpg dialect raises a server-side error as the bare
-        # DBAPIError, so that is the class caught; any other error is a bug and
-        # keeps its traceback. ``exc.orig`` is the driver's one-line reason; the
-        # SQLAlchemy message adds the statement and a URL over several lines.
+        # (issue #3942). The asyncpg dialect raises an error it has no narrower
+        # class for, such as a backend terminated in flight, as the bare
+        # DBAPIError, and never raises OperationalError, so DBAPIError is the
+        # class caught; any other error is a bug and keeps its traceback.
+        # ``exc.orig`` is the driver's one-line reason; the SQLAlchemy message
+        # adds the statement and a URL over several lines.
         _LOG.debug("integrity sweep: the database failed", exc_info=True)
         sys.stderr.write(
             f"integrity sweep aborted: the database failed "

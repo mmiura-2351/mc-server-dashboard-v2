@@ -124,8 +124,8 @@ def test_main_reports_a_store_outage_cleanly(
     [
         # A connection the database closed between two statements.
         InterfaceError("SELECT 1", None, Exception("connection is closed")),
-        # A statement the database cut off in flight: the asyncpg dialect raises
-        # every server-side error as the bare DBAPIError.
+        # A statement the database cut off in flight: the asyncpg dialect has no
+        # narrower class for that error, so it raises the bare DBAPIError.
         DBAPIError(
             "SELECT 1",
             None,
