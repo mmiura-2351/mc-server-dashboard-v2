@@ -75,7 +75,7 @@ func OpenAt(dirFd int, name string, flags int, mode uint32) (int, error) {
 //
 // Where openat2 is unavailable it fails with ENOSYS and opens nothing, and the
 // caller falls back to a per-component O_NOFOLLOW walk. That covers an older
-// kernel or another OS, which answer ENOSYS, and a seccomp profile that predates
+// kernel, which answers ENOSYS, and a seccomp profile that predates
 // openat2 and denies it with EPERM: an O_PATH open of a directory has no EPERM
 // of its own, and should a security module answer one all the same, the
 // equally contained fallback meets the same refusal.
