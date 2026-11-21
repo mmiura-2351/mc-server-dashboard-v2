@@ -18,7 +18,10 @@ from __future__ import annotations
 import datetime as dt
 import errno
 import hashlib
+import io
+import json
 import uuid
+import zipfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -34,6 +37,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupCorruptError,
@@ -311,6 +315,55 @@ async def test_restore_ingests_ghost_disabled_plugin_file() -> None:
     assert rows[0].filename == "mod.jar"
     assert rows[0].display_name == "mod"
     assert rows[0].enabled is False
+
+
+def _fabric_jar(mod_id: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "fabric.mod.json",
+            json.dumps({"schemaVersion": 1, "id": mod_id, "version": "1.0.0"}),
+        )
+    return buf.getvalue()
+
+
+# A ghost's display name is its jar's mod id, or its file's name less ``.jar``.
+# The user typed neither, so a name the display-name rule refuses is made to fit
+# it rather than refused (issue #3988): each character the rule refuses is
+# replaced with ``_``, the result is cut to 200 characters, and a blank one gives
+# way to the file's name.
+@pytest.mark.parametrize(
+    ("rel_path", "mod_id", "stored"),
+    [
+        pytest.param("mods/ghost.jar", "a\nb", "a_b", id="mod-id-c0"),
+        pytest.param("mods/ghost.jar", "a\u2028b", "a_b", id="mod-id-u+2028"),
+        pytest.param("mods/ghost.jar", "x" * 250, "x" * 200, id="mod-id-cut"),
+        # No mod id: the file's name, less ``.jar``.
+        pytest.param("mods/a\x85b.jar", None, "a_b", id="stem-c1"),
+        pytest.param("mods/a\u2029b.jar", None, "a_b", id="stem-u+2029"),
+        pytest.param("mods/" + "y" * 240 + ".jar", None, "y" * 200, id="stem-cut"),
+        pytest.param("mods/  .jar", None, ".jar", id="blank-stem"),
+    ],
+)
+async def test_restore_fits_a_ghost_display_name_to_the_rule(
+    rel_path: str, mod_id: str | None, stored: str
+) -> None:
+    server = _server()
+    repo, backups, backup, archive = _seed_restore_fixture(server)
+    plugins = FakePluginRepository()
+    file_store = FakeFileStore()
+    file_store.files[rel_path] = (
+        _minimal_jar() if mod_id is None else _fabric_jar(mod_id)
+    )
+    uow = FakeUnitOfWork(servers=repo, backups=backups, plugins=plugins)
+
+    await _make_restore(
+        uow, archive, file_store=file_store, cache=FakePluginCacheStore()
+    )(community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id)
+
+    [row] = await plugins.list_for_server(server.id)
+    assert row.display_name == stored
+    assert checked_display_name(row.display_name) == row.display_name
 
 
 # --- ghost provenance recovery / unknown fallback (#2059) -------------------

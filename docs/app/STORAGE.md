@@ -2273,7 +2273,7 @@ snapshot publishes.
 The snapshot does not decide the stop's outcome, but it does decide the
 release:
 
-- **Success, or the Worker disconnected** — the assignment is cleared (the
+- **Success, or a failed or unsent snapshot** — the assignment is cleared (the
   `SERVER_NOT_FOUND` path additionally requires that the same call established
   the row is at rest under this Worker; a convergence write beaten by a fresher
   report holds instead). A failed result is logged loud because no retry exists
@@ -2295,6 +2295,13 @@ release:
   The Worker's late `CommandResult` releases the hold as soon as the upload
   settles, and the reconciler is the backstop once the stop grace
   lapses.
+- **The Worker's session ended**, before or while the snapshot ran, or a fast
+  reconnect retired it — the assignment is HELD too (issue #3981). Nothing is
+  uploading, but the Worker may be back with the working set, and releasing
+  would leave it orphaned in that Worker's scratch while a start placed the
+  server from the older store. The reconciler takes the snapshot once the
+  Worker is back, or releases the server a grace after the drop
+  ([CONFIGURATION.md](CONFIGURATION.md) Section 5.6).
 
 Wherever a final snapshot is taken, it precedes the clear: on the graceful
 `StopServer`, on the reconciler's `redispatch_stop` replay of it, on the

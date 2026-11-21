@@ -660,7 +660,9 @@ forbidden_modules = [
 # both judge members by (issue #3579), and the end-of-archive read beside it
 # (issue #3778); and `gc_pass`, the standard-library limit on failed deletes in a
 # row at which the versions and servers GCs both end a pass (issue #3906), and the
-# resume point their next pass starts after (issue #3934). Keep the
+# resume point their next pass starts after (issue #3934); and `name_characters`,
+# the standard-library rule for the characters no name may carry, which the
+# servers and community name rules both apply (issue #3988). Keep the
 # list in step with that `ls`: a new root-level module belongs here unless it is
 # neutral in the same way. `tests/tooling/test_root_module_contract.py` holds the
 # list to the `ls` and repeats the exemptions, so an exemption changes in both.

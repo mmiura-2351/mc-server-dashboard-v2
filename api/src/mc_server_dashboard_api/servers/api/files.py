@@ -774,8 +774,9 @@ async def upload_file(
 
     **A name no file can carry (issue #3922).** The part's filename names the file
     written under ``path``, so one that is blank, carries a control character, a
-    lone surrogate or a Unicode noncharacter, contains ``/`` or ``\\``, or is over
-    255 bytes in UTF-8 is 422 ``invalid_filename``, refused before a slot is taken
+    line or paragraph separator (issue #3988), a lone surrogate or a Unicode
+    noncharacter, contains ``/`` or ``\\``, or is over 255 bytes in UTF-8 is 422
+    ``invalid_filename``, refused before a slot is taken
     or the upload is read into memory (Starlette has spooled it by then). The path
     rules above still apply to the name that passes.
     """

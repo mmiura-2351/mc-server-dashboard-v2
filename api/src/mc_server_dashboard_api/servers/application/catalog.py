@@ -30,6 +30,7 @@ from mc_server_dashboard_api.servers.domain.catalog_provider import (
     CatalogVersion,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
+from mc_server_dashboard_api.servers.domain.display_name import fitted_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
@@ -55,6 +56,7 @@ from mc_server_dashboard_api.servers.domain.plugin import (
     PluginSource,
     ServerPlugin,
     content_dir_for_server_type,
+    is_valid_plugin_filename,
     loader_type_for_server_type,
     modrinth_loader_for_server_type,
     sanitize_plugin_filename,
@@ -64,9 +66,6 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
-from mc_server_dashboard_api.servers.domain.upload_filename import (
-    is_valid_upload_filename,
-)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -143,14 +142,15 @@ def _catalog_filename(file: CatalogFile) -> str:
     """The name a catalog file is installed under, or :class:`InvalidFilePathError`.
 
     The name must end ``.jar``, and is sanitized (issues #1400, #3957). A name
-    the upload rule still refuses once sanitized, such as one over 255 bytes, is
-    refused with the ``invalid_filename`` reason the upload routes give.
+    the plugin upload's rule still refuses once sanitized, such as one over 246
+    bytes (issue #3988), is refused with the ``invalid_filename`` reason the
+    upload routes give.
     """
 
     if not file.filename.lower().endswith(".jar"):
         raise InvalidFilePathError(f"catalog file is not a jar: {file.filename!r}")
     safe = sanitize_plugin_filename(file.filename)
-    if not is_valid_upload_filename(safe):
+    if not is_valid_plugin_filename(safe):
         raise InvalidFilePathError(
             f"catalog file name cannot name a file: {safe!r}",
             reason="invalid_filename",
@@ -454,7 +454,11 @@ class InstallFromCatalog:
                     server_id=server_id,
                     rel_path=rel_path,
                     filename=safe_filename,
-                    display_name=project.title,
+                    # The user did not type the title, so a title the
+                    # display-name rule refuses is made to fit it (issue #3988).
+                    display_name=fitted_display_name(
+                        project.title, filename=safe_filename
+                    ),
                     description=project.description,
                     loader_type=loader_type,
                     # Provenance follows the catalog that served the project:

@@ -547,6 +547,8 @@ export const en = {
   "serverDetail.error.unsettled": "The server must be stopped for this action.",
   "serverDetail.error.invalidServerName":
     "That server name is not allowed. Enter a name that is not blank and has no control characters.",
+  "serverDetail.error.serverNameExists":
+    "Another server in this community already has that name. Enter a different name.",
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
     "That game port is outside the allowed range.",
@@ -1904,6 +1906,8 @@ export const en = {
     "Invalid file. Only .jar files can be uploaded as {nouns}.",
   "plugins.error.invalidFilename":
     "This file name cannot be used for a {noun}. Rename the file so its name has no control characters, / or \\, and is not too long, then upload it again.",
+  "plugins.error.catalogInvalidFilename":
+    "The catalog file's name cannot be used for a {noun}. Choose another version.",
   "plugins.error.tooLarge":
     "The file is too large. Maximum upload size is 512 MB.",
   "plugins.error.catalogUpstreamFailed":

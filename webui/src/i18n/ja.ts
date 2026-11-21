@@ -495,6 +495,8 @@ export const ja: Record<TranslationKey, string> = {
   "serverDetail.error.unsettled": "この操作にはサーバーの停止が必要です。",
   "serverDetail.error.invalidServerName":
     "そのサーバー名は使用できません。空欄にせず、制御文字を含まない名前を入力してください。",
+  "serverDetail.error.serverNameExists":
+    "このコミュニティには同じ名前のサーバーがすでにあります。別の名前を入力してください。",
   "serverDetail.error.portTaken": "そのゲームポートはすでに使用されています。",
   "serverDetail.error.portOutOfRange":
     "そのゲームポートは許可された範囲外です。",
@@ -1793,6 +1795,8 @@ export const ja: Record<TranslationKey, string> = {
     "無効なファイルです。{nouns}としてアップロードできるのは .jar ファイルのみです。",
   "plugins.error.invalidFilename":
     "このファイル名は{noun}に使用できません。制御文字や / \\ を含まず、長すぎない名前に変更して、再度アップロードしてください。",
+  "plugins.error.catalogInvalidFilename":
+    "カタログのファイル名は{noun}に使用できません。別のバージョンを選んでください。",
   "plugins.error.tooLarge":
     "ファイルが大きすぎます。アップロードの上限は 512 MB です。",
   "plugins.error.catalogUpstreamFailed":

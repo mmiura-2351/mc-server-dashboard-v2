@@ -335,7 +335,8 @@ function ToastItem({
         aria-describedby={messageId}
         onClick={() => onDismiss(toast.id)}
         onKeyDown={(event) => {
-          // Stop here: Modal and Popover close on an Escape at the document.
+          // Stop here: Modal and Popover close on an Escape that reaches the
+          // document.
           if (event.key === "Escape") {
             event.stopPropagation();
             onDismiss(toast.id);

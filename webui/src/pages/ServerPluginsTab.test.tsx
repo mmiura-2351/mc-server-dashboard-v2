@@ -805,6 +805,17 @@ describe("ServerPluginsTab error presentation glue", () => {
     ).toBeInTheDocument();
   });
 
+  // The user can rename the file they uploaded (#3988).
+  it("tells a refused upload's file name to rename the file", async () => {
+    await triggerUploadError(new ApiError(422, { reason: "invalid_filename" }));
+
+    expect(
+      await screen.findByText(
+        t("plugins.error.invalidFilename").replace("{noun}", "mod"),
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("routes a 403 through onForbidden instead of the mapper", async () => {
     await triggerUploadError(
       new ApiError(403, { reason: "forbidden", permission: "plugin:manage" }),
@@ -1159,6 +1170,51 @@ describe("Modrinth modal: installed version indicator (issue #1350)", () => {
     });
     // No "Installed" badge or "Update" button.
     expect(screen.queryByText("Installed")).not.toBeInTheDocument();
+  });
+
+  // The user cannot rename a catalog's file, so the toast does not ask them
+  // to (#3988).
+  it("tells a refused catalog file name apart from an upload's", async () => {
+    mockBrowseAndDetail({
+      plugins: [plugin()],
+      projectId: "PROJ1",
+      versions: [
+        {
+          version_id: "V1",
+          version_number: "0.5.0",
+          name: "Sodium 0.5.0",
+          game_versions: ["1.21"],
+        },
+      ],
+    });
+    mockApi.post.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_filename" }),
+    );
+    renderTab();
+    await waitFor(() => {
+      expect(screen.getByText("Browse Modrinth")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Browse Modrinth"));
+    await waitFor(() => {
+      expect(screen.getByText("Rendering engine")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByText("Rendering engine").closest("button") as HTMLElement,
+    );
+    const install = await waitFor(() => {
+      const [button] = screen
+        .getAllByText("Install")
+        .filter((el) => el.tagName === "BUTTON");
+      expect(button).toBeDefined();
+      return button as HTMLElement;
+    });
+    fireEvent.click(install);
+
+    expect(
+      await screen.findByText(
+        t("plugins.error.catalogInvalidFilename").replace("{noun}", "mod"),
+      ),
+    ).toBeInTheDocument();
   });
 });
 

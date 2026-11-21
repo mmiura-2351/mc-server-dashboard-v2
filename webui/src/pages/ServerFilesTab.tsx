@@ -1090,6 +1090,12 @@ export function ServerFilesTab({
       ) {
         return;
       }
+      // Nor while the context menu or the stop menu is open: its keys are the
+      // menu's (#3971). Only these two count, so no other menu in the page
+      // can switch the shortcuts off.
+      if (document.querySelector(".file-context-menu, .stop-menu") !== null) {
+        return;
+      }
 
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selected.size > 0 && canEdit && !notAtRest) {
@@ -1156,8 +1162,8 @@ export function ServerFilesTab({
       }
 
       if (e.key === "Escape") {
-        // An Escape a modal or a menu already handled keeps the selection
-        // (#3920).
+        // An Escape a menu already handled keeps the selection (#3920,
+        // #3971).
         if (selected.size > 0 && !e.defaultPrevented) {
           setSelected(new Set());
         }

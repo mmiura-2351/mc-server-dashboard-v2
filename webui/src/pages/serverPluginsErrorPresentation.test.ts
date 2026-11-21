@@ -62,11 +62,6 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.invalidDisplayName",
     ],
     [
-      "maps invalid_filename (#3922)",
-      new ApiError(422, { reason: "invalid_filename" }),
-      "plugins.error.invalidFilename",
-    ],
-    [
       "maps bedrock_port_range_exhausted",
       new ApiError(503, { reason: "bedrock_port_range_exhausted" }),
       "plugins.error.bedrockPortRangeExhausted",
@@ -117,6 +112,20 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.generic",
     ],
   ])("%s", (_name, error, expected) => {
-    expect(pluginErrorPresentation(error)).toBe(expected);
+    expect(pluginErrorPresentation(error, "catalog")).toBe(expected);
+  });
+
+  // The jar's file name (#3922): the user can rename an upload, but not a
+  // catalog's file (#3988).
+  it.each([
+    ["upload", "plugins.error.invalidFilename"],
+    ["catalog", "plugins.error.catalogInvalidFilename"],
+  ] as const)("maps invalid_filename from a %s", (jarSource, expected) => {
+    expect(
+      pluginErrorPresentation(
+        new ApiError(422, { reason: "invalid_filename" }),
+        jarSource,
+      ),
+    ).toBe(expected);
   });
 });

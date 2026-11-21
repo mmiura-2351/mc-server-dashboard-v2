@@ -1760,6 +1760,25 @@ describe("ServerDetailPage settings", () => {
     expect(screen.getByDisplayValue("renamed")).toBeInTheDocument();
   });
 
+  // An unchanged name is left out (#3988): a server stored with a name the rule
+  // now refuses can still save its other settings, and a safe-keys-only edit
+  // is not turned into a rename.
+  it("omits the name from the PATCH when it is unchanged", async () => {
+    routeGet({ srv: { observed_state: "stopped", config: { motd: "hi" } } });
+    mockApi.patch.mockResolvedValue(server());
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    await waitFor(() => expect(mockApi.patch).toHaveBeenCalled());
+    const body = JSON.parse(mockApi.patch.mock.calls[0][1].body);
+    expect(body).not.toHaveProperty("name");
+  });
+
   // A cleared name is refused with the same reason as a control character
   // (#3957), so the toast has to name both remedies.
   it("toasts a blank-name save with the remedy for a blank name", async () => {

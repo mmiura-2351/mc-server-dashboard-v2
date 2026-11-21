@@ -25,7 +25,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
     UnsupportedPluginServerTypeError,
 )
 from mc_server_dashboard_api.servers.domain.upload_filename import (
+    MAX_FILENAME_BYTES,
     is_refused_filename_character,
+    is_valid_upload_filename,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, ServerType
 
@@ -35,10 +37,11 @@ def sanitize_plugin_filename(filename: str) -> str:
 
     Prevents zip-slip (issue #1400): a filename like ``a\\..\\..\\evil.jar``
     is reduced to ``evil.jar``. Each character the basename still carries that no
-    uploaded file's name may carry (a control character, a lone surrogate or a
-    noncharacter) is then replaced with ``_`` (issue #3957): a catalog's file
-    name never went through the upload rule. Raises :class:`ValueError` for
-    filenames that are empty or ``..`` after sanitization.
+    uploaded file's name may carry (a control character, a line or paragraph
+    separator, a lone surrogate or a noncharacter) is then replaced with ``_``
+    (issues #3957, #3988): a catalog's file name never went through the upload
+    rule. Raises :class:`ValueError` for filenames that are empty or ``..`` after
+    sanitization.
     """
 
     base = PurePosixPath(filename.replace("\\", "/")).name
@@ -46,6 +49,25 @@ def sanitize_plugin_filename(filename: str) -> str:
     if not safe or safe == "..":
         raise ValueError(f"unsafe plugin filename: {filename!r}")
     return safe
+
+
+# The longest name a plugin's jar may carry, in UTF-8 bytes (issue #3988).
+# Disabling the plugin renames its file ``<name>.disabled`` (:func:`working_set_path`),
+# and that name must still fit the filesystem's ``NAME_MAX`` of 255 bytes.
+MAX_PLUGIN_FILENAME_BYTES = MAX_FILENAME_BYTES - len(".disabled")
+
+
+def is_valid_plugin_filename(filename: str) -> bool:
+    """Whether ``filename`` can name a plugin's jar.
+
+    The upload rule (:func:`.upload_filename.is_valid_upload_filename`), with room
+    left for the ``.disabled`` suffix: at most :data:`MAX_PLUGIN_FILENAME_BYTES`.
+    """
+
+    return (
+        is_valid_upload_filename(filename)
+        and len(filename.encode("utf-8")) <= MAX_PLUGIN_FILENAME_BYTES
+    )
 
 
 # Where a mod/plugin is needed: ``server`` only, ``client`` only, or ``both``

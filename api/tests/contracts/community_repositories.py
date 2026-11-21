@@ -147,6 +147,27 @@ def _grant(
 class CommunityRepositoryContract:
     """Observable contract promised by :class:`CommunityRepository`."""
 
+    async def test_reads_back_a_name_the_rule_refuses(
+        self, community_repository_harness: RepositoryHarness[CommunityRepository]
+    ) -> None:
+        # A row stored before the community-name rule (issue #3988) may hold a
+        # control character; no reader refuses the name.
+        community = _community()
+        community.name = CommunityName.stored("legacy\nname")
+        async with community_repository_harness.open() as transaction:
+            await transaction.repository.add(community)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            by_id = await transaction.repository.get_by_id(community.id)
+            page = await transaction.repository.list_summaries_page(
+                limit=1000, offset=0
+            )
+
+        assert by_id is not None
+        assert by_id.name.value == "legacy\nname"
+        assert [s.name.value for s in page if s.id == community.id] == ["legacy\nname"]
+
     async def test_add_detaches_the_persisted_values(
         self, community_repository_harness: RepositoryHarness[CommunityRepository]
     ) -> None:
@@ -375,6 +396,23 @@ class MembershipRepositoryContract:
 
 class RoleRepositoryContract:
     """Observable contract promised by :class:`RoleRepository`."""
+
+    async def test_reads_back_a_name_the_rule_refuses(
+        self, role_repository_harness: RoleRepositoryHarness
+    ) -> None:
+        # A row stored before the role-name rule (issue #3988) may hold a
+        # control character; reading it never refuses the name.
+        role = _role(role_repository_harness)
+        role.name = RoleName.stored("legacy\nname")
+        async with role_repository_harness.open() as transaction:
+            await transaction.repository.add(role)
+            await transaction.commit()
+
+        async with role_repository_harness.open() as transaction:
+            stored = await transaction.repository.get_by_id(role.id)
+
+        assert stored is not None
+        assert stored.name.value == "legacy\nname"
 
     async def test_add_detaches_mutable_permissions(
         self, role_repository_harness: RoleRepositoryHarness
