@@ -119,8 +119,11 @@ export type LifecycleAction = "start" | "stop" | "restart";
 // deliberately NOT verb-specific and not `command_failed`'s message: the host
 // never ran the command, so nothing was half-done and there is no state to go
 // and check. What the API committed before dispatch still differs per verb. A
-// start is compensated back to stopped, and a restart commits no state change
-// and left the server as it was, so nothing is pending on either. A stop keeps
+// start whose start command expired is compensated back to stopped, and a
+// restart commits no state change and left the server as it was, so nothing is
+// pending on either. A start whose hydrate expired keeps desired=running on its
+// Worker for the reconciler instead (issue #3890), so a retry of that one
+// answers `invalid_transition` (the start entry below). A stop keeps
 // desired=stopped committed over a server that is still running. Its refusal is
 // recorded (stop_dispatch_refusals.py), so the reconciler's `redispatch_stop`
 // replays the stop on its own after the short refused-stop grace, even past
@@ -158,12 +161,13 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // failure leaves behind differs per verb (servers/application/lifecycle.py):
 //
 // - start   — compensated back to stopped wherever the start demonstrably did
-//             not happen, which is every 409 reason below EXCEPT a post-dispatch
-//             BUSY (see the worker_busy note below; a 503 `worker_unavailable`
-//             from a post-dispatch timeout or lost session is the same
-//             carve-out, see VERB_SPECIFIC_503_MESSAGE). So for `command_failed`
-//             nothing is pending and the verb-agnostic message is already right.
-//             Absent here.
+//             not happen, which is every 409 reason below EXCEPT a BUSY (see the
+//             worker_busy note below) and an expired hydrate (the
+//             command_expired note above); a 503 `worker_unavailable` from a
+//             post-dispatch timeout or lost session, or from a refused hydrate,
+//             is the same carve-out, see VERB_SPECIFIC_503_MESSAGE. So for
+//             `command_failed` nothing is pending and the verb-agnostic message
+//             is already right. Absent here.
 // - stop    — desired=stopped is committed over a still-running process and no
 //             stop failure class proves the stop will not take effect, so the
 //             intent stands and the reconciler's redispatch_stop keeps trying.
@@ -192,13 +196,16 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 //   redispatch_start to the SAME Worker (lifecycle.py StartServer.__call__ under
 //   `dispatch.attempted`). The start IS pending.
 // - PRE-dispatch BUSY — the HYDRATE that runs before the start was refused for
-//   the same two reasons; the start command was never sent, so StartServer
-//   compensates back to desired=stopped and unassigns. NOTHING is pending.
+//   the same two reasons, so the start command was never sent. Either reason
+//   leaves an instance of the server on that Worker possible, so StartServer
+//   keeps desired=running plus the assignment here too (issue #3890). The start
+//   IS pending.
 //
-// So the firm "…will be applied automatically" promise the stop/restart entries
-// make would be a FALSE promise here on the pre-dispatch path. #2435 scoped
-// start out and kept the plain busy message; this message replaces it with one
-// honest for BOTH paths: it says the start MAY still be applied on its own and
+// Until #3890 the pre-dispatch path compensated back to stopped, so the firm
+// "…will be applied automatically" promise the stop/restart entries make would
+// have been FALSE there. #2435 scoped start out and kept the plain busy
+// message; this message replaces it with one honest for BOTH paths: it says
+// the start MAY still be applied on its own and
 // tells the operator to start it again only if the server stays stopped, rather
 // than the generic "wait and try again" — which on the pending path lands the
 // retry on `invalid_transition` (see the invalid_transition entry below). The
@@ -291,12 +298,13 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
 //             above. A Worker that is not connected gets no such restart; see
 //             WORKER_NOT_CONNECTED_503_MESSAGE below.
 // - start   — absent DELIBERATELY. A PRE-dispatch unavailable (a failed hydrate,
-//             a hydrate the Worker answered UNAVAILABLE, or a connect that never
-//             reached the Worker) IS compensated back to stopped, and so is a
-//             start the Worker itself answered UNAVAILABLE, so nothing is
-//             pending and "try again" is right; a POST-dispatch timeout or lost
-//             session keeps desired=running plus the assignment for
-//             redispatch_start, so a start IS pending. All arrive as a bare
+//             or a connect that never reached the Worker) IS compensated back to
+//             stopped, and so is a start the Worker itself answered UNAVAILABLE,
+//             so nothing is pending and "try again" is right; a POST-dispatch
+//             timeout or lost session, and a hydrate the Worker answered
+//             UNAVAILABLE (its leftover container may still run, issue #3890),
+//             keep desired=running plus the assignment for redispatch_start, so a
+//             start IS pending. All arrive as a bare
 //             `worker_unavailable` and the client cannot tell them apart — the
 //             `worker_state` member does not split them either, since each state
 //             arises both before and after the dispatch. It is the same

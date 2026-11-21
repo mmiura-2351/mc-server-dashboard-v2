@@ -16,6 +16,7 @@ import uuid
 
 import pytest
 
+from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
     SnapshotServer,
@@ -39,7 +40,14 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from tests.servers.contract_table import worker_message, worker_status
-from tests.servers.fakes import FakeClock, FakeControlPlane, FakeUnitOfWork
+from tests.servers.fakes import (
+    FakeClock,
+    FakeControlPlane,
+    FakeFileStore,
+    FakeJarProvisioner,
+    FakeStoreGenerationReader,
+    FakeUnitOfWork,
+)
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 _WORKER = WorkerId(uuid.uuid4())
@@ -394,6 +402,84 @@ async def test_only_running_assigned_servers_are_considered() -> None:
     clock.set(_NOW + dt.timedelta(seconds=3600))
     await scheduler.tick()
     assert {sid for _, _, sid in cp.dispatched} == {running.id}
+
+
+# --- a Worker that has not hydrated its server (issue #3890) ----------------
+
+
+async def test_a_server_awaiting_its_hydrate_is_skipped_until_it_lands() -> None:
+    # Door 1 of review r1 finding 1: the Worker's scratch may be older than the
+    # store, so the tick asks it for nothing. Like a disconnected Worker, the skip
+    # does not advance next-due, so the snapshot goes out on the first tick after
+    # the hydrate lands.
+    uow = FakeUnitOfWork()
+    server = _running_server(observed=ObservedState.UNKNOWN)
+    server.awaiting_hydrate = True
+    uow.servers.seed(server)
+    cp = FakeControlPlane()
+    clock = FakeClock(_NOW)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=3600))
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(seconds=7200))
+    await scheduler.tick()
+    assert cp.dispatched == []
+
+    uow.servers.by_id[server.id].awaiting_hydrate = False
+    await scheduler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+
+
+@pytest.mark.parametrize(
+    "precondition",
+    ["command_in_flight", "orphan_pending", "untracked_container", "command_expired"],
+)
+async def test_a_kept_start_is_not_snapshotted_before_its_hydrate_lands(
+    precondition: str,
+) -> None:
+    # Door 1 end to end: a user start whose hydrate the Worker refused keeps the
+    # Worker (issue #3890). The cadence comes due twice before the reconciler's
+    # retried start hydrates, and sends nothing; the first tick after it does.
+    uow = FakeUnitOfWork()
+    server = _running_server(worker=None, observed=ObservedState.STOPPED)
+    server.desired_state = DesiredState.STOPPED
+    uow.servers.seed(server)
+    outcomes = {
+        "hydrate": CommandOutcome(
+            status=worker_status("HydrateTrigger", precondition), message="refused"
+        )
+    }
+    cp = FakeControlPlane(place_to=_WORKER, outcomes=outcomes)
+    clock = FakeClock(_NOW)
+    start = StartServer(
+        uow=uow,
+        control_plane=cp,
+        clock=clock,
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=FakeFileStore(seed_eula=True),
+    )
+    with pytest.raises(CommandDispatchError):
+        await start(community_id=server.community_id, server_id=server.id)
+    scheduler = _scheduler(uow, cp, clock)
+    await scheduler.tick()
+    for elapsed in (3600, 7200):
+        clock.set(_NOW + dt.timedelta(seconds=elapsed))
+        await scheduler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["hydrate"]
+
+    del outcomes["hydrate"]
+    await start.redispatch_start(community_id=server.community_id, server_id=server.id)
+    await scheduler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == [
+        "hydrate",
+        "hydrate",
+        "start",
+        "snapshot",
+    ]
 
 
 # --- per-server isolation inside one tick (issue #2752) --------------------

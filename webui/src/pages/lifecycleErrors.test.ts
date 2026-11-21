@@ -142,14 +142,12 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
-  // A start refused with worker_busy is ambiguous at the edge (issue #2445): a
-  // POST-dispatch BUSY keeps desired_state=running so the reconciler's
-  // redispatch_start applies the start later, while a PRE-dispatch BUSY (a
-  // refused hydrate) is compensated back to stopped so nothing is pending — and
-  // both arrive as a bare worker_busy. The message is honest for both: it does
-  // not promise the start will be applied, and it drops the "try again" the
-  // generic busy message pushes, which on the pending path lands on
-  // invalid_transition (see below).
+  // A start refused with worker_busy (issue #2445): a POST-dispatch BUSY keeps
+  // desired_state=running so the reconciler's redispatch_start applies the start
+  // later, and since issue #3890 a PRE-dispatch BUSY (a refused hydrate) does
+  // too. The message does not promise the start will be applied, and it drops
+  // the "try again" the generic busy message pushes, which on the pending path
+  // lands on invalid_transition (see below).
   it("maps a 409 worker_busy on start to the start-pending message", () => {
     const error = new ApiError(409, { reason: "worker_busy" });
     expect(lifecycleErrorMessage(error, "start")).toBe(

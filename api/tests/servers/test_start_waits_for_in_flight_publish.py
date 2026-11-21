@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.dataplane.api.transfers import _assignment_fence
+from mc_server_dashboard_api.dependencies import WorkerAssignment
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
 )
@@ -173,9 +174,14 @@ async def _release_a_with_its_publish_past_the_fence(
     )
     assert uow.servers.by_id[server.id].assigned_worker_id is None
 
-    async def _assigned(_c: uuid.UUID, s: uuid.UUID) -> str | None:
-        worker = uow.servers.by_id[ServerId(s)].assigned_worker_id
-        return None if worker is None else str(worker.value)
+    async def _assigned(_c: uuid.UUID, s: uuid.UUID) -> WorkerAssignment | None:
+        row = uow.servers.by_id[ServerId(s)]
+        if row.assigned_worker_id is None:
+            return None
+        return WorkerAssignment(
+            worker_id=str(row.assigned_worker_id.value),
+            awaiting_hydrate=row.awaiting_hydrate,
+        )
 
     fence = _assignment_fence(
         _assigned, server.community_id.value, server.id.value, str(_WORKER_A.value)
