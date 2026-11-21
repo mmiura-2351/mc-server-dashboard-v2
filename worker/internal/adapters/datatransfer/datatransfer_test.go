@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -286,28 +287,162 @@ func TestHydrateRejectsAbsoluteMember(t *testing.T) {
 	}
 }
 
-// The member file is created without following a link at its own name: one in
-// the unpack directory fails the unpack and its target is left untouched.
+// The member file is created only where nothing is (issue #3940): a symlink or a
+// hard link already at its name fails the unpack, and the file outside the unpack
+// directory that it names is left untouched.
 func TestUnpackDoesNotWriteThroughALinkAtAMembersName(t *testing.T) {
-	base := t.TempDir()
-	outside := filepath.Join(base, "outside-secret")
-	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dest := filepath.Join(base, "dest")
-	if err := os.Mkdir(dest, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(dest, "server.properties")); err != nil {
-		t.Fatal(err)
-	}
+	for name, plant := range map[string]func(oldname, newname string) error{
+		"symlink":   os.Symlink,
+		"hard link": os.Link,
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			outside := filepath.Join(base, "outside-secret")
+			if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dest := filepath.Join(base, "dest")
+			if err := os.Mkdir(dest, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := plant(outside, filepath.Join(dest, "server.properties")); err != nil {
+				t.Fatal(err)
+			}
 
-	err := unpackTar(bytes.NewReader(tarOf(map[string]string{"server.properties": "from-tar"})), openDirFd(t, dest))
-	if !errors.Is(err, unix.ELOOP) {
-		t.Fatalf("unpackTar = %v, want ELOOP from the link at the member's name", err)
+			err := unpackTar(bytes.NewReader(tarOf(map[string]string{"server.properties": "from-tar"})), openDirFd(t, dest))
+			if !errors.Is(err, unix.EEXIST) {
+				t.Errorf("unpackTar = %v, want EEXIST from the link at the member's name", err)
+			}
+			if got, err := os.ReadFile(outside); err != nil || string(got) != "secret" {
+				t.Fatalf("the linked file outside reads %q, %v; want it untouched", got, err)
+			}
+		})
 	}
-	if got, err := os.ReadFile(outside); err != nil || string(got) != "secret" {
-		t.Fatalf("the link's target reads %q, %v; want it untouched", got, err)
+}
+
+// A symlink planted at a directory on a member's path, whether it points outside
+// the unpack directory or at another directory inside it, fails the unpack, and
+// nothing is created behind it (issue #3940): every directory on the path is
+// opened without following a link, with openat2 or, on a kernel without it,
+// with O_NOFOLLOW.
+func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) {
+	members := map[string]tar.Header{
+		"file":      {Name: "world/region/sub/r.0.0.mca", Typeflag: tar.TypeReg, Mode: 0o640, Size: 4},
+		"directory": {Name: "world/region/sub/", Typeflag: tar.TypeDir, Mode: 0o750},
+	}
+	for member, header := range members {
+		for _, link := range []string{"world", "world/region"} {
+			for _, target := range []string{"outside", "inside"} {
+				for _, kernel := range []string{"openat2", "without openat2"} {
+					t.Run(member+" with "+link+" linked "+target+", "+kernel, func(t *testing.T) {
+						if kernel == "without openat2" {
+							withoutOpenat2(t)
+						}
+						base := t.TempDir()
+						dest := filepath.Join(base, "dest")
+						if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+							t.Fatal(err)
+						}
+						// An outside link is absolute. An inside one is relative and names
+						// a sibling, so resolving it never leaves the link's directory:
+						// only the refusal of every link, not the one of an escape,
+						// stops it.
+						linked, linkTarget := filepath.Join(base, "elsewhere"), filepath.Join(base, "elsewhere")
+						if target == "inside" {
+							linked, linkTarget = filepath.Join(dest, filepath.Dir(link), "elsewhere"), "elsewhere"
+						}
+						if err := os.Mkdir(linked, 0o750); err != nil {
+							t.Fatal(err)
+						}
+						// The link takes the place of the directory at link.
+						if err := os.Remove(filepath.Join(dest, link)); err != nil && !os.IsNotExist(err) {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(linkTarget, filepath.Join(dest, link)); err != nil {
+							t.Fatal(err)
+						}
+						var buf bytes.Buffer
+						tw := tar.NewWriter(&buf)
+						if err := tw.WriteHeader(&header); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := tw.Write(make([]byte, header.Size)); err != nil {
+							t.Fatal(err)
+						}
+						if err := tw.Close(); err != nil {
+							t.Fatal(err)
+						}
+
+						if err := unpackTar(&buf, openDirFd(t, dest)); !errors.Is(err, linkRefusal(kernel)) {
+							t.Errorf("unpackTar = %v, want %v from the link on the member's path", err, linkRefusal(kernel))
+						}
+						if entries, err := os.ReadDir(linked); err != nil || len(entries) != 0 {
+							t.Fatalf("the link's target holds %v, %v; want nothing written through the link", entries, err)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// Every descriptor the unpack opens on a member's path is closed again, whether
+// the unpack succeeds or a link on the path fails it, with openat2 or without it.
+func TestUnpackLeavesNoDescriptorOpen(t *testing.T) {
+	openFds := func() int {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Skipf("no /proc/self/fd to count descriptors with: %v", err)
+		}
+		return len(entries)
+	}
+	archive := func() io.Reader {
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		for _, h := range []tar.Header{
+			{Name: "world/region/", Typeflag: tar.TypeDir, Mode: 0o750},
+			{Name: "world/region/r.0.0.mca", Typeflag: tar.TypeReg, Mode: 0o640},
+			{Name: "world/level.dat", Typeflag: tar.TypeReg, Mode: 0o640},
+			{Name: "server.properties", Typeflag: tar.TypeReg, Mode: 0o640},
+			{Name: "logs/", Typeflag: tar.TypeDir, Mode: 0o750},
+		} {
+			if err := tw.WriteHeader(&h); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return &buf
+	}
+	for _, kernel := range []string{"openat2", "without openat2"} {
+		t.Run(kernel, func(t *testing.T) {
+			if kernel == "without openat2" {
+				withoutOpenat2(t)
+			}
+			clean := openDirFd(t, t.TempDir())
+			// The link is one directory down, so the walk holds a descriptor of
+			// its own when the link fails it.
+			linked := t.TempDir()
+			if err := os.Mkdir(filepath.Join(linked, "world"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(t.TempDir(), filepath.Join(linked, "world", "region")); err != nil {
+				t.Fatal(err)
+			}
+			linkedFd := openDirFd(t, linked)
+
+			before := openFds()
+			if err := unpackTar(archive(), clean); err != nil {
+				t.Fatalf("unpackTar: %v", err)
+			}
+			if err := unpackTar(archive(), linkedFd); err == nil {
+				t.Fatal("unpackTar = nil, want the link on the members' path refused")
+			}
+			if after := openFds(); after != before {
+				t.Fatalf("open descriptors: %d before, %d after", before, after)
+			}
+		})
 	}
 }
 
@@ -344,25 +479,109 @@ func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
 }
 
 // A directory member whose name an entry other than a directory already holds
-// fails the unpack, as os.MkdirAll failed it: here a dangling link, which a stat
-// that follows it reports as absent, so the mkdir meets EEXIST.
+// fails the unpack, as os.MkdirAll failed it: here a dangling link, which the
+// walk refuses to open (issue #3940) instead of following it into a mkdir at its
+// target, with openat2 or without it. The error names the refused open.
 func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
-	dest := t.TempDir()
-	if err := os.Symlink(filepath.Join(dest, "nowhere"), filepath.Join(dest, "world")); err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
-		t.Fatal(err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	for _, kernel := range []string{"openat2", "without openat2"} {
+		t.Run(kernel, func(t *testing.T) {
+			if kernel == "without openat2" {
+				withoutOpenat2(t)
+			}
+			dest := t.TempDir()
+			if err := os.Symlink(filepath.Join(dest, "nowhere"), filepath.Join(dest, "world")); err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := unpackTar(&buf, openDirFd(t, dest)); !errors.Is(err, unix.EEXIST) {
-		t.Fatalf("unpackTar = %v, want EEXIST for the link at the directory's name", err)
+			err := unpackTar(&buf, openDirFd(t, dest))
+			var pathErr *os.PathError
+			if !errors.Is(err, linkRefusal(kernel)) || !errors.As(err, &pathErr) || pathErr.Op != "open" {
+				t.Errorf("unpackTar = %v, want an open refused with %v at the link", err, linkRefusal(kernel))
+			}
+			if _, err := os.Lstat(filepath.Join(dest, "nowhere")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the link's target: %v; want it never created", err)
+			}
+		})
 	}
+}
+
+// An interrupted mkdirat that had already created its directory answers EEXIST
+// on its EINTR retry (issue #3940). The walk then opens what is at the name all
+// the same, and that open is what judges it: the directory is used, while a link
+// or a file planted in the same window is refused as at any other open. The
+// planting happens between the walk's first open and its mkdirat.
+func TestUnpackOpensWhatAnInterruptedMkdirLeft(t *testing.T) {
+	for name, tc := range map[string]struct {
+		plant func(at, outside string) error
+		want  error
+	}{
+		"the directory": {func(at, _ string) error { return os.Mkdir(at, 0o750) }, nil},
+		"a link":        {func(at, outside string) error { return os.Symlink(outside, at) }, unix.ELOOP},
+		"a file":        {func(at, _ string) error { return os.WriteFile(at, nil, 0o640) }, unix.ENOTDIR},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			dest, outside := filepath.Join(base, "dest"), filepath.Join(base, "outside")
+			for _, dir := range []string{dest, outside} {
+				if err := os.Mkdir(dir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+			}
+			orig := openat2Beneath
+			t.Cleanup(func() { openat2Beneath = orig })
+			planted := false
+			openat2Beneath = func(dirFd int, n string) (int, error) {
+				fd, err := orig(dirFd, n)
+				if n == "world" && errors.Is(err, unix.ENOENT) && !planted {
+					planted = true
+					if perr := tc.plant(filepath.Join(dest, "world"), outside); perr != nil {
+						t.Error(perr)
+					}
+				}
+				return fd, err
+			}
+
+			err := unpackTar(bytes.NewReader(tarOf(map[string]string{"world/level.dat": "level"})), openDirFd(t, dest))
+			if !planted || !errors.Is(err, tc.want) {
+				t.Fatalf("unpackTar = %v (planted: %v), want %v", err, planted, tc.want)
+			}
+			if tc.want == nil {
+				if got, err := os.ReadFile(filepath.Join(dest, "world", "level.dat")); err != nil || string(got) != "level" {
+					t.Errorf("world/level.dat reads %q, %v; want the member", got, err)
+				}
+			}
+			if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+				t.Errorf("outside holds %v, %v; want nothing", entries, err)
+			}
+		})
+	}
+}
+
+// linkRefusal is the errno the unpack walk refuses a link at a directory with:
+// openat2's RESOLVE_NO_SYMLINKS answers ELOOP, and the O_NOFOLLOW|O_DIRECTORY
+// open of the fallback answers ENOTDIR.
+func linkRefusal(kernel string) error {
+	if kernel == "without openat2" {
+		return unix.ENOTDIR
+	}
+	return unix.ELOOP
+}
+
+// withoutOpenat2 makes the unpack take, for the rest of the test, the path it
+// takes where openat2 is unavailable (nofollow.Openat2Beneath answers ENOSYS).
+func withoutOpenat2(t *testing.T) {
+	t.Helper()
+	orig := openat2Beneath
+	t.Cleanup(func() { openat2Beneath = orig })
+	openat2Beneath = func(int, string) (int, error) { return -1, unix.ENOSYS }
 }
 
 // ignoringEINTR retries a call the kernel interrupted, as the os package does

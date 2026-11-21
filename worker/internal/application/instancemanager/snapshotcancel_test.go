@@ -110,10 +110,13 @@ func TestASnapshotPastItsDeadlineIsStillReportedAsAbandoned(t *testing.T) {
 }
 
 // The cancelled snapshot logs the work's own message capped at 1 KiB, on a rune
-// boundary and marked with an ellipsis: an over-limit pack error quotes a path
-// of about 4 KiB. A shorter message is logged whole.
+// boundary and marked as truncated, as the session caps the error it logs: an
+// over-limit pack error quotes a path of about 4 KiB. A shorter message is logged
+// whole. The long fixture puts the cap inside a rune: after the leading "a", byte
+// 1024 is the second byte of an "é", so a cut that did not back off to the rune's
+// start would log half of it.
 func TestACancelledSnapshotCapsTheDetailItLogs(t *testing.T) {
-	for _, detail := range []string{"short", strings.Repeat("é", 1000)} {
+	for _, detail := range []string{"short", "a" + strings.Repeat("é", 1000)} {
 		h := &syncSlogHandler{}
 		m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
 		m.snapshotCancelled(snapshotCmd(), detail)
@@ -133,9 +136,9 @@ func TestACancelledSnapshotCapsTheDetailItLogs(t *testing.T) {
 			}
 			continue
 		}
-		kept, cut := strings.CutSuffix(logged, "…")
+		kept, cut := strings.CutSuffix(logged, "…[truncated]")
 		if !cut || len(kept) > 1024 || !utf8.ValidString(kept) || !strings.HasPrefix(detail, kept) {
-			t.Errorf("a %d-byte detail was logged as %d bytes (%q…), want at most 1024 bytes of it and an ellipsis", len(detail), len(logged), logged[:min(len(logged), 20)])
+			t.Errorf("a %d-byte detail was logged as %d bytes (%q…), want at most 1024 bytes of it and the truncation marker", len(detail), len(logged), logged[:min(len(logged), 20)])
 		}
 	}
 }

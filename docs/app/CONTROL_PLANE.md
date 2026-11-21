@@ -200,8 +200,10 @@ Other Minecraft versions were not measured for this.
 
 The Worker's "command failed" WARN logs at most 1,024 bytes of the error
 message, with a truncation marker; the `CommandError.message` sent to the API is
-not cut. The API's "fire-and-forget command failed" WARN caps the message it
-logs the same way, at 1,024 characters.
+not cut. A failure that comes back after its session ended cannot be sent at
+all, so the Worker logs it at INFO instead ("command result not delivered"),
+with the same fields and cap (issue #3940). The API's "fire-and-forget command
+failed" WARN caps the message it logs the same way, at 1,024 characters.
 
 ---
 
