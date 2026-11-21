@@ -868,6 +868,8 @@ export const ja: Record<TranslationKey, string> = {
     "指定されたパスはディレクトリではなくファイルです。",
   "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
   "files.error.nameTooLong": "名前が長すぎます。",
+  "files.error.invalidFilename":
+    "このファイル名は使用できません。制御文字や / \\ を含まず、長すぎない名前に変更して、再度アップロードしてください。",
   "files.error.platformManagedKey":
     "server.properties の「{key}」はプラットフォームが管理しているため、この操作では変更できません。",
   "files.error.platformManagedPath":
@@ -1787,6 +1789,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.busy": "別の操作が進行中です。しばらくお待ちください。",
   "plugins.error.invalidPath":
     "無効なファイルです。{nouns}としてアップロードできるのは .jar ファイルのみです。",
+  "plugins.error.invalidFilename":
+    "このファイル名は{noun}に使用できません。制御文字や / \\ を含まず、長すぎない名前に変更して、再度アップロードしてください。",
   "plugins.error.tooLarge":
     "ファイルが大きすぎます。アップロードの上限は 512 MB です。",
   "plugins.error.catalogUpstreamFailed":
@@ -1892,7 +1896,9 @@ export const ja: Record<TranslationKey, string> = {
   "resourcePacks.error.uploadFailed":
     "リソースパックをアップロードできませんでした。",
   "resourcePacks.error.invalidFilename":
-    "このファイル名はリソースパックに使用できません。制御文字や / \\ を含まない255バイト以内の名前に変更して、再度アップロードしてください。",
+    "このファイル名はリソースパックに使用できません。制御文字や / \\ を含まず、長すぎない名前に変更して、再度アップロードしてください。",
+  "resourcePacks.error.invalidDisplayName":
+    "この表示名は使用できません。制御文字を含まない200文字以内の名前を入力してください。",
   "resourcePacks.error.deleteFailed": "リソースパックを削除できませんでした。",
   "resourcePacks.error.inUse":
     "このリソースパックは1つ以上のサーバーに割り当てられているため、削除できません。",

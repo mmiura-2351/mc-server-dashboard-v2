@@ -47,7 +47,8 @@ function isStorageUnavailable(error: unknown): boolean {
 /**
  * The toast for a failed upload. A 422 `invalid_filename` is the file's name,
  * not its content (issue #3907): the pack cannot be stored under that name, so
- * renaming the file is the remedy, which the generic toast does not say.
+ * renaming the file is the remedy, which the generic toast does not say. A 422
+ * `invalid_display_name` is the name typed in the dialog (issue #3922).
  */
 function uploadErrorKey(error: unknown): TranslationKey {
   if (isStorageUnavailable(error)) {
@@ -55,6 +56,9 @@ function uploadErrorKey(error: unknown): TranslationKey {
   }
   if (error instanceof ApiError && error.reason === "invalid_filename") {
     return "resourcePacks.error.invalidFilename";
+  }
+  if (error instanceof ApiError && error.reason === "invalid_display_name") {
+    return "resourcePacks.error.invalidDisplayName";
   }
   return "resourcePacks.error.uploadFailed";
 }

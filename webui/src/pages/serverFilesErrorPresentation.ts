@@ -65,6 +65,10 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.symlinkRefused" };
         case "name_too_long":
           return { key: "files.error.nameTooLong" };
+        // An upload's file name no file can carry (issue #3922): renaming the
+        // file is the remedy, which the generic message would not say.
+        case "invalid_filename":
+          return { key: "files.error.invalidFilename" };
         case "platform_managed_key":
           return error.key === undefined
             ? { key: "files.error.invalidInput" }

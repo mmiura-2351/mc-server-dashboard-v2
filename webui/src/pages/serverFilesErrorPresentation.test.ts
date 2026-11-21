@@ -82,6 +82,11 @@ describe("fileOperationErrorPresentation", () => {
       { key: "files.error.nameTooLong" },
     ],
     [
+      "maps an upload's file name no file can carry (#3922)",
+      new ApiError(422, { reason: "invalid_filename" }),
+      { key: "files.error.invalidFilename" },
+    ],
+    [
       "maps a platform-managed key with its targeted key",
       new ApiError(422, {
         reason: "platform_managed_key",

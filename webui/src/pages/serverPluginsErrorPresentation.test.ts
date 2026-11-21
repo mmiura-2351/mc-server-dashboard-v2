@@ -62,6 +62,11 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.invalidDisplayName",
     ],
     [
+      "maps invalid_filename (#3922)",
+      new ApiError(422, { reason: "invalid_filename" }),
+      "plugins.error.invalidFilename",
+    ],
+    [
       "maps bedrock_port_range_exhausted",
       new ApiError(503, { reason: "bedrock_port_range_exhausted" }),
       "plugins.error.bedrockPortRangeExhausted",
