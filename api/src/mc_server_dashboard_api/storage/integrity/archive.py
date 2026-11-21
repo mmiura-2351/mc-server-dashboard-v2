@@ -122,8 +122,7 @@ class GzipReadProbe:
 # is the one ``RecursionError`` meant here. The object walks wrap only their
 # reads of the archive, but the fs restore's wrap spans the files it extracts
 # too, so it creates a member's directories one level at a time
-# (``_make_directories``), and refuses a member too deep for it by its own depth
-# bound, not by this.
+# (``_make_directories``): a deep member is restored, not taken for this.
 # Deliberately NOT ``tarfile.TarError`` as a whole: its ``FilterError`` branch
 # refuses an unsafe member of a perfectly readable archive.
 # A plain ``OSError`` (an I/O fault reading the bytes) is not here either: it says

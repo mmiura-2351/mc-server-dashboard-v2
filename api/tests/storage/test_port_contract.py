@@ -2001,58 +2001,26 @@ async def test_backup_within_the_storage_header_limits_is_healthy_and_restores(
     )
 
 
-def _name_levels_deep(levels: int) -> str:
-    """A file name of ``levels`` path components, under ``levels - 1`` directories."""
+def _files_levels_deep(levels: int) -> dict[str, bytes]:
+    """One file ``levels`` path components deep, and no directory members."""
 
-    return "/".join(["d"] * (levels - 1) + ["f"])
-
-
-@pytest.mark.parametrize("levels", [513, 1100])
-async def test_a_member_past_the_fs_depth_bound_restores_on_object_only(
-    harness: StorageHarness, backend: str, levels: int
-) -> None:
-    """The object backend restores a member of any depth (issue #3859). The fs
-    backend packs a working set with ``tarfile``'s recursive ``add``, which cannot
-    pack a tree about 1,000 levels deep, so a restore would leave a server it
-    could not start, back up or delete: its restore and health probe refuse a
-    member more than 512 levels deep, naming the bound, and the live world
-    stays (until issue #3931)."""
-
-    name = _name_levels_deep(levels)
-    community, server = new_scope()
-    await harness.publish(community, server, {"world/level.dat": b"live"})
-    key = await harness.storage.put_backup(
-        community, server, stream_of(gzip.compress(tar_bytes({name: b"deep"})))
-    )
-
-    if backend == "object":
-        health = await harness.storage.check_backup_health(community, server, key)
-        assert health.healthy
-        await harness.storage.restore_backup(community, server, key)
-        read = await harness.storage.read_file(community, server, RelPath(name))
-        assert read == b"deep"
-    else:
-        with pytest.raises(ArchiveUnreadableError, match="more than 512 levels deep"):
-            await harness.storage.check_backup_health(community, server, key)
-        with pytest.raises(ArchiveUnreadableError, match="more than 512 levels deep"):
-            await harness.storage.restore_backup(community, server, key)
-        live = await harness.storage.read_file(
-            community, server, RelPath("world/level.dat")
-        )
-        assert live == b"live"
+    return {"/".join(["d"] * (levels - 1) + ["f"]): b"deep"}
 
 
-async def test_a_member_512_levels_deep_restores_and_is_packed_again(
+async def test_a_member_1100_levels_deep_restores_and_is_packed_again(
     harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A member 512 levels deep, the fs bound, is healthy and restores on BOTH
-    backends (issue #3859), and the working set it leaves is hydrated, backed up
-    and pruned: the server can start, be backed up and be deleted."""
+    """A file 1,100 levels deep is healthy and restores on BOTH backends (issue
+    #3859), and the working set it leaves is hydrated, backed up, restored over
+    and pruned: the server can start, be backed up and be deleted. The fs
+    adapter creates a member's directories and packs a working set one level at
+    a time; ``Path.mkdir`` and ``tarfile.add`` recursed once a level and raised
+    ``RecursionError``."""
 
-    # The fs publish syncs each of the 511 directories, which this does not pin,
-    # and which would hold a gate under I/O load (issue #3651).
+    # The fs publish syncs each of the 1,100 directories, which this does not
+    # pin, and which would hold a gate under I/O load (issue #3651).
     monkeypatch.setattr(os, "fsync", lambda fd: None)
-    files = {_name_levels_deep(512): b"deep"}
+    files = _files_levels_deep(1100)
     community, server = new_scope()
     key = await harness.storage.put_backup(
         community, server, stream_of(gzip.compress(tar_bytes(files)))
@@ -2063,7 +2031,33 @@ async def test_a_member_512_levels_deep_restores_and_is_packed_again(
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == files
     backup = await harness.storage.create_backup_from_current(community, server)
-    assert backup in await harness.storage.list_backups(community, server)
+    blob = await drain(harness.storage.open_backup(community, server, backup))
+    assert read_tar(blob) == files
+    await harness.storage.restore_backup(community, server, key)
+    await harness.storage.prune_to_final_snapshot(community, server)
+
+
+async def test_a_backup_written_of_a_deep_working_set_restores(
+    harness: StorageHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backup the platform writes of a working set 600 levels deep restores on
+    BOTH backends (issue #3859), and the working set is hydrated again. Not at
+    1,100 levels: the fs writer gives every level a directory member, and the
+    fs restore's member filter resolves each member's path, which took about
+    46 s there."""
+
+    monkeypatch.setattr(os, "fsync", lambda fd: None)  # as above
+    files = _files_levels_deep(600)
+    community, server = new_scope()
+    key = await harness.storage.put_backup(
+        community, server, stream_of(gzip.compress(tar_bytes(files)))
+    )
+    await harness.storage.restore_backup(community, server, key)
+    backup = await harness.storage.create_backup_from_current(community, server)
+
+    await harness.storage.restore_backup(community, server, backup)
+    blob = await drain(harness.storage.open_hydrate_source(community, server))
+    assert read_tar(blob) == files
     await harness.storage.prune_to_final_snapshot(community, server)
 
 
