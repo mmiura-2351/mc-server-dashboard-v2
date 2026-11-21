@@ -57,6 +57,7 @@ from mc_server_dashboard_api.dependencies import (
 from mc_server_dashboard_api.servers.adapters.plugin_cache_store import (
     ObjectPluginCacheStore,
 )
+from mc_server_dashboard_api.servers.api import plugins as plugins_api
 from mc_server_dashboard_api.servers.application.catalog import (
     PluginDependencyInfo,
     PluginUpdateInfo,
@@ -114,6 +115,11 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
+from tests.servers.upload_filenames import (
+    accepted_filenames,
+    post_raw_upload,
+    refused_filenames,
+)
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -508,6 +514,66 @@ def test_install_plugin_too_long_display_name_is_422() -> None:
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_display_name"
+
+
+# The jar's name becomes a file name in the server's content directory, so an
+# install refuses one no file can carry, as the resource-pack upload does (issue
+# #3922).
+
+
+@pytest.mark.parametrize(("filename", "charset"), refused_filenames(".jar"))
+def test_install_plugin_refuses_an_unsafe_filename(
+    filename: bytes, charset: str | None
+) -> None:
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        filename,
+        fields={"display_name": b"Test"},
+        charset=charset,
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert install.calls == []
+
+
+@pytest.mark.parametrize("filename", accepted_filenames(".jar"))
+def test_install_plugin_accepts_a_unicode_filename(filename: str) -> None:
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        f'"{filename}"'.encode(),
+        fields={"display_name": b"Test"},
+    )
+    assert resp.status_code == 201
+    assert [call["filename"] for call in install.calls] == [filename]
+
+
+def test_install_plugin_refuses_the_filename_before_reading_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b"jar-bytes"
+
+    monkeypatch.setattr(plugins_api, "_read_capped_upload", read)
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        b'"a\nb.jar"',
+        fields={"display_name": b"Test"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+    assert reads == []
 
 
 # --- remove plugin ---------------------------------------------------------

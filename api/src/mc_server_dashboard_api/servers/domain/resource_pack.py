@@ -19,34 +19,30 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 
-# The longest name a pack may carry, in UTF-8 bytes: ``NAME_MAX``, the limit a
-# filesystem puts on one name and past which the file API answers
-# ``name_too_long`` (issue #3907).
-MAX_FILENAME_BYTES = 255
+# The longest display name a pack may carry, in characters, once stripped: the
+# bound a plugin's display name has (issue #3922).
+MAX_DISPLAY_NAME_LENGTH = 200
 
 
-def is_valid_pack_filename(filename: str) -> bool:
-    """Whether ``filename`` can name an uploaded pack (issue #3907).
+def pack_display_name(display_name: str) -> str | None:
+    """``display_name`` stripped, as an uploaded pack stores it, or ``None``.
 
-    The name is the last segment of the pack's object key and of its public
-    download URL, and the GC logs the key. So it must be one segment, with no
-    ``/`` or ``\\``. It must carry no control character (Unicode ``Cc``: C0, DEL
-    and C1), which would split a log line or drive the terminal showing it, and no
-    lone surrogate, which has no UTF-8 encoding at all. It must not be blank, and
-    must fit :data:`MAX_FILENAME_BYTES`. Any other character is a legitimate name,
-    Unicode spaces and joiners included.
-
-    Only an upload asks: a row stored before the check keeps its name, and every
-    read path serves it as before.
+    ``None`` when the stripped name cannot name a pack (issue #3922). The name is
+    shown in the library and typed to confirm a delete. Stripped, it must not be
+    empty, must fit :data:`MAX_DISPLAY_NAME_LENGTH`, and must carry no control
+    character (Unicode ``Cc``), which would break the line it is shown on or drive
+    a terminal, and no lone surrogate, which has no UTF-8 encoding and so could not
+    be stored. Any other character is a legitimate name.
     """
 
-    return (
-        filename.strip() != ""
-        and not any(
-            c in "/\\" or unicodedata.category(c) in ("Cc", "Cs") for c in filename
-        )
-        and len(filename.encode("utf-8")) <= MAX_FILENAME_BYTES
-    )
+    name = display_name.strip()
+    if (
+        name == ""
+        or len(name) > MAX_DISPLAY_NAME_LENGTH
+        or any(unicodedata.category(c) in ("Cc", "Cs") for c in name)
+    ):
+        return None
+    return name
 
 
 @dataclass(frozen=True)

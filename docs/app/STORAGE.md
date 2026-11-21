@@ -346,7 +346,10 @@ resource-pack GC (Section 4.3) run a pass the same way:
   age. A resource pack's line also names its pack id. A resource pack's key is
   logged escaped, here, in the WARNING below and in the DEBUG line that says
   where a pass starts: it ends in the upload's filename, and a pack stored before
-  the upload refused control characters may carry them (issue #3907).
+  the upload refused control characters may carry them (issue #3907). The object
+  client's errors and the resource-pack store's name the key escaped too, so a
+  failed download's traceback carries it escaped in the `text` log format, which
+  keeps a traceback's own line breaks (issue #3922).
 - Each pass ends with one summary line: how many objects it listed, how many it
   reclaimed and their bytes, how many deletes failed, and how long it took. The
   line is at INFO when the pass reclaimed or failed anything, and at DEBUG

@@ -36,7 +36,7 @@ import json
 import os
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 
 import pytest
@@ -433,6 +433,67 @@ async def test_put_backend_failure_translates_and_leaves_no_blob() -> None:
         await _put(store, pack_id)
 
     assert backing.objects == {}
+
+
+# A pack stored before the upload refused control characters (issue #3922).
+_LEGACY_FILENAME = "x\nINFO forged\x1b[2J.zip"
+
+
+async def _open_missing(pack_id: ResourcePackId) -> None:
+    store = ObjectResourcePackStore(fake_s3_factory(FakeS3Store()))
+    await _read(store, pack_id, _LEGACY_FILENAME)
+
+
+async def _open_down(pack_id: ResourcePackId) -> None:
+    backing = FakeS3Store()
+    store = ObjectResourcePackStore(fake_s3_factory(backing))
+    await _put(store, pack_id, _LEGACY_FILENAME)
+    backing.read_aborts[f"resource-packs/{pack_id.value}/{_LEGACY_FILENAME}"] = [0]
+    await _read(store, pack_id, _LEGACY_FILENAME)
+
+
+async def _size_missing(pack_id: ResourcePackId) -> None:
+    store = ObjectResourcePackStore(fake_s3_factory(FakeS3Store()))
+    await store.size(pack_id, _LEGACY_FILENAME)
+
+
+async def _size_down(pack_id: ResourcePackId) -> None:
+    store = ObjectResourcePackStore(_head_unavailable_factory(FakeS3Store()))
+    await store.size(pack_id, _LEGACY_FILENAME)
+
+
+async def _put_down(pack_id: ResourcePackId) -> None:
+    store = ObjectResourcePackStore(
+        _write_fault_factory(FakeS3Store(), fail_upload=True)
+    )
+    await _put(store, pack_id, _LEGACY_FILENAME)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param(_open_missing, id="open-missing"),
+        pytest.param(_open_down, id="open-down"),
+        pytest.param(_size_missing, id="size-missing"),
+        pytest.param(_size_down, id="size-down"),
+        pytest.param(_put_down, id="put-down"),
+    ],
+)
+async def test_an_error_names_its_key_escaped(
+    call: Callable[[ResourcePackId], Awaitable[None]],
+) -> None:
+    # A download that fails mid-body is logged with this error in its traceback,
+    # which keeps its line breaks: raw, the key's newline would start a line of its
+    # own there (issue #3922).
+    pack_id = ResourcePackId(uuid.uuid4())
+    key = f"resource-packs/{pack_id.value}/{_LEGACY_FILENAME}"
+
+    with pytest.raises(
+        (ResourcePackNotFoundError, ResourcePackStorageUnavailableError)
+    ) as excinfo:
+        await call(pack_id)
+
+    assert str(excinfo.value) == repr(key)
 
 
 async def test_delete_backend_failure_at_the_listing_translates() -> None:

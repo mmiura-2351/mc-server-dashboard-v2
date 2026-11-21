@@ -21,6 +21,7 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   server_unsettled: "plugins.error.unsettled",
   server_busy: "plugins.error.busy",
   invalid_path: "plugins.error.invalidPath",
+  invalid_filename: "plugins.error.invalidFilename",
   catalog_upstream_failed: "plugins.error.catalogUpstreamFailed",
   catalog_project_not_found: "plugins.error.catalogNotFound",
   checksum_mismatch: "plugins.error.checksumMismatch",

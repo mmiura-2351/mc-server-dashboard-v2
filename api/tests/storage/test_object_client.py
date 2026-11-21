@@ -36,6 +36,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     NotFoundError,
     ObjectStoreUnavailableError,
     ObjectStoreUnreachableError,
+    StorageError,
     StorageUnreachableError,
 )
 
@@ -809,6 +810,90 @@ async def test_delete_object_failure_names_its_key_escaped(
 
     with pytest.raises(ObjectStoreUnavailableError) as excinfo:
         await client.delete_object(key)
+
+    assert repr(key) in str(excinfo.value)
+
+
+class _RaisingKeyedCallsClient:
+    """A client double whose every call on one key raises a set error."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    async def get_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+    async def head_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+    async def copy_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+    async def put_object(self, **_kwargs: object) -> None:
+        raise self._error
+
+    async def create_multipart_upload(self, **_kwargs: object) -> None:
+        raise self._error
+
+
+async def _get(client: _Aioboto3S3Client, key: str) -> None:
+    await client.get_object(key)
+
+
+async def _head(client: _Aioboto3S3Client, key: str) -> None:
+    await client.head_object(key)
+
+
+async def _copy(client: _Aioboto3S3Client, key: str) -> None:
+    await client.copy_object(key, "communities/k/copy")
+
+
+async def _put(client: _Aioboto3S3Client, key: str) -> None:
+    await client.put_object(key, b"data")
+
+
+async def _put_if_absent(client: _Aioboto3S3Client, key: str) -> None:
+    await client.put_object_if_absent(key, b"data")
+
+
+async def _upload(client: _Aioboto3S3Client, key: str) -> None:
+    await client.upload_multipart(key, _one_part())
+
+
+_FAULT = _service_error("Operation", 500, "InternalError")
+_TRANSPORT = EndpointConnectionError(endpoint_url="http://store:8333")
+
+
+@pytest.mark.parametrize(
+    ("call", "error"),
+    [
+        pytest.param(_get, _client_error("NoSuchKey"), id="get-not-found"),
+        pytest.param(_get, _FAULT, id="get-fault"),
+        pytest.param(_get, _TRANSPORT, id="get-transport"),
+        pytest.param(_head, _FAULT, id="head-fault"),
+        pytest.param(_head, _TRANSPORT, id="head-transport"),
+        pytest.param(_copy, _client_error("NoSuchKey"), id="copy-not-found"),
+        pytest.param(_copy, _FAULT, id="copy-fault"),
+        pytest.param(_put, _FAULT, id="put-fault"),
+        pytest.param(_put_if_absent, _FAULT, id="put-if-absent-fault"),
+        pytest.param(_put_if_absent, _TRANSPORT, id="put-if-absent-transport"),
+        pytest.param(
+            _put_if_absent, _client_error("NotImplemented"), id="put-if-absent-refused"
+        ),
+        pytest.param(_upload, _FAULT, id="upload-fault"),
+    ],
+)
+async def test_a_failure_names_its_key_escaped(
+    call: Callable[[_Aioboto3S3Client, str], Awaitable[None]], error: BaseException
+) -> None:
+    # The message reaches a log only in a traceback, which keeps its line breaks:
+    # a raw newline in a key stored before the resource-pack upload refused
+    # control characters would start a line of its own there (issue #3922).
+    key = "resource-packs/p/x\nINFO forged\x1b[2J.zip"
+    client = _Aioboto3S3Client(_RaisingKeyedCallsClient(error), "bucket")
+
+    with pytest.raises((StorageError, ConditionalPutUnsupportedError)) as excinfo:
+        await call(client, key)
 
     assert repr(key) in str(excinfo.value)
 
