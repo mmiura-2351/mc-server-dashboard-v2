@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useRef } from "react";
 import { t } from "../i18n/index.ts";
+import { isComposing } from "./isComposing.ts";
 
 // Self-built modal primitive (WEBUI_SPEC.md Section 7.4 / 7.6 — no UI kit).
 // The backdrop is a sibling button behind the dialog so clicking it closes the
@@ -220,8 +221,9 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         return;
       }
       if (event.key === "Escape") {
-        // An inner layer, as a popover in the dialog, has taken it (#3971).
-        if (event.defaultPrevented) {
+        // An inner layer, as a popover in the dialog, has taken it (#3971),
+        // or the IME has, to cancel a conversion in a field (#3993).
+        if (event.defaultPrevented || isComposing(event)) {
           return;
         }
         // Handled, so a listener that hears the Escape after this one leaves
