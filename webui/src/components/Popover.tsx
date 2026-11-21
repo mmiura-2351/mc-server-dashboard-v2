@@ -104,16 +104,17 @@ export function Popover({
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
       // Escape under a modal that does not hold this popover is the modal's
       // (#3920).
       const dialog = topmostDialog();
       if (dialog !== null && !dialog.contains(wrapperRef.current)) {
         return;
       }
-      if (event.key === "Escape") {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
+      setOpen(false);
+      triggerRef.current?.focus();
     };
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
