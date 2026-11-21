@@ -97,6 +97,30 @@ function focusFirstOf(
   }
 }
 
+// The stops of `cycle` from the one a Tab from `active` goes to next, round
+// to `active`, when that one is a scroller; else undefined. A browser that
+// does not stop Tab on a scroller runs past it, as Chromium does past a
+// disabled scrolling textarea, and may run out of the dialog.
+function onwardFromScroller(
+  cycle: HTMLElement[],
+  active: Element,
+  dialog: HTMLElement,
+  back: boolean,
+): HTMLElement[] | undefined {
+  const at = cycle.indexOf(active as HTMLElement);
+  const next = cycle[at + (back ? -1 : 1)];
+  if (
+    (at === -1 && active !== dialog) ||
+    next === undefined ||
+    next.matches(CONTROLS)
+  ) {
+    return undefined;
+  }
+  const ring = back ? [...cycle].reverse() : cycle;
+  const from = ring.indexOf(next);
+  return [...ring.slice(from), ...ring.slice(0, from)];
+}
+
 interface ModalProps {
   open: boolean;
   title: string;
@@ -146,22 +170,29 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
       subtree: true,
     });
 
-    // The last Tab's direction and the page's scroll before it, kept until
-    // the browser has moved focus for it: used up by the first focus that
-    // follows, or cleared at its keyup, or by a timer when that keyup is
-    // lost, as when Tab leaves the page.
-    let lastTab: { shiftKey: boolean; x: number; y: number } | null = null;
+    // The last Tab's direction and the page's scroll before it, and the
+    // stops on from a scroller it goes to next, kept until the browser has
+    // moved focus for it: used up by the first focus that follows, or
+    // cleared at its keyup, or by a timer when that keyup is lost, as when
+    // Tab leaves the page.
+    let lastTab: {
+      shiftKey: boolean;
+      x: number;
+      y: number;
+      onward?: HTMLElement[];
+    } | null = null;
 
     // A Tab that lands focus outside the dialog and the toast stack, the
     // browser's own from the page body or one that leaves the dialog, is
     // pulled back: to the dialog's first control, or its last after
-    // Shift+Tab. The control may scroll into view inside the dialog; the
-    // page's scroll the Tab made is undone. Focus a script or the pointer
-    // moves is left alone, even while the Tab's key is still down: a confirm
-    // may close the dialog and focus behind it in any order, and the keydown
-    // branch below takes the next Tab. Only the topmost dialog pulls: one
-    // that opens over it during the Tab, from a blur handler say, keeps the
-    // focus it takes.
+    // Shift+Tab. One that ran past the scroller it went to next goes on from
+    // that scroller instead, the toast stack included (#3971). The control
+    // may scroll into view inside the dialog; the page's scroll the Tab made
+    // is undone. Focus a script or the pointer moves is left alone, even
+    // while the Tab's key is still down: a confirm may close the dialog and
+    // focus behind it in any order, and the keydown branch below takes the
+    // next Tab. Only the topmost dialog pulls: one that opens over it during
+    // the Tab, from a blur handler say, keeps the focus it takes.
     const isOutside = (node: Node | null) =>
       !dialog.contains(node) && !toastZone?.contains(node);
     const onFocusIn = () => {
@@ -175,7 +206,10 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         return;
       }
       const inDialog = focusableWithin(dialog);
-      focusFirstOf(tab.shiftKey ? inDialog.reverse() : inDialog, dialog);
+      focusFirstOf(
+        tab.onward ?? (tab.shiftKey ? inDialog.reverse() : inDialog),
+        dialog,
+      );
       window.scrollTo(tab.x, tab.y);
     };
     document.addEventListener("focusin", onFocusIn);
@@ -242,6 +276,13 @@ export function Modal({ open, title, onClose, children, footer }: ModalProps) {
         if (order !== undefined) {
           event.preventDefault();
           focusFirstOf(order, dialog);
+        } else {
+          lastTab.onward = onwardFromScroller(
+            cycle,
+            active,
+            dialog,
+            event.shiftKey,
+          );
         }
       }
     };
