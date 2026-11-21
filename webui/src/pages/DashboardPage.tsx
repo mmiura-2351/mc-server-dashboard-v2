@@ -10,6 +10,7 @@ import { Link, useParams } from "react-router";
 import { api } from "../api/client.ts";
 import { apiPath } from "../api/path.ts";
 import type { components } from "../api/schema";
+import { isComposing } from "../components/isComposing.ts";
 import { Modal } from "../components/Modal.tsx";
 import { Popover } from "../components/Popover.tsx";
 import { ResizableTable } from "../components/ResizableColumns.tsx";
@@ -476,7 +477,10 @@ function DashboardFilterBar({
         onChange={(e) => onSearchDraftChange(e.target.value)}
         onBlur={onSearchCommit}
         onKeyDown={(e) => {
-          if (e.key === "Enter") onSearchCommit();
+          // An Enter that confirms an IME conversion is the IME's (#4012).
+          if (e.key === "Enter" && !isComposing(e.nativeEvent)) {
+            onSearchCommit();
+          }
         }}
         aria-label={t("dashboard.filter.search")}
       />
