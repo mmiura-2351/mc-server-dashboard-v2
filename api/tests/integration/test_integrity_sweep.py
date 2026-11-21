@@ -497,7 +497,6 @@ class _Forwarder:
 
 # 4 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(4 * 10 + 30)
-@pytest.mark.usefixtures("app_log_handler_restored")
 @pytest.mark.parametrize("down_at", ["snapshot-check", "lock-acquire"])
 async def test_cli_exits_3_when_the_database_goes_down_mid_sweep(
     down_at: str,
@@ -505,6 +504,9 @@ async def test_cli_exits_3_when_the_database_goes_down_mid_sweep(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    # Last, so the app's handler comes off before ``capsys`` closes its stream and
+    # ``engine``'s teardown logs the downgrade.
+    app_log_handler_restored: None,
 ) -> None:
     """Postgres going down while the sweep holds no lifecycle lock stops the pass
     at its next query with exit 3 and one line, no traceback, at the default log
