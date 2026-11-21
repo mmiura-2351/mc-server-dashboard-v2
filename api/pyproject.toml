@@ -257,6 +257,8 @@ include_external_packages = true
 # carries a comment saying why. Own-quadrant bans are NOT repeated in the third
 # contract — the layered and adapters contracts already cover them — and its
 # `source_modules` is domain + application wherever both exist.
+# `tests/tooling/test_context_contracts.py` holds each list to that `ls` and
+# repeats the deliberate omissions, so an omission changes in both.
 [[tool.importlinter.contracts]]
 name = "core context layers (domain <- application <- api; adapters at the edge)"
 type = "layers"
@@ -455,8 +457,7 @@ forbidden_modules = [
 # adapter layer (the servers UnitOfWork reuses the community resource-grant
 # adapter on one session), so the domain never reaches across. The player-groups
 # slice (issue #276) lives inside this same context (servers.{domain,application,
-# adapters,api}.groups), so it is covered by these contracts and adds none — the
-# kept-contract count stays 23.
+# adapters,api}.groups), so it is covered by these contracts and adds none.
 [[tool.importlinter.contracts]]
 name = "servers context layers (domain <- application <- api; adapters at the edge)"
 type = "layers"
