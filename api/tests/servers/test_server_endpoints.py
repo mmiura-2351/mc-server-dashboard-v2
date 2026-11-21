@@ -716,6 +716,41 @@ def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
     assert recorder.events[0].actor_id is not None
 
 
+# Every door that names a server refuses a name with a control character or a
+# lone surrogate (issue #3957). A JSON escape delivers either one.
+@pytest.mark.parametrize(
+    ("name", "reason"),
+    [
+        pytest.param("a\x00b", "invalid_server_name", id="nul"),
+        pytest.param("a\x1b[2Jb", "invalid_server_name", id="esc"),
+        # The body's ``min_length`` check refuses a lone surrogate as
+        # ``string_unicode``, so FastAPI's validation answers first.
+        pytest.param("a\ud800b", "validation_error", id="lone-surrogate"),
+    ],
+)
+def test_create_refuses_a_server_name(name: str, reason: str) -> None:
+    uow = FakeUnitOfWork()
+    app = _app(
+        member=True,
+        allow=True,
+        create=CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=PortRange(start=25565, end=25664),
+        ),
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers",
+        content=json.dumps({**_create_body(), "name": name}),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == reason
+    assert uow.servers.by_id == {}
+
+
 def test_create_game_port_out_of_schema_bound_is_422() -> None:
     # A wildly invalid value (above 65535) fails schema validation before the use
     # case runs (issue #243).
@@ -1178,6 +1213,53 @@ def test_update_empty_body_requires_server_update_403() -> None:
     assert body["reason"] == "forbidden"
     assert body["permission"] == "server:update"
     assert uow.commits == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a\x00b", id="nul"),
+        pytest.param("a\x1b[2Jb", id="esc"),
+        # The rename body sets no bound, so a lone surrogate reaches the name.
+        pytest.param("a\ud800b", id="lone-surrogate"),
+    ],
+)
+def test_rename_refuses_a_server_name(name: str) -> None:
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server_entity(community_id=community, server_id=server_id))
+    app = _app(member=True, allow=True, update=_real_update(uow))
+    resp = _client(app).patch(
+        f"/api/communities/{community}/servers/{server_id}",
+        content=json.dumps({"name": name}),
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_server_name"
+    assert uow.commits == 0
+    assert uow.servers.by_id[ServerId(server_id)].name.value == "survival"
+
+
+def test_rename_refuses_a_stored_name_the_rule_refuses_until_renamed() -> None:
+    # A server stored before the rule keeps its name, but a save that sends it
+    # back is refused like any other; a valid name fixes it (issue #3957).
+    community = uuid.uuid4()
+    server_id = uuid.uuid4()
+    uow = FakeUnitOfWork()
+    legacy = _server_entity(community_id=community, server_id=server_id)
+    legacy.name = ServerName.stored("legacy\nname")
+    uow.servers.seed(legacy)
+    client = _client(_app(member=True, allow=True, update=_real_update(uow)))
+    url = f"/api/communities/{community}/servers/{server_id}"
+
+    resent = client.patch(url, json={"name": "legacy\nname"})
+    assert resent.status_code == 422
+    assert resent.json()["reason"] == "invalid_server_name"
+
+    renamed = client.patch(url, json={"name": "legacy name"})
+    assert renamed.status_code == 200
+    assert uow.servers.by_id[ServerId(server_id)].name.value == "legacy name"
 
 
 def test_update_no_op_config_requires_server_update_403() -> None:

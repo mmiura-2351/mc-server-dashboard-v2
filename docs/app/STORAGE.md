@@ -1689,6 +1689,11 @@ This is enforced in the adapter (not the use case) so that **every** backend get
 the protection and a future backend cannot forget it; the rejection is a typed
 domain error so the API surface can map it to a uniform response.
 
+A refusal or a miss names the caller's path escaped (`repr`) in its message, on
+both backends (issue #3957). `rel_path` refuses C0 and DEL but not a C1
+character, and a traceback in the `text` log format keeps a message's own line
+breaks, so a raw path could split the line it is logged on.
+
 ### 6.1 The per-component symlink rule
 
 **Symlinks in a working set are unsupported, full stop — at rest included.** The

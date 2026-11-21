@@ -545,6 +545,8 @@ export const en = {
   // and actions-bar surfaces via the lifecycle mapping, so it names no single
   // action (issue #2360).
   "serverDetail.error.unsettled": "The server must be stopped for this action.",
+  "serverDetail.error.invalidServerName":
+    "That server name is not allowed. Enter a name that is not blank and has no control characters.",
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
     "That game port is outside the allowed range.",
@@ -1912,7 +1914,8 @@ export const en = {
   "plugins.error.unsupportedServerType":
     "This server type does not support {nouns}.",
   "plugins.error.invalidSide": "Invalid side for this server type.",
-  "plugins.error.invalidDisplayName": "The display name is invalid.",
+  "plugins.error.invalidDisplayName":
+    "This file name cannot be used as the {noun}'s display name. Rename the file so its name before .jar is 1 to 200 characters long, then upload it again.",
   "plugins.error.bedrockPortRangeExhausted":
     "No free port is available in the Bedrock port range. Please try again later.",
   "plugins.error.bedrockPortTaken":

@@ -2651,7 +2651,7 @@ class FsStorage(Storage):
         try:
             target = self._safe_read_target(current, rel_path)
             with _open_readable_sync(
-                target, f"file not found: {rel_path.value}"
+                target, f"file not found: {rel_path.value!r}"
             ) as handle:
                 return handle.read()
         finally:
@@ -2675,7 +2675,7 @@ class FsStorage(Storage):
             try:
                 target = self._safe_read_target(current, rel_path)
                 handle = _open_readable_sync(
-                    target, f"file not found: {rel_path.value}"
+                    target, f"file not found: {rel_path.value!r}"
                 )
             except BaseException:
                 release()
@@ -2709,7 +2709,7 @@ class FsStorage(Storage):
         current, release = self._lease_current(community_id, server_id)
         try:
             target = self._safe_read_target(current, rel_path)
-            return _list_entries(target, f"directory not found: {rel_path.value}")
+            return _list_entries(target, f"directory not found: {rel_path.value!r}")
         finally:
             release()
 
@@ -2823,7 +2823,7 @@ class FsStorage(Storage):
             # reject it as an invalid path rather than crashing.
             if target.is_dir():
                 raise PathTraversalError(
-                    f"rel_path names a directory, not a file: {rel_path.value}"
+                    f"rel_path names a directory, not a file: {rel_path.value!r}"
                 )
             # Capture the prior version BEFORE overwriting (Section 4.4/5), so a
             # crash mid-write leaves both the old content and the retained version
@@ -2919,7 +2919,7 @@ class FsStorage(Storage):
         # (issue #2433): ``_existing_file`` answers False rather than raising
         # ENAMETOOLONG, so it takes the not-found path below instead of a 500.
         if not _existing_file(target):
-            raise NotFoundError(f"file not found: {rel_path.value}")
+            raise NotFoundError(f"file not found: {rel_path.value!r}")
         # Capture the content BEFORE removing it (Section 5), so a delete is
         # reversible by rollback exactly like an overwrite is.
         self._capture_version(community_id, server_id, rel_path, target)
@@ -2958,11 +2958,11 @@ class FsStorage(Storage):
         # directory misses here rather than rmtree-ing the subtree it points at.
         # Checked before ``_existing_dir``, which follows the link.
         if _is_symlink(target):
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
         # A SOURCE path, so an over-long name is a miss (issue #2433):
         # ``_existing_dir`` answers False rather than raising ENAMETOOLONG.
         if not _existing_dir(target):
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
         # rmtree is per-member unlinks — not crash-atomic (#1608).
         shutil.rmtree(target)
         _fsync_dir(target.parent)
@@ -3010,7 +3010,7 @@ class FsStorage(Storage):
         # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
         # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
         if not _existing_file(src):
-            raise NotFoundError(f"file not found: {from_path.value}")
+            raise NotFoundError(f"file not found: {from_path.value!r}")
         with _dest_mutation_errnos(to_path):
             dst.parent.mkdir(parents=True, exist_ok=True)
             os.rename(src, dst)
@@ -3060,7 +3060,7 @@ class FsStorage(Storage):
         # ``from_path`` is a SOURCE (over-long -> miss), ``to_path`` a DESTINATION
         # (over-long -> 422, a file-occupied parent -> 409) — issue #2433.
         if not _existing_dir(src):
-            raise NotFoundError(f"directory not found: {from_path.value}")
+            raise NotFoundError(f"directory not found: {from_path.value!r}")
         with _dest_mutation_errnos(to_path):
             # Ensure parent directories exist for the destination (e.g. renaming
             # ``a/b`` to ``x/y/z`` needs ``x/y`` to exist).
@@ -4460,7 +4460,7 @@ class _FsWorkingSetView(WorkingSetView):
         if self._pinned is None:
             if not rel_path.parts:
                 return []
-            raise NotFoundError(f"directory not found: {rel_path.value}")
+            raise NotFoundError(f"directory not found: {rel_path.value!r}")
         return await self._storage._read_leased(
             self._pinned, self._list_dir_sync, rel_path
         )
@@ -4475,11 +4475,11 @@ class _FsWorkingSetView(WorkingSetView):
         # shared so the view cannot drift from ``_list_dir`` on any of it --
         # including how a vanished child is reported (issue #2414) and how a
         # symlink child is described (issue #2418).
-        return _list_entries(target, f"directory not found: {rel_path.value}")
+        return _list_entries(target, f"directory not found: {rel_path.value!r}")
 
     def open_file_stream(self, rel_path: RelPath) -> ByteStream:
         if self._pinned is None:
-            raise NotFoundError(f"file not found: {rel_path.value}")
+            raise NotFoundError(f"file not found: {rel_path.value!r}")
         # Resolve the target synchronously (the pinned path is stable). Reads go
         # through the read-side resolve so the view refuses a symlink component
         # exactly as the unpinned read paths do (issues #2418, #2432).
@@ -4510,7 +4510,7 @@ class _FsWorkingSetView(WorkingSetView):
                 _open_releasing_on_fault,
                 release,
                 target,
-                f"file not found: {rel}",
+                f"file not found: {rel!r}",
             )
         except asyncio.CancelledError:
             raise  # the still-running open owns the lease

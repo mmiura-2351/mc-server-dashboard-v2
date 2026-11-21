@@ -22,6 +22,9 @@ describe("serverSettingsErrorPresentation", () => {
     ["config_lone_surrogate", "serverDetail.error.configLoneSurrogate"],
     // A delete the Worker still holds (#3852): the held Delete button's reason.
     ["server_assigned", "serverDetail.danger.deleteAwaitsRelease"],
+    // A rename to a name with a control character (#3957). A save always sends
+    // the name, so a server stored with one before the rule gets this too.
+    ["invalid_server_name", "serverDetail.error.invalidServerName"],
   ] as const)("toasts %s with its specific message", (reason, key) => {
     expect(serverSettingsErrorPresentation(reason)).toEqual({
       target: "toast",

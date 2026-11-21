@@ -25,6 +25,10 @@ const SETTINGS_ERROR_KEY: Record<string, TranslationKey> = {
   // A delete a Worker still holds (#3852): the cache showed the server
   // released, so the button was not held. Same words as the held button.
   server_assigned: "serverDetail.danger.deleteAwaitsRelease",
+  // A rename the server-name rule refuses (#3957). The save always sends the
+  // name, so a server stored with such a name before the rule is refused
+  // until it is renamed.
+  invalid_server_name: "serverDetail.error.invalidServerName",
   port_taken: "serverDetail.error.portTaken",
   port_out_of_range: "serverDetail.error.portOutOfRange",
   invalid_snapshot_interval: "serverDetail.error.invalidSnapshotInterval",

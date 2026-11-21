@@ -145,6 +145,24 @@ def test_unexpected_exception_is_problem_json_not_bare_500() -> None:
     assert "Is a directory" not in resp.text
 
 
+# The whole body a 500 carries: the reason and the status phrase, and no part of
+# the exception that caused it (issue #3957).
+_GENERIC_500_BODY = {
+    "type": "urn:mcsd:error:internal_error",
+    "title": "Internal Server Error",
+    "status": 500,
+    "reason": "internal_error",
+}
+
+
+def test_unhandled_exception_handler_answers_the_generic_body() -> None:
+    # This app has no catch-all middleware, so ``unhandled_exception_handler``
+    # answers the 500 itself.
+    resp = _client().get("/boom")
+    assert resp.status_code == 500
+    assert resp.json() == _GENERIC_500_BODY
+
+
 def test_validation_error_entries_omit_input_and_ctx() -> None:
     # A structural 422 on a secret-bearing field must not echo the submitted
     # value: ``input`` (the raw value) and ``ctx`` (can embed it, e.g. a
@@ -251,6 +269,12 @@ def test_unhandled_500_carries_security_headers() -> None:
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
     assert resp.headers["Permissions-Policy"]
+
+
+def test_unhandled_exception_middleware_answers_the_generic_body() -> None:
+    resp = _client_with_middleware().get("/boom")
+    assert resp.status_code == 500
+    assert resp.json() == _GENERIC_500_BODY
 
 
 def test_unhandled_500_carries_correlation_id() -> None:
