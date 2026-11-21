@@ -191,6 +191,19 @@ def test_a_store_fault_exits_2_without_a_traceback(
     assert "Traceback" not in err
 
 
+def test_a_configuration_fault_exits_2_without_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The database URL is a required key, so the settings do not load.
+    monkeypatch.delenv("MCD_API_DATABASE__URL")
+
+    assert store_claim_cli.main([]) == 2
+
+    err = capsys.readouterr().err
+    assert err.startswith("store claim failed: ValidationError: ")
+    assert "Traceback" not in err
+
+
 def test_the_command_logs_in_the_configured_format(
     store: _Store, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
