@@ -1393,10 +1393,11 @@ async def test_restore_opens_gzip_spool_exactly_once() -> None:
     """Issue #1945: restore_backup must decompress the gzip spool in a single
     sequential pass, not re-open the archive per member (O(n^2)).
 
-    Patch ``tarfile.open`` to count invocations on the spool path during
-    restore. A correct single-pass implementation opens the spool exactly once;
-    the old per-member implementation opened it 1 + N times (once for the
-    member-list scan, once per member).
+    Patch ``tarfile.TarFile``, which the walk opens the tar with (issue #3931),
+    to count invocations on the spool path during restore. A correct
+    single-pass implementation opens the spool exactly once; the old per-member
+    implementation opened it 1 + N times (once for the member-list scan, once
+    per member).
     """
 
     from unittest.mock import patch
@@ -1408,17 +1409,17 @@ async def test_restore_opens_gzip_spool_exactly_once() -> None:
     key = await storage.create_backup_from_current(community, server)
 
     open_count = {"n": 0}
-    original_open = tarfile.open
+    original_tarfile = tarfile.TarFile
 
     def _counting_open(*args: Any, **kwargs: Any) -> tarfile.TarFile:
         open_count["n"] += 1
-        return original_open(*args, **kwargs)
+        return original_tarfile(*args, **kwargs)
 
-    with patch("tarfile.open", side_effect=_counting_open):
+    with patch("tarfile.TarFile", side_effect=_counting_open):
         await storage.restore_backup(community, server, key)
 
     assert open_count["n"] == 1, (
-        f"expected exactly 1 tarfile.open call (single pass), got {open_count['n']}"
+        f"expected exactly 1 TarFile opened (single pass), got {open_count['n']}"
     )
 
     # The restored content must still be correct.

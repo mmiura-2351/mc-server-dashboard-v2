@@ -65,29 +65,32 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
     RelPath,
     ServerId,
 )
+from tests.servers import archive_cap_shapes
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store, fake_s3_factory
 from tests.storage.helpers import (
     BAD_SPARSE_FIELDS,
     END_CHECK_FILES,
     GNU_SPARSE_FORMATS,
     GO_PACK_FILES,
+    HEADER_LIMITS,
     INVALID_SPARSE_LAYOUTS,
-    OVER_THE_UPLOAD_HEADER_LIMITS_FILES,
     SPARSE_EXTENSION_CUTS,
     SPARSE_FILES,
     TARS_NOT_ENDING_AT_THEIR_MARKER,
     TARS_WHOSE_MEMBER_DATA_RUNS_PAST_IT,
+    WITHIN_THE_STORAGE_HEADER_LIMITS_FILES,
     gnu_tar,
     gnu_tar_sparse_archive_cut_in_its_extension_block,
     go_archive_tar,
     needs_gnu_tar,
     needs_go,
-    over_the_upload_header_limits_tar,
+    over_a_header_limit_tar,
     tar_cut_in_a_sparse_extension_block,
     tar_with_a_bad_sparse_field,
     tar_with_an_invalid_sparse_layout,
     tar_with_gnu_tar_sparse_members,
     tar_with_link_member,
+    within_the_storage_header_limits_tar,
 )
 
 _CREDENTIAL = "test-worker-credential"
@@ -3272,22 +3275,91 @@ def test_snapshot_from_each_producer_is_published(
 @pytest.mark.parametrize(
     "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
 )
-def test_snapshot_over_the_upload_header_limits_is_published(
+@pytest.mark.parametrize("limit", HEADER_LIMITS)
+def test_snapshot_over_a_header_limit_is_refused_and_not_published(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    limit: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The ingest reads a snapshot through restore's reader stack, held to the
+    # storage walks' header limits (issue #3931): 2 MiB of extended headers
+    # before a member, a member of 33 PAX records, and more PAX values than
+    # 8 Mi characters plus 16 Ki a member are each a body that does not read.
+    # The Worker writes none of them: its largest member header is a PAX
+    # ``path`` and ``size`` record, 5,632 bytes holding 8,209 characters. The
+    # Worker credential keeps the route's own body limit, as above.
+    monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: _CREDENTIAL)
+    body = over_a_header_limit_tar(limit)
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+def test_snapshot_within_the_storage_header_limits_is_published(
     tmp_path: Path,
     make_storage: Callable[[Path], Storage],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The header limits the upload doors hold a walk to (issue #3810) are not the
-    # ingest's: it has no entry cap, so a large working set would reach the
-    # character limit. 2 MiB of extended headers before a member, a member of 33
-    # PAX records and more than 8 Mi characters of PAX values are published. The
-    # Worker credential keeps the route's own body limit, as above.
+    # The ingest has no entry cap, so it takes the 16 Ki characters a member
+    # the storage walks allow on top of the upload doors' 8 Mi (issue #3931).
     monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: _CREDENTIAL)
     status, _, hydrated, staging = _post_snapshot_over_a_prior(
-        tmp_path, make_storage, over_the_upload_header_limits_tar()
+        tmp_path, make_storage, within_the_storage_header_limits_tar()
     )
 
-    assert (status, hydrated, staging) == (204, OVER_THE_UPLOAD_HEADER_LIMITS_FILES, [])
+    assert (status, hydrated, staging) == (
+        204,
+        WITHIN_THE_STORAGE_HEADER_LIMITS_FILES,
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    "make_storage", [_fs_storage, _object_storage], ids=["fs", "object"]
+)
+@pytest.mark.parametrize("build", archive_cap_shapes.EXTENDED_HEADER_CHAINS)
+def test_snapshot_with_a_chain_of_extended_headers_is_refused_and_not_published(
+    tmp_path: Path,
+    make_storage: Callable[[Path], Storage],
+    build: Callable[[], bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``tarfile`` reads extended headers recursively, so a chain of a few
+    # hundred before one member raised a raw ``RecursionError`` and answered 500
+    # (issue #3931). It is a body that does not read.
+    monkeypatch.setattr(dependencies, "get_worker_credential", lambda _r: _CREDENTIAL)
+    body = gzip.decompress(build())
+
+    assert _post_snapshot_over_a_prior(tmp_path, make_storage, body) == _REFUSED
+
+
+def _path_of_length(length: int) -> str:
+    """A relative path ``length`` bytes long, of components of at most 201."""
+
+    path = ("n" * 200 + "/") * (length // 201)
+    path += "n" * (length - len(path))
+    return path[:-1] + "n" if path.endswith("/") else path
+
+
+def test_snapshot_whose_member_path_the_fs_staging_cannot_hold_is_refused(
+    tmp_path: Path,
+) -> None:
+    # The fs ingest extracts a member by its path joined to the staging
+    # directory, so a path the Worker may pack (up to 4095 bytes, issue #3341)
+    # can join to past Linux's PATH_MAX there. That raised a raw ``OSError``
+    # (ENAMETOOLONG) and answered 500 (issue #3931); it is a refusal naming the
+    # member. Here the joined path is 4096 bytes, one past what a path may be.
+    # Which paths a snapshot may hold is issue #3973's to decide.
+    staging = FsStorage(tmp_path)._staging_dir(
+        CommunityId(uuid.uuid4()), ServerId(uuid.uuid4()), uuid.uuid4().hex
+    )
+    member = _path_of_length(4096 - len(f"{staging}/"))
+    body = _tar_bytes({member: b"long"})
+
+    assert _post_snapshot_over_a_prior(tmp_path, _fs_storage, body) == _REFUSED
 
 
 def test_snapshot_disconnect_mid_upload_is_a_warning_and_leaves_no_staging(

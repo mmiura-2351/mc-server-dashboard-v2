@@ -36,7 +36,8 @@ from mc_server_dashboard_api.storage.adapters.object_store import (
 )
 from tests.storage.helpers import tar_bytes
 
-_REAL_TARFILE_OPEN = tarfile.open
+# The walks open their tar with ``tarfile.TarFile`` itself (issue #3931).
+_REAL_TARFILE = tarfile.TarFile
 
 
 class _Reader(io.BufferedReader):
@@ -116,7 +117,7 @@ def _opener(
 
 
 def _patch_tarfile(monkeypatch: pytest.MonkeyPatch, held: _Held, pause: str) -> None:
-    monkeypatch.setattr(tarfile, "open", _opener(_REAL_TARFILE_OPEN, held, pause))
+    monkeypatch.setattr(tarfile, "TarFile", _opener(_REAL_TARFILE, held, pause))
 
 
 def _patch_spool_open(monkeypatch: pytest.MonkeyPatch, held: _Held, pause: str) -> None:
@@ -179,7 +180,7 @@ _Patch = Callable[[pytest.MonkeyPatch, _Held, str], None]
 _Run = Callable[[Path], Awaitable[object]]
 
 
-# Built before any test patches ``tarfile.open``, which ``tar_bytes`` calls.
+# Built before any test patches ``tarfile.TarFile``, which ``tar_bytes`` opens.
 _PLAIN_TAR = tar_bytes({"a.txt": b"A"})
 
 
