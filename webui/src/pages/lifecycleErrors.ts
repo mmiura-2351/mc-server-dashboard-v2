@@ -352,8 +352,10 @@ const VERB_SPECIFIC_503_MESSAGE: Record<
 //             Worker is gone. The reconciler releases the server from it once
 //             its grace lapses, or a second stop does at once, and a start then
 //             places it on another Worker. A Worker back before the release
-//             gets the stop; one back after it keeps its instance, and nothing
-//             stops it.
+//             gets the stop and the final snapshot, which a retried stop takes
+//             at once, including for a server whose process is already gone
+//             and is owed only that snapshot (issue #3983); one back after it
+//             keeps its instance, and nothing stops it.
 // - restart — desired stays running, but an undelivered restart is never
 //             re-sent, so the operator restarts it once the Worker is back, or
 //             moves it (stop, stop again, start).

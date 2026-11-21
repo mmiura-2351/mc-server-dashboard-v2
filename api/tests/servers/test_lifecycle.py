@@ -666,10 +666,12 @@ async def test_reregister_between_commit_and_increment_does_not_double_count() -
     class _ReregisteringUnitOfWork(FakeUnitOfWork):
         async def commit(self) -> None:
             await super().commit()
-            registry.register(make_worker(worker_id=str(worker_uuid), at=_NOW))
+            session = registry.register(
+                make_worker(worker_id=str(worker_uuid), at=_NOW)
+            )
             epoch = registry.assignment_epoch(FleetWorkerId(str(worker_uuid)))
             registry.set_assignment(
-                FleetWorkerId(str(worker_uuid)), {str(server_id): 0}, epoch
+                FleetWorkerId(str(worker_uuid)), session, {str(server_id): 0}, epoch
             )
 
     uow = _ReregisteringUnitOfWork()
@@ -2406,7 +2408,9 @@ async def test_start_confirms_reservation_when_cancelled_after_commit() -> None:
     registry = InMemoryWorkerRegistry(
         clock=FleetFakeClock(_NOW), heartbeat_timeout=dt.timedelta(seconds=30)
     )
-    registry.register(make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW))
+    session = registry.register(
+        make_worker(worker_id=str(worker_uuid), max_servers=1, at=_NOW)
+    )
     cp = _registry_backed_control_plane(registry)
 
     class _CancelOnExitUnitOfWork(FakeUnitOfWork):
@@ -2441,7 +2445,7 @@ async def test_start_confirms_reservation_when_cancelled_after_commit() -> None:
     # reservation that set_assignment can never clear. The snapshot epoch is read here
     # (after the confirm), so the confirm is not preserved and the empty tally wins.
     epoch = registry.assignment_epoch(FleetWorkerId(str(worker_uuid)))
-    registry.set_assignment(FleetWorkerId(str(worker_uuid)), {}, epoch)
+    registry.set_assignment(FleetWorkerId(str(worker_uuid)), session, {}, epoch)
     assert registry.list_workers()[0].assigned_count == 0
 
 

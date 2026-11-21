@@ -29,6 +29,7 @@ from mc_server_dashboard_api.fleet.domain.assigned_server_stopper import (
     AssignedServerStopper,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
+from mc_server_dashboard_api.fleet.domain.registry import SessionToken
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
@@ -95,11 +96,15 @@ def _server(
 
 
 def _registry() -> InMemoryWorkerRegistry:
+    return _registered()[0]
+
+
+def _registered() -> tuple[InMemoryWorkerRegistry, SessionToken]:
     registry = InMemoryWorkerRegistry(
         clock=FakeClock(_T0), heartbeat_timeout=dt.timedelta(seconds=30)
     )
-    registry.register(make_worker(worker_id=str(_WORKER_UUID), at=_T0))
-    return registry
+    session = registry.register(make_worker(worker_id=str(_WORKER_UUID), at=_T0))
+    return registry, session
 
 
 def _stopper(uow: FakeUnitOfWork) -> ServersAssignedServerStopper:
@@ -326,12 +331,12 @@ async def test_drain_decrements_placement_load_per_stopped_server() -> None:
         worker_uuid=_WORKER_UUID,
     )
     uow.servers.seed(s)
-    registry = _registry()
+    registry, session = _registered()
     worker_id = WorkerId(str(_WORKER_UUID))
     # Seed the worker's committed load to 1 (one assigned, desired-running server),
     # the truth the drain is about to flip.
     registry.set_assignment(
-        worker_id, {str(s.id.value): 0}, registry.assignment_epoch(worker_id)
+        worker_id, session, {str(s.id.value): 0}, registry.assignment_epoch(worker_id)
     )
     assert _assigned_count(registry, worker_id) == 1
 
@@ -354,10 +359,10 @@ async def test_drain_does_not_decrement_when_commit_fails() -> None:
         worker_uuid=_WORKER_UUID,
     )
     uow.servers.seed(s)
-    registry = _registry()
+    registry, session = _registered()
     worker_id = WorkerId(str(_WORKER_UUID))
     registry.set_assignment(
-        worker_id, {str(s.id.value): 0}, registry.assignment_epoch(worker_id)
+        worker_id, session, {str(s.id.value): 0}, registry.assignment_epoch(worker_id)
     )
     assert _assigned_count(registry, worker_id) == 1
 
@@ -504,10 +509,13 @@ async def test_failed_drain_record_still_sheds_the_committed_stops() -> None:
         worker_uuid=_WORKER_UUID,
     )
     uow.servers.seed(s)
-    registry = _registry()
+    registry, session = _registered()
     worker_id = WorkerId(str(_WORKER_UUID))
     registry.set_assignment(
-        worker_id, {str(s.id.value): 1024}, registry.assignment_epoch(worker_id)
+        worker_id,
+        session,
+        {str(s.id.value): 1024},
+        registry.assignment_epoch(worker_id),
     )
     use_case = _use_case(registry, uow, store)
 
