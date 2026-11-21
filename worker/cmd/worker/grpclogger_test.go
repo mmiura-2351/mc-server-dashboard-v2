@@ -32,23 +32,33 @@ func newTestGRPCLogger(t *testing.T, env map[string]string) (grpcLogger, func() 
 
 // TestGRPCLoggerKeepsGRPCSeverity: GRPC_GO_LOG_SEVERITY_LEVEL picks the lowest
 // grpc severity written, read as grpc-go's own logger reads it: errors only when
-// it is unset, and nothing at all for a value grpc does not know.
+// it is unset, and nothing at all for a value grpc does not know. Each severity
+// is logged in all three forms.
 func TestGRPCLoggerKeepsGRPCSeverity(t *testing.T) {
+	info := []string{"INFO i", "INFO i", "INFO i"}
+	warn := []string{"WARN w", "WARN w", "WARN w"}
+	errs := []string{"ERROR e", "ERROR e", "ERROR e"}
 	for severity, want := range map[string][]string{
-		"":        {"ERROR e"},
-		"ERROR":   {"ERROR e"},
-		"error":   {"ERROR e"},
-		"WARNING": {"WARN w", "ERROR e"},
-		"warning": {"WARN w", "ERROR e"},
-		"INFO":    {"INFO i", "WARN w", "ERROR e"},
-		"info":    {"INFO i", "WARN w", "ERROR e"},
+		"":        errs,
+		"ERROR":   errs,
+		"error":   errs,
+		"WARNING": slices.Concat(warn, errs),
+		"warning": slices.Concat(warn, errs),
+		"INFO":    slices.Concat(info, warn, errs),
+		"info":    slices.Concat(info, warn, errs),
 		"debug":   nil,
 	} {
 		t.Run("severity="+severity, func(t *testing.T) {
 			g, records := newTestGRPCLogger(t, map[string]string{"GRPC_GO_LOG_SEVERITY_LEVEL": severity})
 			g.Info("i")
+			g.Infoln("i")
+			g.Infof("i")
 			g.Warning("w")
+			g.Warningln("w")
+			g.Warningf("w")
 			g.Error("e")
+			g.Errorln("e")
+			g.Errorf("e")
 			if got := records(); !slices.Equal(got, want) {
 				t.Errorf("records %q, want %q", got, want)
 			}
