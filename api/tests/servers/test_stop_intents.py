@@ -75,6 +75,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StopServer,
     StopServersAssignedToWorker,
 )
+from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
+    RunSnapshotCadenceTick,
+)
 from mc_server_dashboard_api.servers.application.start_intent_lock import (
     StartIntentLock,
 )
@@ -469,6 +472,9 @@ class _World:
         # which the real locks forbid. ``None`` gives each use case its own.
         self.lock: LifecycleLock = NullLifecycleLock()
         self.intent_lock: StartIntentLock | None = None
+        # The store generation the starts read; a test moves it as an at-rest edit
+        # or a restore would.
+        self.store_generation = 0
 
     def row(
         self,
@@ -511,7 +517,9 @@ class _World:
             control_plane=control_plane or self.cp,
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=FakeStoreGenerationReader(generation=0),
+            store_generation=FakeStoreGenerationReader(
+                generation=self.store_generation
+            ),
             file_store=FakeFileStore(seed_eula=True),
             lifecycle_lock=self.lock,
             stop_intents=self.intents,
@@ -2452,3 +2460,146 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
     assert stop.stop_intents is app.state.stop_intents
     assert isinstance(drain.stopper, ServersAssignedServerStopper)
     assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents
+
+
+# --- an older start and a newer placement's mark (issue #3890, r2 finding 1) --
+
+
+_KEEP_CODES = [
+    "command_in_flight",
+    "orphan_pending",
+    "untracked_container",
+    "command_expired",
+]
+
+
+def _refused(precondition: str) -> CommandOutcome:
+    return CommandOutcome(
+        status=worker_status("HydrateTrigger", precondition), message="refused"
+    )
+
+
+async def _due_tick_sends_nothing_new(world: _World) -> None:
+    """Run the periodic snapshot past its jitter; it must dispatch nothing."""
+
+    before = world.kinds()
+    clock = FakeClock(_NOW)
+    scheduler = RunSnapshotCadenceTick(
+        uow=FakeUnitOfWork(servers=world.repo),
+        control_plane=world.cp,
+        clock=clock,
+        default_interval_seconds=300,
+        min_interval_seconds=60,
+    )
+    await scheduler.tick()
+    clock.set(_NOW + dt.timedelta(hours=1))
+    await scheduler.tick()
+    assert world.kinds() == before
+
+
+@pytest.mark.parametrize("precondition", _KEEP_CODES)
+async def test_an_older_start_leaves_a_newer_placements_mark(precondition: str) -> None:
+    # Start T1's hydrate is in flight when a stop releases the row, without a
+    # snapshot since it is marked, and start T2 places it on the same Worker. T2's
+    # hydrate is refused, so T2 keeps the Worker, marked. T1's hydrate then
+    # answers. T1 no longer owns the row, so it clears nothing: the Worker holds
+    # T1's copy, not the store's.
+    world = _World()
+    kept_mark: list[bool] = []
+
+    async def stop_then_a_kept_start() -> None:
+        await world.stop()
+
+        async def refuse() -> CommandOutcome:
+            return _refused(precondition)
+
+        world.cp.hydrate_hooks.append(refuse)
+        with pytest.raises(CommandDispatchError):
+            await world.start()
+        kept_mark.append(world.repo.by_id[world.server_id].awaiting_hydrate)
+
+    world.after_hydrate(stop_then_a_kept_start)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    assert kept_mark == [True]
+    assert world.kinds() == ["hydrate", "stop", "hydrate"]
+    row = world.repo.by_id[world.server_id]
+    assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
+        DesiredState.RUNNING,
+        world.worker,
+        True,
+    )
+    await _due_tick_sends_nothing_new(world)
+
+
+async def test_an_older_start_after_a_stale_clear_leaves_a_newer_placements_mark() -> (
+    None
+):
+    # The r2 review's chain, with no task stalled by the test:
+    # 1. Start T1 places the server on the Worker; its hydrate is in flight.
+    # 2. The operator's stop waits behind that hydrate, and its request is
+    #    cancelled. The row reads (stopped, stopped, assigned, marked).
+    # 3. A second stop takes the stale clear: no start was sent, so it skips the
+    #    final snapshot for the mark and releases the row.
+    # 4. An at-rest edit or a restore moves the store.
+    # 5. Start T2 places the server on the same Worker, marked, and its hydrate
+    #    is refused UNAVAILABLE: kept.
+    # 6. T1's hydrate answers. T2's mark survives: the Worker still holds the copy
+    #    from before step 4.
+    world = _World()
+    guard = StopConvergenceGuard()
+    kept_mark: list[bool] = []
+
+    def stop_at(at: dt.datetime) -> StopServer:
+        return StopServer(
+            uow=FakeUnitOfWork(servers=world.repo),
+            control_plane=world.cp,
+            clock=FakeClock(at),
+            stop_intents=world.intents,
+            stop_convergence=guard,
+        )
+
+    async def during_t1_hydrate() -> None:
+        world.cp.hold_stop_answer = asyncio.Event()
+        stop = asyncio.create_task(
+            stop_at(_NOW)(community_id=world.community, server_id=world.server_id)
+        )
+        await world.cp.stop_sent.wait()
+        stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop
+        world.cp.hold_stop_answer = None
+        row = world.repo.by_id[world.server_id]
+        assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
+            DesiredState.STOPPED,
+            world.worker,
+            True,
+        )
+        await stop_at(_NOW + dt.timedelta(seconds=120)).clear_stale_assignment(
+            community_id=world.community, server_id=world.server_id
+        )
+        assert world.stored() == (DesiredState.STOPPED, None)
+        world.store_generation = 1
+
+        async def refuse() -> CommandOutcome:
+            return _refused("untracked_container")
+
+        world.cp.hydrate_hooks.append(refuse)
+        with pytest.raises(CommandDispatchError):
+            await world.start()
+        kept_mark.append(world.repo.by_id[world.server_id].awaiting_hydrate)
+
+    world.after_hydrate(during_t1_hydrate)
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start()
+
+    assert kept_mark == [True]
+    assert world.kinds() == ["hydrate", "stop", "hydrate"]
+    row = world.repo.by_id[world.server_id]
+    assert (row.desired_state, row.assigned_worker_id, row.awaiting_hydrate) == (
+        DesiredState.RUNNING,
+        world.worker,
+        True,
+    )
+    await _due_tick_sends_nothing_new(world)

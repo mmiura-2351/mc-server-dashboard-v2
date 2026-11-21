@@ -1910,6 +1910,56 @@ async def test_a_kept_server_is_snapshotted_once_its_hydrate_lands(
     assert uow.servers.by_id[server_id].assigned_worker_id is None
 
 
+class _RePlacedOnAnotherWorkerDuringTheStop(FakeControlPlane):
+    """The stop's answer arrives after the row was released and placed on B."""
+
+    def __init__(self, uow: FakeUnitOfWork, other: WorkerId, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._uow = uow
+        self._other = other
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        await super().stop(worker_id=worker_id, server_id=server_id, force=force)
+        row = self._uow.servers.by_id[server_id]
+        row.desired_state = DesiredState.RUNNING
+        row.assigned_worker_id = self._other
+        row.awaiting_hydrate = True
+        return _NOT_FOUND
+
+
+async def test_a_final_snapshot_reads_only_its_own_workers_mark() -> None:
+    # The mark speaks for the placement that set it. Once the row is worker B's,
+    # B's mark says nothing about worker A's scratch, so A's final snapshot is
+    # still taken; the data plane fences A's publish as it does any Worker that
+    # is not the assigned one. B's row is left as it is.
+    community, server_id, worker_a = _ids()
+    worker_b = WorkerId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.RUNNING,
+            observed=ObservedState.RUNNING,
+            worker_id=worker_a,
+        )
+    )
+    cp = _RePlacedOnAnotherWorkerDuringTheStop(uow, worker_b)
+
+    await _stop_use_case(uow, cp)(
+        community_id=CommunityId(community), server_id=ServerId(server_id)
+    )
+
+    assert cp.dispatched == [
+        ("stop", WorkerId(worker_a), ServerId(server_id)),
+        ("snapshot", WorkerId(worker_a), ServerId(server_id)),
+    ]
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (stored.assigned_worker_id, stored.awaiting_hydrate) == (worker_b, True)
+
+
 async def test_a_kept_server_its_worker_reports_running_is_snapshotted() -> None:
     # The instance the refusal hinted at turns out live and reports running. That
     # instance's working set is what a snapshot captures from now on, as when a
