@@ -707,6 +707,7 @@ forbidden_modules = [
     "mc_server_dashboard_api.middleware",
     "mc_server_dashboard_api.observability",
     "mc_server_dashboard_api.serve",
+    "mc_server_dashboard_api.store_claim_cli",
     "mc_server_dashboard_api.webui",
 ]
 
