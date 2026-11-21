@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -381,13 +383,54 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 	_ = level.UnmarshalText([]byte(cfg.Level))
 
 	opts := &slog.HandlerOptions{Level: level}
+	out := escapingWriter{os.Stderr}
 	var handler slog.Handler
 	if cfg.Format == "text" {
-		handler = slog.NewTextHandler(os.Stderr, opts)
+		handler = slog.NewTextHandler(out, opts)
 	} else {
-		handler = slog.NewJSONHandler(os.Stderr, opts)
+		handler = slog.NewJSONHandler(out, opts)
 	}
 	return slog.New(handler)
+}
+
+// escapingWriter writes each log line with the characters slog leaves raw
+// escaped (issue #3939): DEL in either format, and the C1 and bidi controls in
+// json. Text a peer controls could otherwise put a terminal escape sequence or a
+// reordering of the line into the log. slog escapes C0, U+2028 and U+2029
+// itself, and in text quotes and escapes any value holding one of these but a
+// lone DEL. Each is written as \uXXXX, which a json string decodes back to the
+// same text. slog hands over a whole record per Write, so no character is split
+// across two.
+type escapingWriter struct{ w io.Writer }
+
+func (e escapingWriter) Write(p []byte) (int, error) {
+	out := make([]byte, 0, len(p))
+	for i := 0; i < len(p); {
+		r, size := utf8.DecodeRune(p[i:])
+		if escapedInLog(r) {
+			out = fmt.Appendf(out, `\u%04x`, r)
+		} else {
+			out = append(out, p[i:i+size]...)
+		}
+		i += size
+	}
+	if _, err := e.w.Write(out); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// escapedInLog reports whether r is one of the characters the API's log
+// formats escape beyond C0 (CONFIGURATION.md Section 5.10).
+func escapedInLog(r rune) bool {
+	switch {
+	case r >= 0x7f && r < 0xa0,
+		r == 0x061c, r == 0x200e, r == 0x200f, r == 0x2028, r == 0x2029,
+		r >= 0x202a && r <= 0x202e,
+		r >= 0x2066 && r <= 0x2069:
+		return true
+	}
+	return false
 }
 
 // controlPlaneKeepalive is the client-side HTTP/2 keepalive for the control

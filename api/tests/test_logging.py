@@ -1,11 +1,18 @@
 """Tests for structured JSON logging and correlation-ID inclusion (NFR-OBS-1)."""
 
+import asyncio
 import json
 import logging
+import re
+import socket
 import sys
+import threading
+import time
+import warnings
 import weakref
 from collections.abc import Iterator
 
+import httpx2
 import pytest
 import uvicorn
 from fastapi import FastAPI
@@ -28,6 +35,10 @@ from mc_server_dashboard_api.logging import (
     TextFormatter,
     configure_logging,
     correlation_id,
+)
+from mc_server_dashboard_api.observability import (
+    create_observability_app,
+    start_observability_listener,
 )
 
 
@@ -658,3 +669,174 @@ def test_uvicorn_lines_go_through_the_app_handler(
         'INFO uvicorn.access 127.0.0.1:5000 - "GET /x HTTP/1.1" 200',
         "INFO uvicorn.error Started server process [42]",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Nothing built after configure_logging takes uvicorn's lines away from the app
+# handler (issue #3939). uvicorn's ``Config`` reconfigures its loggers
+# process-wide when it is built, so a second server in the process silenced the
+# public API's access log.
+# ---------------------------------------------------------------------------
+
+
+_ACCESS_ARGS = ('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", "/x", "1.1", 200)
+_ACCESS_LINE = 'INFO uvicorn.access 127.0.0.1:5000 - "GET /x HTTP/1.1" 200'
+
+
+def _serve_main_app(
+    monkeypatch: pytest.MonkeyPatch, paths: list[tuple[str, str]]
+) -> None:
+    """Serve ``create_app`` under a real uvicorn and GET each (listener, path).
+
+    Built the way ``serve.py`` builds it: uvicorn's default ``Config`` (its own
+    ``dictConfig``) first, then the app factory. ``listener`` is ``"api"`` or
+    ``"metrics"``; the metrics listener is enabled on a loopback port.
+    """
+
+    monkeypatch.setenv("MCD_API_LOG__FORMAT", "text")
+    monkeypatch.setenv("MCD_API_METRICS__ENABLED", "true")
+    monkeypatch.setenv("MCD_API_METRICS__HOST", "127.0.0.1")
+    monkeypatch.setenv("MCD_API_METRICS__PORT", "0")
+    apps: list[FastAPI] = []
+
+    def factory() -> FastAPI:
+        apps.append(create_app())
+        return apps[0]
+
+    sock = socket.create_server(("127.0.0.1", 0))
+    server = uvicorn.Server(uvicorn.Config(factory, factory=True))
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]})
+    thread.start()
+    try:
+        deadline = time.monotonic() + 30
+        while not server.started:
+            assert thread.is_alive(), "the API server did not start"
+            assert time.monotonic() < deadline, "the API server did not start"
+            time.sleep(0.01)
+        ports = {
+            "api": sock.getsockname()[1],
+            "metrics": apps[0].state.metrics_listener.port,
+        }
+        for listener, path in paths:
+            httpx2.get(f"http://127.0.0.1:{ports[listener]}{path}", timeout=10.0)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=30)
+        sock.close()
+
+
+@pytest.mark.usefixtures("_restore_logging")
+def test_the_api_access_log_survives_the_metrics_listener(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _serve_main_app(monkeypatch, [("api", "/api/healthz")])
+
+    access = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("INFO uvicorn.access ")
+    ]
+    assert len(access) == 1
+    assert re.fullmatch(
+        r'INFO uvicorn\.access 127\.0\.0\.1:\d+ - "GET /api/healthz HTTP/1\.1" '
+        r"(200|503)",
+        access[0],
+    )
+
+
+@pytest.mark.usefixtures("_restore_logging")
+def test_a_scrape_writes_no_access_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A scrape every few seconds would otherwise write an access line every few
+    # seconds, forever. The API's own request is the control.
+    _serve_main_app(monkeypatch, [("metrics", "/metrics"), ("api", "/api/healthz")])
+
+    access = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("INFO uvicorn.access ")
+    ]
+    assert len(access) == 1
+    assert '"GET /api/healthz HTTP/1.1"' in access[0]
+
+
+@pytest.mark.usefixtures("_restore_logging")
+def test_the_metrics_listener_leaves_uvicorn_logging_alone(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("info", "text")
+
+    async def _run() -> None:
+        listener = start_observability_listener(
+            create_observability_app(), host="127.0.0.1", port=0
+        )
+        assert listener is not None
+        logging.getLogger("uvicorn.error").error("bad")
+        logging.getLogger("uvicorn.access").info(*_ACCESS_ARGS)
+        await listener.stop()
+
+    asyncio.run(_run())
+
+    lines = capsys.readouterr().err.splitlines()
+    assert "ERROR uvicorn.error bad" in lines
+    assert _ACCESS_LINE in lines
+
+
+@pytest.mark.usefixtures("_restore_logging")
+def test_the_lifespan_routes_uvicorn_back_after_a_later_config(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A uvicorn ``Config`` built with the default ``log_config`` after
+    # create_app re-runs uvicorn's dictConfig, which gives its loggers their own
+    # handlers again. The lifespan starts serving with them routed back.
+    monkeypatch.setenv("MCD_API_LOG__FORMAT", "text")
+    app = create_app()
+    uvicorn.Config(FastAPI())
+
+    with TestClient(app):
+        logging.getLogger("uvicorn.error").error("bad")
+        logging.getLogger("uvicorn.access").info(*_ACCESS_ARGS)
+
+    out = capsys.readouterr()
+    lines = out.err.splitlines()
+    assert "ERROR uvicorn.error bad" in lines
+    assert _ACCESS_LINE in lines
+    assert out.out == ""
+
+
+@pytest.fixture
+def _restore_warnings_capture() -> Iterator[None]:
+    """Start and end with ``warnings`` uncaptured.
+
+    pytest restores ``warnings.showwarning`` after each test, while ``logging``
+    still records that it is capturing; ``captureWarnings(True)`` would then do
+    nothing. Turning capture off first resets that record.
+    """
+
+    logging.captureWarnings(False)
+    yield
+    logging.captureWarnings(False)
+
+
+@pytest.mark.usefixtures("_restore_logging", "_restore_warnings_capture")
+@pytest.mark.parametrize("log_format", ["json", "text"])
+def test_a_warning_goes_through_the_app_handler(
+    log_format: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging("info", log_format)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn("careful \x1b[2J", UserWarning, stacklevel=1)
+
+    out = capsys.readouterr()
+    assert out.out == ""
+    [line] = out.err.splitlines()
+    if log_format == "json":
+        parsed = json.loads(line)
+        assert (parsed["level"], parsed["logger"]) == ("warning", "py.warnings")
+        assert "UserWarning: careful \x1b[2J" in parsed["message"]
+    else:
+        assert line.startswith("WARNING py.warnings ")
+        assert "UserWarning: careful \\x1b[2J" in line

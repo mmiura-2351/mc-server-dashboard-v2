@@ -567,7 +567,7 @@ config, wiring at the edge.
 | `bedrock.max_flows_per_ip` / `bedrock.new_flows_per_ip_per_second` | `32` / `10` | Hygiene caps on a bound Bedrock `bedrock_port`, same posture as `game.max_conns_per_ip` / `game.joins_per_ip_per_second` — see `BEDROCK_TUNNEL.md` Section 8. |
 | `metrics.enabled` | `false` | Master switch for the Prometheus `/metrics` + `/healthz` HTTP endpoint (Section 13). Off by default: the relay is an edge process, so observability is opt-in. Via `MCD_RELAY_METRICS_ENABLED`. A metrics-bind failure is non-fatal (logged, relay keeps serving) — unlike the game/tunnel binds. |
 | `metrics.listen` | `127.0.0.1:9090` | Metrics/health listener address. Loopback by default so the endpoint is never exposed on the public interface without an explicit choice. Via `MCD_RELAY_METRICS_LISTEN`. |
-| `log.level` / `log.format` | as Worker | Standard logging keys. |
+| `log.level` / `log.format` | as Worker | Standard logging keys. No control character is written raw, as on the Worker ([`CONFIGURATION.md`](CONFIGURATION.md) Section 6.4). |
 
 A blank (empty or whitespace-only) value of a required key or of
 `api.tls.ca_file` counts as unset, per the secret-blank rule of

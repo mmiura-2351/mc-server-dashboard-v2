@@ -180,6 +180,9 @@ def configure_logging(level: str, log_format: str) -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
 
+    # A warning is otherwise written to stderr by ``warnings`` itself, past this
+    # handler: a plain-text line in the json format, unescaped (issue #3939).
+    logging.captureWarnings(True)
     route_uvicorn_logging()
 
 
@@ -189,7 +192,9 @@ def route_uvicorn_logging() -> None:
     uvicorn configures its own logging before it calls the app factory
     (serve.py): its server and access loggers get handlers of their own and
     stop propagating, so their lines bypassed this handler -- the configured
-    format and the control-character escaping alike (issue #3928).
+    format and the control-character escaping alike (issue #3928). Every later
+    ``uvicorn.Config`` built with its default ``log_config`` does the same again,
+    so the lifespan calls this once more before serving (issue #3939).
     """
 
     for name in ("uvicorn", "uvicorn.access"):

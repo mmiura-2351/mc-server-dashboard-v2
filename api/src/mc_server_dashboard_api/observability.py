@@ -32,9 +32,12 @@ import contextlib
 import logging
 import socket
 from collections.abc import Generator
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
+from uvicorn.protocols.http.h11_impl import H11Protocol
+from uvicorn.server import ServerState
 
 from mc_server_dashboard_api.core.api import metrics
 
@@ -90,6 +93,27 @@ class _EmbeddedServer(uvicorn.Server):
     @contextlib.contextmanager
     def capture_signals(self) -> Generator[None, None, None]:
         yield
+
+
+class _UnloggedH11Protocol(H11Protocol):
+    """uvicorn's h11 protocol, writing no access line for this listener.
+
+    Each connection decides whether to write access lines from whether the
+    process-wide ``uvicorn.access`` logger has a handler, and uvicorn applies
+    ``Config(access_log=False)`` by taking that logger's handlers away -- which
+    silenced the API's own access log too (issue #3939). This listener's
+    connections decide no themselves and leave the logger alone.
+    """
+
+    def __init__(
+        self,
+        config: uvicorn.Config,
+        server_state: ServerState,
+        app_state: dict[str, Any],
+        _loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        super().__init__(config, server_state, app_state, _loop)
+        self.access_log = False
 
 
 class ObservabilityListener:
@@ -190,8 +214,9 @@ def start_observability_listener(
         host=host,
         port=bound_port,
         # A scrape every few seconds would otherwise emit an access-log line
-        # every few seconds, forever.
-        access_log=False,
+        # every few seconds, forever. Not ``access_log=False``: uvicorn applies
+        # that to the whole process (_UnloggedH11Protocol).
+        http=_UnloggedH11Protocol,
         # One GET, no WebSocket routes: skip loading the WS protocol entirely.
         ws="none",
         # The process already configured logging (``create_app``); uvicorn's
