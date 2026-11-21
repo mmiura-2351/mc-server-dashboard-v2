@@ -511,8 +511,8 @@ func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
 	}
 }
 
-// withoutOpenat2 makes the unpack take, for the rest of the test, the path a
-// kernel without openat2 takes (before Linux 5.6).
+// withoutOpenat2 makes the unpack take, for the rest of the test, the path it
+// takes where openat2 is unavailable (nofollow.Openat2Beneath answers ENOSYS).
 func withoutOpenat2(t *testing.T) {
 	t.Helper()
 	orig := openat2Beneath

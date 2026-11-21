@@ -912,9 +912,10 @@ func openDirAllAt(rootFd int, rel string) (int, error) {
 
 // openDirBeneath opens the directory name of the directory behind dirFd, refusing
 // a symlink at it. The kernel resolves it with openat2 RESOLVE_BENEATH|
-// RESOLVE_NO_SYMLINKS, which also refuses a name that would leave dirFd; on a
-// kernel without openat2 (before Linux 5.6), O_NOFOLLOW refuses the link instead,
-// the fallback instancemanager.openParentBeneath takes too.
+// RESOLVE_NO_SYMLINKS, which also refuses a name that would leave dirFd. Where
+// openat2 is unavailable (a kernel before Linux 5.6, or a seccomp profile that
+// denies it), O_NOFOLLOW refuses the link instead, the fallback
+// instancemanager.openParentBeneath takes too.
 func openDirBeneath(dirFd int, name string) (int, error) {
 	fd, err := openat2Beneath(dirFd, name)
 	if !errors.Is(err, unix.ENOSYS) {
@@ -924,7 +925,8 @@ func openDirBeneath(dirFd int, name string) (int, error) {
 }
 
 // openat2Beneath is nofollow.Openat2Beneath, held in a variable so a test can
-// take the path a kernel without openat2 takes; production never reassigns it.
+// take the path taken where openat2 is unavailable; production never reassigns
+// it.
 var openat2Beneath = nofollow.Openat2Beneath
 
 // The snapshot walk (packTar, walkInto, packDir, packRegular) never resolves a

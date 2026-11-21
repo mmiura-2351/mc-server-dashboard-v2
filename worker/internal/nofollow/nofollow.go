@@ -71,17 +71,31 @@ func OpenAt(dirFd int, name string, flags int, mode uint32) (int, error) {
 // itself refuses any component that is a symlink (ELOOP) and any resolution that
 // would leave dirFd (EXDEV), an absolute rel included (Linux 5.6+). The returned
 // fd is an O_PATH directory handle, for use as the directory of further *at
-// calls; the caller closes it. Where openat2 is unavailable (an older kernel, or
-// not Linux) it fails with ENOSYS and opens nothing, and the caller falls back
-// to a per-component O_NOFOLLOW walk.
+// calls; the caller closes it.
+//
+// Where openat2 is unavailable it fails with ENOSYS and opens nothing, and the
+// caller falls back to a per-component O_NOFOLLOW walk. That covers an older
+// kernel or another OS, which answer ENOSYS, and a seccomp profile that predates
+// openat2 and denies it with EPERM: an O_PATH open of a directory has no EPERM
+// of its own, and should a security module answer one all the same, the
+// equally contained fallback meets the same refusal.
 func Openat2Beneath(dirFd int, rel string) (int, error) {
 	for {
-		fd, err := openat2Beneath(dirFd, rel)
-		if !errors.Is(err, unix.EINTR) {
-			return fd, err
+		fd, err := openat2(dirFd, rel)
+		switch {
+		case errors.Is(err, unix.EINTR):
+			continue
+		case errors.Is(err, unix.EPERM):
+			return -1, unix.ENOSYS
 		}
+		return fd, err
 	}
 }
+
+// openat2 is the one openat2 call Openat2Beneath makes, held in a variable so a
+// test can answer it as an older kernel or a seccomp profile does; production
+// never reassigns it.
+var openat2 = openat2Beneath
 
 // ReadFileAt returns the content of the entry name of the directory behind dirFd.
 //

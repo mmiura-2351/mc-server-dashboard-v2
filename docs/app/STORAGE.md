@@ -1541,8 +1541,11 @@ reach the stored working set only out of band, from an operator over SSH. The
 hydrate does not rely on its fresh staging directory holding no link either: it
 opens every directory on a member's path relative to the one before it without
 following a link (`openat2` with `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS`, or
-`O_NOFOLLOW` on a kernel older than 5.6), so a link there fails the hydrate
-instead of redirecting a write (issue #3940).
+`O_NOFOLLOW` where `openat2` is unavailable: a kernel older than 5.6, or a
+seccomp profile that denies it). It creates each file only where nothing is
+(`O_EXCL`), so neither a symlink nor a hard link already at a member's name is
+written through. Either fails the hydrate instead of redirecting a write (issue
+#3940).
 
 Every operation that takes a `rel_path` resolves it the same way, in this order:
 
