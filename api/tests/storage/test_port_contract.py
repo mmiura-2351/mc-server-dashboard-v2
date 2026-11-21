@@ -29,7 +29,6 @@ from mc_server_dashboard_api.storage.adapters.object_store import ObjectStorage
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     ArchiveUnreadableError,
-    HydratedDuringUploadError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -41,8 +40,6 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
-    SnapshotHandle,
-    Storage,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -345,115 +342,6 @@ async def test_commit_without_expected_base_skips_recheck(
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"worker"}
     assert await harness.storage.current_generation(community, server) == generation
-
-
-async def _serve_hydrate(
-    storage: Storage, community: CommunityId, server: ServerId
-) -> None:
-    """Read a hydrate source to its end, as the data plane does for a Worker."""
-
-    try:
-        await drain(storage.open_hydrate_source(community, server))
-    except NotFoundError:
-        # Nothing published: the data plane answers 204, or a JAR-only tar.
-        pass
-
-
-async def _stage(
-    storage: Storage, community: CommunityId, server: ServerId, content: bytes
-) -> SnapshotHandle:
-    handle = await storage.begin_snapshot(community, server)
-    await storage.write_snapshot(handle, tar_stream({"f": content}))
-    return handle
-
-
-# 16 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(16 * 10 + 30)
-@pytest.mark.parametrize("published", [True, False], ids=["published", "unpublished"])
-async def test_a_commit_is_refused_once_a_hydrate_was_served_since_its_base(
-    harness: StorageHarness, published: bool
-) -> None:
-    # Issue #3950: a hydrate served after an upload's guard read gives a Worker the
-    # store as it stood then. The upload was packed before that hydrate, so its
-    # generation would be one the hydrated working set does not contain. It is
-    # refused under the lock, the staging is discarded and nothing is bumped. A
-    # hydrate that finds nothing published replaces the Worker's working set too
-    # (the data plane's 204 and JAR-only answers), so it counts the same.
-    community, server = new_scope()
-    if published:
-        await harness.publish(community, server, {"f": b"v1"})
-    before = await harness.storage.current_generation(community, server)
-    base = await harness.storage.settled_upload_base(community, server)
-    assert base.generation == before
-    handle = await _stage(harness.storage, community, server, b"packed-before")
-
-    await _serve_hydrate(harness.storage, community, server)
-
-    with pytest.raises(HydratedDuringUploadError):
-        await harness.storage.commit_snapshot(
-            handle, expected_base=base.generation, expected_hydrates=base.hydrates
-        )
-    assert await harness.storage.current_generation(community, server) == before
-    if published:
-        blob = await drain(harness.storage.open_hydrate_source(community, server))
-        assert read_tar(blob) == {"f": b"v1"}
-    with pytest.raises(SnapshotHandleError):
-        await harness.storage.commit_snapshot(handle)
-
-    # An upload whose guard read follows the hydrate publishes.
-    rebased = await harness.storage.settled_upload_base(community, server)
-    handle = await _stage(harness.storage, community, server, b"packed-after")
-    assert (
-        await harness.storage.commit_snapshot(
-            handle,
-            expected_base=rebased.generation,
-            expected_hydrates=rebased.hydrates,
-        )
-        == before + 1
-    )
-
-
-# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(12 * 10 + 30)
-async def test_a_hydrate_served_before_the_base_does_not_refuse_the_commit(
-    harness: StorageHarness,
-) -> None:
-    # Issue #3950: what counts is a hydrate served after the guard read, not any
-    # hydrate at all.
-    community, server = new_scope()
-    await harness.publish(community, server, {"f": b"v1"})
-    await _serve_hydrate(harness.storage, community, server)
-
-    base = await harness.storage.settled_upload_base(community, server)
-    handle = await _stage(harness.storage, community, server, b"v2")
-    assert (
-        await harness.storage.commit_snapshot(
-            handle, expected_base=base.generation, expected_hydrates=base.hydrates
-        )
-        == 2
-    )
-
-
-# 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
-@pytest.mark.timeout(12 * 10 + 30)
-async def test_a_hydrate_of_another_server_does_not_refuse_the_commit(
-    harness: StorageHarness,
-) -> None:
-    # Issue #3950: the count is per server.
-    community, server = new_scope()
-    _, other = new_scope()
-    await harness.publish(community, server, {"f": b"v1"})
-    await harness.publish(community, other, {"f": b"other"})
-
-    base = await harness.storage.settled_upload_base(community, server)
-    handle = await _stage(harness.storage, community, server, b"v2")
-    await _serve_hydrate(harness.storage, community, other)
-    assert (
-        await harness.storage.commit_snapshot(
-            handle, expected_base=base.generation, expected_hydrates=base.hydrates
-        )
-        == 2
-    )
 
 
 # 20 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).

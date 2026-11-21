@@ -848,35 +848,6 @@ Notes:
   the assignment. The mark is stored with the server, so it also covers a start
   whose API process stopped between the commit and the hydrate, and a start
   cancelled while a hydrate it sent was refused.
-- **A hydrate voids an upload still committing.** A Worker's snapshot command
-  can end before the API's commit of its upload does: at the Worker's transfer
-  deadline, when the stream drops, or when the Worker restarts, the request ends
-  while the API keeps the body it already received. A start can then hydrate
-  that Worker before the commit publishes, if the Worker holds less than the
-  store: a torn scratch whose marker its boot rewrote to 0, or a marker left
-  behind by an earlier lost response. The Worker then runs on the generation the
-  hydrate served, and the late commit would publish a world that run does not
-  contain. Its next snapshot would replace that world through the lost-response
-  allowance below, or a later hydrate would roll the run back to it. So the data
-  plane refuses the commit (`409 hydrated_during_upload`, STORAGE.md Section 8):
-  a hydrate of the server served after an upload's guard read voids the upload
-  (issue #3950). The world the upload carried is lost from the store. The
-  Worker's copy of it is the tree that hydrate displaced, kept at
-  `.displaced-<id>` unless an older tree already holds that slot (STORAGE.md
-  Section 4.6). This also refuses an upload of the Worker's previous assignment
-  that passed the awaiting-hydrate check before a new placement on that Worker
-  was marked, once that placement's hydrate is served.
-  A commit that no hydrate overtook still lands. If the Worker never saw its
-  answer, its next snapshot declares a base behind that commit, and the data
-  plane allows it because the commit's publisher sent it (issue #847): that
-  Worker's working set is still the tree the commit was packed from. Its marker
-  falls behind its own publish only when the response is lost, when it abandons
-  the upload at its deadline, or when the marker write fails, and none of these
-  replaces the tree. A hydrate does, and serves either the store's current
-  generation or one before an upload that was still committing, which it voids.
-  Two things this does not cover: a host crash that loses writes the Worker
-  never synced, which can leave its scratch older than what it packed, and an
-  operator's copy into the scratch (STORAGE.md Section 4.6).
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

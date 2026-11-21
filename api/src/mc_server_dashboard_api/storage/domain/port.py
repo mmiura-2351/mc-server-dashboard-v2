@@ -208,21 +208,6 @@ class JarPoolEntry:
     modified_at: dt.datetime
 
 
-@dataclass(frozen=True)
-class UploadBase:
-    """What a snapshot upload's guard observed of the store (issue #3950).
-
-    ``generation`` is the generation :meth:`WorkingSetStore.settled_generation`
-    returns. ``hydrates`` counts the hydrate sources served for the server, read
-    under the same lock, for :meth:`WorkingSetStore.commit_snapshot` to compare
-    against. The adapter keeps the count in memory, so it compares only within
-    one process, which is all an upload spans.
-    """
-
-    generation: int
-    hydrates: int
-
-
 class SnapshotHandle(abc.ABC):
     """An opaque handle to an in-flight incoming snapshot transfer.
 
@@ -264,12 +249,6 @@ class WorkingSetStore(abc.ABC):
         instead of a separate ``current_generation`` call, closing the race where a
         bump between the two mislabels the served bytes.
 
-        The first read counts as serving a hydrate of the server, under the
-        per-server lock, whether or not a snapshot is published (issue #3950). The
-        data plane answers both with a working set the Worker replaces its own
-        with, so an upload whose guard read came before it must not publish
-        (:meth:`commit_snapshot`'s ``expected_hydrates``).
-
         POSIX semantics reliance: on fs/remote-fs the stream reads the snapshot
         directory ``current`` resolved to *at open time*. A concurrent publish flips
         ``current`` to a new snapshot and only then reclaims the superseded one, so a
@@ -310,7 +289,6 @@ class WorkingSetStore(abc.ABC):
         publisher: str | None = None,
         expected_base: int | None = None,
         publisher_fence: PublisherFence | None = None,
-        expected_hydrates: int | None = None,
     ) -> int:
         """Atomically publish the staged snapshot, returning the new generation.
 
@@ -366,15 +344,6 @@ class WorkingSetStore(abc.ABC):
         while the lock is held, so it must not wait on anything that can wait on
         this server's lock. ``None`` skips it.
 
-        ``expected_hydrates`` is the ``hydrates`` of the :class:`UploadBase` the
-        caller's guard read (issue #3950). The commit re-reads the count under the
-        same lock and raises :class:`~.errors.HydratedDuringUploadError` when a
-        hydrate source of the server was served since: that hydrate gave a Worker
-        the store as it stood before this publish, and this upload was packed
-        before it, so the Worker's working set does not contain what this publish
-        would put in ``current``. The staging is discarded and nothing is bumped.
-        ``None`` skips the check.
-
         The content-integrity gate uses the single region rule set (issue #927): a
         non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear,
         on every source — running OR stopped. The earlier source-keyed strict/live
@@ -421,24 +390,9 @@ class WorkingSetStore(abc.ABC):
         committed a state the fence refuses — another Worker assigned — before
         this read sees every publish the fence let through. A publish whose fence
         has not run yet is refused. The skip-hydrate decision reads the
-        generation this way, and so does the snapshot upload guard, through
-        :meth:`settled_upload_base` (issue #3564): every mutation of the
-        published working set runs whole under this lock, so the read never
-        observes one half done.
-        """
-
-    @abc.abstractmethod
-    async def settled_upload_base(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> UploadBase:
-        """Return what a snapshot upload's guard reads, in one locked read (#3950).
-
-        The generation :meth:`settled_generation` returns and the count of hydrate
-        sources served for the server, both read under the per-server lock, so
-        every hydrate's lease and every commit's flip comes either before this
-        read or after it. The upload guard hands ``generation`` to
-        :meth:`commit_snapshot` as ``expected_base`` and ``hydrates`` as
-        ``expected_hydrates``.
+        generation this way, and so does the snapshot upload guard (issue
+        #3564): every mutation of the published working set runs whole under
+        this lock, so the read never observes one half done.
         """
 
     @abc.abstractmethod

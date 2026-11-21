@@ -74,7 +74,6 @@ from mc_server_dashboard_api.storage.adapters.failure_seam import (
 from mc_server_dashboard_api.storage.domain.errors import (
     ArchiveTooLargeError,
     ArchiveUnreadableError,
-    HydratedDuringUploadError,
     IncompleteTransferError,
     IntegrityCheckError,
     MissingRegionsError,
@@ -104,7 +103,6 @@ from mc_server_dashboard_api.storage.domain.port import (
     PublisherFence,
     SnapshotHandle,
     Storage,
-    UploadBase,
     WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -864,10 +862,6 @@ class FsStorage(Storage):
         # on it (issue #3569).
         self._server_locks: dict[Path, threading.Lock] = {}
         self._server_locks_guard = threading.Lock()
-        # The hydrate sources served per server root (issue #3950), counted and read
-        # only under that server's lock. In process only, like the lock: an upload
-        # never outlives the process that received it.
-        self._hydrates_served: dict[Path, int] = {}
 
     def _server_lock(
         self, community_id: CommunityId, server_id: ServerId
@@ -1509,11 +1503,6 @@ class FsStorage(Storage):
 
         def _lease_with_generation() -> tuple[Path, Callable[[], None]]:
             server_root = self._server_root(community_id, server_id)
-            # Counted before the lease, under the same lock, so a hydrate that
-            # finds nothing published counts too (issue #3950).
-            self._hydrates_served[server_root] = (
-                self._hydrates_served.get(server_root, 0) + 1
-            )
             path, release = self._lease_current(community_id, server_id)
             try:
                 source.generation = self._read_generation(server_root)
@@ -1608,7 +1597,6 @@ class FsStorage(Storage):
         publisher: str | None = None,
         expected_base: int | None = None,
         publisher_fence: PublisherFence | None = None,
-        expected_hydrates: int | None = None,
     ) -> int:
         fs_handle = _as_fs_handle(handle)
         if fs_handle.consumed:
@@ -1668,22 +1656,15 @@ class FsStorage(Storage):
                     publisher,
                     expected_base,
                     fence=fence,
-                    expected_hydrates=expected_hydrates,
                 )
-        except (
-            StaleGenerationError,
-            HydratedDuringUploadError,
-            MissingRegionsError,
-            PublisherFencedError,
-        ):
+        except (StaleGenerationError, MissingRegionsError, PublisherFencedError):
             # StaleGenerationError: the store advanced past the guard's base during
             # the upload window (issue #899). MissingRegionsError: the staged set lost
             # regions from a dimension that still has some (issue #854, moved under the
             # lock by #921). PublisherFencedError: the fence refused the publisher
             # under the lock (issue #3544). Discard the staging exactly as the other
             # refusal paths do (the prior ``current`` keeps the newer/good copy, no
-            # bump) and re-raise. HydratedDuringUploadError: a hydrate of the
-            # server was served since the guard read (issue #3950).
+            # bump) and re-raise.
             await self._discard_staging(staging, raise_fault=False)
             fs_handle.consumed = True
             raise
@@ -1766,7 +1747,6 @@ class FsStorage(Storage):
         expected_base: int | None = None,
         *,
         fence: Callable[[], bool] | None = None,
-        expected_hydrates: int | None = None,
     ) -> int:
         """Publish the snapshot, then bump and return the generation (issue #763).
 
@@ -1795,9 +1775,6 @@ class FsStorage(Storage):
         lock immediately before the publish; ``False`` raises
         :class:`PublisherFencedError`.
 
-        ``expected_hydrates`` is the hydrate count the guard read (issue #3950): a
-        count that moved since raises :class:`HydratedDuringUploadError`.
-
         The lock is taken through ``_under_server_lock``, so a publish contending for
         it holds no executor thread while it waits (issue #3569).
         """
@@ -1824,13 +1801,6 @@ class FsStorage(Storage):
                     if not self._current_link(community_id, server_id).is_symlink():
                         raise PrunedStoreError(expected_base, current)
                     raise StaleGenerationError(expected_base, current)
-            if (
-                expected_hydrates is not None
-                and self._hydrates_served.get(server_root, 0) != expected_hydrates
-            ):
-                raise HydratedDuringUploadError(
-                    "the server was hydrated during the upload"
-                )
             # Missing-region gate (issue #854, #921 item 2): compare the staged
             # region-file set against the prior ``current/`` set INSIDE the lock so
             # a concurrent publish/restore cannot flip ``current`` between the
@@ -2396,19 +2366,6 @@ class FsStorage(Storage):
             server_id,
             functools.partial(self._read_generation, server_root),
         )
-
-    async def settled_upload_base(
-        self, community_id: CommunityId, server_id: ServerId
-    ) -> UploadBase:
-        server_root = self._server_root(community_id, server_id)
-
-        def _read() -> UploadBase:
-            return UploadBase(
-                generation=self._read_generation(server_root),
-                hydrates=self._hydrates_served.get(server_root, 0),
-            )
-
-        return await self._under_server_lock(community_id, server_id, _read)
 
     async def current_publisher(
         self, community_id: CommunityId, server_id: ServerId

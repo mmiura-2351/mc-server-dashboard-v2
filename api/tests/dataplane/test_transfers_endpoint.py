@@ -58,7 +58,6 @@ from mc_server_dashboard_api.storage.domain.port import (
     RESTORE_PUBLISHER,
     SnapshotHandle,
     Storage,
-    UploadBase,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -726,23 +725,23 @@ def test_snapshot_refused_when_edit_lands_during_upload_window(
     base = asyncio.run(storage.current_generation(c, s))
 
     # Simulate the at-rest edit landing in the upload window by hooking the guard's
-    # settled_upload_base read: the FIRST call (the guard) returns the base, then
+    # settled_generation read: the FIRST call (the guard) returns the base, then
     # mutates current/ in place so the store advances past it before the commit's
     # re-check. The commit re-reads the now-advanced generation and refuses.
-    real_settled_upload_base = storage.settled_upload_base
+    real_settled_generation = storage.settled_generation
     edited = False
 
-    async def _hooked_settled_upload_base(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
-    ) -> UploadBase:
+    ) -> int:
         nonlocal edited
-        value = await real_settled_upload_base(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not edited:
             edited = True
             await storage.write_file(c, s, RelPath("k"), b"edited-mid-upload")
         return value
 
-    storage.settled_upload_base = _hooked_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     body = _tar_bytes({"k": b"in-flight"})
     with client:
@@ -759,7 +758,7 @@ def test_snapshot_refused_when_edit_lands_during_upload_window(
     assert resp.status_code == 409
     assert resp.json()["reason"] == "stale_generation"
 
-    storage.settled_upload_base = real_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = real_settled_generation  # type: ignore[method-assign]
 
     # The edit that landed in the window survives; the stale worker upload is discarded.
     async def _read() -> bytes:
@@ -787,23 +786,23 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     asyncio.run(_publish(storage, community, server, {"k": b"snap"}))
     base = asyncio.run(storage.current_generation(c, s))
 
-    # Same upload-window hook as the declared-base test: the guard's settled_upload_base
+    # Same upload-window hook as the declared-base test: the guard's settled_generation
     # read returns the base, then mutates current/ in place so the store advances before
     # the commit's re-check.
-    real_settled_upload_base = storage.settled_upload_base
+    real_settled_generation = storage.settled_generation
     edited = False
 
-    async def _hooked_settled_upload_base(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
-    ) -> UploadBase:
+    ) -> int:
         nonlocal edited
-        value = await real_settled_upload_base(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not edited:
             edited = True
             await storage.write_file(c, s, RelPath("k"), b"edited-mid-upload")
         return value
 
-    storage.settled_upload_base = _hooked_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     body = _tar_bytes({"k": b"in-flight"})
     with client:
@@ -818,7 +817,7 @@ def test_snapshot_refused_when_edit_lands_during_upload_window_without_base_head
     # The 409 carries the guard-time current (= expected_base) as base_generation.
     assert resp.json()["base_generation"] == base
 
-    storage.settled_upload_base = real_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = real_settled_generation  # type: ignore[method-assign]
 
     # The edit that landed in the window survives; the stale worker upload is discarded.
     async def _read() -> bytes:
@@ -852,23 +851,23 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     base = asyncio.run(storage.current_generation(c, s))
 
     # Simulate the concurrent delete landing in the upload window by hooking the
-    # guard's settled_upload_base read: the FIRST call (the guard) returns the base,
+    # guard's settled_generation read: the FIRST call (the guard) returns the base,
     # then prunes the store (as DeleteServer's retention prune does) before the
     # commit's re-check.
-    real_settled_upload_base = storage.settled_upload_base
+    real_settled_generation = storage.settled_generation
     pruned = False
 
-    async def _hooked_settled_upload_base(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
-    ) -> UploadBase:
+    ) -> int:
         nonlocal pruned
-        value = await real_settled_upload_base(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not pruned:
             pruned = True
             await storage.prune_to_final_snapshot(c, s)
         return value
 
-    storage.settled_upload_base = _hooked_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     body = _tar_bytes({"k": b"in-flight"})
     with client:
@@ -885,7 +884,7 @@ def test_snapshot_refused_when_delete_prunes_store_during_upload_window(
     assert resp.status_code == 409
     assert resp.json()["reason"] == "deleted_during_upload"
 
-    storage.settled_upload_base = real_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = real_settled_generation  # type: ignore[method-assign]
 
 
 def _fs_storage(tmp_path: Path) -> Storage:
@@ -914,20 +913,20 @@ def test_first_upload_refused_when_delete_prunes_never_published_store(
     community, server = _scope()
     c, s = CommunityId(community), ServerId(server)
 
-    real_settled_upload_base = storage.settled_upload_base
+    real_settled_generation = storage.settled_generation
     pruned = False
 
-    async def _hooked_settled_upload_base(
+    async def _hooked_settled_generation(
         community_id: CommunityId, server_id: ServerId
-    ) -> UploadBase:
+    ) -> int:
         nonlocal pruned
-        value = await real_settled_upload_base(community_id, server_id)
+        value = await real_settled_generation(community_id, server_id)
         if not pruned:
             pruned = True
             await storage.prune_to_final_snapshot(c, s)
         return value
 
-    storage.settled_upload_base = _hooked_settled_upload_base  # type: ignore[method-assign]
+    storage.settled_generation = _hooked_settled_generation  # type: ignore[method-assign]
 
     with client:
         resp = client.post(
@@ -3794,7 +3793,7 @@ def _post_stale_snapshot(
 
         return _read
 
-    for name in ("live_snapshot", "current_generation", "settled_upload_base"):
+    for name in ("live_snapshot", "current_generation", "settled_generation"):
         if hasattr(storage, name):
             hooked[name] = getattr(storage, name)
             setattr(storage, name, _guard_read(name))
