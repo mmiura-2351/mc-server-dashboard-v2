@@ -114,9 +114,6 @@ class _Doors:
     store: StorageFileStoreAdapter
     uow: FakeUnitOfWork
 
-    def scope(self) -> dict[str, CommunityId | ServerId]:
-        return {"community_id": self.community, "server_id": self.server}
-
     async def write(self, rel_path: str, content: bytes = b"x") -> None:
         await WriteFile(
             uow=self.uow, control_plane=FakeControlPlane(), file_store=self.store
@@ -407,6 +404,7 @@ _CHARACTERS = [
     "\ufdd0",  # a noncharacter in U+FDD0..U+FDEF
     "\ufffe",  # the BMP's last two code points
     "\U0001ffff",  # the last two of another plane
+    "\u2028",  # a line separator, refused once the upload rule refuses Zl
     "\ud800",  # a lone surrogate
     " ",
     "\u200b",
@@ -503,7 +501,12 @@ async def odd(request: pytest.FixtureRequest, tmp_path: Path) -> _Doors:
     await harness.publish(
         StorageCommunityId(community),
         StorageServerId(server),
-        {"a\\b": b"odd", _nested(129, "f"): b"deep", "a\x85b": b"c1"},
+        {
+            "a\\b": b"odd",
+            _nested(129, "f"): b"deep",
+            "a\x85b": b"c1",
+            "box/a\\b": b"inner",
+        },
     )
     uow = FakeUnitOfWork()
     uow.servers.seed(_server(community, server, running=False))
@@ -527,6 +530,14 @@ async def test_an_existing_odd_name_is_renamed_away(odd: _Doors) -> None:
 
     assert await odd.read("ab") == b"odd"
     assert await odd.read("shallow") == b"deep"
+
+
+async def test_a_directory_holding_an_odd_name_is_moved(odd: _Doors) -> None:
+    # A directory rename creates no component: the names it moves keep the
+    # characters they had, so only how deep and long they end up is judged.
+    await odd.rename("box", "moved")
+
+    assert await odd.read("moved/a\\b") == b"inner"
 
 
 async def test_an_existing_odd_name_is_deleted(odd: _Doors) -> None:
