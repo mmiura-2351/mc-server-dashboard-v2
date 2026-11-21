@@ -593,13 +593,21 @@ async def publish_snapshot(
                     # worker (issue #1703): a re-placed worker whose base lags because
                     # the old worker's late final snapshot advanced the store is the
                     # authoritative session — refusing it would wedge the server.
-                    # An assigned worker that has not hydrated was refused above.
+                    # That holds only once the worker has hydrated the server under
+                    # its assignment (issue #3890). The check above refused a
+                    # marked assigned worker, but this read is a second one: a
+                    # placement that committed since is marked, and still refused.
                     assigned = await assigned_worker(community_id, server_id)
-                    if assigned is None or assigned.worker_id != publisher:
+                    if (
+                        assigned is None
+                        or assigned.worker_id != publisher
+                        or assigned.awaiting_hydrate
+                    ):
                         _logger.warning(
                             "snapshot publish refused: stale base "
-                            "generation for server %s from a different "
-                            "worker (publisher %s held %d, store at "
+                            "generation for server %s from a worker that "
+                            "is not the assigned one or has not hydrated "
+                            "it (publisher %s held %d, store at "
                             "%d published by %s)",
                             server_id,
                             publisher,
