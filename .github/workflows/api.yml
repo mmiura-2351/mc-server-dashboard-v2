@@ -19,6 +19,11 @@ on:
       - "webui/src/pages/serverState.ts"
       # The start guard table, pinned by test_lifecycle_endpoints.py.
       - "webui/src/pages/startGuard.json"
+      # The services' env forwarding, pinned by test_compose_log_forwarding.py,
+      # test_serve_entrypoint.py and fleet/test_control_plane_config.py.
+      - "compose.yaml"
+      # Run by tooling/test_argon2_canary.py.
+      - "scripts/argon2_canary.py"
   push:
     branches: [main]
     paths:
@@ -38,6 +43,11 @@ on:
       - "webui/src/pages/serverState.ts"
       # The start guard table, pinned by test_lifecycle_endpoints.py.
       - "webui/src/pages/startGuard.json"
+      # The services' env forwarding, pinned by test_compose_log_forwarding.py,
+      # test_serve_entrypoint.py and fleet/test_control_plane_config.py.
+      - "compose.yaml"
+      # Run by tooling/test_argon2_canary.py.
+      - "scripts/argon2_canary.py"
 
 permissions:
   contents: read
