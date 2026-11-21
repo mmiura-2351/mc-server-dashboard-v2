@@ -283,10 +283,10 @@ database session ended before a write that relied on the lock: it stopped
 before that write. Retrying takes the lock afresh. What it wrote before
 stopping stands, as after any other failure at that point. A restore that had
 already published answers **503 `restore_incomplete`** instead (Section 6.7).
-An import whose server already exists answers 503 `seed_failed`, as for its
-other failures after the create. A loss found only when the operation releases
-the lock, after its last write, changes nothing: the operation answers as it
-finished.
+An import whose server already exists, and an update whose row change has
+committed, answer 503 `seed_failed`, as for their other failures after that
+commit. A loss found only when the operation releases the lock, after its last
+write, changes nothing: the operation answers as it finished.
 
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
 `mc_version`, `server_type`, `config` (full blob),

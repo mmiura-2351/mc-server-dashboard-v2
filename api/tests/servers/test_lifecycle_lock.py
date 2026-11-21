@@ -74,6 +74,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupRestoreIncompleteError,
     LifecycleLockLostError,
+    WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
@@ -1056,13 +1057,16 @@ async def test_update_server_confirms_the_lock_again_before_its_file_rewrite() -
 
     lock.events.clear()
     lock.checks_before_loss = 1
-    with pytest.raises(LifecycleLockLostError):
+    # The row is committed by then, so the loss is the post-commit seed failure
+    # a failed rewrite is (503 seed_failed, audited as the change it made).
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await update(
             community_id=_COMMUNITY,
             server_id=server.id,
             game_port=25567,
             authorize=_allow,
         )
+    assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
     assert (server.id, "update-row") in lock.events
     assert (server.id, "write-file") not in lock.events
     assert store.files["server.properties"] == b"server-port=25566\n"

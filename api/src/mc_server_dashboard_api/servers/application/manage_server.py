@@ -44,6 +44,7 @@ from mc_server_dashboard_api.servers.domain.deleted_server_reclaim import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleLockLostError,
     PermissionDeniedError,
     PortAlreadyTakenError,
     PortOutOfRangeError,
@@ -720,8 +721,14 @@ class UpdateServer:
                 await self.uow.servers.update(server)
                 await self.uow.commit()
             if pending_overrides is not None or pending_port is not None:
-                # The rewrites are in-place working-set writes (issue #3927).
-                await lock.ensure_held()
+                # The rewrites are in-place working-set writes (issue #3927). The
+                # row is committed by now, so a lost lock is the post-commit
+                # failure a failed rewrite is: 503 seed_failed, audited as the
+                # change that stands, not lifecycle_lock_lost.
+                try:
+                    await lock.ensure_held()
+                except LifecycleLockLostError as exc:
+                    raise WorkingSetSeedFailedError(str(server_id.value)) from exc
             # Deferred file writes (#1705): run after the DB commit succeeds
             # so a commit failure never leaves the file and row out of step.
             # A post-commit file-write failure is the self-healing direction:
