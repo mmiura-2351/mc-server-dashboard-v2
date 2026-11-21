@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -311,6 +312,68 @@ func TestUnpackDoesNotWriteThroughALinkAtAMembersName(t *testing.T) {
 	}
 }
 
+// A symlink planted at a directory on a member's path, whether it points outside
+// the unpack directory or at another directory inside it, fails the unpack, and
+// nothing is created behind it (issue #3940): every directory on the path is
+// opened without following a link, with openat2 or, on a kernel without it,
+// with O_NOFOLLOW.
+func TestUnpackDoesNotWriteThroughALinkAtADirectoryOnAMembersPath(t *testing.T) {
+	members := map[string]tar.Header{
+		"file":      {Name: "world/region/sub/r.0.0.mca", Typeflag: tar.TypeReg, Mode: 0o640, Size: 4},
+		"directory": {Name: "world/region/sub/", Typeflag: tar.TypeDir, Mode: 0o750},
+	}
+	for member, header := range members {
+		for _, link := range []string{"world", "world/region"} {
+			for _, target := range []string{"outside", "inside"} {
+				for _, kernel := range []string{"openat2", "without openat2"} {
+					t.Run(member+" with "+link+" linked "+target+", "+kernel, func(t *testing.T) {
+						if kernel == "without openat2" {
+							withoutOpenat2(t)
+						}
+						base := t.TempDir()
+						dest := filepath.Join(base, "dest")
+						if err := os.MkdirAll(filepath.Join(dest, "world"), 0o750); err != nil {
+							t.Fatal(err)
+						}
+						linked := filepath.Join(base, "elsewhere")
+						if target == "inside" {
+							linked = filepath.Join(dest, "elsewhere")
+						}
+						if err := os.Mkdir(linked, 0o750); err != nil {
+							t.Fatal(err)
+						}
+						// The link takes the place of the directory at link.
+						if err := os.Remove(filepath.Join(dest, link)); err != nil && !os.IsNotExist(err) {
+							t.Fatal(err)
+						}
+						if err := os.Symlink(linked, filepath.Join(dest, link)); err != nil {
+							t.Fatal(err)
+						}
+						var buf bytes.Buffer
+						tw := tar.NewWriter(&buf)
+						if err := tw.WriteHeader(&header); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := tw.Write(make([]byte, header.Size)); err != nil {
+							t.Fatal(err)
+						}
+						if err := tw.Close(); err != nil {
+							t.Fatal(err)
+						}
+
+						if err := unpackTar(&buf, openDirFd(t, dest)); err == nil {
+							t.Error("unpackTar = nil, want the link on the member's path refused")
+						}
+						if entries, err := os.ReadDir(linked); err != nil || len(entries) != 0 {
+							t.Fatalf("the link's target holds %v, %v; want nothing written through the link", entries, err)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 // Directories the unpack creates, named by a member or implied by a file's path,
 // get mode 0750 (under a 022 umask).
 func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
@@ -344,25 +407,45 @@ func TestUnpackCreatesDirectoriesWithMode0750(t *testing.T) {
 }
 
 // A directory member whose name an entry other than a directory already holds
-// fails the unpack, as os.MkdirAll failed it: here a dangling link, which a stat
-// that follows it reports as absent, so the mkdir meets EEXIST.
+// fails the unpack, as os.MkdirAll failed it: here a dangling link, which the
+// walk refuses to open (issue #3940) instead of following it into a mkdir at its
+// target, with openat2 or without it.
 func TestUnpackRefusesADirectoryMemberWhoseNameALinkHolds(t *testing.T) {
-	dest := t.TempDir()
-	if err := os.Symlink(filepath.Join(dest, "nowhere"), filepath.Join(dest, "world")); err != nil {
-		t.Fatal(err)
-	}
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
-		t.Fatal(err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
-	}
+	for _, kernel := range []string{"openat2", "without openat2"} {
+		t.Run(kernel, func(t *testing.T) {
+			if kernel == "without openat2" {
+				withoutOpenat2(t)
+			}
+			dest := t.TempDir()
+			if err := os.Symlink(filepath.Join(dest, "nowhere"), filepath.Join(dest, "world")); err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			if err := tw.WriteHeader(&tar.Header{Name: "world/", Typeflag: tar.TypeDir, Mode: 0o750}); err != nil {
+				t.Fatal(err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
 
-	if err := unpackTar(&buf, openDirFd(t, dest)); !errors.Is(err, unix.EEXIST) {
-		t.Fatalf("unpackTar = %v, want EEXIST for the link at the directory's name", err)
+			if err := unpackTar(&buf, openDirFd(t, dest)); err == nil {
+				t.Error("unpackTar = nil, want the link at the directory's name refused")
+			}
+			if _, err := os.Lstat(filepath.Join(dest, "nowhere")); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the link's target: %v; want it never created", err)
+			}
+		})
 	}
+}
+
+// withoutOpenat2 makes the unpack take, for the rest of the test, the path a
+// kernel without openat2 takes (before Linux 5.6).
+func withoutOpenat2(t *testing.T) {
+	t.Helper()
+	orig := openat2Beneath
+	t.Cleanup(func() { openat2Beneath = orig })
+	openat2Beneath = func(int, string) (int, error) { return -1, unix.ENOSYS }
 }
 
 // ignoringEINTR retries a call the kernel interrupted, as the os package does

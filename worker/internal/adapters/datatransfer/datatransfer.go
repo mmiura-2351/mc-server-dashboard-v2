@@ -40,6 +40,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/scratchformat"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
 // generationHeader is the response header the API data plane stamps on a hydrate
@@ -754,9 +755,11 @@ func sweepHydrateLeftovers(parent, serverID string) {
 
 // unpackTar extracts a tar stream into the directory behind destFd, rejecting any
 // member whose path escapes it (absolute paths, "..", and link members). This
-// mirrors the API-side filter="data" sandbox. Every member is created by its path
-// relative to destFd, never by the path joined to destFd's own (issue #3341), so
-// the length of the directory's path does not count against a member's.
+// mirrors the API-side filter="data" sandbox. Every member is created by its last
+// name relative to its parent directory's descriptor, which openDirAllAt reaches
+// from destFd without following a link at any directory on the way (issue
+// #3940); a member's path is never joined to destFd's own (issue #3341), so the
+// length of the directory's path does not count against a member's.
 func unpackTar(r io.Reader, destFd int) error {
 	tr := tar.NewReader(r)
 	for {
@@ -785,14 +788,19 @@ func unpackTar(r io.Reader, destFd int) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := mkdirAllAt(destFd, target); err != nil {
+			dirFd, err := openDirAllAt(destFd, target)
+			if err != nil {
 				return err
 			}
+			_ = unix.Close(dirFd)
 		case tar.TypeReg:
-			if err := mkdirAllAt(destFd, path.Dir(target)); err != nil {
+			dirFd, err := openDirAllAt(destFd, path.Dir(target))
+			if err != nil {
 				return err
 			}
-			if err := writeFile(destFd, target, tr, os.FileMode(header.Mode)); err != nil {
+			err = writeFile(dirFd, target, tr, os.FileMode(header.Mode))
+			_ = unix.Close(dirFd)
+			if err != nil {
 				return err
 			}
 		case tar.TypeSymlink, tar.TypeLink:
@@ -825,7 +833,8 @@ func isRootGenerationMarkerMember(name string) bool {
 // already streamed (one extra flush per file, not a re-read of the whole tree); the
 // per-dir entries are made durable by a single recursive dir-fsync after unpack.
 //
-// target is named relative to the directory behind dirFd (issue #3341).
+// dirFd is the directory that holds target, and only target's last name is
+// opened relative to it (issue #3940); target labels errors.
 func writeFile(dirFd int, target string, src io.Reader, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0o640
@@ -835,7 +844,7 @@ func writeFile(dirFd int, target string, src io.Reader, mode os.FileMode) error 
 	// keeps the write self-defending against any residual link in the destination.
 	var fd int
 	if err := ignoringEINTR(func() (err error) {
-		fd, err = unix.Openat(dirFd, target, unix.O_CREAT|unix.O_TRUNC|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
+		fd, err = unix.Openat(dirFd, path.Base(target), unix.O_CREAT|unix.O_TRUNC|unix.O_WRONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
 		return err
 	}); err != nil {
 		return &os.PathError{Op: "open", Path: target, Err: err}
@@ -868,35 +877,52 @@ func safeRel(name string) (string, error) {
 	return path.Clean(slashed), nil
 }
 
-// mkdirAllAt creates the directory rel below the directory behind rootFd, with
-// any missing parents, as os.MkdirAll does (mode 0o750), naming each relative to
-// rootFd (issue #3341).
-func mkdirAllAt(rootFd int, rel string) error {
-	var st unix.Stat_t
-	if err := ignoringEINTR(func() error { return unix.Fstatat(rootFd, rel, &st, 0) }); err == nil {
-		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
-			return nil
+// openDirAllAt opens the directory rel below the directory behind rootFd,
+// creating it and any missing parents first, as os.MkdirAll does (mode 0o750),
+// and returns its descriptor, which the caller closes.
+//
+// rel is walked one name at a time from rootFd (issue #3940): each directory is
+// opened relative to its parent's descriptor without following a link
+// (openDirBeneath), and a missing one is created by its single name relative to
+// that descriptor. A symlink at any directory on the path therefore fails the
+// walk instead of redirecting a write, whether it points out of rootFd or at
+// another directory inside it. The walk holds at most two descriptors at a time.
+func openDirAllAt(rootFd int, rel string) (int, error) {
+	dirFd := rootFd
+	for _, name := range strings.Split(rel, "/") {
+		fd, err := openDirBeneath(dirFd, name)
+		if errors.Is(err, unix.ENOENT) {
+			if err = ignoringEINTR(func() error { return unix.Mkdirat(dirFd, name, 0o750) }); err == nil {
+				fd, err = openDirBeneath(dirFd, name)
+			}
 		}
-		return &os.PathError{Op: "mkdir", Path: rel, Err: unix.ENOTDIR}
-	}
-	if parent := path.Dir(rel); parent != "." {
-		if err := mkdirAllAt(rootFd, parent); err != nil {
-			return err
+		if dirFd != rootFd {
+			_ = unix.Close(dirFd)
 		}
+		if err != nil {
+			return -1, &os.PathError{Op: "mkdir", Path: rel, Err: err}
+		}
+		dirFd = fd
 	}
-	err := ignoringEINTR(func() error { return unix.Mkdirat(rootFd, rel, 0o750) })
-	if err == nil {
-		return nil
-	}
-	// As os.MkdirAll does, an existing name is success only when it is a
-	// directory itself, not a link or anything else.
-	if errors.Is(err, unix.EEXIST) &&
-		ignoringEINTR(func() error { return unix.Fstatat(rootFd, rel, &st, unix.AT_SYMLINK_NOFOLLOW) }) == nil &&
-		st.Mode&unix.S_IFMT == unix.S_IFDIR {
-		return nil
-	}
-	return &os.PathError{Op: "mkdir", Path: rel, Err: err}
+	return dirFd, nil
 }
+
+// openDirBeneath opens the directory name of the directory behind dirFd, refusing
+// a symlink at it. The kernel resolves it with openat2 RESOLVE_BENEATH|
+// RESOLVE_NO_SYMLINKS, which also refuses a name that would leave dirFd; on a
+// kernel without openat2 (before Linux 5.6), O_NOFOLLOW refuses the link instead,
+// the fallback instancemanager.openParentBeneath takes too.
+func openDirBeneath(dirFd int, name string) (int, error) {
+	fd, err := openat2Beneath(dirFd, name)
+	if !errors.Is(err, unix.ENOSYS) {
+		return fd, err
+	}
+	return nofollow.OpenAt(dirFd, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+}
+
+// openat2Beneath is nofollow.Openat2Beneath, held in a variable so a test can
+// take the path a kernel without openat2 takes; production never reassigns it.
+var openat2Beneath = nofollow.Openat2Beneath
 
 // The snapshot walk (packTar, walkInto, packDir, packRegular) never resolves a
 // path below the working-set root (issue #3334). A snapshot is taken of a RUNNING
