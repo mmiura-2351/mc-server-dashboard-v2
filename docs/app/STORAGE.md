@@ -1563,7 +1563,15 @@ the system does not trust ([SECURITY.md](SECURITY.md) Section 6), has that copy
 bind-mounted and can create symlinks in it at will. The snapshot walk skips them
 without following them, and the Worker's file operations on a running server
 refuse to follow them, so none of them reaches the store. One can therefore
-reach the stored working set only out of band, from an operator over SSH.
+reach the stored working set only out of band, from an operator over SSH. The
+hydrate does not rely on its fresh staging directory holding no link either: it
+opens every directory on a member's path relative to the one before it without
+following a link (`openat2` with `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS`, or
+`O_NOFOLLOW` where `openat2` is unavailable: a kernel older than 5.6, or a
+seccomp profile that denies it). It creates each file only where nothing is
+(`O_EXCL`), so neither a symlink nor a hard link already at a member's name is
+written through. Either fails the hydrate instead of redirecting a write (issue
+#3940).
 
 Every operation that takes a `rel_path` resolves it the same way, in this order:
 
