@@ -7,6 +7,8 @@ on:
       - "proto/contract/**"
       - "proto/mcsd/**"
       - "Makefile"
+      # Run by the migration guard step below.
+      - "scripts/check_migrations.py"
       - "scripts/check_api_benchmark_collection.py"
       - "scripts/refresh_python_lock.py"
       - ".github/dependabot.yml"
@@ -15,6 +17,15 @@ on:
       - ".github/workflows/api.yml"
       # Mirrors the anonymous body limit, pinned by test_http_body_credential.py.
       - "webui/src/api/limits.ts"
+      # Mirrors the not-restarted crash reasons, pinned by test_entities.py.
+      - "webui/src/pages/serverState.ts"
+      # The start guard table, pinned by test_lifecycle_endpoints.py.
+      - "webui/src/pages/startGuard.json"
+      # The services' env forwarding, pinned by test_compose_log_forwarding.py,
+      # test_serve_entrypoint.py and fleet/test_control_plane_config.py.
+      - "compose.yaml"
+      # Run by tooling/test_argon2_canary.py.
+      - "scripts/argon2_canary.py"
   push:
     branches: [main]
     paths:
@@ -22,6 +33,8 @@ on:
       - "proto/contract/**"
       - "proto/mcsd/**"
       - "Makefile"
+      # Run by the migration guard step below.
+      - "scripts/check_migrations.py"
       - "scripts/check_api_benchmark_collection.py"
       - "scripts/refresh_python_lock.py"
       - ".github/dependabot.yml"
@@ -30,6 +43,15 @@ on:
       - ".github/workflows/api.yml"
       # Mirrors the anonymous body limit, pinned by test_http_body_credential.py.
       - "webui/src/api/limits.ts"
+      # Mirrors the not-restarted crash reasons, pinned by test_entities.py.
+      - "webui/src/pages/serverState.ts"
+      # The start guard table, pinned by test_lifecycle_endpoints.py.
+      - "webui/src/pages/startGuard.json"
+      # The services' env forwarding, pinned by test_compose_log_forwarding.py,
+      # test_serve_entrypoint.py and fleet/test_control_plane_config.py.
+      - "compose.yaml"
+      # Run by tooling/test_argon2_canary.py.
+      - "scripts/argon2_canary.py"
 
 permissions:
   contents: read
