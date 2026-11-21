@@ -1874,7 +1874,11 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 			return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 				fmt.Sprintf("instancemanager: snapshot pack: %v", err))
 		}
-		defer cleanup()
+		// The spool is removed on every path out of here, and once only: the tail below
+		// removes it early, before the tree sync (issue #3999).
+		var removeOnce sync.Once
+		removeSpool := func() { removeOnce.Do(cleanup) }
+		defer removeSpool()
 		// Restore save-on immediately after the pack — the working dir is no longer
 		// being read, so auto-save can safely resume. The deferred restore() is still
 		// in place as a safety net for early returns above this point.
@@ -1886,6 +1890,31 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 		}
 		if !att.commit() {
 			return m.skipAbandonedTail(cmd)
+		}
+		// Make the tree durable before the marker stamp below names it (issue #3999).
+		// The server writes it through the page cache, so a marker made durable over
+		// it alone can outlive it on a power loss, and the skip-hydrate gate then boots
+		// the older world the marker does not describe. The sync runs here, after the
+		// upload and outside the save-off window: what the marker needs is a durable
+		// tree no older than the generation it names, and a sync started now flushes
+		// everything the tree held at the pack together with what the server has
+		// written since. The spool goes first, so that the sync drops its pages
+		// instead of writing them to disk. A tree that cannot be made durable is still
+		// published, since the store gains the newest world either way, but it is not
+		// stamped: the marker keeps its older generation, which costs the next start a
+		// hydrate. ctx, not cmdCtx: this is the committed tail, which may outlive the
+		// command's deadline, as the stamp it gates does. The sync's duration is logged,
+		// so its cost on a real host can be read off the Worker's log.
+		removeSpool()
+		treeDurable := true
+		syncStart := time.Now()
+		if err := syncWorkingSet(ctx, workingDir); err != nil {
+			treeDurable = false
+			m.logger.Warn("snapshot could not make the working set durable; it is published, but the generation marker is not advanced",
+				"server_id", cmd.ServerID, "error", err)
+		} else {
+			m.logger.Info("snapshot made the working set durable",
+				"server_id", cmd.ServerID, "sync_ms", time.Since(syncStart).Milliseconds())
 		}
 		// Record the NEW generation the publish produced (issue #763): the scratch we
 		// just pushed is the source of this store generation, so its local generation
@@ -1905,7 +1934,11 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 		// so a declaration the marker does not back would defeat the guard above over the
 		// wire instead of on disk — hence the value is taken FROM the write's report, not
 		// from being in this branch.
-		if m.recordGenerationIfUnchanged(ctx, pin, workingDir, cmd.ServerID, gen) {
+		//
+		// Conditional as well on the tree having been made durable above (issue #3999),
+		// for the same reason: a marker durable over a tree that is not can be newer
+		// than what a power loss leaves.
+		if treeDurable && m.recordGenerationIfUnchanged(ctx, pin, workingDir, cmd.ServerID, gen) {
 			declaredGeneration = &gen
 		}
 		// GC the displaced tree a prior hydrate kept aside (issue #906): a successful

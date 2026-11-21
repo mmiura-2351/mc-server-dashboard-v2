@@ -269,11 +269,13 @@ so the set stays advertised at the hydrate's generation and the next start re-hy
 
 At boot, before the first registration, the
 Worker structurally fsck's each held set's region files: a periodic running-id
-snapshot makes the generation marker durable while the live world files are never
-fsynced by the Worker, so a power loss can leave a durable gen-N marker next to a
-torn local world. A held set whose region is torn is advertised at **generation 0**
-— treated as stale, forcing the hydrate that recovers the consistent store copy
-rather than booting the torn world. The Worker makes that verdict stick by
+snapshot syncs the tree after its upload and before its gen-N marker
+([`STORAGE.md`](STORAGE.md) Section 8), but the server keeps writing after that
+sync, and the Worker does not sync those writes, so a power loss can leave a
+durable gen-N marker next to a world they tore. A held set whose region is torn
+is advertised at **generation 0** — treated as stale, forcing the hydrate that
+recovers the consistent store copy rather than booting the torn world. The
+Worker makes that verdict stick by
 **rewriting the set's generation marker to 0** (atomically and fsynced; skipped when
 it already reads 0), because what every `Register` carries, the first included, is a
 fresh read of the markers with no fsck: the boot verdict reaches the API only through
@@ -599,7 +601,7 @@ directories named this way.
 | `RestartServer` | Stop then start in place. The relaunch takes the same working-set guard as `StartServer`, so a restart over a scratch destroyed or emptied out of band is refused `SERVER_NOT_FOUND` once the stop has confirmed; the server is left down and the reconciler re-launches it with a hydrate (Section 7). | none | FR-SRV-2 |
 | `ServerCommand` | Forward an RCON/console line. | `command_output` | FR-SRV-5 |
 | `HydrateTrigger` | Pull the working set from the data plane before launch; carries the transfer URL + one-time token. | none | FR-DATA-4 |
-| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → async save-all → settle-wait → copy → save-on so the world is fully on disk and a region file is not captured torn — NOT `save-all flush`, whose synchronous main-thread flush can trip the server watchdog and crash a live server; a running snapshot that cannot quiesce — RCON down, save-off/save-all failing, or the save never settling — is refused `quiesce_unavailable` rather than packing a live world; a stopped-id snapshot whose scratch holds no working set — already GC'd after a published final snapshot, emptied out of band, never hydrated, or holding only the generation marker — is refused `SERVER_NOT_FOUND` rather than packing an empty tar with the base-generation guard disabled). | none | FR-DATA-4, FR-DATA-7, REQUIREMENTS.md Section 6.9 |
+| `SnapshotTrigger` | Push the working set back to the data plane (a running server's copy is bracketed save-off → async save-all → settle-wait → copy → save-on so the world is fully on disk and a region file is not captured torn; after the upload the spool is removed and the tree synced before the generation marker is stamped, so the marker never names a tree a power loss could roll back (STORAGE.md Section 8) — NOT `save-all flush`, whose synchronous main-thread flush can trip the server watchdog and crash a live server; a running snapshot that cannot quiesce — RCON down, save-off/save-all failing, or the save never settling — is refused `quiesce_unavailable` rather than packing a live world; a stopped-id snapshot whose scratch holds no working set — already GC'd after a published final snapshot, emptied out of band, never hydrated, or holding only the generation marker — is refused `SERVER_NOT_FOUND` rather than packing an empty tar with the base-generation guard disabled). | none | FR-DATA-4, FR-DATA-7, REQUIREMENTS.md Section 6.9 |
 | `ReadFile` | Read a path from a running server's live working set. | `file_content` | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |
 | `EditFile` | Write a path in a running server's live working set. | none | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |
 | `ListFiles` | List a directory in a running server's live working set (read-only). | `file_listing` | REQUIREMENTS.md Section 6.9, ARCHITECTURE.md Section 7.2 |

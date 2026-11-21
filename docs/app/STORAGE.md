@@ -2207,6 +2207,47 @@ full round-trip. A fsck I/O error is best-effort (logged, transfer proceeds) so
 the fsck never wedges a snapshot; the API integrity gate is the correctness
 guarantee.
 
+**The Worker's generation marker reaches the disk after its tree.** The Worker
+records the generation a transfer leaves its working set at (the
+`X-Working-Set-Generation` above) in a `.mcsd_generation` marker in the
+working-set root and advertises it at registration, where the skip-hydrate gate
+reads it (CONTROL_PLANE.md Section 4.1). A marker newer than the tree on disk makes
+that gate boot an older world, whose next snapshot then publishes it over newer
+data. So the marker is made durable (written under a temporary name, fsynced,
+renamed, its directory fsynced) only once the tree it names is durable (issue
+#3999):
+
+- A hydrate fsyncs each file it unpacks and every directory of the tree before the
+  rename that swaps the tree in.
+- A running-id snapshot, once its upload has published, removes its spool and
+  then syncs the filesystem the working set lies on (`syncfs(2)`) before it stamps
+  the new generation. Where `syncfs` is unavailable (`ENOSYS`, or `EPERM` from a
+  seccomp profile), it fsyncs every regular file and directory of the tree
+  instead. A sync that fails leaves the marker at its older generation: the
+  publish stands, the snapshot declares no held generation, and the next start
+  hydrates.
+- A stopped-id snapshot writes no marker; it removes the scratch.
+
+What the marker needs is a durable tree no older than the generation it names,
+not the packed state exactly. So the sync runs after the upload, outside the
+save-off window, while the server writes again: it flushes everything the tree
+held at the pack together with what the server wrote since. The spool is unlinked
+before it, so the sync drops the spool's pages instead of writing them; it still
+flushes whatever else is dirty on that filesystem. Writes after the sync are not
+synced, so a power loss can still tear them; the boot region fsck is what catches
+that (CONTROL_PLANE.md Section 4.1).
+
+The guarantee holds only where `syncfs` makes one, so the scratch directory must
+sit on a **local filesystem**: not FUSE, which need not pass the sync on to its
+daemon, and not a network filesystem. `syncfs` reports a writeback error only
+from **Linux 5.8** on; on an older kernel a write the disk refused can go
+unreported, and the marker then advances over it. `syncfs` also waits on
+everything else dirty on that filesystem, so a scratch that shares it with the
+store or Postgres waits on their writeback too; a separate filesystem is
+recommended ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 3). Each
+successful sync logs `snapshot made the working set durable` at `INFO` with its
+duration as `sync_ms`.
+
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
 split. MC 26.x pads region files to a 4096-byte sector boundary only on
