@@ -3793,3 +3793,15 @@ async def test_active_staging_survives_concurrent_sweep(
     await harness.storage.commit_snapshot(handle)
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"INFLIGHT"}
+
+
+async def test_subtree_extent_before_any_publish_is_of_an_empty_root(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+
+    assert await harness.storage.subtree_extent(
+        community, server, RelPath(".")
+    ) == SubtreeExtent(depth=0, longest=0)
+    with pytest.raises(NotFoundError):
+        await harness.storage.subtree_extent(community, server, RelPath("top"))

@@ -812,9 +812,9 @@ decided on the opened descriptor, so an entry swapped for a symlink or a FIFO
 mid-snapshot is skipped instead of being packed from outside the working set or
 blocking the worker. The walk holds one descriptor per directory level and
 refuses a working set nested deeper than 128 directories. The API creates no
-name past that bound (issue #3973): every door that creates one, except those
-tracked in issue #4008 — the files API's write, make-dir, upload, extract and
-rename, a server import and a backup upload — refuses a name more than 128
+name past that bound (issue #3973): the files API's write, make-dir, upload,
+extract and rename, a server import and a backup upload — every door that
+creates one except those tracked in issue #4008 — refuse a name more than 128
 directory levels deep, counted as the walk counts them (the root is level 0 and
 only directories count), a component past 255 bytes, or a path past 4,095 bytes,
 the walk's own member bound ([STORAGE.md](STORAGE.md) Section 6.2). The numbers

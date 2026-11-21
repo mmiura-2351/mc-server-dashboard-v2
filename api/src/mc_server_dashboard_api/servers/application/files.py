@@ -385,11 +385,12 @@ def _refuse_unnamable(rel_path: str, *, is_dir: bool) -> None:
     deletes and a rename away do not ask.
 
     The lengths are judged before the characters, and each distinct character
-    is looked at once, so a path of any length costs a few passes in C before a
-    character is looked at: past the lengths, at most a component's worth of
-    distinct characters is left, however many ``.`` and ``/`` segments pad it.
-    A lone surrogate is refused first, at the cost of one encode: no name may
-    carry one, and the rule cannot measure one.
+    is looked at once, so the character scan is bounded: past the lengths, at
+    most a path's worth of distinct characters is left, however long the string
+    or however many ``.`` and ``/`` segments pad it. The lengths themselves cost
+    a pass per segment, as the traversal check before them does. A lone
+    surrogate is refused first, at the cost of one encode: no name may carry
+    one, and the rule cannot measure one.
     """
 
     try:

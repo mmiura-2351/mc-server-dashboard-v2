@@ -590,6 +590,8 @@ async def test_a_directory_holding_control_character_directories_is_moved(
 async def test_a_deeper_move_is_judged_by_the_extent_below(odd: _Doors) -> None:
     # ``deepctl`` holds a directory 127 levels below it, through a C0-named one.
     assert await _refusal(odd.rename("deepctl", "x/deepctl")) == "path_too_deep"
+    # Fewer bytes but one more level is measured too.
+    assert await _refusal(odd.rename("deepctl", "x/d")) == "path_too_deep"
 
     await odd.rename("deepctl", "deeper-control-characters")
     assert await odd.names("deeper-control-characters") == ["a\x01b"]
@@ -681,3 +683,43 @@ async def test_an_extract_judges_its_members_off_the_event_loop(
     await doors.upload(".", filename, content, extract=True)
 
     assert on_loop == [False] * 20
+
+
+async def test_a_directory_rename_measures_the_paths_it_moves_to_the_byte(
+    doors: _Doors,
+) -> None:
+    # 3,000 bytes below ``src``: a 1,095-byte destination makes the moved path
+    # 1,095 + 1 + 3,000 = 4,096 bytes, the separator included.
+    await doors.write("src/" + _long_path(3000))
+
+    assert await _refusal(doors.rename("src", _long_path(1095))) == "path_too_long"
+
+
+@pytest.mark.parametrize("doors", ["object"], indirect=True)
+async def test_a_directory_moved_to_4095_bytes_is_admitted(doors: _Doors) -> None:
+    # On object only: on fs the store's own directories make a path that long
+    # unwritable.
+    await doors.write("src/" + _long_path(3000))
+
+    await doors.rename("src", _long_path(1094))
+    assert await doors.read(_long_path(1094) + "/" + _long_path(3000)) == b"x"
+
+
+@pytest.mark.parametrize("doors", ["object"], indirect=True)
+async def test_a_longer_name_at_the_same_level_is_measured(doors: _Doors) -> None:
+    # ``a/src`` to a 250-byte name adds no level but 245 bytes, so the 3,900
+    # bytes below make a 4,151-byte path.
+    await doors.write("a/src/" + _long_path(3900))
+
+    assert await _refusal(doors.rename("a/src", "a/" + "n" * 250)) == "path_too_long"
+
+
+@pytest.mark.parametrize("doors", ["object"], indirect=True)
+async def test_an_empty_directory_moved_to_4095_bytes_is_admitted(
+    doors: _Doors,
+) -> None:
+    # Nothing below adds a separator.
+    await doors.mkdir("e")
+
+    await doors.rename("e", _long_path(4095))
+    assert await doors.names(_long_path(4095)) == []

@@ -20,6 +20,7 @@ from mc_server_dashboard_api.member_name import (
     NAME_TOO_LONG,
     PATH_TOO_DEEP,
     PATH_TOO_LONG,
+    extent_refusal,
     member_name_refusal,
 )
 
@@ -138,3 +139,9 @@ def test_a_path_is_measured_without_empty_and_dot_segments() -> None:
 def test_the_root_is_admitted() -> None:
     assert member_name_refusal("", is_dir=True) is None
     assert member_name_refusal(".", is_dir=True) is None
+
+
+def test_too_long_is_named_before_too_deep() -> None:
+    # 2,100 directory levels of 1 byte and their separators: 4,199 bytes.
+    assert member_name_refusal("a/" * 2100, is_dir=True) == PATH_TOO_LONG
+    assert extent_refusal(directories=129, path_bytes=4096) == PATH_TOO_LONG
