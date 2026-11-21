@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/clock"
+	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/config"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/controlplane"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/adapters/regionfsck"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/application/instancemanager"
@@ -49,26 +52,78 @@ func TestControlPlaneKeepaliveMatchesServerContract(t *testing.T) {
 	}
 }
 
-// TestRunFailsFastOnMissingConfig verifies the wiring surfaces a fatal config
-// error at boot when required keys are absent (CONFIGURATION.md Section 2). The
-// test clears the relevant env so Load sees nothing.
-func TestRunFailsFastOnMissingConfig(t *testing.T) {
-	for _, k := range []string{
-		"MCD_WORKER_CONFIG",
-		"MCD_WORKER_API_GRPC_ENDPOINT",
-		"MCD_WORKER_API_CREDENTIAL",
-		"MCD_WORKER_WORKER_SCRATCH_DIR",
-	} {
-		t.Setenv(k, "")
+// TestMainFailsFastOnMissingConfig verifies the wiring surfaces a fatal config
+// error at boot when required keys are absent (CONFIGURATION.md Section 2): main
+// exits 1 and says why. The child sees no MCD_WORKER_* variable, so Load sees
+// nothing.
+func TestMainFailsFastOnMissingConfig(t *testing.T) {
+	if isChild(t) {
+		main()
+		return
 	}
+	stderr, code := runChild(t, nil)
+	if code != 1 {
+		t.Errorf("main() with no config exited %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "config") {
+		t.Errorf("main() wrote %q, want a config error", stderr)
+	}
+}
 
-	err := run(context.Background())
-	if err == nil {
-		t.Fatal("run() with no config returned nil, want a fatal config error")
+// childEnv marks a run of the test binary as runChild's child, by the name of the
+// one test it runs.
+const childEnv = "MCSD_TEST_CHILD"
+
+// childTimeout bounds a child of runChild. Each exits within a second; the bound
+// is there for a main that stops failing and serves instead.
+const childTimeout = time.Minute
+
+// runChild runs t again in a child process of the test binary, for a test that
+// exits or changes process-wide state. The child sees no MCD_*, GRPC_GO_* or
+// GODEBUG variable but those in env, so the ambient environment cannot steer it.
+// It returns what the child wrote to stderr and its exit code. t must be a
+// top-level test: the child runs t whole.
+func runChild(t *testing.T, env map[string]string) (string, int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), childTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+t.Name()+"$")
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "MCD_") && !strings.HasPrefix(kv, "GRPC_GO_") && !strings.HasPrefix(kv, "GODEBUG=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
 	}
-	if !strings.Contains(err.Error(), "config") {
-		t.Errorf("run() error = %v, want a config error", err)
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	cmd.Env = append(cmd.Env, childEnv+"="+t.Name())
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		t.Fatalf("the child did not exit within %v; it wrote:\n%s", childTimeout, stderr.String())
+	}
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		t.Fatalf("run the child: %v", err)
+	}
+	return stderr.String(), cmd.ProcessState.ExitCode()
+}
+
+// isChild reports whether this process is runChild's child for t.
+func isChild(t *testing.T) bool {
+	return os.Getenv(childEnv) == t.Name()
+}
+
+// runFromEnv runs the Worker as main does, from the configuration the environment
+// gives and with a logger over os.Stderr as it is at the call. It leaves routeLogs
+// to main: grpclog's logger is not safe to change while another test's grpc runs.
+func runFromEnv(ctx context.Context) error {
+	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
+	if err != nil {
+		return err
+	}
+	return run(ctx, cfg, newLogger(cfg.Log))
 }
 
 // TestResolveRconHost pins the RCON host-resolution gate (issue #218): only a
@@ -134,7 +189,7 @@ func TestResolveRconHost(t *testing.T) {
 // run() is reachable without Docker or a live API. The control-plane dial is lazy
 // (grpc.NewClient connects on first use), the container driver's client construction only
 // parses the docker host (NewEngineClient), and Run returns nil at once on a cancelled
-// context. TestRunFailsFastOnMissingConfig already calls run() for the config leg; this
+// context. TestMainFailsFastOnMissingConfig already runs main() for the config leg; this
 // covers the scratch legs.
 //
 // What this test must NOT fake is the orphan sweep's success: since review round 2 the
@@ -167,7 +222,7 @@ func TestBootReclaimsScratchLeftovers(t *testing.T) {
 	t.Cleanup(func() { backstop.Stop() })
 	setBootEnv(t, scratch, fakeDockerSocket(t), endpoint)
 
-	if err := run(ctx); err != nil {
+	if err := runFromEnv(ctx); err != nil {
 		t.Fatalf("run() = %v, want nil: this test needs the boot sequence to complete and the "+
 			"session to return, as a clean shutdown does", err)
 	}
@@ -212,7 +267,7 @@ func TestBootReclaimsWaitForTheContainerOrphanSweep(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	err := run(ctx)
+	err := runFromEnv(ctx)
 	if err == nil {
 		t.Fatal("run() with an unsupported docker host returned nil, want the instance-manager " +
 			"build to fail: this test places that failure between the orphan sweep and the " +
@@ -263,7 +318,7 @@ func TestBootLeavesScratchLeftoversWhenTheOrphanSweepFails(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := run(ctx); err != nil {
+	if err := runFromEnv(ctx); err != nil {
 		t.Fatalf("run() = %v, want nil: a failed orphan sweep is non-fatal by design, and this "+
 			"test needs boot to reach the reclaims and decline them", err)
 	}
@@ -619,7 +674,7 @@ func runInBackground(t *testing.T) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(ctx) }()
+	go func() { done <- runFromEnv(ctx) }()
 	var once sync.Once
 	stop := func() {
 		once.Do(func() {
@@ -639,10 +694,36 @@ func runInBackground(t *testing.T) func() {
 // sequence does. EVERY key applyEnv reads is set here, including the ones set to empty:
 // leaving one inherited lets a malformed ambient value fail these tests during
 // configuration loading instead of at the boot step they exercise (PR #3170 review round
-// 2). The comment on each is what the boot path does with it.
+// 2). The variables are bootEnv's.
 func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 	t.Helper()
-	keys := map[string]string{
+	keys := bootEnv(scratch, dockerHost, grpcEndpoint)
+	for k, v := range keys {
+		t.Setenv(k, v)
+	}
+	// The claim above is checked, not trusted: an MCD_WORKER_* variable this map does not
+	// name is one the ambient environment still controls, and a malformed value there fails
+	// these tests in configuration loading instead of at the boot step they exercise. Only
+	// a variable that is actually SET can do that, which is exactly what this sees — so a
+	// key added to applyEnv and missed here surfaces the first time anyone's environment
+	// carries it, including CI's.
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if !strings.HasPrefix(name, "MCD_WORKER_") {
+			continue
+		}
+		if _, isolated := keys[name]; !isolated {
+			t.Fatalf("%s is set in the environment but setBootEnv does not isolate it: these "+
+				"tests would exercise the ambient value, and a malformed one would fail them "+
+				"in config loading rather than at the boot step under test", name)
+		}
+	}
+}
+
+// bootEnv is the configuration setBootEnv gives run(), as variable names and values. The
+// comment on each is what the boot path does with it.
+func bootEnv(scratch, dockerHost, grpcEndpoint string) map[string]string {
+	return map[string]string{
 		"MCD_WORKER_CONFIG":                          "", // no TOML layer: defaults + env only
 		"MCD_WORKER_API_GRPC_ENDPOINT":               grpcEndpoint,
 		"MCD_WORKER_API_CREDENTIAL":                  "test-credential",
@@ -664,26 +745,6 @@ func setBootEnv(t *testing.T, scratch, dockerHost, grpcEndpoint string) {
 		// the suite output clean.
 		"MCD_WORKER_LOG_LEVEL":  "error",
 		"MCD_WORKER_LOG_FORMAT": "json",
-	}
-	for k, v := range keys {
-		t.Setenv(k, v)
-	}
-	// The claim above is checked, not trusted: an MCD_WORKER_* variable this map does not
-	// name is one the ambient environment still controls, and a malformed value there fails
-	// these tests in configuration loading instead of at the boot step they exercise. Only
-	// a variable that is actually SET can do that, which is exactly what this sees — so a
-	// key added to applyEnv and missed here surfaces the first time anyone's environment
-	// carries it, including CI's.
-	for _, kv := range os.Environ() {
-		name, _, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(name, "MCD_WORKER_") {
-			continue
-		}
-		if _, isolated := keys[name]; !isolated {
-			t.Fatalf("%s is set in the environment but setBootEnv does not isolate it: these "+
-				"tests would exercise the ambient value, and a malformed one would fail them "+
-				"in config loading rather than at the boot step under test", name)
-		}
 	}
 }
 
@@ -812,7 +873,7 @@ func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 }
 
 // captureStderr redirects os.Stderr to a pipe for the rest of the test and returns the
-// reader for what boot logged there — run() builds its own logger over os.Stderr
+// reader for what boot logged there — runFromEnv builds boot's logger over os.Stderr
 // (newLogger), so this is where a test of the wiring observes a boot decision that nothing
 // else exposes. The returned func restores os.Stderr and reads the pipe once; it is also
 // registered as cleanup, so a t.Fatal inside the captured window cannot leave the process

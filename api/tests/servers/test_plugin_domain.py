@@ -88,6 +88,32 @@ class TestSanitizePluginFilename:
     def test_mixed_separators(self) -> None:
         assert sanitize_plugin_filename("a/b\\c.jar") == "c.jar"
 
+    # A catalog's file name never went through the upload rule, so the sanitizer
+    # replaces each character that rule refuses (issue #3957).
+    @pytest.mark.parametrize(
+        "filename",
+        [
+            pytest.param("a\x00b.jar", id="nul"),
+            pytest.param("a\nb.jar", id="lf"),
+            pytest.param("a\x1bb.jar", id="esc"),
+            pytest.param("a\x7fb.jar", id="del"),
+            pytest.param("a\x85b.jar", id="c1"),
+            pytest.param("a\ud800b.jar", id="lone-surrogate"),
+            pytest.param("a\uffffb.jar", id="u+ffff"),
+            pytest.param("a\ufdd0b.jar", id="u+fdd0"),
+            pytest.param("a\U0010fffeb.jar", id="u+10fffe"),
+        ],
+    )
+    def test_refused_character_is_replaced(self, filename: str) -> None:
+        assert sanitize_plugin_filename(filename) == "a_b.jar"
+
+    def test_each_refused_character_is_replaced(self) -> None:
+        assert sanitize_plugin_filename("\x01\x02x\uffff.jar") == "__x_.jar"
+
+    def test_any_other_character_is_kept(self) -> None:
+        name = "Poke\u0301mon \u30d1\u30c3\u30af a\u202eb.jar"
+        assert sanitize_plugin_filename(name) == name
+
     def test_empty_after_strip_raises(self) -> None:
         with pytest.raises(ValueError):
             sanitize_plugin_filename("")

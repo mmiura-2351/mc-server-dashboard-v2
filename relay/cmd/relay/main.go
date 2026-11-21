@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/keepalive"
 
 	"github.com/mmiura-2351/mc-server-dashboard-v2/relay/internal/adapters/apiclient"
@@ -92,22 +93,26 @@ var version = "0.0.0-dev"
 const configPathEnv = "MCD_RELAY_CONFIG"
 
 func main() {
-	if err := run(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
+	if err != nil {
+		// No log.format is loaded yet, so the error is a text record, escaped
+		// like any other (issue #3960).
+		newLogger(config.LogConfig{Format: "text"}).Error("relay failed", "error", err)
+		os.Exit(1)
+	}
+	logger := newLogger(cfg.Log)
+	routeLogs(logger)
+	if err := run(context.Background(), cfg, logger); err != nil {
+		logger.Error("relay failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-// run wires the relay and blocks until shutdown. It returns nil on a
-// signal-driven clean shutdown, and an error on a fatal config/bind failure
-// or a failure-driven listener shutdown (non-transient Accept error).
-func run(ctx context.Context) error {
-	cfg, err := config.Load(os.Getenv(configPathEnv), os.Getenv)
-	if err != nil {
-		return err
-	}
-
-	logger := newLogger(cfg.Log)
+// run wires the relay from its loaded configuration and blocks until shutdown.
+// It returns nil on a signal-driven clean shutdown, and an error on a fatal
+// wiring/bind failure or a failure-driven listener shutdown (non-transient
+// Accept error).
+func run(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
 	logger.Info("relay configuration loaded", "config", cfg)
 
 	// Dedicated registry (never the client_golang global default) plus the
@@ -274,12 +279,7 @@ func run(ctx context.Context) error {
 	// NON-FATAL: observability must never take player ingress down, so it is
 	// logged at Error and the relay keeps running without the endpoint.
 	if cfg.Metrics.Enabled {
-		srv := &http.Server{
-			Handler: metricsHandler(reg),
-			// Bound the header read so an idle/slow client cannot pin a
-			// connection on the metrics listener.
-			ReadHeaderTimeout: 5 * time.Second,
-		}
+		srv := newMetricsServer(reg, logger)
 		ln, lnErr := net.Listen("tcp", cfg.Metrics.Listen)
 		if lnErr != nil {
 			logger.Error("metrics listener bind failed; continuing without the metrics endpoint", "listen", cfg.Metrics.Listen, "error", lnErr)
@@ -310,6 +310,19 @@ func run(ctx context.Context) error {
 // SIGINT/SIGTERM before its connections are forcibly closed.
 const metricsShutdownTimeout = 5 * time.Second
 
+// newMetricsServer builds the metrics / health HTTP server over reg. Its own
+// lines (accept errors, handler panics) are ERROR records of logger (issue
+// #3960).
+func newMetricsServer(reg *prometheus.Registry, logger *slog.Logger) *http.Server {
+	return &http.Server{
+		Handler: metricsHandler(reg),
+		// Bound the header read so an idle/slow client cannot pin a
+		// connection on the metrics listener.
+		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}
+}
+
 // metricsHandler builds the metrics/health mux: /metrics exposes reg's series
 // via promhttp; /healthz is a static liveness 200. Both answer GET (and so
 // HEAD) only; any other method, CONNECT included, gets a 405 (issue #3331).
@@ -337,6 +350,17 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 		handler = slog.NewJSONHandler(out, opts)
 	}
 	return slog.New(handler)
+}
+
+// routeLogs sends the lines other packages log through logger's handler (issue
+// #3960): the standard log package's, as Warn records, since each one in these
+// binaries' dependencies reports something abnormal, and grpc-go's. Both are
+// process-wide, and grpclog's is not safe to change once grpc runs, so main
+// calls it once, before anything dials.
+func routeLogs(logger *slog.Logger) {
+	slog.SetDefault(logger)
+	slog.SetLogLoggerLevel(slog.LevelWarn)
+	grpclog.SetLoggerV2(newGRPCLogger(logger, os.Getenv))
 }
 
 // escapingWriter writes each log line with the characters slog leaves raw

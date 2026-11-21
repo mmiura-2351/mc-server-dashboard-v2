@@ -68,6 +68,9 @@ from mc_server_dashboard_api.servers.application.resource_packs import (
     UnassignResourcePack,
     UploadResourcePack,
 )
+from mc_server_dashboard_api.servers.domain.display_name import (
+    checked_display_name,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidResourcePackError,
@@ -84,7 +87,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackId,
-    pack_display_name,
 )
 from mc_server_dashboard_api.servers.domain.upload_filename import (
     is_valid_upload_filename,
@@ -179,7 +181,7 @@ async def upload_resource_pack(
         raise _unprocessable("invalid_filename")
     if not filename.lower().endswith(".zip"):
         raise _unprocessable("filename_not_zip")
-    stored_name = pack_display_name(display_name)
+    stored_name = checked_display_name(display_name)
     if stored_name is None:
         raise _unprocessable("invalid_display_name")
 

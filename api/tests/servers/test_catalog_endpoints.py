@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     CatalogProjectNotFoundError,
     CatalogUpstreamFailedError,
+    InvalidFilePathError,
     LifecycleLockLostError,
     PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
@@ -469,6 +470,36 @@ def test_install_from_catalog_upstream_failure_is_502() -> None:
     )
     assert resp.status_code == 502
     assert resp.json()["reason"] == "catalog_upstream_failed"
+
+
+# A catalog file name the upload rule still refuses once sanitised keeps its own
+# reason; any other path refusal is ``invalid_path`` (issue #3957).
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        pytest.param(InvalidFilePathError("x"), "invalid_path", id="path"),
+        pytest.param(
+            InvalidFilePathError("x", reason="name_too_long"),
+            "invalid_path",
+            id="store-refusal",
+        ),
+        pytest.param(
+            InvalidFilePathError("x", reason="invalid_filename"),
+            "invalid_filename",
+            id="filename",
+        ),
+    ],
+)
+def test_install_from_catalog_refused_path_is_422(
+    error: InvalidFilePathError, reason: str
+) -> None:
+    app = _app(member=True, allow=True, install=_FakeUseCase(error=error))
+    resp = _client(app).post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/install"),
+        json={"project_id": "proj-1", "version_id": "ver-1"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == reason
 
 
 def test_install_from_catalog_checksum_mismatch_is_502() -> None:
