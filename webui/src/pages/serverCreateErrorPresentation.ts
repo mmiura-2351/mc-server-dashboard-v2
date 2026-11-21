@@ -78,6 +78,10 @@ const IMPORT_ERROR_KEY: Record<string, TranslationKey> = {
   // row). It asks for a retry rather than pointing at a field the operator
   // never filled in: the next attempt draws a fresh address.
   slug_taken: "serverCreate.import.error.slug_taken",
+  // Too many archive uploads being checked at once (issue #3912): refused before
+  // the row is created, and sending it again shortly is the remedy. Without this
+  // arm the 503 would fall to the generic toast.
+  upload_busy: "serverCreate.import.error.upload_busy",
 };
 
 /** Select where and how the new-server tab shows a failed create. */

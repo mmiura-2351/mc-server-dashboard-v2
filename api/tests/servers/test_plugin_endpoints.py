@@ -411,6 +411,28 @@ def test_install_plugin_too_large_is_413() -> None:
     assert resp.json()["reason"] == "file_too_large"
 
 
+def test_install_plugin_over_cap_body_is_413_before_use_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The route checks the body it read against the cap before the use case
+    # runs. Patch the cap small so the fixture stays tiny; the request body
+    # limit was fixed when the route was declared, so only the route's own check
+    # trips.
+    import mc_server_dashboard_api.servers.api.plugins as plugins_api
+
+    monkeypatch.setattr(plugins_api, "MAX_PLUGIN_BYTES", 16)
+    install = _FakeInstall()
+    app = _app(member=True, allow=True, install=install)
+    resp = _client(app).post(
+        _url(uuid.uuid4(), uuid.uuid4()),
+        data={"display_name": "Test"},
+        files={"file": ("big.jar", b"x" * 1024, "application/java-archive")},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["reason"] == "file_too_large"
+    assert install.calls == []  # refused before the use case ran
+
+
 def test_install_plugin_already_exists_is_409() -> None:
     app = _app(
         member=True,

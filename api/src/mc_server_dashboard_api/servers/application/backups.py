@@ -1273,9 +1273,9 @@ class UploadBackup:
     at restore.
 
     The validation runs off the event loop thread (issue #3801), on the
-    archive-validation pool it shares with the files upload's extract and nothing
-    else (:mod:`.archive_validation`, issue #3843), so a crafted upload can hold a
-    thread of that pool but none of the default executor's. The loop still runs
+    archive-validation pool it shares with the other upload doors
+    (:mod:`.archive_validation`, issues #3843 and #3912), so a crafted upload can
+    hold a thread of that pool but none of the default executor's. The loop still runs
     late while it validates: the validating thread holds the GIL as it
     decompresses, and with one such thread a 1 ms loop tick was measured late by
     up to 29 ms at the 99th percentile and 100 ms at most (several threads were

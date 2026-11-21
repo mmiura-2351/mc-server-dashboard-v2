@@ -597,6 +597,13 @@ export interface paths {
          *     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
          *     exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same
          *     answers create gives for the same conditions.
+         *
+         *     **Only a few archive uploads at a time (issue #3912).** This route reads the
+         *     archive on the small pool the backup upload and the files upload's extract
+         *     validate on, and counts toward the limit they share: at most four archive
+         *     uploads at a time across the three routes. One past that is 503
+         *     ``upload_busy``, refused before its body is read into memory, with no server
+         *     created; sending it again shortly is the remedy.
          */
         post: operations["import_server_api_communities__community_id__servers_import_post"];
         delete?: never;
@@ -793,12 +800,13 @@ export interface paths {
          *     under one is 422 ``reserved_name``, refused before the archive is stored. A
          *     same-named member deeper in the tree is ordinary user data.
          *
-         *     **Only a few archive uploads at a time (issue #3843).** This route and the
-         *     files upload's extract validate on one small pool, and admit at most four
-         *     archive uploads at a time between them: two validating and two waiting. One
-         *     past that is 503 ``upload_busy``, refused before its body is read into memory,
-         *     with nothing stored; sending it again shortly is the remedy. Once its body is
-         *     read, an upload whose client disconnects still runs to its end and is stored.
+         *     **Only a few archive uploads at a time (issue #3843).** This route, the files
+         *     upload's extract and the server import validate on one small pool, and admit
+         *     at most four archive uploads at a time between them: two validating and two
+         *     waiting. One past that is 503 ``upload_busy``, refused before its body is read
+         *     into memory, with nothing stored; sending it again shortly is the remedy. Once
+         *     its body is read, an upload whose client disconnects still runs to its end and
+         *     is stored.
          */
         post: operations["upload_backup_api_communities__community_id__servers__server_id__backups_upload_post"];
         delete?: never;

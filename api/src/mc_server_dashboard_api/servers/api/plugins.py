@@ -112,10 +112,6 @@ router = APIRouter(route_class=RequestBodyLimitRoute)
 
 _SERVER_RESOURCE_TYPE = "server"
 
-# How much of the multipart body to pull per chunk while counting it against the
-# upload cap (the bounded-read loop).
-_UPLOAD_CHUNK_BYTES = 1024 * 1024
-
 # Upper bound for a plugin's display name (applies to the user-facing upload
 # endpoint; catalog installs use the project title from the trusted catalog).
 _MAX_DISPLAY_NAME_LENGTH = 200
@@ -1338,19 +1334,18 @@ def _client_modpack_headers() -> dict[str, str]:
 
 
 async def _read_capped_upload(file: UploadFile) -> bytes:
-    """Pull the multipart body in chunks, aborting with 413 past the upload cap."""
+    """Read the multipart part whole, refusing it with 413 past the upload cap.
 
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = await file.read(_UPLOAD_CHUNK_BYTES)
-        if not chunk:
-            break
-        total += len(chunk)
-        if total > MAX_PLUGIN_BYTES:
-            raise _too_large()
-        chunks.append(chunk)
-    return b"".join(chunks)
+    One read, which Starlette runs on its thread pool for a part spooled to disk
+    (every part past 1 MiB), so copying a jar of up to 512 MiB never runs on the
+    event loop (issue #3912). The route's request body limit already bounds the
+    part to the cap plus the multipart envelope.
+    """
+
+    content = await file.read()
+    if len(content) > MAX_PLUGIN_BYTES:
+        raise _too_large()
+    return content
 
 
 async def _record_plugin(
