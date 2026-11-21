@@ -83,7 +83,9 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackId,
-    is_valid_pack_filename,
+)
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
 )
 
 router = APIRouter(route_class=RequestBodyLimitRoute)
@@ -164,7 +166,7 @@ async def upload_resource_pack(
     # log lines, so one none of them can carry is refused before anything is
     # stored (issue #3907). A missing name is blank, and refused too.
     filename = file.filename or ""
-    if not is_valid_pack_filename(filename):
+    if not is_valid_upload_filename(filename):
         raise _unprocessable("invalid_filename")
     if not filename.lower().endswith(".zip"):
         raise _unprocessable("filename_not_zip")

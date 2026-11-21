@@ -50,7 +50,6 @@ from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackAssignment,
     ResourcePackId,
-    is_valid_pack_filename,
 )
 from mc_server_dashboard_api.servers.domain.resource_pack_store import (
     ByteStream,
@@ -65,6 +64,9 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     set_resource_pack_properties,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -103,7 +105,7 @@ class UploadResourcePack:
         content: bytes,
         uploaded_by: uuid.UUID,
     ) -> ResourcePack:
-        if not is_valid_pack_filename(filename):
+        if not is_valid_upload_filename(filename):
             raise ValueError("filename cannot name a resource pack")
         if not filename.lower().endswith(".zip"):
             raise ValueError("filename must end with .zip")
