@@ -353,11 +353,13 @@ func newLogger(cfg config.LogConfig) *slog.Logger {
 }
 
 // routeLogs sends the lines other packages log through logger's handler (issue
-// #3960): the standard log package's, as Info records, and grpc-go's. Both are
+// #3960): the standard log package's, as Warn records, since each one in these
+// binaries' dependencies reports something abnormal, and grpc-go's. Both are
 // process-wide, and grpclog's is not safe to change once grpc runs, so main
 // calls it once, before anything dials.
 func routeLogs(logger *slog.Logger) {
 	slog.SetDefault(logger)
+	slog.SetLogLoggerLevel(slog.LevelWarn)
 	grpclog.SetLoggerV2(newGRPCLogger(logger, os.Getenv))
 }
 

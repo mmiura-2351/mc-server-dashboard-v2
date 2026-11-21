@@ -180,10 +180,11 @@ func textErrorRecord(out, msg string) (string, bool) {
 }
 
 // TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler pins what main sets up
-// before it dials (issue #3960): the standard log package's lines and grpc-go's
-// are records of the configured format, escaped like any other, and grpc keeps
-// its own default of writing only errors unless GRPC_GO_LOG_SEVERITY_LEVEL asks
-// for more. It runs in a child, since it changes the process's loggers.
+// before it dials (issue #3960): the standard log package's lines, at WARN, and
+// grpc-go's are records of the configured format, escaped like any other, and
+// grpc keeps its own default of writing only errors unless
+// GRPC_GO_LOG_SEVERITY_LEVEL asks for more. It runs in a child, since it changes
+// the process's loggers.
 func TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler(t *testing.T) {
 	if isChild(t) {
 		routeLogs(newLogger(config.LogConfig{Level: "debug", Format: os.Getenv("MCSD_TEST_LOG_FORMAT")}))
@@ -211,11 +212,11 @@ func TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler(t *testing.T) {
 		var stdlib, grpcError, grpcInfo bool
 		if tc.format == "json" {
 			recs := jsonRecords(t, out)
-			stdlib = hasRecord(recs, "INFO", "stdlib"+hostile)
+			stdlib = hasRecord(recs, "WARN", "stdlib"+hostile)
 			grpcError = hasRecord(recs, "ERROR", "[probe] grpc error"+hostile)
 			grpcInfo = hasRecord(recs, "INFO", "[probe] grpc info")
 		} else {
-			stdlib = strings.Contains(out, " level=INFO msg="+strconv.Quote("stdlib"+hostile)+"\n")
+			stdlib = strings.Contains(out, " level=WARN msg="+strconv.Quote("stdlib"+hostile)+"\n")
 			grpcError = strings.Contains(out, " level=ERROR msg="+strconv.Quote("[probe] grpc error"+hostile)+"\n")
 			grpcInfo = strings.Contains(out, "grpc info")
 		}
@@ -227,28 +228,42 @@ func TestRouteLogsSendsStdlibAndGRPCLogsThroughTheHandler(t *testing.T) {
 	}
 }
 
-// TestMainSendsGRPCLogsThroughTheHandler pins that main sets up the grpc logger
-// before it dials (issue #3960). Asked for its info lines, grpc logs the channel
-// the dial creates; boot then fails on an unsupported docker host, and each line
-// written on the way is a json record, grpc's among them.
+// TestMainSendsGRPCLogsThroughTheHandler pins that main sets up the grpc logger,
+// over the configured handler, before it dials (issue #3960). Asked for its info
+// lines, grpc logs the channel the dial creates; boot then fails on an
+// unsupported docker host, and each line written on the way is a record of the
+// configured format, grpc's among them.
 func TestMainSendsGRPCLogsThroughTheHandler(t *testing.T) {
 	if isChild(t) {
 		main()
 		return
 	}
-	env := bootEnv(t.TempDir(), "tcp://127.0.0.1:2375", "127.0.0.1:1")
-	env["MCD_WORKER_LOG_LEVEL"] = "info"
-	env["GRPC_GO_LOG_SEVERITY_LEVEL"] = "info"
-	out, code := runChild(t, env)
-	if code != 1 {
-		t.Errorf("exit code %d, want 1", code)
-	}
-	recs := jsonRecords(t, out)
-	if !slices.ContainsFunc(recs, func(rec map[string]any) bool {
-		msg, _ := rec["msg"].(string)
-		return strings.HasPrefix(msg, "[core] ")
-	}) {
-		t.Errorf("no grpc record in:\n%s", out)
+	for _, format := range []string{"json", "text"} {
+		env := bootEnv(t.TempDir(), "tcp://127.0.0.1:2375", "127.0.0.1:1")
+		env["MCD_WORKER_LOG_LEVEL"] = "info"
+		env["MCD_WORKER_LOG_FORMAT"] = format
+		env["GRPC_GO_LOG_SEVERITY_LEVEL"] = "info"
+		out, code := runChild(t, env)
+		if code != 1 {
+			t.Errorf("%s: exit code %d, want 1", format, code)
+		}
+		var grpcRecord bool
+		if format == "json" {
+			grpcRecord = slices.ContainsFunc(jsonRecords(t, out), func(rec map[string]any) bool {
+				msg, _ := rec["msg"].(string)
+				return rec["level"] == "INFO" && strings.HasPrefix(msg, "[core] ")
+			})
+		} else {
+			for line := range strings.Lines(out) {
+				if !strings.HasPrefix(line, "time=") {
+					t.Errorf("text: not a text record: %q", line)
+				}
+				grpcRecord = grpcRecord || strings.Contains(line, ` level=INFO msg="[core] `)
+			}
+		}
+		if !grpcRecord {
+			t.Errorf("%s: no grpc record in:\n%s", format, out)
+		}
 	}
 }
 

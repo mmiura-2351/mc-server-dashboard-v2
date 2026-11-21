@@ -1092,8 +1092,9 @@ Every log line the Worker writes goes through that handler, so each follows
 `log.format` and the escaping above:
 
 - its own records;
-- the lines of Go's standard `log` package, as `INFO` records, so `log.level=warn`
-  or `error` drops them;
+- the lines of Go's standard `log` package, as `WARN` records: each one in the
+  Worker's dependencies reports something abnormal, so only `log.level=error`
+  drops them;
 - grpc-go's lines. They keep grpc's own default: only errors are written, unless
   `GRPC_GO_LOG_SEVERITY_LEVEL` is `warning` or `info`; any other value writes
   none. `GRPC_GO_LOG_VERBOSITY_LEVEL` sets grpc's verbosity as before, and
