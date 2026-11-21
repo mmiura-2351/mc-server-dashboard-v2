@@ -878,12 +878,17 @@ store:
     a plugin, a pooled JAR) hangs off a server. A fresh database does not claim
     it.
 
-  On the object store, the sample is one listing per id (one per content
-  namespace), each read at the store's default page size until it finds a key,
-  following a page that is truncated but holds none. SeaweedFS keeps the
-  directories of deleted keys, and 4.33 reads only `MaxKeys + 2` entries of a
-  directory, so a one-key listing reported a store holding a live object as
-  empty. On fs, the sample is up to three entries each of `communities/` and
+  Each namespace is classified as one of these two kinds. A namespace added to
+  the object store's `KeyNamespace` refuses the claim, when it holds an object,
+  until it is classified.
+
+  On the object store, the sample is one listing per id, and one per content
+  namespace only when no id was found. Each listing reads the store's default
+  page size until it finds a key, and follows a page that is truncated but holds
+  none. It lists keys, not common prefixes: SeaweedFS keeps the directories of
+  deleted keys and reports an emptied one as a common prefix. Its 4.33 also reads
+  only `MaxKeys + 2` entries of a directory, so a one-key listing reported a store
+  holding a live object as empty. On fs, the sample is up to three entries each of `communities/` and
   `jars/`; there are no resource packs on fs, and a directory left empty by
   deletes counts, which errs on the side of refusing.
 
@@ -923,8 +928,11 @@ failed. Restart the API afterwards: an API that left the store unclaimed at
 startup claims it only at its next start. A legitimate deployment needs the
 command once when the sample does not show its store to be its own: its store
 still holds the objects of a deleted community (the `final.tar.gz` of its
-servers), or its database has no server and no resource pack while the store
-still holds pooled JARs.
+servers), or a resource pack that has no row. A pack has no row when its upload
+completed while the response was lost, or when it was deleted and the
+resource-pack GC has not reclaimed it yet; that GC does not run while the store
+is unclaimed. The third case is a database with no server and no resource pack
+while the store still holds pooled JARs.
 
 Before **every** pass, each destructive GC and sweep reads the marker again. It
 runs only if the marker names this installation. This covers the storage sweep

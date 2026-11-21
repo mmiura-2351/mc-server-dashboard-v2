@@ -70,9 +70,11 @@ def main(argv: list[str]) -> int:
     try:
         refusal = asyncio.run(run())
     except Exception as exc:
-        # The configuration, the database or the store failed: neither claimed nor
-        # refused. One line, not a traceback, and a status of its own, so a script
-        # tells it from a refusal.
+        # The configuration, the database or the store failed, so the command
+        # cannot tell whether the store is claimed: a fault after the write (the
+        # read-back) leaves the marker written, and a re-run then answers. One
+        # line, not a traceback, and a status of its own, so a script tells it from
+        # a refusal.
         sys.stderr.write(f"store claim failed: {type(exc).__name__}: {exc}\n")
         return 2
     if refusal is not None:

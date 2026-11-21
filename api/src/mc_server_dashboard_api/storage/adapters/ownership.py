@@ -65,6 +65,14 @@ OWNER_MARKER = "mcsd-owner.json"
 # from a store without a marker (issue #3886).
 _SAMPLE = 3
 
+# How the startup claim reads each namespace (issue #3886): by the id its keys
+# start with, or as content-addressed objects that name no row. A namespace in
+# neither holds objects the claim cannot match against this database, so one
+# that holds an object refuses the claim; a namespace added to ``KeyNamespace``
+# is classified here before a store holding it is claimed.
+_ID_NAMESPACES = (KeyNamespace.COMMUNITIES, KeyNamespace.RESOURCE_PACKS)
+_CONTENT_NAMESPACES = (KeyNamespace.JARS, KeyNamespace.PLUGIN_CACHE)
+
 # What an operator runs to claim a store the API left unclaimed (issue #3886).
 CLAIM_COMMAND = "python -m mc_server_dashboard_api.store_claim_cli"
 
@@ -118,10 +126,18 @@ def _refusal(
 
 
 def _already_marked(
-    location: str, owner: uuid.UUID | None, installation_id: uuid.UUID
+    location: str, body: bytes | None, installation_id: uuid.UUID
 ) -> str:
-    """Why the operator's claim did not claim a store that has a marker."""
+    """Why the operator's claim did not claim the store, from the marker it read
+    back."""
 
+    if body is None:
+        return (
+            f"the store has no owner marker ({location}) after the claim: one was "
+            "removed while the command ran. The store was not claimed; run the "
+            "command again"
+        )
+    owner = _named_installation(body)
     if owner == installation_id:
         return (
             f"the store is already this database's: its owner marker {location} "
@@ -165,12 +181,15 @@ class _Sample:
 
     ``communities`` and ``resource_packs`` are the distinct ids the first keys of
     their namespaces start with, as found; ``content`` is whether a
-    content-addressed namespace (JARs, plugin blobs) holds an object.
+    content-addressed namespace (JARs, plugin blobs) holds an object, asked only
+    when no id was found; ``unclassified`` names the namespaces outside both kinds
+    that hold an object.
     """
 
     communities: tuple[str, ...] = ()
     resource_packs: tuple[str, ...] = ()
     content: bool = False
+    unclassified: tuple[str, ...] = ()
 
 
 def _uuids(names: Iterable[str]) -> frozenset[uuid.UUID] | None:
@@ -185,6 +204,11 @@ def _uuids(names: Iterable[str]) -> frozenset[uuid.UUID] | None:
 async def _not_ours(sample: _Sample, database: StoreDatabase) -> str | None:
     """Why a store without a marker must not be claimed, or ``None`` if it may."""
 
+    if sample.unclassified:
+        return (
+            f"holds objects under {list(sample.unclassified)}, a namespace the claim "
+            "cannot match against this database"
+        )
     if sample.communities or sample.resource_packs:
         # Keys that name a community or a resource pack: the store is this
         # database's only if every one sampled is a row here.
@@ -274,15 +298,18 @@ class _StoreOwnership(abc.ABC):
 
         created = await self._read() is None and await self._create(installation_id)
         body = await self._read()
-        owner = None if body is None else _named_installation(body)
-        if created and owner == installation_id:
+        if (
+            created
+            and body is not None
+            and _named_installation(body) == installation_id
+        ):
             _LOG.info(
                 "claimed the store for installation %s: wrote %s",
                 installation_id,
                 self._location,
             )
             return None
-        return _already_marked(self._location, owner, installation_id)
+        return _already_marked(self._location, body, installation_id)
 
     async def refusal(self) -> str | None:
         """Why a destructive pass must not run now, or ``None`` if the store is ours."""
@@ -319,21 +346,28 @@ class ObjectStoreOwnership(_StoreOwnership):
 
     async def _sample(self) -> _Sample:
         # A few listing requests per namespace, so the sample of a large bucket
-        # stays cheap. A namespace other than these two is content-addressed,
-        # including one added to ``KeyNamespace`` later.
-        named = (KeyNamespace.COMMUNITIES, KeyNamespace.RESOURCE_PACKS)
+        # stays cheap.
+        classified = (*_ID_NAMESPACES, *_CONTENT_NAMESPACES)
         async with self._client_factory() as client:
             communities = await _first_ids(client, KeyNamespace.COMMUNITIES)
             resource_packs = await _first_ids(client, KeyNamespace.RESOURCE_PACKS)
-            content = False
-            for namespace in KeyNamespace:
-                if (
-                    namespace not in named
+            unclassified = tuple(
+                [
+                    namespace.value
+                    for namespace in KeyNamespace
+                    if namespace not in classified
                     and await client.first_key(namespace) is not None
-                ):
-                    content = True
-                    break
-        return _Sample(communities, resource_packs, content)
+                ]
+            )
+            # Ids decide when there are any, so the content namespaces are listed
+            # only without them.
+            content = False
+            if not (communities or resource_packs):
+                for namespace in _CONTENT_NAMESPACES:
+                    if await client.first_key(namespace) is not None:
+                        content = True
+                        break
+        return _Sample(communities, resource_packs, content, unclassified)
 
     async def _create(self, installation_id: uuid.UUID) -> bool:
         body = _marker_body(installation_id)
@@ -350,7 +384,10 @@ async def _first_ids(client: S3Client, namespace: str) -> tuple[str, ...]:
     with, lowest first: ``communities/<id>/...``, ``resource-packs/<id>/...``.
 
     One listing per id. Each starts after every key of the id before it: a key of
-    that id continues with ``/``, which sorts just below ``0``.
+    that id continues with ``/``, which sorts just below ``0``. It lists keys, not
+    common prefixes (``Delimiter=/``): SeaweedFS reports a directory left empty by
+    deletes as a common prefix, so a prefix listing would count ids that hold no
+    object.
     """
 
     ids: list[str] = []
@@ -399,11 +436,13 @@ class FsStoreOwnership(_StoreOwnership):
 
     async def _sample(self) -> _Sample:
         # FsStorage keeps only ``communities/<id>/`` and ``jars/`` at the root; no
-        # resource packs are stored on fs.
-        return _Sample(
-            communities=await asyncio.to_thread(self._entries, "communities"),
-            content=bool(await asyncio.to_thread(self._entries, "jars")),
+        # resource packs are stored on fs. Ids decide when there are any, so
+        # ``jars/`` is read only without them.
+        communities = await asyncio.to_thread(self._entries, "communities")
+        content = not communities and bool(
+            await asyncio.to_thread(self._entries, "jars")
         )
+        return _Sample(communities=communities, content=content)
 
     def _entries(self, name: str) -> tuple[str, ...]:
         # Up to :data:`_SAMPLE` entries of one namespace directory, so the sample

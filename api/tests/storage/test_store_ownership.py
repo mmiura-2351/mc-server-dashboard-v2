@@ -289,6 +289,108 @@ async def test_a_resource_pack_this_database_lacks_refuses(
     assert str(_PACK) in error
 
 
+async def test_a_resource_pack_key_that_names_no_pack_refuses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Beside a community this database has, one segment that is not an id is
+    # enough to refuse.
+    backend = _backend("object", Path())
+    backend.put(_world(_LIVE))
+    backend.put("resource-packs/not-an-id/pack.zip")
+    database = FakeStoreDatabase(rows=True, communities=[_LIVE])
+
+    error = await _assert_refused(backend, database, caplog)
+
+    assert "not-an-id" in error
+
+
+def test_every_key_namespace_is_classified_for_the_claim() -> None:
+    # A namespace added to KeyNamespace fails here until the claim is told how to
+    # read it; until then, a store holding it refuses the claim (next test).
+    assert ownership_module._ID_NAMESPACES == (
+        KeyNamespace.COMMUNITIES,
+        KeyNamespace.RESOURCE_PACKS,
+    )
+    assert ownership_module._CONTENT_NAMESPACES == (
+        KeyNamespace.JARS,
+        KeyNamespace.PLUGIN_CACHE,
+    )
+    assert {
+        *ownership_module._ID_NAMESPACES,
+        *ownership_module._CONTENT_NAMESPACES,
+    } == set(KeyNamespace)
+
+
+@pytest.mark.parametrize("with_ids", [False, True], ids=["alone", "beside-ids"])
+async def test_a_namespace_the_claim_does_not_classify_refuses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, with_ids: bool
+) -> None:
+    # plugin-cache/, declassified, stands in for a namespace added later: neither
+    # the rows rule nor matching ids beside it claim the store.
+    monkeypatch.setattr(ownership_module, "_CONTENT_NAMESPACES", (KeyNamespace.JARS,))
+    backend = _backend("object", Path())
+    backend.put(_PLUGIN)
+    if with_ids:
+        backend.put(_world(_LIVE))
+    database = FakeStoreDatabase(rows=True, communities=[_LIVE])
+
+    error = await _assert_refused(backend, database, caplog)
+
+    assert "plugin-cache/" in error
+
+
+class _ListingRecorder(FakeS3Client):
+    """A fake client that records the prefix of every ``first_key`` listing."""
+
+    def __init__(self, store: FakeS3Store, listed: list[str]) -> None:
+        super().__init__(store)
+        self._listed = listed
+
+    async def first_key(
+        self, prefix: str, *, start_after: str | None = None
+    ) -> str | None:
+        self._listed.append(prefix)
+        return await super().first_key(prefix, start_after=start_after)
+
+
+async def test_ids_decide_without_listing_the_content_namespaces() -> None:
+    store = FakeS3Store()
+    store.objects[_world(_LIVE)] = b"live"
+    store.objects[_JAR] = b"jar"
+    listed: list[str] = []
+    ownership = ObjectStoreOwnership(
+        _factory_of(_ListingRecorder(store, listed)), bucket="mcsd"
+    )
+
+    await ownership.claim(_OURS, database=FakeStoreDatabase(communities=[_LIVE]))
+
+    assert await ownership.refusal() is None
+    assert set(listed) == {"communities/", "resource-packs/"}
+
+
+async def test_ids_decide_without_reading_jars_on_fs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _backend("fs", tmp_path)
+    backend.put(_world(_LIVE))
+    backend.put(_JAR)
+    ownership = backend.make()
+    assert isinstance(ownership, FsStoreOwnership)
+    read: list[str] = []
+    entries = ownership._entries
+
+    def _recording(name: str) -> tuple[str, ...]:
+        read.append(name)
+        return entries(name)
+
+    monkeypatch.setattr(ownership, "_entries", _recording)
+
+    await ownership.claim(_OURS, database=FakeStoreDatabase(communities=[_LIVE]))
+
+    assert await ownership.refusal() is None
+    assert read == ["communities"]
+
+
 # The content-addressed namespaces on each backend: a key there names no row.
 _CONTENT = [("object", _JAR), ("object", _PLUGIN), ("fs", _JAR)]
 
@@ -679,6 +781,24 @@ async def test_an_operator_claim_without_conditional_writes_reads_its_marker_bac
 
     assert refusal is not None
     assert str(_THEIRS) in refusal
+
+
+class _GoneAfterPut(FakeS3Client):
+    """A conditional write that reports success, and a marker gone at once."""
+
+    async def put_object_if_absent(self, key: str, body: bytes) -> bool:
+        return True
+
+
+async def test_an_operator_claim_that_reads_no_marker_back_says_so() -> None:
+    store = FakeS3Store()
+    ownership = ObjectStoreOwnership(_factory_of(_GoneAfterPut(store)), bucket="mcsd")
+
+    refusal = await ownership.claim_explicitly(_OURS)
+
+    assert refusal is not None
+    assert "has no owner marker" in refusal
+    assert "names no installation" not in refusal
 
 
 # --- why the operator's claim did not claim a marked store -------------------------
