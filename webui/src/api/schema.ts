@@ -1657,7 +1657,8 @@ export interface paths {
          *     written under ``path``, so one that is blank, carries a control character, a
          *     lone surrogate or a Unicode noncharacter, contains ``/`` or ``\``, or is over
          *     255 bytes in UTF-8 is 422 ``invalid_filename``, refused before a slot is taken
-         *     or the body read. The path rules above still apply to the name that passes.
+         *     or the upload is read into memory (Starlette has spooled it by then). The path
+         *     rules above still apply to the name that passes.
          */
         post: operations["upload_file_api_communities__community_id__servers__server_id__files_upload_post"];
         delete?: never;
@@ -1730,10 +1731,10 @@ export interface paths {
          * @description Install a plugin jar via multipart upload (plugin:manage).
          *
          *     The jar's filename names its file in the server's content directory, so a
-         *     name no file can carry is 422 ``invalid_filename``, refused before the body is
-         *     read (issue #3922): one that is blank, carries a control character, a lone
-         *     surrogate or a Unicode noncharacter, contains ``/`` or ``\``, or is over 255
-         *     bytes in UTF-8.
+         *     name no file can carry is 422 ``invalid_filename``, refused before the upload
+         *     is read into memory (Starlette has spooled it by then, issue #3922): one that
+         *     is blank, carries a control character, a lone surrogate or a Unicode
+         *     noncharacter, contains ``/`` or ``\``, or is over 255 bytes in UTF-8.
          */
         post: operations["install_plugin_api_communities__community_id__servers__server_id__plugins_post"];
         delete?: never;

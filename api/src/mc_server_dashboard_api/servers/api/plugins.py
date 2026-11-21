@@ -490,10 +490,10 @@ async def install_plugin(
     """Install a plugin jar via multipart upload (plugin:manage).
 
     The jar's filename names its file in the server's content directory, so a
-    name no file can carry is 422 ``invalid_filename``, refused before the body is
-    read (issue #3922): one that is blank, carries a control character, a lone
-    surrogate or a Unicode noncharacter, contains ``/`` or ``\\``, or is over 255
-    bytes in UTF-8.
+    name no file can carry is 422 ``invalid_filename``, refused before the upload
+    is read into memory (Starlette has spooled it by then, issue #3922): one that
+    is blank, carries a control character, a lone surrogate or a Unicode
+    noncharacter, contains ``/`` or ``\\``, or is over 255 bytes in UTF-8.
     """
 
     display_name = display_name.strip()

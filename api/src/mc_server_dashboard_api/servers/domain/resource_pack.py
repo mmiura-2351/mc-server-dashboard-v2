@@ -24,22 +24,25 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 MAX_DISPLAY_NAME_LENGTH = 200
 
 
-def is_valid_pack_display_name(display_name: str) -> bool:
-    """Whether ``display_name``, stripped, can name an uploaded pack (issue #3922).
+def pack_display_name(display_name: str) -> str | None:
+    """``display_name`` stripped, as an uploaded pack stores it, or ``None``.
 
-    The name is shown in the library and typed to confirm a delete. Stripped, it
-    must not be empty, must fit :data:`MAX_DISPLAY_NAME_LENGTH`, and must carry no
-    control character (Unicode ``Cc``), which would break the line it is shown on
-    or drive a terminal, and no lone surrogate, which has no UTF-8 encoding and so
-    could not be stored. Any other character is a legitimate name.
+    ``None`` when the stripped name cannot name a pack (issue #3922). The name is
+    shown in the library and typed to confirm a delete. Stripped, it must not be
+    empty, must fit :data:`MAX_DISPLAY_NAME_LENGTH`, and must carry no control
+    character (Unicode ``Cc``), which would break the line it is shown on or drive
+    a terminal, and no lone surrogate, which has no UTF-8 encoding and so could not
+    be stored. Any other character is a legitimate name.
     """
 
     name = display_name.strip()
-    return (
-        name != ""
-        and len(name) <= MAX_DISPLAY_NAME_LENGTH
-        and not any(unicodedata.category(c) in ("Cc", "Cs") for c in name)
-    )
+    if (
+        name == ""
+        or len(name) > MAX_DISPLAY_NAME_LENGTH
+        or any(unicodedata.category(c) in ("Cc", "Cs") for c in name)
+    ):
+        return None
+    return name
 
 
 @dataclass(frozen=True)

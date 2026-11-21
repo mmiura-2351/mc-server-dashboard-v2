@@ -84,7 +84,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 from mc_server_dashboard_api.servers.domain.resource_pack import (
     ResourcePack,
     ResourcePackId,
-    is_valid_pack_display_name,
+    pack_display_name,
 )
 from mc_server_dashboard_api.servers.domain.upload_filename import (
     is_valid_upload_filename,
@@ -170,16 +170,17 @@ async def upload_resource_pack(
     """
 
     # The name goes into the object key, the public download URL and the GC's
-    # log lines, so one none of them can carry is refused before the body is read
-    # (issues #3907, #3922). A part with no ``filename=`` parameter never gets
-    # here: FastAPI answers it 422 ``validation_error``, so the ``or ""`` only
-    # narrows the type.
+    # log lines, so one none of them can carry is refused before the upload is
+    # read into memory (issues #3907, #3922). A part with no ``filename=``
+    # parameter never gets here: FastAPI answers it 422 ``validation_error``, so
+    # the ``or ""`` only narrows the type.
     filename = file.filename or ""
     if not is_valid_upload_filename(filename):
         raise _unprocessable("invalid_filename")
     if not filename.lower().endswith(".zip"):
         raise _unprocessable("filename_not_zip")
-    if not is_valid_pack_display_name(display_name):
+    stored_name = pack_display_name(display_name)
+    if stored_name is None:
         raise _unprocessable("invalid_display_name")
 
     content = await _read_capped_upload(file)
@@ -187,7 +188,7 @@ async def upload_resource_pack(
     try:
         pack = await use_case(
             filename=filename,
-            display_name=display_name.strip(),
+            display_name=stored_name,
             content=content,
             uploaded_by=user.id.value,
         )
