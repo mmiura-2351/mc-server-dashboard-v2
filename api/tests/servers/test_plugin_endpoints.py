@@ -82,6 +82,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CatalogChecksumMismatchError,
     FileTooLargeError,
+    InvalidFilePathError,
     InvalidPluginSideError,
     LifecycleLockLostError,
     PluginAlreadyExistsError,
@@ -115,6 +116,10 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.identity.fakes import make_user
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeUnitOfWork
+from tests.servers.upload_display_names import (
+    accepted_display_names,
+    refused_display_names,
+)
 from tests.servers.upload_filenames import (
     accepted_filenames,
     post_raw_upload,
@@ -492,28 +497,81 @@ def test_install_plugin_bedrock_port_race_is_409() -> None:
     assert resp.json()["reason"] == "bedrock_port_taken"
 
 
-def test_install_plugin_empty_display_name_is_422() -> None:
-    app = _app(member=True, allow=True, install=_FakeInstall())
-    client = _client(app)
-    resp = client.post(
+# The display name is shown in the plugin list, so an install refuses one the
+# resource-pack upload refuses: a control character, a lone surrogate, blank, or
+# over 200 characters (issue #3957).
+
+
+@pytest.mark.parametrize(("display_name", "charset"), refused_display_names())
+def test_install_plugin_refuses_a_display_name(
+    display_name: bytes, charset: str | None
+) -> None:
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
         _url(uuid.uuid4(), uuid.uuid4()),
-        data={"display_name": "   "},
-        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+        b'"test.jar"',
+        fields={"display_name": display_name},
+        charset=charset,
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_display_name"
+    assert install.calls == []
 
 
-def test_install_plugin_too_long_display_name_is_422() -> None:
-    app = _app(member=True, allow=True, install=_FakeInstall())
-    client = _client(app)
-    resp = client.post(
+@pytest.mark.parametrize(("display_name", "stored"), accepted_display_names())
+def test_install_plugin_stores_a_display_name_stripped(
+    display_name: str, stored: str
+) -> None:
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
         _url(uuid.uuid4(), uuid.uuid4()),
-        data={"display_name": "x" * 201},
-        files={"file": ("test.jar", b"jar-bytes", "application/java-archive")},
+        b'"test.jar"',
+        fields={"display_name": display_name.encode()},
+    )
+    assert resp.status_code == 201
+    assert [call["display_name"] for call in install.calls] == [stored]
+
+
+def test_install_plugin_names_the_filename_before_the_display_name() -> None:
+    # The Web UI sends the file's name, less ``.jar``, as the display name, so a
+    # file name both rules refuse is answered as the file name the user can fix.
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        b'"a\nb.jar"',
+        fields={"display_name": b"a\nb"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == "invalid_filename"
+
+
+def test_install_plugin_refuses_the_display_name_before_reading_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reads: list[object] = []
+
+    async def read(file: object) -> bytes:
+        reads.append(file)
+        return b"jar-bytes"
+
+    monkeypatch.setattr(plugins_api, "_read_capped_upload", read)
+    install = _FakeInstall(result=_plugin())
+    app = _app(member=True, allow=True, install=install)
+    resp = post_raw_upload(
+        _client(app),
+        _url(uuid.uuid4(), uuid.uuid4()),
+        b'"test.jar"',
+        fields={"display_name": b"a\nb"},
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_display_name"
+    assert reads == []
 
 
 # The jar's name becomes a file name in the server's content directory, so an
@@ -700,6 +758,36 @@ def test_update_plugin_unsettled_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+
+
+# A catalog file name the upload rule still refuses once sanitised keeps its own
+# reason; any other path refusal is ``invalid_path`` (issue #3957).
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        pytest.param(InvalidFilePathError("x"), "invalid_path", id="path"),
+        pytest.param(
+            InvalidFilePathError("x", reason="name_too_long"),
+            "invalid_path",
+            id="store-refusal",
+        ),
+        pytest.param(
+            InvalidFilePathError("x", reason="invalid_filename"),
+            "invalid_filename",
+            id="filename",
+        ),
+    ],
+)
+def test_update_plugin_refused_path_is_422(
+    error: InvalidFilePathError, reason: str
+) -> None:
+    app = _app(member=True, allow=True, update=_FakeUseCase(error=error))
+    resp = _client(app).post(
+        _url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/update"),
+        json={"version_id": "v1"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == reason
 
 
 def test_update_plugin_checksum_mismatch_is_502() -> None:

@@ -110,6 +110,7 @@ from tests.servers.fakes import FakeClock as ServersFakeClock
 from tests.servers.fakes import FakeFileStore, FakeVersionValidator
 from tests.servers.fakes import FakeUnitOfWork as ServersFakeUnitOfWork
 from tests.servers.test_export_import import _UNREADABLE_IMPORTS
+from tests.servers.upload_filenames import post_raw_upload
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -962,6 +963,71 @@ def test_import_of_an_unreadable_archive_is_422_and_creates_nothing(
     )
     assert resp.status_code == 422
     assert resp.json()["reason"] == "invalid_archive"
+    assert uow.servers.by_id == {}
+    assert file_store.files == {}
+
+
+def _export_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        zf.writestr(
+            EXPORT_METADATA_FILENAME,
+            json.dumps(
+                {
+                    "format": EXPORT_FORMAT_VERSION,
+                    "name": "exported-name",
+                    "mc_edition": "java",
+                    "mc_version": "1.21.1",
+                    "server_type": "vanilla",
+                    "exported_at": _NOW.isoformat(),
+                }
+            ),
+        )
+    return buf.getvalue()
+
+
+# The ``name`` form field names the imported server, so it is refused as a
+# create's name is: a control character or a lone surrogate (issue #3957).
+@pytest.mark.parametrize(
+    ("name", "charset", "reason"),
+    [
+        pytest.param(b"a\x00b", None, "invalid_server_name", id="nul"),
+        pytest.param(b"a\nb", None, "invalid_server_name", id="lf"),
+        pytest.param(b"a\x1b[2Jb", None, "invalid_server_name", id="esc"),
+        # A declared charset decodes a lone surrogate. The field's
+        # ``min_length`` check refuses it as ``string_unicode`` first.
+        pytest.param(b"a+2AA-b", "utf-7", "validation_error", id="lone-surrogate"),
+    ],
+)
+def test_import_refuses_a_server_name(
+    name: bytes, charset: str | None, reason: str
+) -> None:
+    uow = ServersFakeUnitOfWork()
+    file_store = FakeFileStore()
+    app = _app(
+        member=True,
+        allow=True,
+        import_=ImportServer(
+            create_server=CreateServer(
+                uow=uow,
+                clock=ServersFakeClock(_NOW),
+                version_validator=FakeVersionValidator(),
+                file_store=file_store,
+                port_range=PortRange(start=25565, end=25664),
+            ),
+            file_store=file_store,
+        ),
+    )
+    resp = post_raw_upload(
+        _client(app),
+        f"/api/communities/{uuid.uuid4()}/servers/import",
+        b'"server.zip"',
+        fields={"name": name},
+        charset=charset,
+        content=_export_zip(),
+    )
+    assert resp.status_code == 422
+    assert resp.json()["reason"] == reason
     assert uow.servers.by_id == {}
     assert file_store.files == {}
 

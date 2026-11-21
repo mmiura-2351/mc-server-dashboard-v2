@@ -1760,6 +1760,31 @@ describe("ServerDetailPage settings", () => {
     expect(screen.getByDisplayValue("renamed")).toBeInTheDocument();
   });
 
+  // A cleared name is refused with the same reason as a control character
+  // (#3957), so the toast has to name both remedies.
+  it("toasts a blank-name save with the remedy for a blank name", async () => {
+    routeGet({ srv: { observed_state: "stopped" } });
+    mockApi.patch.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_server_name" }),
+    );
+    renderPage();
+
+    await screen.findByText("survival");
+    openSettings();
+    fireEvent.change(screen.getByDisplayValue("survival"), {
+      target: { value: "" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: t("serverDetail.settings.save") }),
+    );
+
+    const toast = await screen.findByText(
+      t("serverDetail.error.invalidServerName"),
+    );
+    expect(toast.closest(".toast")).not.toBeNull();
+    expect(toast.textContent).toMatch(/blank/);
+  });
+
   it("routes a save 403 through the permission glue, not the mapper", async () => {
     routeGet({ srv: { observed_state: "stopped" } });
     mockApi.patch.mockRejectedValue(

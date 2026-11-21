@@ -26,11 +26,13 @@ def post_raw_upload(
     *,
     fields: Mapping[str, bytes] | None = None,
     charset: str | None = None,
+    content: bytes = b"PK\x03\x04",
 ) -> httpx2.Response:
     """POST a multipart body whose ``file`` part's ``filename`` is these bytes.
 
     ``filename`` is the parameter's whole value, quotes included. ``fields`` are
-    form fields sent before the file part, as raw bytes too.
+    form fields sent before the file part, as raw bytes too. ``content`` is the
+    file part's body.
     """
 
     body = b""
@@ -46,8 +48,7 @@ def post_raw_upload(
     body += (
         b"--" + _BOUNDARY + b"\r\n"
         b'Content-Disposition: form-data; name="file"; filename=' + filename + b"\r\n"
-        b"Content-Type: application/octet-stream\r\n\r\n"
-        b"PK\x03\x04\r\n"
+        b"Content-Type: application/octet-stream\r\n\r\n" + content + b"\r\n"
         b"--" + _BOUNDARY + b"--\r\n"
     )
     content_type = f"multipart/form-data; boundary={_BOUNDARY.decode()}"

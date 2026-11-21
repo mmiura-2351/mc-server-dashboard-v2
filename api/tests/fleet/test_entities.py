@@ -36,7 +36,7 @@ def test_with_heartbeat_moves_the_window() -> None:
 
 
 def test_disconnected_worker_is_offline_even_when_fresh() -> None:
-    worker = make_worker(at=_T0).disconnect()
+    worker = make_worker(at=_T0).disconnect(_T0)
     assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.OFFLINE
 
 
@@ -48,7 +48,7 @@ def test_draining_worker_reports_draining_while_live() -> None:
 def test_draining_offline_worker_is_offline() -> None:
     # Liveness wins over drain: a draining Worker that has gone offline reports
     # OFFLINE, not DRAINING.
-    worker = make_worker(at=_T0).start_draining().disconnect()
+    worker = make_worker(at=_T0).start_draining().disconnect(_T0)
     assert worker.status(now=_T0, timeout=_TIMEOUT) is WorkerStatus.OFFLINE
 
 
@@ -60,3 +60,30 @@ def test_stop_draining_returns_to_online() -> None:
 def test_blank_worker_id_is_rejected() -> None:
     with pytest.raises(InvalidWorkerIdError):
         WorkerId("   ")
+
+
+# --- offline_since: the instant a Worker first read offline (issue #3963) ---
+
+
+def test_a_live_worker_is_not_offline() -> None:
+    worker = make_worker(at=_T0)
+    assert worker.offline_since(now=_T0 + _TIMEOUT, timeout=_TIMEOUT) is None
+
+
+def test_a_lapsed_worker_is_offline_since_its_heartbeats_lapsed() -> None:
+    worker = make_worker(at=_T0)
+    now = _T0 + _TIMEOUT + dt.timedelta(seconds=5)
+    assert worker.offline_since(now=now, timeout=_TIMEOUT) == _T0 + _TIMEOUT
+
+
+def test_a_disconnected_worker_is_offline_since_its_stream_ended() -> None:
+    ended = _T0 + dt.timedelta(seconds=5)
+    worker = make_worker(at=_T0).disconnect(ended)
+    assert worker.offline_since(now=ended, timeout=_TIMEOUT) == ended
+
+
+def test_a_stream_that_ended_after_a_lapse_is_offline_since_the_lapse() -> None:
+    # The Worker read offline from the lapse on, before its teardown ran.
+    ended = _T0 + _TIMEOUT + dt.timedelta(seconds=10)
+    worker = make_worker(at=_T0).disconnect(ended)
+    assert worker.offline_since(now=ended, timeout=_TIMEOUT) == _T0 + _TIMEOUT

@@ -493,6 +493,8 @@ export const ja: Record<TranslationKey, string> = {
     "この変更を行う前にサーバーを停止してください。",
   // The at-rest precondition (409 server_unsettled); action-agnostic (#2360).
   "serverDetail.error.unsettled": "この操作にはサーバーの停止が必要です。",
+  "serverDetail.error.invalidServerName":
+    "そのサーバー名は使用できません。空欄にせず、制御文字を含まない名前を入力してください。",
   "serverDetail.error.portTaken": "そのゲームポートはすでに使用されています。",
   "serverDetail.error.portOutOfRange":
     "そのゲームポートは許可された範囲外です。",
@@ -1802,7 +1804,8 @@ export const ja: Record<TranslationKey, string> = {
   "plugins.error.unsupportedServerType":
     "このサーバータイプは{nouns}に対応していません。",
   "plugins.error.invalidSide": "このサーバータイプには無効なサイドです。",
-  "plugins.error.invalidDisplayName": "表示名が無効です。",
+  "plugins.error.invalidDisplayName":
+    "このファイル名は{noun}の表示名に使用できません。.jar を除いた部分が1〜200文字になるようにファイル名を変更して、再度アップロードしてください。",
   "plugins.error.bedrockPortRangeExhausted":
     "Bedrock のポート範囲に空きポートがありません。しばらくしてからもう一度お試しください。",
   "plugins.error.bedrockPortTaken":

@@ -64,6 +64,9 @@ from mc_server_dashboard_api.servers.domain.plugin import (
 from mc_server_dashboard_api.servers.domain.plugin_cache_store import PluginCacheStore
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_valid_upload_filename,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     ServerId,
@@ -134,6 +137,25 @@ async def capture_catalog_dependencies(
         }
 
     return list(await asyncio.gather(*(_label(dep) for dep in captured)))
+
+
+def _catalog_filename(file: CatalogFile) -> str:
+    """The name a catalog file is installed under, or :class:`InvalidFilePathError`.
+
+    The name must end ``.jar``, and is sanitized (issues #1400, #3957). A name
+    the upload rule still refuses once sanitized, such as one over 255 bytes, is
+    refused with the ``invalid_filename`` reason the upload routes give.
+    """
+
+    if not file.filename.lower().endswith(".jar"):
+        raise InvalidFilePathError(f"catalog file is not a jar: {file.filename!r}")
+    safe = sanitize_plugin_filename(file.filename)
+    if not is_valid_upload_filename(safe):
+        raise InvalidFilePathError(
+            f"catalog file name cannot name a file: {safe!r}",
+            reason="invalid_filename",
+        )
+    return safe
 
 
 def side_from_modrinth(client_side: str, server_side: str) -> PluginSide:
@@ -374,9 +396,7 @@ class InstallFromCatalog:
             raise CatalogProjectNotFoundError(f"no files in version {version_id}")
         file = primary
 
-        if not file.filename.lower().endswith(".jar"):
-            raise InvalidFilePathError(file.filename)
-        safe_filename = sanitize_plugin_filename(file.filename)
+        safe_filename = _catalog_filename(file)
 
         project = await self.catalog.get_project(project_id)
 
@@ -661,9 +681,7 @@ class UpdatePlugin:
             raise CatalogProjectNotFoundError(f"no files in version {version_id}")
         file = primary
 
-        if not file.filename.lower().endswith(".jar"):
-            raise InvalidFilePathError(file.filename)
-        safe_filename = sanitize_plugin_filename(file.filename)
+        safe_filename = _catalog_filename(file)
 
         # Phase 3: Resolve bytes from the cache or download + verify (no lock).
         # The download cache skips the HTTP fetch when this version is cached.

@@ -57,6 +57,9 @@ class WorkerSnapshot:
     registered_at: dt.datetime
     last_heartbeat_at: dt.datetime
     status: WorkerStatus
+    # The instant ``status`` first read OFFLINE, or ``None`` while the Worker is
+    # live (``Worker.offline_since``, issue #3963).
+    offline_since: dt.datetime | None
     assigned_count: int
 
 

@@ -211,6 +211,24 @@ def assignment(server_id: ServerId, pack_id: ResourcePackId) -> ResourcePackAssi
 
 
 class ServerRepositoryContract:
+    async def test_reads_back_a_name_the_rule_refuses(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # A row stored before the server-name rule (issue #3957) may hold a
+        # control character; reading it never refuses the name.
+        item = server(contract_community_id)
+        item.name = ServerName.stored("legacy\nname")
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+
+        async with server_repository_harness.open() as tx:
+            stored = await tx.repository.get_by_id(item.id)
+        assert stored is not None
+        assert stored.name.value == "legacy\nname"
+
     async def test_add_detaches_after_commit(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],

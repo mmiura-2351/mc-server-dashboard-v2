@@ -1813,6 +1813,7 @@ class StopServer:
         self, *, community_id: CommunityId, server_id: ServerId, force: bool
     ) -> Server:
         owed: str | None = None
+        owed_on_connected_worker = False
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             if server.desired_state is DesiredState.STOPPED:
@@ -1821,6 +1822,14 @@ class StopServer:
                 owed = stopped_intent_action(server, self.control_plane)
                 if owed is None:
                     raise InvalidLifecycleTransitionError(str(server_id.value))
+                # The Worker as this stop found it, read with the selection: one
+                # that drops before the convergence reads the row again keeps the
+                # row, as on the reconciler's path (issue #3963).
+                owed_worker = server.assigned_worker_id
+                owed_on_connected_worker = (
+                    owed_worker is not None
+                    and self.control_plane.is_worker_connected(worker_id=owed_worker)
+                )
             else:
                 # ``None`` is a start intent no Worker holds yet, while the
                 # reconciler retries its placement (issue #3815). The stop withdraws
@@ -1855,7 +1864,10 @@ class StopServer:
             )
         if owed == "clear_stale_assignment":
             return await self._clear_stale_assignment(
-                community_id=community_id, server_id=server_id, force=force
+                community_id=community_id,
+                server_id=server_id,
+                worker_connected=owed_on_connected_worker,
+                force=force,
             )
         if worker_id is None:
             # Nothing was placed, so there is no Worker to tell and no placement
@@ -2228,6 +2240,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
+        hold_if_unreachable: bool = False,
     ) -> bool:
         """Capture the working set of a server whose process is gone.
 
@@ -2262,6 +2275,9 @@ class StopServer:
         uploading, so the caller must HOLD the assignment rather than release it
         while the upload is in flight. ``False`` for success and for a worker
         DISCONNECT (the upload died with the worker's ctx) — clearing is safe.
+        With ``hold_if_unreachable`` a Worker whose session ended re-raises the
+        ``WorkerUnavailableError`` instead, so the caller keeps the assignment
+        for a Worker that may be back with the working set (issue #3963).
 
         A row whose Worker has not hydrated it under this assignment
         (``awaiting_hydrate``, issue #3890) is not snapshotted at all, and this
@@ -2347,6 +2363,18 @@ class StopServer:
                     server_id.value,
                 )
                 return True
+            if (
+                hold_if_unreachable
+                and exc.worker_state is UnavailableWorkerState.NOT_CONNECTED
+            ):
+                _LOG.warning(
+                    "final snapshot could not reach the Worker for server %s: its "
+                    "session ended. Holding the assignment for the "
+                    "disconnected-Worker grace, so a Worker back within it still "
+                    "takes the snapshot (issue #3963)",
+                    server_id.value,
+                )
+                raise
             _LOG.error(
                 "final snapshot could not reach the Worker for server %s; the "
                 "process is gone but the working set was NOT captured "
@@ -2456,9 +2484,16 @@ class StopServer:
         return server
 
     async def clear_stale_assignment(
-        self, *, community_id: CommunityId, server_id: ServerId
+        self, *, community_id: CommunityId, server_id: ServerId, worker_connected: bool
     ) -> Server:
         """``_clear_stale_assignment`` under the stop-convergence exclusion.
+
+        ``worker_connected`` is whether the caller found the assigned Worker
+        connected when it chose this convergence. Such a Worker that drops before
+        Step B's final snapshot is taken, or before the owed stop is sent, keeps
+        the row: this raises ``WorkerUnavailableError`` instead of releasing
+        (issue #3963). Once the Worker has answered that stop, its own final
+        snapshot still releases on a session end (issue #3981).
 
         Raises ``LifecycleTransitionConflictError`` without dispatching or releasing
         when another stop convergence for the server is in flight (issue #3491).
@@ -2466,11 +2501,18 @@ class StopServer:
 
         with self.stop_convergence.claim(server_id):
             return await self._clear_stale_assignment(
-                community_id=community_id, server_id=server_id
+                community_id=community_id,
+                server_id=server_id,
+                worker_connected=worker_connected,
             )
 
     async def _clear_stale_assignment(
-        self, *, community_id: CommunityId, server_id: ServerId, force: bool = False
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_connected: bool,
+        force: bool = False,
     ) -> Server:
         """Release a stop wedged at (stopped, stopped|unknown|crashed|stopping,
         assigned).
@@ -2516,10 +2558,11 @@ class StopServer:
         snapshot is re-driven before clearing the assignment — the original stop
         wedged between observed=stopped and the post-snapshot clear, so the
         generation was never advanced. Without this, a cross-worker re-placement
-        hydrates stale store-gen and rolls back. A DISCONNECTED worker skips the
-        snapshot (the worker is gone; same exposure as today, logged loud). A
-        snapshot TIMEOUT raises ``WorkerUnavailableError`` so the reconciler backs
-        off. A snapshot failure (TRANSFER_FAILED, etc.) or a benign duplicate
+        hydrates stale store-gen and rolls back. A worker DISCONNECTED when the
+        caller chose this convergence and still at Step A skips the snapshot (the
+        worker is gone; same exposure as today, logged loud). A snapshot TIMEOUT
+        raises ``WorkerUnavailableError`` so the reconciler backs off. A snapshot
+        failure (TRANSFER_FAILED, etc.) or a benign duplicate
         (working_set_absent) proceeds to clear — ``_final_snapshot`` logs an ordinary
         failure as unconfirmed publication with the cross-worker exposure, or records
         the pinned no-working-set refusal at INFO.
@@ -2560,6 +2603,26 @@ class StopServer:
         session ended, so it is released as before, with the exposure the unknown
         leg already accepts.
 
+        A Worker that drops while this runs keeps the row (issue #3963). When the
+        caller (``worker_connected``) or Step A found the Worker connected, it is
+        owed the final snapshot or the stop, and a Worker whose session has ended
+        since may still hold the working set and reconnect seconds later. So the
+        release raises ``WorkerUnavailableError`` (``not_connected``) and leaves
+        the row assigned: when the Worker reads disconnected after Step A, and when
+        Step B's snapshot fails because its session is gone, at dispatch or in
+        flight, which also covers a Worker already back on a new session. The
+        reconciler counts that as a failed action, and the next tick measures the
+        row's grace from no earlier than the drop, a finished-stop record made
+        before it included, so the release without a snapshot waits a full grace
+        from it, or longer under the backoff. Both callers pass the connectivity
+        they read with the row, since a drop before Step A's read would otherwise
+        look like a Worker long gone: the reconciler the one it measured the grace
+        on, an operator stop the one it read in its own unit of work. A Worker
+        already gone when the operator's stop began is released at once, as
+        documented. The owed stop's own release, once the Worker has answered it,
+        is not covered: a final snapshot that fails on a session end there still
+        releases (issue #3981).
+
         Step A also withdraws the intent again, with a bump, as
         :meth:`_redispatch_stop` does and for the same reasons: the write that
         stopped the row may not have bumped yet, or may have bumped before its flip
@@ -2586,6 +2649,7 @@ class StopServer:
                 # The row moved since list_reconcilable snapshotted it; nothing for
                 # this recovery arm to do.
                 raise InvalidLifecycleTransitionError(str(server_id.value))
+            seen_connected = self.control_plane.is_worker_connected(worker_id=worker_id)
             # TOCTOU guard for the unknown (issue #1599) and stopping (issue #2452)
             # cases: the reconciler routes here only when the worker is
             # disconnected, but the worker may have reconnected in between. If so,
@@ -2594,33 +2658,42 @@ class StopServer:
                 ObservedState.UNKNOWN,
                 ObservedState.STOPPING,
             ):
-                if self.control_plane.is_worker_connected(worker_id=worker_id):
+                if seen_connected:
                     raise InvalidLifecycleTransitionError(str(server_id.value))
             # One step, no await: a start compares either before the bump, and is
             # noted as sent here, or after it, and is not sent (issue #3766).
             self.stop_intents.bump(server_id)
             start_may_be_running = self.stop_intents.start_may_be_running(server_id)
 
+        # A Worker the caller or Step A found connected is owed the final snapshot
+        # or the stop. If its session has ended since, it may still hold the
+        # working set and be back within the disconnected-Worker grace, so the row
+        # is kept for that grace, measured from the drop (issue #3963).
+        connected = self.control_plane.is_worker_connected(worker_id=worker_id)
+        if (worker_connected or seen_connected) and not connected:
+            raise WorkerUnavailableError(
+                str(worker_id.value), worker_state=UnavailableWorkerState.NOT_CONNECTED
+            )
+
         # A connected Worker here means a stopped or crashed row, or an unknown or
         # stopping one whose Worker reconnected during the unit of work's exit:
         # the next tick would send that one a stop anyway.
-        if start_may_be_running and self.control_plane.is_worker_connected(
-            worker_id=worker_id
-        ):
+        if start_may_be_running and connected:
             return await self._redispatch_stop(
                 community_id=community_id, server_id=server_id, force=force
             )
 
         # --- Step B: re-drive the final snapshot when the process is gone and
         # the worker is still reachable (observed stopped, #1004; crashed, #2439)
-        if server.observed_state in (
-            ObservedState.STOPPED,
-            ObservedState.CRASHED,
-        ) and self.control_plane.is_worker_connected(worker_id=worker_id):
+        if (
+            server.observed_state in (ObservedState.STOPPED, ObservedState.CRASHED)
+            and connected
+        ):
             upload_may_be_live = await self._final_snapshot(
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                hold_if_unreachable=True,
             )
             if upload_may_be_live:
                 # The connected Worker has not answered the snapshot yet.

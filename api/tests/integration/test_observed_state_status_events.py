@@ -743,7 +743,11 @@ async def test_releasing_a_stop_wedged_at_stopping_publishes_unknown(
 
     await world.stop_server(
         FakeControlPlane(connected={WorkerId(worker): False})
-    ).clear_stale_assignment(community_id=world.community, server_id=server.id)
+    ).clear_stale_assignment(
+        community_id=world.community,
+        server_id=server.id,
+        worker_connected=False,
+    )
 
     assert [event.payload for event in await _received(watching)] == [
         _status("unknown") | _RELEASED
@@ -1032,7 +1036,11 @@ async def test_stale_assignment_release_publishes_the_release(
 
     await world.stop_server(
         FakeControlPlane(connected={WorkerId(worker): False})
-    ).clear_stale_assignment(community_id=world.community, server_id=server.id)
+    ).clear_stale_assignment(
+        community_id=world.community,
+        server_id=server.id,
+        worker_connected=False,
+    )
 
     assert [event.payload for event in await _received(watching)] == [_RELEASED]
     assert await world.observed(server) is ObservedState(wedged_at)

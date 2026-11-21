@@ -13,6 +13,7 @@ and a plain :class:`CommandOutcome`. No fleet type crosses the seam.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import enum
 from dataclasses import dataclass
 
@@ -262,6 +263,17 @@ class ControlPlane(abc.ABC):
         The snapshot scheduler skips a server whose assigned Worker is gone
         rather than dispatching a doomed snapshot trigger; the server is
         re-evaluated on a later tick once the Worker reconnects (FR-DATA-5/7).
+        """
+
+    @abc.abstractmethod
+    def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        """The instant from which ``worker_id`` has read not connected (issue #3963).
+
+        The earlier of the end of its session and the lapse of its heartbeats,
+        so the first instant :meth:`is_worker_connected` answered ``False``.
+        ``None`` while the Worker is connected, and for a Worker that has not
+        registered with this process. The reconciler releases a disconnected
+        Worker's server no sooner than a grace after it.
         """
 
     @abc.abstractmethod
