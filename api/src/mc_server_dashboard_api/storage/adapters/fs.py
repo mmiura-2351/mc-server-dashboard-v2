@@ -4424,7 +4424,8 @@ def _make_directories(directory: Path) -> None:
 
     ``Path.mkdir`` and ``os.makedirs`` recurse once for each missing directory,
     so a member about 1,000 directories deep raised ``RecursionError`` (issue
-    #3859), which the restore walk reports as an archive that does not read.
+    #3859), which the restore walk then reported as an archive that does not
+    read. Only ``tarfile``'s header read is reported so now (issue #3931).
     """
 
     pending = [directory]
