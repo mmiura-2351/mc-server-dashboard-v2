@@ -879,6 +879,8 @@ export const ja: Record<TranslationKey, string> = {
   "files.error.pathTooLong": "パスが長すぎます。パスは 4,095 バイトまでです。",
   "files.error.invalidNameCharacter":
     "名前に使用できない文字（制御文字や \\ など）が含まれています。別の名前を指定してください。",
+  "files.error.nameNoLongerAllowed":
+    "この名前は使用できなくなりました。編集するにはファイル名を変更してください。",
   "files.error.invalidFilename":
     "このファイル名は使用できません。制御文字や / \\ を含まず、長すぎない名前に変更して、再度アップロードしてください。",
   "files.error.platformManagedKey":

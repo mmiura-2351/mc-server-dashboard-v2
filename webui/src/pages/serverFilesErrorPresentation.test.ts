@@ -7,7 +7,35 @@ import {
   fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
+  fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
+
+describe("fileSaveErrorPresentation", () => {
+  it.each([
+    "path_too_deep",
+    "name_too_long",
+    "path_too_long",
+    "invalid_name_character",
+  ])(
+    "asks for a rename when the saved file's name is refused: %s (#3973)",
+    (reason) => {
+      expect(fileSaveErrorPresentation(new ApiError(422, { reason }))).toEqual({
+        key: "files.error.nameNoLongerAllowed",
+      });
+    },
+  );
+
+  it.each([
+    ["another 422", new ApiError(422, { reason: "platform_managed_key" })],
+    [
+      "the reason on another status",
+      new ApiError(409, { reason: "name_too_long" }),
+    ],
+    ["a local refusal", new UnencodableTextError()],
+  ])("leaves %s to the operation's presentation", (_label, error) => {
+    expect(fileSaveErrorPresentation(error)).toBeUndefined();
+  });
+});
 
 describe("fileOperationErrorPresentation", () => {
   it.each([

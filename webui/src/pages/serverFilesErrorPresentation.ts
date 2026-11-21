@@ -119,6 +119,30 @@ export function fileOperationErrorPresentation(
 }
 
 /**
+ * Select the toast a failed save of an open file shows in place of the
+ * operation's, or `undefined` when it shows the operation's (issue #3973). The
+ * file exists, so a name the member-name rule refuses was created before the
+ * rule or by a running server: renaming the file is the remedy, not choosing
+ * another name.
+ */
+export function fileSaveErrorPresentation(
+  error: unknown,
+): FileErrorPresentation | undefined {
+  if (!(error instanceof ApiError) || error.status !== 422) {
+    return undefined;
+  }
+  switch (error.reason) {
+    case "path_too_deep":
+    case "name_too_long":
+    case "path_too_long":
+    case "invalid_name_character":
+      return { key: "files.error.nameNoLongerAllowed" };
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Select the viewer's inline message for a file that could not be read
  * (#3361). The read shares the operations' reasons except two whose operation
  * wording is about changes: an unsettled server (the operations say "stop the

@@ -946,6 +946,9 @@ export const en = {
     "The path is too long. A path may be at most 4,095 bytes.",
   "files.error.invalidNameCharacter":
     "The name contains a character that cannot be used, such as a control character or \\. Choose another name.",
+  // A save of an existing file whose name the rule refuses (issue #3973).
+  "files.error.nameNoLongerAllowed":
+    "This name is no longer allowed; rename the file to edit it.",
   "files.error.invalidFilename":
     "This file name cannot be used. Rename the file so its name has no control characters, / or \\, and is not too long, then upload it again.",
   // Platform-managed server.properties refusals (issues #2623, #2812, #2846).

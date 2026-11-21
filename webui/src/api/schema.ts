@@ -1323,9 +1323,9 @@ export interface paths {
          *     directories count, so a file path may have 129 components), one with a
          *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
          *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
-         *     control character, a lone surrogate or a Unicode noncharacter in any
-         *     component is 422 ``invalid_name_character``; C0 and DEL stay
-         *     ``invalid_path``.
+         *     control character, a line or paragraph separator, a lone surrogate or a
+         *     Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+         *     and DEL stay ``invalid_path``.
          *     Running or at rest alike, before the Worker is asked.
          */
         put: operations["write_file_api_communities__community_id__servers__server_id__files_put"];
@@ -1380,9 +1380,9 @@ export interface paths {
          *     directories count, so a file path may have 129 components), one with a
          *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
          *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
-         *     control character, a lone surrogate or a Unicode noncharacter in any
-         *     component is 422 ``invalid_name_character``; C0 and DEL stay
-         *     ``invalid_path``.
+         *     control character, a line or paragraph separator, a lone surrogate or a
+         *     Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+         *     and DEL stay ``invalid_path``.
          *     The new directory counts as a level, so it may have 128 components.
          */
         post: operations["make_directory_api_communities__community_id__servers__server_id__files_directories_post"];
@@ -1570,13 +1570,16 @@ export interface paths {
          *     directories count, so a file path may have 129 components), one with a
          *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
          *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
-         *     control character, a lone surrogate or a Unicode noncharacter in any
-         *     component is 422 ``invalid_name_character``; C0 and DEL stay
-         *     ``invalid_path``.
-         *     A directory rename also judges every name the move creates below the
+         *     control character, a line or paragraph separator, a lone surrogate or a
+         *     Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+         *     and DEL stay ``invalid_path``.
+         *     A directory rename also judges the names the move creates below the
          *     destination, so a subtree that would end up too deep or too long is
-         *     refused with nothing moved. The source is not judged, so a name created
-         *     before the rule can be renamed to one it admits.
+         *     refused with nothing moved. A destination with no more components and no
+         *     more bytes than the source is not measured, so a tree already too deep can
+         *     still be renamed at its own level, and the names below are not judged by
+         *     their characters. The source is not judged, so a name created before the
+         *     rule can be renamed to one it admits.
          */
         post: operations["rename_file_api_communities__community_id__servers__server_id__files_rename_post"];
         delete?: never;
@@ -1711,9 +1714,9 @@ export interface paths {
          *     directories count, so a file path may have 129 components), one with a
          *     component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
          *     ``path_too_long``, on either storage backend. A path carrying a ``\``, a C1
-         *     control character, a lone surrogate or a Unicode noncharacter in any
-         *     component is 422 ``invalid_name_character``; C0 and DEL stay
-         *     ``invalid_path``.
+         *     control character, a line or paragraph separator, a lone surrogate or a
+         *     Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+         *     and DEL stay ``invalid_path``.
          *     Judged on the resulting path, of the upload and of each member once
          *     joined to ``path``, in the same pre-write scan, so one refused member
          *     refuses the whole extract with nothing written.
