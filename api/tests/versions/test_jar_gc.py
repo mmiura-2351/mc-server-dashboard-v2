@@ -85,9 +85,10 @@ class _FakeReferences(LiveJarReferences):
 
 def _resume_point() -> ResumePoint:
     """A resume point whose pass without a mark starts at the first key in key
-    order, so a pass meets the keys in the order a test seeds them (issue #3934)."""
+    order and walks up, so a pass meets the keys in the order a test seeds them
+    (issues #3934, #3965)."""
 
-    return ResumePoint(start=lambda count: 0)
+    return ResumePoint(start=lambda count: 0, descending=lambda: False)
 
 
 def _old() -> dt.datetime:

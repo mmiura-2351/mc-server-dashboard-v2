@@ -29,6 +29,10 @@ MAX_CONSECUTIVE_FAILED_DELETES = 5
 STOPPED_AFTER_CONSECUTIVE_FAILURES = "stopped_after_consecutive_failures"
 
 
+def _coin_flip() -> bool:
+    return random.random() < 0.5
+
+
 class ResumePoint:
     """Where a GC's next pass starts (issue #3934).
 
@@ -46,9 +50,14 @@ class ResumePoint:
     does not start every pass at the same key.
     """
 
-    def __init__(self, start: Callable[[int], int] = random.randrange) -> None:
+    def __init__(
+        self,
+        start: Callable[[int], int] = random.randrange,
+        descending: Callable[[], bool] = _coin_flip,
+    ) -> None:
         self.key: str | None = None
         self._start = start
+        self._descending = descending
 
     def order[T](self, entries: Iterable[T], key_of: Callable[[T], str]) -> list[T]:
         """``entries`` in key order, starting after :attr:`key` and wrapping round.

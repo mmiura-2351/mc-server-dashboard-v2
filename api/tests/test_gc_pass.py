@@ -23,7 +23,7 @@ def test_a_pass_with_no_resume_point_starts_where_its_picker_says() -> None:
         picked.append(count)
         return 2
 
-    walk = ResumePoint(start=_third).order(_KEYS, str)
+    walk = ResumePoint(start=_third, descending=lambda: False).order(_KEYS, str)
 
     assert walk == ["c", "d", "e", "a", "b"]
     assert picked == [5]
