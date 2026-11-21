@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     InvalidGrantResourceTypeError,
@@ -243,6 +244,24 @@ def test_create_grant_nonexistent_resource_gets_404() -> None:
         json=_create_body(UserId(uuid.uuid4())),
     )
     assert resp.status_code == 404
+
+
+def test_create_grant_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    # The community's deletion committed after the gate admitted the caller
+    # (#2967): the answer is the one the gate now gives, a non-member's 404.
+    url = f"/api/communities/{uuid.uuid4()}/grants"
+    body = _create_body(UserId(uuid.uuid4()))
+    gate = _client(_app(member=False, allow=True, create_uc=_FakeUseCase())).post(
+        url, json=body
+    )
+    app = _app(
+        member=True,
+        allow=True,
+        create_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).post(url, json=body)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
 
 
 def test_create_grant_unknown_resource_type_returns_422() -> None:
