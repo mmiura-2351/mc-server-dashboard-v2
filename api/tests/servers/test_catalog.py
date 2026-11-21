@@ -1037,13 +1037,15 @@ async def test_install_from_catalog_non_jar_filename_fails() -> None:
         cache=FakePluginCacheStore(),
         clock=FakeClock(_NOW),
     )
-    with pytest.raises(InvalidFilePathError):
+    with pytest.raises(InvalidFilePathError) as excinfo:
         await uc(
             community_id=_COMMUNITY,
             server_id=server.id,
             project_id="proj-1",
             version_id="ver-1",
         )
+    # The catalog's name is escaped in the message (issue #3957).
+    assert str(excinfo.value) == "catalog file is not a jar: 'fabric-api-0.92.0.zip'"
 
 
 # A catalog's file name never went through the upload rule (issue #3957): each

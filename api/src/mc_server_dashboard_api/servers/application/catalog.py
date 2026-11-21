@@ -148,7 +148,7 @@ def _catalog_filename(file: CatalogFile) -> str:
     """
 
     if not file.filename.lower().endswith(".jar"):
-        raise InvalidFilePathError(file.filename)
+        raise InvalidFilePathError(f"catalog file is not a jar: {file.filename!r}")
     safe = sanitize_plugin_filename(file.filename)
     if not is_valid_upload_filename(safe):
         raise InvalidFilePathError(

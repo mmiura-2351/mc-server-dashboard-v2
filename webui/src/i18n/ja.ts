@@ -494,7 +494,7 @@ export const ja: Record<TranslationKey, string> = {
   // The at-rest precondition (409 server_unsettled); action-agnostic (#2360).
   "serverDetail.error.unsettled": "この操作にはサーバーの停止が必要です。",
   "serverDetail.error.invalidServerName":
-    "そのサーバー名は使用できません。制御文字を含まない名前にしてください。",
+    "そのサーバー名は使用できません。空欄にせず、制御文字を含まない名前を入力してください。",
   "serverDetail.error.portTaken": "そのゲームポートはすでに使用されています。",
   "serverDetail.error.portOutOfRange":
     "そのゲームポートは許可された範囲外です。",

@@ -32,10 +32,10 @@ def accepted_display_names() -> list[object]:
 
     return [
         pytest.param("My Pack", "My Pack", id="ascii"),
-        pytest.param("パック　二", "パック　二", id="japanese"),
+        pytest.param("パック\u3000二", "パック\u3000二", id="japanese"),
         pytest.param(
-            "\U0001f468‍\U0001f469 a‮b",
-            "\U0001f468‍\U0001f469 a‮b",
+            "\U0001f468\u200d\U0001f469 a\u202eb",
+            "\U0001f468\u200d\U0001f469 a\u202eb",
             id="zwj-and-bidi",
         ),
         pytest.param("x" * 200, "x" * 200, id="200-characters"),

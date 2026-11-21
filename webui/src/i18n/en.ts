@@ -546,7 +546,7 @@ export const en = {
   // action (issue #2360).
   "serverDetail.error.unsettled": "The server must be stopped for this action.",
   "serverDetail.error.invalidServerName":
-    "That server name is not allowed. Use a name with no control characters.",
+    "That server name is not allowed. Enter a name that is not blank and has no control characters.",
   "serverDetail.error.portTaken": "That game port is already in use.",
   "serverDetail.error.portOutOfRange":
     "That game port is outside the allowed range.",
