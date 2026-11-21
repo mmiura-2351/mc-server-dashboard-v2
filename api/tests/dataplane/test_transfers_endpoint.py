@@ -2390,6 +2390,58 @@ def test_no_publish_lands_from_an_assigned_worker_not_yet_hydrated(
 
 # 19 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(19 * 10 + 30)
+@pytest.mark.parametrize("first", ["unassigned", "another-worker"])
+def test_a_placement_between_the_publish_checks_keeps_a_stale_base_refused(
+    tmp_path: Path, first: str
+) -> None:
+    # Issue #3890, r3 review: the pre-upload check reads the assignment once and
+    # the stale-base check reads it again, after the store's generation and
+    # publisher. A placement on worker B that commits between the two reads is
+    # marked, so B's stale base must not get the #1703 exemption at the second
+    # read either. Either read alone refuses this publish; the store stands.
+    import asyncio
+
+    worker_a = str(uuid.uuid4())
+    worker_b = str(uuid.uuid4())
+    worker_c = str(uuid.uuid4())
+
+    client, storage = _setup(tmp_path)
+    reads: list[None] = []
+
+    async def _assigned(_c: uuid.UUID, _s: uuid.UUID) -> WorkerAssignment | None:
+        reads.append(None)
+        if len(reads) == 1:
+            if first == "unassigned":
+                return None
+            return WorkerAssignment(worker_id=worker_c, awaiting_hydrate=False)
+        return WorkerAssignment(worker_id=worker_b, awaiting_hydrate=True)
+
+    _shared_app.dependency_overrides[get_assigned_worker_lookup] = lambda: _assigned
+    community, server = _scope()
+    asyncio.run(_publish(storage, community, server, {"k": b"g1"}, publisher=worker_a))
+    asyncio.run(_publish(storage, community, server, {"k": b"g2"}, publisher=worker_a))
+    current = asyncio.run(
+        storage.current_generation(CommunityId(community), ServerId(server))
+    )
+
+    with client:
+        resp = client.post(
+            _url(community, server, "snapshot"),
+            content=_tar_bytes({"world/level.dat": b"leftover-on-b"}),
+            headers={
+                **_auth(),
+                "X-Working-Set-Base-Generation": str(current - 1),
+                "X-Worker-Id": worker_b,
+            },
+        )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "stale_generation"
+    assert len(reads) == 2
+    assert _read_tar(_published(storage, community, server)) == {"k": b"g2"}
+
+
+# 19 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(19 * 10 + 30)
 def test_snapshot_stale_base_from_a_worker_that_is_not_assigned_is_refused_early(
     tmp_path: Path,
 ) -> None:
