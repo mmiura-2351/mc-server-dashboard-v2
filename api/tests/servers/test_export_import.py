@@ -1096,7 +1096,9 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
 
 async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> None:
     # The plugin rows (and a Geyser's port) are committed under the lifecycle
-    # lock, which can be lost before the commit (issue #3927).
+    # lock, which can be lost before the commit (issue #3927). The server
+    # already exists by then, so the loss is the seed failure the port errors
+    # are: a retry would only meet the name the first attempt took.
     community = uuid.uuid4()
     archive = await _export_archive(community=community, mod_identifier="Geyser-Spigot")
 
@@ -1114,9 +1116,10 @@ async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> Non
     lost_uow = FakeUnitOfWork()
     lost = FakeLifecycleLock()
     lost.checks_before_loss = 0
-    with pytest.raises(LifecycleLockLostError):
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await _import(lost_uow, lost)
 
+    assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
     # The import's last commit, the plugin rows', is the one the loss stops.
     assert lost_uow.commits == held_uow.commits - 1
 
