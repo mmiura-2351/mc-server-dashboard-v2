@@ -23,6 +23,7 @@ import gzip
 import io
 import tarfile
 import threading
+import tracemalloc
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -1354,6 +1355,23 @@ def test_validate_refuses_an_archive_that_seeks_back() -> None:
 def test_validate_counts_directory_members_toward_the_entry_cap() -> None:
     with pytest.raises(InvalidBackupArchiveError, match="too many entries"):
         _validate_backup_archive(archive_cap_shapes.directories(5), max_entries=5)
+
+
+def test_validate_keeps_no_member_it_walked_past() -> None:
+    # ``tarfile`` keeps every member it reads, with its PAX records, unless it
+    # is opened not to (issue #3931). 500 members holding 7.5 MiB of PAX
+    # comments, within the gate's limits, are walked one member at a time, in
+    # under 4 MiB.
+    content = archive_cap_shapes.commented_directories(500)
+
+    tracemalloc.start()
+    try:
+        _validate_backup_archive(content, max_entries=10_000)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 4 * archive_cap_shapes.MIB
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------

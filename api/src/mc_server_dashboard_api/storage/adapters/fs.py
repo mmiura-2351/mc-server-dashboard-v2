@@ -4076,22 +4076,31 @@ def _extract_tar_into(spool: Path, dest: Path) -> None:
     past one, or a chain of extended headers too long for ``tarfile`` to read, is
     ``ReadError``. The cap is the spool's own length: the data plane bounds the
     body the spool holds, so the count refuses nothing more.
+
+    The walk keeps no member it has passed (issue #3931): ``tarfile`` is opened
+    not to keep the members it reads (``stream=True``), and each member is
+    extracted as the walk reaches it, as restore extracts one. ``extractall``
+    kept every directory member, to set its modification time once its entries
+    were in; a directory's time is now the one its last entry left, as after a
+    restore.
     """
 
     with (
         open(spool, "rb") as fileobj,
-        tarfile.open(
+        tarfile.TarFile(
             fileobj=(
                 stream := EndCheckedReader(
                     CappedReader(fileobj, os.fstat(fileobj.fileno()).st_size),
                     header_limits=STORAGE_HEADER_LIMITS,
                 )
             ),
-            mode="r:",
+            mode="r",
             tarinfo=HeaderCheckedTarInfo,
+            stream=True,
         ) as tar,
     ):
-        tar.extractall(dest, members=stream.members(tar), filter=_ingest_member_filter)
+        for member in stream.members(tar):
+            tar.extract(member, dest, filter=_ingest_member_filter)
         for _zeros in stream.read_past_end_marker():
             pass
 
@@ -4273,6 +4282,9 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
     records plus 16 Ki a member. Going past one, or a chain of extended headers
     too long for ``tarfile`` to read, is :class:`ArchiveUnreadableError`.
 
+    ``tarfile`` is opened not to keep the members it reads (``stream=True``,
+    issue #3931), so the walk holds one member at a time, however many.
+
     An archive whose bytes cannot be read back — truncated, or damaged gzip / tar
     framing — raises :class:`ArchiveUnreadableError` (issue #3230). So does one
     holding a member the filter refuses (issue #3371): it reads, but nothing can
@@ -4299,15 +4311,16 @@ def _extract_tar_gz_into(archive: Path, dest: Path, max_bytes: int) -> int:
         with (
             archive_read_errors_as_verdicts(),
             GzipReader(open(archive, "rb")) as gz,
-            tarfile.open(
+            tarfile.TarFile(
                 fileobj=(
                     stream := EndCheckedReader(
                         CappedReader(gz, max_bytes),
                         header_limits=STORAGE_HEADER_LIMITS,
                     )
                 ),
-                mode="r:",
+                mode="r",
                 tarinfo=HeaderCheckedTarInfo,
+                stream=True,
             ) as tar,
         ):
             for read in stream.members(tar):

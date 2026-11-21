@@ -51,17 +51,18 @@ _END_READS = (len(_END_BLOCK), len(_END_BLOCK) + 1)
 # a time. Real extended headers are long names, xattrs and ACLs: kilobytes.
 _BETWEEN_MEMBERS_BYTES = 1024 * 1024
 
-# What the members a walk hands out may hold. tarfile keeps every member, most
-# of them with a copy of the global PAX records dict, and the TarFile keeps the
-# global records too, so a member may hold at most this many PAX records, global
-# and its own...
+# What the members a walk hands out may hold. tarfile gives most members a copy
+# of the global PAX records dict, and the TarFile keeps the global records too,
+# so a member may hold at most this many PAX records, global and its own...
 _PAX_RECORDS_PER_MEMBER = 32
 # ...and the members' names, link names, PAX keys and PAX values together at most
 # this many characters, plus what HeaderLimits allows a member. The count
 # over-states some of it, which errs safe: a global record is one string the
 # members share but counts once a member, and a name or link name read from a PAX
 # record counts twice. Real archives hold a dozen records and a few hundred
-# characters a member.
+# characters a member. A TarFile opened with ``stream=True``, as every walk's is
+# (issue #3931), keeps no member it has handed out, so the count bounds what the
+# walk reads of them in all; opened without, tarfile keeps every member.
 _HELD_CHARACTERS = 8 * 1024 * 1024
 
 # How much of the stream past the end-of-archive marker to read at a time, so a
@@ -211,7 +212,10 @@ class EndCheckedReader(io.RawIOBase):
 
     Pass it as ``tarfile.open(fileobj=reader, mode="r:")`` over the decompressed
     stream (:class:`GzipReader` for a ``tar.gz``), walk the archive through
-    :meth:`members`, then iterate :meth:`read_past_end_marker`.
+    :meth:`members`, then iterate :meth:`read_past_end_marker`. Every walk opens
+    ``tarfile.TarFile(fileobj=reader, mode="r", stream=True)``, the same read,
+    so that ``tarfile`` keeps no member it hands out (issue #3931): typeshed's
+    ``tarfile.open`` does not take ``stream``.
 
     The walk counts as having stopped at the marker only when everything it read
     after handing out its last member is one block of 512 zeros, after at most
@@ -244,11 +248,13 @@ class EndCheckedReader(io.RawIOBase):
       headers, which ``tarfile`` holds whole. A read then asks the stream for at
       most one byte past that. The caller's reads of member data are not held to
       it.
-    - ``tarfile`` also keeps every member it hands out, with its name, its link
-      name and its PAX records, and the ``TarFile`` keeps the global ones
+    - Each member ``tarfile`` hands out holds its name, its link name and its
+      PAX records, and the ``TarFile`` keeps the global ones
       (``TarFile.pax_headers``). It copies them into a member's own records for
       most member types, but not into an old-GNU sparse one, so each member
-      counts as holding all of them. :meth:`members` bounds what the members
+      counts as holding all of them. Unless the ``TarFile`` is opened with
+      ``stream=True``, as every walk's is (issue #3931), ``tarfile`` keeps every
+      member it hands out. :meth:`members` bounds what the members
       hold: at most 32 PAX records in a member, global and its own, and at most
       8 Mi characters of names, link names, PAX keys and PAX values in all, plus
       the limits' allowance for each member handed out. Neither bound sees a

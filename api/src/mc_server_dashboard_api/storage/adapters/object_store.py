@@ -2793,7 +2793,9 @@ class _EndCheckedTar:
 
     Every byte the walk takes from ``source`` counts toward ``max_bytes``
     through a ``CappedReader``, and the walk is held to ``header_limits``
-    (issues #3859, #3931): a backup's and a snapshot's walk alike.
+    (issues #3859, #3931): a backup's and a snapshot's walk alike. ``tarfile``
+    is opened not to keep the members it reads (``stream=True``, issue #3931),
+    so the walk holds one member at a time, however many.
     """
 
     def __init__(
@@ -2808,8 +2810,11 @@ class _EndCheckedTar:
             self._reader = EndCheckedReader(
                 CappedReader(source, max_bytes), header_limits=header_limits
             )
-            self.tar = tarfile.open(
-                fileobj=self._reader, mode="r:", tarinfo=HeaderCheckedTarInfo
+            self.tar = tarfile.TarFile(
+                fileobj=self._reader,
+                mode="r",
+                tarinfo=HeaderCheckedTarInfo,
+                stream=True,
             )
         except BaseException:
             source.close()

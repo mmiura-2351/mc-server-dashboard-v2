@@ -1567,9 +1567,9 @@ def _validate_backup_archive(
     header limits, with the limit as the message: more than 1 MiB of headers
     between two members, since ``tarfile`` holds extended-header data whole, or
     members that hold more than 32 PAX records each or 8 Mi characters of names,
-    link names and PAX records in all, since ``tarfile`` keeps every member with
-    its names and a copy of the global records. So is a chain of extended headers
-    too long for ``tarfile`` to read. Each
+    link names and PAX records in all. ``tarfile`` is opened not to keep the
+    members it hands out (``stream=True``, issue #3931). So is a chain of
+    extended headers too long for ``tarfile`` to read. Each
     file member's body is drained too, and what it holds counts toward the same
     cap on its own: for a sparse member that includes holes restore writes but
     nothing decompresses.
@@ -1601,14 +1601,15 @@ def _validate_backup_archive(
     try:
         with (
             GzipReader(io.BytesIO(content)) as gz,
-            tarfile.open(
+            tarfile.TarFile(
                 fileobj=(
                     stream := EndCheckedReader(
                         CappedReader(gz, max_decompressed_bytes),
                         header_limits=UPLOAD_HEADER_LIMITS,
                     )
                 ),
-                mode="r:",
+                mode="r",
+                stream=True,
             ) as tar,
         ):
             count = 0
