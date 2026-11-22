@@ -1143,7 +1143,8 @@ a different-publisher publish whose base now lags, so the guard refuses it. The
 guard still lets that publish through from the server's assigned Worker (the
 #1703 exemption, Section 8), so the application makes no such edit while a stop
 holds the server for its final snapshot: every authoritative edit and restore
-waits for the release (`409 server_assigned`, issue #3998). The bump
+is refused until the release (`409 server_assigned`, issue #3998), however long
+a refused final snapshot holds it (issue #3697). The bump
 is uniform across all five ops for a simple invariant: even `make_dir` (which only
 creates an empty directory — a real one on `fs`, a zero-byte `.dir` marker on
 object backends) bumps, so the staleness reasoning never special-cases
@@ -2557,11 +2558,12 @@ snapshot publishes.
 The snapshot does not decide the stop's outcome, but it does decide the
 release:
 
-- **Success, or a failed or unsent snapshot** — the assignment is cleared (the
+- **Success, or a failed or unsent snapshot** that is not a refusal below — the
+  assignment is cleared (the
   `SERVER_NOT_FOUND` path additionally requires that the same call established
   the row is at rest under this Worker; a convergence write beaten by a fresher
-  report holds instead). A failed result is logged loud because no retry exists
-  for a stopped server, but publication is unconfirmed: a later cross-worker
+  report holds instead). A failed result is logged loud because nothing retries
+  it, but publication is unconfirmed: a later cross-worker
   re-placement may lose progression since the last periodic snapshot
   (#845/#847). Before recovery, inspect authoritative Storage's current snapshot;
   the result carries no publication receipt and cannot distinguish a failed
@@ -2577,8 +2579,15 @@ release:
   late); releasing would reopen the very race above, whereas an upload that
   lands while the row is still held publishes against the base it hydrated from.
   The Worker's late `CommandResult` releases the hold as soon as the upload
-  settles, and the reconciler is the backstop once the stop grace
-  lapses.
+  settles, unless it is a refusal below, and the reconciler is the backstop
+  once the stop grace lapses.
+- **The Worker refused the snapshot `BUSY` or `UNAVAILABLE`** — the assignment
+  is HELD, and the refusal is recorded on the server (issue #3697). The Worker
+  packed nothing and still holds the working set the snapshot owes: a release
+  would let a start place the server elsewhere, or an at-rest write advance the
+  store, and lose it. The reconciler retries the snapshot until one settles
+  otherwise, and a holder of `server:stop` can release the server without it
+  ([CONFIGURATION.md](CONFIGURATION.md) Section 5.6).
 - **The Worker's session ended**, before or while the snapshot ran, or a fast
   reconnect retired it — the assignment is HELD too (issue #3981). Nothing is
   uploading, but the Worker may be back with the working set, and releasing
