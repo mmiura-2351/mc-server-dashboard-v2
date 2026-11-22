@@ -126,7 +126,7 @@ function Loaded({
           queryClient.invalidateQueries({ queryKey: ["users", "me"] });
         }}
       />
-      <PasswordSection showToast={showToast} />
+      <PasswordSection username={user.username} showToast={showToast} />
       <MembershipsSection
         communities={communities}
         isError={communitiesError}
@@ -199,8 +199,10 @@ function ProfileSection({ user, showToast, onSaved }: ProfileSectionProps) {
 }
 
 function PasswordSection({
+  username,
   showToast,
 }: {
+  username: string;
   showToast: LoadedProps["showToast"];
 }) {
   const [current, setCurrent] = useState("");
@@ -242,10 +244,25 @@ function PasswordSection({
   return (
     <form className="card" onSubmit={onSubmit}>
       <h2>{t("account.password.heading")}</h2>
+      {/* The signed-in username, for password managers to match the saved
+          credential and save a new one against (#4093, #4094). Visually
+          hidden rather than type="hidden", which some managers ignore; out
+          of the tab order and the accessibility tree. */}
+      <input
+        type="text"
+        name="username"
+        autoComplete="username"
+        value={username}
+        readOnly
+        tabIndex={-1}
+        aria-hidden="true"
+        className="visually-hidden"
+      />
       <label className="field" htmlFor="account-password-current">
         {t("account.password.current")}
         <PasswordInput
           id="account-password-current"
+          name="current-password"
           autoComplete="current-password"
           value={current}
           onChange={(event) => setCurrent(event.target.value)}
@@ -256,6 +273,7 @@ function PasswordSection({
           {t("account.password.new")}
           <PasswordInput
             id="account-password-new"
+            name="new-password"
             autoComplete="new-password"
             value={next}
             onChange={(event) => setNext(event.target.value)}
@@ -265,6 +283,7 @@ function PasswordSection({
           {t("account.password.confirm")}
           <PasswordInput
             id="account-password-confirm"
+            name="confirm-password"
             autoComplete="new-password"
             value={confirm}
             onChange={(event) => setConfirm(event.target.value)}
