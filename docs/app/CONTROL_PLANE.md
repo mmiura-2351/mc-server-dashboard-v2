@@ -784,6 +784,31 @@ Notes:
   the stop finds no intent to place. The reconciler counts neither toward its
   backoff (CONFIGURATION.md Section 5.6). A user start needs the server
   `desired=stopped`, so it can place the server only once the stop has landed.
+- **Releasing a held server without its final snapshot sends no command.** A
+  stop holds its Worker until the final snapshot settles. When the Worker
+  refuses that snapshot `BUSY` or `UNAVAILABLE`, the server records the refusal
+  (`final_snapshot_refusal`, DATABASE.md Section 7) and stays held. A holder of
+  `server:stop` can release it without the snapshot
+  (`POST …/release-without-snapshot`, WEBUI_SPEC.md Section 2.3; issue #4055).
+  The release runs under the per-server exclusion every stop convergence holds.
+  While a stop of the server, the reconciler's convergence of it, a late
+  result's release, or a final snapshot whose result has not arrived is in
+  flight, it answers `409 transition_conflict` and writes nothing: an upload
+  that may still publish is never released under (issue #847). It releases
+  only a server still `desired=stopped`, at rest, assigned and holding a
+  refusal, and answers any other `409 invalid_transition`. A server held for
+  another reason (a snapshot not answered yet, a session that ended, a
+  disconnected Worker's grace) may still get its snapshot. A refusal held
+  through its Worker's disconnect reads `unknown` and stays releasable. The
+  write is the stale-assignment release, guarded on the Worker and on the
+  `observed_at` it read, so a report that lands meanwhile keeps the server
+  held (`409 transition_conflict`). It clears the assignment, the refusal and
+  `awaiting_hydrate`, publishes the release frame, and leaves `observed` as it
+  was. The Worker is sent nothing: it keeps the scratch, and a container a
+  failed start left running may run there until the Worker next starts the
+  server, reclaims it or boots. Nothing records a refusal until issue #4056
+  holds the Worker on one, so until then every release answers
+  `409 invalid_transition`.
 - **A hydrate refused `INVALID_STATE` keeps the server on that Worker.** A
   Worker answers a `HydrateTrigger` `INVALID_STATE` only when it already runs an
   instance of the server (Section 7). Placement cannot know that: it ranks
