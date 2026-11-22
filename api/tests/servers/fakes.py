@@ -19,6 +19,7 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.core.adapters.database import is_transient_database_error
 from mc_server_dashboard_api.fleet.domain.control_plane import EXPIRY_MARGIN_SECONDS
 from mc_server_dashboard_api.servers.adapters.file_store import _rel_path
 from mc_server_dashboard_api.servers.application.stop_intents import StopIntentCounter
@@ -1279,6 +1280,22 @@ class FakeServerRepository(ServerRepository):
         self.by_id.pop(server_id, None)
 
 
+class ClearCreationFailsRepository(FakeServerRepository):
+    """Fails the write that ends a creation with each of ``errors`` in turn,
+    then makes it (issue #4088), counting every attempt."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__()
+        self._errors = list(errors)
+        self.clear_attempts = 0
+
+    async def clear_creation_incomplete(self, server_id: ServerId) -> None:
+        self.clear_attempts += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        await super().clear_creation_incomplete(server_id)
+
+
 class FakeBackupRepository(BackupRepository):
     def __init__(self) -> None:
         self.by_id: dict[BackupId, Backup] = {}
@@ -2018,6 +2035,11 @@ class FakeUnitOfWork(UnitOfWork):
         # needs a real one is pinned in
         # tests/integration/test_backup_plugin_reconcile.py.
         yield
+
+    def is_transient(self, exc: BaseException) -> bool:
+        # The real adapter's classification, so a test fails this fake with
+        # what the database would raise.
+        return is_transient_database_error(exc)
 
 
 class ExitHookUnitOfWork(FakeUnitOfWork):

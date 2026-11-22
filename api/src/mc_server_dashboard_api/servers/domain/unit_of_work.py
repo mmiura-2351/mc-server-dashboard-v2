@@ -72,3 +72,11 @@ class UnitOfWork(abc.ABC):
         (issue #2612). Running the write inside this context keeps the refusal
         local -- the surrounding work stands and the caller may go on.
         """
+
+    @abc.abstractmethod
+    def is_transient(self, exc: BaseException) -> bool:
+        """Whether ``exc``, raised by this unit of work, means it is unavailable.
+
+        The outage is for now, so the same work in a new unit of work may
+        succeed (issue #4088). Any other failure is not one.
+        """

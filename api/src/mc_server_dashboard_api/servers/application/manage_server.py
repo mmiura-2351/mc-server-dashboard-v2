@@ -18,6 +18,7 @@ assume an authorized member and only do the data work.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from collections.abc import Set as AbstractSet
@@ -120,6 +121,10 @@ _EULA_ACCEPTED_CONTENT = b"eula=true\n"
 # needs it), plus a new server's ``sync-chunk-writes=false`` default (issue #3443).
 # The trailing newline matches the line format Mojang writes.
 _PROPERTIES_REL_PATH = "server.properties"
+
+# The waits, in seconds, before each retry of the write that ends a creation
+# after a transient failure (issue #4088): three attempts in all.
+_END_CREATION_RETRY_DELAYS = (0.2, 0.5)
 
 _logger = logging.getLogger(__name__)
 
@@ -269,8 +274,9 @@ class CreateServer:
     returned: the seed's, or ``populate``'s when one is given. A creation that
     fails, is cancelled or dies before then leaves it set, and
     :class:`StartServer` refuses the row, since its working set is only what was
-    written. The clear is a single-column write of its own; a failure of it is
-    the seed failure too, with the flag left set.
+    written. The clear is a single-column write of its own, retried after a
+    transient failure (issue #4088); its failure is the seed failure too, with
+    the flag left set.
 
     The server's **lifecycle lock** is held from before the row commits until the
     last create-time write (issue #4045). Each seed write publishes on its own, so
@@ -310,6 +316,9 @@ class CreateServer:
     default_memory_limit_mb: int | None = None
     max_memory_limit_mb: int | None = None
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
+    # The wait between attempts to end the creation (issue #4088), injectable
+    # so tests do not really sleep.
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
     async def __call__(
         self,
@@ -458,22 +467,34 @@ class CreateServer:
         last write instead of replacing it. That lock is in-process only, and
         across processes this is the window between a check and the writes it
         guards that issue #3927 leaves open (``adapters/lifecycle_lock.py``).
-        A failure of the write or its commit is
+
+        A failure the unit of work calls transient, such as a pool wait running
+        out, is retried in a new unit of work, still inside the hold, up to
+        three attempts in all with a short wait between them (issue #4088).
+        There is no ``ensure_held()`` between attempts either, for the same
+        reason: every write the clear vouches for is done. Any other failure of
+        the write or its commit, or the last attempt's, is
         :class:`WorkingSetSeedFailedError`, the row still unstartable.
         """
 
-        try:
-            async with self.uow:
-                await self.uow.servers.clear_creation_incomplete(server.id)
-                await self.uow.commit()
-        except Exception as exc:
-            _logger.warning(
-                "ending the server's creation failed; its working set is whole "
-                "but it cannot start (delete it and create or import it again)",
-                extra={"server_id": str(server.id.value)},
-            )
-            raise WorkingSetSeedFailedError(str(server.id.value)) from exc
-        server.creation_incomplete = False
+        for delay in (*_END_CREATION_RETRY_DELAYS, None):
+            try:
+                async with self.uow:
+                    await self.uow.servers.clear_creation_incomplete(server.id)
+                    await self.uow.commit()
+            except Exception as exc:
+                if delay is None or not self.uow.is_transient(exc):
+                    _logger.warning(
+                        "ending the server's creation failed; its working set is "
+                        "whole but it cannot start (delete it and create or "
+                        "import it again)",
+                        extra={"server_id": str(server.id.value)},
+                    )
+                    raise WorkingSetSeedFailedError(str(server.id.value)) from exc
+                await self.sleep(delay)
+            else:
+                server.creation_incomplete = False
+                return
 
     async def _seed_initial_working_set(
         self,

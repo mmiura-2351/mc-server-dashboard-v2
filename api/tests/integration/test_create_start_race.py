@@ -35,7 +35,13 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from mc_server_dashboard_api.community.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as CommunityUnitOfWork,
@@ -87,6 +93,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+from tests.core.fakes import RecordingSleep
 from tests.integration.migrate import downgrade_base, upgrade_head
 from tests.servers.fakes import (
     FakeControlPlane,
@@ -180,14 +187,24 @@ class _FailingFileStore(StorageFileStoreAdapter):
         )
 
 
-class _SecondCommitFails(ServersUnitOfWork):
-    """Fails the creation's second commit, the one that ends it."""
+class _EndCommitFails(ServersUnitOfWork):
+    """Fails ``times`` of the creation's commits from its second, the ones that
+    end it, with an outage (issue #4088).
 
-    commits = 0
+    The creations below sleep on a fake that returns for one wait more than the
+    retry makes, so an extra attempt fails a test instead of parking it.
+    """
+
+    def __init__(
+        self, session_factory: async_sessionmaker[AsyncSession], *, times: int
+    ) -> None:
+        super().__init__(session_factory)
+        self.commits = 0
+        self._times = times
 
     async def commit(self) -> None:
         self.commits += 1
-        if self.commits == 2:
+        if 2 <= self.commits < 2 + self._times:
             raise OSError("connection reset")
         await super().commit()
 
@@ -473,7 +490,8 @@ async def test_a_start_after_a_failed_creation_is_refused(
     session_factory = create_session_factory(engine)
     create = CreateServer(
         uow=(
-            _SecondCommitFails(session_factory)
+            # On every attempt.
+            _EndCommitFails(session_factory, times=3)
             if failure == "end"
             else ServersUnitOfWork(session_factory)
         ),
@@ -482,6 +500,7 @@ async def test_a_start_after_a_failed_creation_is_refused(
         file_store=file_store,
         port_range=PortRange(start=25565, end=25664),
         lifecycle_lock=lock,
+        sleep=RecordingSleep(returns=3),
     )
     creation = (
         ImportServer(create_server=create, file_store=file_store)(
@@ -513,3 +532,39 @@ async def test_a_start_after_a_failed_creation_is_refused(
         None,
         True,
     )
+
+
+async def test_a_creation_whose_end_met_an_outage_once_can_start(
+    engine: AsyncEngine, tmp_path: Path
+) -> None:
+    # Issue #4088: the commit that ends the creation is retried in a new unit
+    # of work after an outage, so the whole working set is startable.
+    storage = FsStorage(tmp_path)
+    lock = PgLifecycleLock(engine)
+    community_id = await _seed_community(engine)
+    uow = _EndCommitFails(create_session_factory(engine), times=1)
+    create = CreateServer(
+        uow=uow,
+        clock=_FixedClock(),
+        version_validator=FakeVersionValidator(),
+        file_store=StorageFileStoreAdapter(storage=storage),
+        port_range=PortRange(start=25565, end=25664),
+        lifecycle_lock=lock,
+        sleep=RecordingSleep(returns=3),
+    )
+    server = await create(
+        community_id=community_id,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+        accept_eula=True,
+    )
+    assert uow.commits == 3
+    assert (await _load(engine, server.id)).creation_incomplete is False
+    start, _ = _start_server(engine, storage, lock)
+
+    started = await start(community_id=community_id, server_id=server.id)
+
+    assert started.desired_state is DesiredState.RUNNING
