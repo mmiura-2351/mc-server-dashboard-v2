@@ -21,6 +21,7 @@ DB-gated (TESTING.md Section 5): run only when ``MCD_TEST_DATABASE_URL`` is set
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import os
 import uuid
@@ -50,6 +51,7 @@ from mc_server_dashboard_api.fleet.adapters.control_plane import ControlPlaneSta
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
+from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.clock import SystemClock
 from mc_server_dashboard_api.servers.adapters.file_store import (
@@ -71,6 +73,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.application.reconciler import RunReconcilerTick
+from mc_server_dashboard_api.servers.application.release_held_server import (
+    ReleaseHeldServer,
+)
 from mc_server_dashboard_api.servers.application.snapshot_scheduler import (
     RunSnapshotCadenceTick,
 )
@@ -105,6 +110,7 @@ from mc_server_dashboard_api.servers.domain.store_generation import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     WorkerId,
@@ -2527,3 +2533,103 @@ async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot(
     released = await _load(engine, server.id)
     assert released is not None
     assert released.assigned_worker_id is None
+
+
+# --- The release of a held server without its final snapshot (issue #4055) --
+
+
+class _FinalSnapshotCancelled(FakeControlPlane):
+    """The caller is cancelled at the final snapshot's await: the row stays held."""
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        await super().snapshot(
+            worker_id=worker_id,
+            community_id=community_id,
+            server_id=server_id,
+            final=final,
+        )
+        raise asyncio.CancelledError
+
+
+async def test_a_refused_final_snapshot_hold_is_released_without_it_then_starts(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop held at its final snapshot -> the Worker's refusal recorded
+    -> a forced stop still sends the final snapshot -> the release without it
+    frees the row and publishes the release -> a start places the server on
+    another Worker.
+
+    Until #4056 a refusal releases the row by itself, so the hold is the one a
+    cancelled snapshot leaves and the refusal is written as #4056 will write it.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id, community = server.id, server.community_id
+    worker = WorkerId(uuid.uuid4())
+    await _start_server_use_case(engine, FakeControlPlane(place_to=worker), clock)(
+        community_id=community, server_id=server_id
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await _stop_server_use_case(
+            engine, _FinalSnapshotCancelled(place_to=worker), clock
+        )(community_id=community, server_id=server_id)
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
+        assert await uow.servers.set_final_snapshot_refusal(
+            server_id, worker, FinalSnapshotRefusal.UNAVAILABLE
+        )
+        await uow.commit()
+
+    # Force means "kill now" only: on a held row it still sends the final
+    # snapshot, and does not release without it.
+    forced = _FinalSnapshotCancelled(place_to=worker)
+    with pytest.raises(asyncio.CancelledError):
+        await _stop_server_use_case(engine, forced, clock)(
+            community_id=community, server_id=server_id, force=True
+        )
+    assert [kind for kind, _, _ in forced.dispatched] == ["snapshot"]
+    held = await _load(engine, server_id)
+    assert held is not None
+    assert held.assigned_worker_id == worker
+    assert held.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+
+    bus = InProcessRealTimeEvents()
+    watching = bus.subscribe(
+        server_id=str(server_id.value), streams=frozenset({EventStream.STATUS})
+    )
+    released = await ReleaseHeldServer(
+        uow=ServersUnitOfWork(factory, bus), stop_convergence=StopConvergenceGuard()
+    )(community_id=community, server_id=server_id)
+
+    # The returned server is the row as the release wrote it (issue #4056).
+    for row in (released, await _load(engine, server_id)):
+        assert row is not None
+        assert row.assigned_worker_id is None
+        assert row.final_snapshot_refusal is None
+        assert row.awaiting_hydrate is False
+        assert row.desired_state is DesiredState.STOPPED
+        assert row.observed_state is ObservedState.STOPPED
+        assert row.observed_at == held.observed_at
+    frames = []
+    with contextlib.suppress(TimeoutError):
+        while True:
+            frames.append(await asyncio.wait_for(anext(watching), timeout=0.05))
+    await watching.aclose()
+    assert [frame.payload for frame in frames] == [
+        {"assigned_worker_id": None, "final_snapshot_refusal": None}
+    ]
+
+    next_worker = WorkerId(uuid.uuid4())
+    restarted = await _start_server_use_case(
+        engine, FakeControlPlane(place_to=next_worker), clock
+    )(community_id=community, server_id=server_id)
+    assert restarted.desired_state is DesiredState.RUNNING
+    assert restarted.assigned_worker_id == next_worker

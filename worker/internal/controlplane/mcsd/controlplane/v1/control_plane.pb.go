@@ -2630,8 +2630,18 @@ type CommandError struct {
 	// leaves it UNSPECIFIED, and a genuine traversal/path denial, both map back to
 	// the pre-existing invalid-path behaviour.
 	FileAccessReason FileAccessReason `protobuf:"varint,3,opt,name=file_access_reason,json=fileAccessReason,proto3,enum=mcsd.controlplane.v1.FileAccessReason" json:"file_access_reason,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// swap_began says whether a failed HydrateTrigger got as far as replacing the
+	// server's working dir (issue #4041). The Worker sets it on every
+	// TRANSFER_FAILED its hydrate handler answers, and on nothing else. It is true
+	// from the first rename that moves the working dir aside or the new tree in:
+	// a step that fails from there on can leave the working dir changed or absent.
+	// It is false when the hydrate failed before that rename, as a failed pull or
+	// unpack does, and the working dir is as it was. The field is OPTIONAL so that
+	// absent, which is what an older Worker sends, reads as "unknown", which the API
+	// treats as true.
+	SwapBegan     *bool `protobuf:"varint,4,opt,name=swap_began,json=swapBegan,proto3,oneof" json:"swap_began,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CommandError) Reset() {
@@ -2683,6 +2693,13 @@ func (x *CommandError) GetFileAccessReason() FileAccessReason {
 		return x.FileAccessReason
 	}
 	return FileAccessReason_FILE_ACCESS_REASON_UNSPECIFIED
+}
+
+func (x *CommandError) GetSwapBegan() bool {
+	if x != nil && x.SwapBegan != nil {
+		return *x.SwapBegan
+	}
+	return false
 }
 
 // Event is an asynchronous report from a Worker, not tied to a command.
@@ -3172,11 +3189,14 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\tFileEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x03 \x01(\x04R\x04size\x127\n" +
-	"\x04kind\x18\x04 \x01(\x0e2#.mcsd.controlplane.v1.FileEntryKindR\x04kindJ\x04\b\x02\x10\x03R\x06is_dir\"\xba\x01\n" +
+	"\x04kind\x18\x04 \x01(\x0e2#.mcsd.controlplane.v1.FileEntryKindR\x04kindJ\x04\b\x02\x10\x03R\x06is_dir\"\xed\x01\n" +
 	"\fCommandError\x12:\n" +
 	"\x04code\x18\x01 \x01(\x0e2&.mcsd.controlplane.v1.CommandErrorCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12T\n" +
-	"\x12file_access_reason\x18\x03 \x01(\x0e2&.mcsd.controlplane.v1.FileAccessReasonR\x10fileAccessReason\"\xb0\x02\n" +
+	"\x12file_access_reason\x18\x03 \x01(\x0e2&.mcsd.controlplane.v1.FileAccessReasonR\x10fileAccessReason\x12\"\n" +
+	"\n" +
+	"swap_began\x18\x04 \x01(\bH\x00R\tswapBegan\x88\x01\x01B\r\n" +
+	"\v_swap_began\"\xb0\x02\n" +
 	"\x05Event\x12\x1b\n" +
 	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12I\n" +
 	"\rstatus_change\x18\x02 \x01(\v2\".mcsd.controlplane.v1.StatusChangeH\x00R\fstatusChange\x12:\n" +
@@ -3397,6 +3417,7 @@ func file_mcsd_controlplane_v1_control_plane_proto_init() {
 		(*CommandResult_FileContent)(nil),
 		(*CommandResult_FileListing)(nil),
 	}
+	file_mcsd_controlplane_v1_control_plane_proto_msgTypes[24].OneofWrappers = []any{}
 	file_mcsd_controlplane_v1_control_plane_proto_msgTypes[25].OneofWrappers = []any{
 		(*Event_StatusChange)(nil),
 		(*Event_LogLine)(nil),

@@ -799,6 +799,31 @@ Notes:
   the stop finds no intent to place. The reconciler counts neither toward its
   backoff (CONFIGURATION.md Section 5.6). A user start needs the server
   `desired=stopped`, so it can place the server only once the stop has landed.
+- **Releasing a held server without its final snapshot sends no command.** A
+  stop holds its Worker until the final snapshot settles. When the Worker
+  refuses that snapshot `BUSY` or `UNAVAILABLE`, the server records the refusal
+  (`final_snapshot_refusal`, DATABASE.md Section 7) and stays held. A holder of
+  `server:stop` can release it without the snapshot
+  (`POST …/release-without-snapshot`, WEBUI_SPEC.md Section 2.3; issue #4055).
+  The release runs under the per-server exclusion every stop convergence holds.
+  While a stop of the server, the reconciler's convergence of it, a late
+  result's release, or a final snapshot whose result has not arrived is in
+  flight, it answers `409 transition_conflict` and writes nothing: an upload
+  that may still publish is never released under (issue #847). It releases
+  only a server still `desired=stopped`, at rest, assigned and holding a
+  refusal, and answers any other `409 invalid_transition`. A server held for
+  another reason (a snapshot not answered yet, a session that ended, a
+  disconnected Worker's grace) may still get its snapshot. A refusal held
+  through its Worker's disconnect reads `unknown` and stays releasable. The
+  write is the stale-assignment release, guarded on the Worker and on the
+  `observed_at` it read, so a report that lands meanwhile keeps the server
+  held (`409 transition_conflict`). It clears the assignment, the refusal and
+  `awaiting_hydrate`, publishes the release frame, and leaves `observed` as it
+  was. The Worker is sent nothing: it keeps the scratch, and a container a
+  failed start left running may run there until the Worker next starts the
+  server, reclaims it or boots. Nothing records a refusal until issue #4056
+  holds the Worker on one, so until then every release answers
+  `409 invalid_transition`.
 - **A hydrate refused `INVALID_STATE` keeps the server on that Worker.** A
   Worker answers a `HydrateTrigger` `INVALID_STATE` only when it already runs an
   instance of the server (Section 7). Placement cannot know that: it ranks
@@ -890,14 +915,20 @@ Notes:
   cannot have replaced the Worker's working set, the re-sent start puts the mark
   back as it found it: the Worker refused the hydrate before the pull (`BUSY`,
   `UNAVAILABLE` or `EXPIRED`, or `INVALID_STATE`, which clears the mark anyway,
-  below), or the hydrate was never sent: the wait ran out, the start's intent
-  was withdrawn, the Worker had no session to send it on, or the API has no
-  data-plane URL or Worker credential to send it with. A hydrate that failed,
-  timed out, or lost its session while it awaited its answer may have swapped
-  the new tree in, as the Worker can report a failed transfer after its swap, so
-  the mark stays until a hydrate lands. The start puts the mark back only while
-  it is still its own: while the row is as the start marked it, or while the one
-  stop or drain that withdrew the start holds it, as its flip left it. For that
+  below), its transfer failed before the swap, as the Worker says in
+  `swap_began` (Section 7), or the hydrate was never sent: the wait ran out, the
+  start's intent was withdrawn, the Worker had no session to send it on, or the
+  API has no data-plane URL or Worker credential to send it with. A transfer
+  that failed after its swap began may have left the Worker's working dir
+  changed or absent. So the mark stays until a hydrate lands after such a
+  failure, after one whose answer does not say (Section 7), and after a
+  hydrate that timed out or lost its session while it awaited its answer. A
+  user start does not read `swap_began`: its mark is always its own
+  placement's, on a Worker that has not hydrated the server under it, so
+  clearing it would let a final snapshot publish a stale or absent scratch.
+  The re-sent start puts the mark back only while it is still its own: while
+  the row is as the start marked it, or while the one stop or drain that
+  withdrew the start holds it, as its flip left it. For that
   stop the put-back is best effort: the stop reads the mark for its final
   snapshot as soon as the Worker answers it, and if that comes before the
   start's wait ends, the stop takes no final snapshot. Any other write to the
@@ -1398,7 +1429,7 @@ classes a Worker can hit:
 | `BUSY` | The command was refused without being applied because the server's id is not free yet, and the refusal is **not** a statement about a settled state: either another mutating lifecycle command is already in flight (the reservation race) or the Worker holds a failed-stop orphan it is still converging. In both cases the outcome is not yet known and **this same command will be accepted once the Worker settles**, so the API keeps the assignment/intent and retries on a later tick rather than converging an observed state. For the same reason the reconciler does not count a `BUSY`-refused start toward that server's backoff, and it does not re-dispatch a start at all while the row still reports a restart's stop leg (`desired=running`, `observed=stopping`) inside the restart budget (CONFIGURATION.md Section 5.6). Note where `BUSY` is actually met: a command arriving on the **same session** as an in-flight command for that server is not refused but queued behind it (the Worker runs one server's commands serially per session), so the reservation refusal is seen on a new session after a reconnect, and the orphan refusal on any session. The exception is a snapshot abandoned at its deadline (Section 5.2): it answers but keeps its claim until its blocked work exits, so that claim's refusal is met on the same session too. For a stopped id the claim is the reservation; for a running id it is the running-snapshot mark, which only a second `SnapshotTrigger` consults. Answering `INVALID_STATE` for the orphan would wedge the reconciler: the API reads `INVALID_STATE` on a start as "already running", so a refusal over an orphan whose process is already **dead** would manufacture a permanent false `observed=running` — a converged row is settled, so the reconciler would never re-select it and no `StatusChange` would ever come. The Worker converges the orphan itself — it probes the instance's real liveness on a backoff, retries the stop while it is alive, retires the record and reports the instance's terminal state (`stopped` when it has none) once it is confirmed gone, and reports `SERVER_STATE_UNKNOWN` while the backend cannot answer — which is what makes the `BUSY` promise true. The record also clears on its own if the process exits, via the instance's status pump. |
 | `DRIVER_UNAVAILABLE` | The requested execution driver is not offered by this Worker. |
 | `FILE_ACCESS_DENIED` | A file path was rejected. A refining `file_access_reason` (Section 7.2) splits the distinct conditions so the API maps each to an honest HTTP reason instead of one blanket `invalid_path`. |
-| `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. |
+| `TRANSFER_FAILED` | A hydrate/snapshot data-plane transfer failed. On a `HydrateTrigger` the Worker sets `CommandError.swap_began` (issue #4041): `true` once the Worker's swap began, with the first rename that moves the working dir aside or the new tree in, after which the working dir may be changed or absent; `false` when the pull or the unpack failed before that rename, and the working dir is as it was. The field is optional and can arrive absent: an older Worker never sets it, and a failure too large for the message size limit (Section 3.1) is replaced by a stand-in that carries neither its payload nor this field. The API reads an absent field as `true`. No other code or kind carries it. |
 | `PORT_CONFLICT` | A `StartServer` could not publish a host port already in use (the container driver classifies it from the Docker daemon's error message). |
 | `IMAGE_MISSING` | A `StartServer` could not find or pull the server's container image (the container driver classifies it from the Docker daemon's error message). |
 | `COMMAND_DROPPED` | A `ServerCommand` was written to RCON and the game server closed the connection (EOF or reset) before a single response byte arrived. Vanilla does that, without running the command, to a packet that did not arrive in one read, which is what a command near the length limit meets on a path that splits it (Section 3.1). A server that ran the command and then crashed before answering looks the same on the wire, so **whether the command ran is uncertain**: the user checks the console output and the server's state before retrying. A reply cut short — some response bytes arrived, then the connection ended — is not this code but `INTERNAL`, since the server was answering. It is kept apart from `INTERNAL` — RCON could not be opened or authenticated, the round trip timed out, or the reply was cut short — so the user can tell a dropped command from a server that cannot be reached. The API answers it `409 command_dropped`. |

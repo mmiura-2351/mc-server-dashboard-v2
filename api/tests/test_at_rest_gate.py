@@ -54,6 +54,11 @@ _ALLOWED: dict[tuple[str, str], tuple[int, str]] = {
         2,
         "refuses an assigned row right after, with its own ServerAssignedError",
     ),
+    ("servers/application/release_held_server.py", "ReleaseHeldServer.__call__"): (
+        1,
+        "a release, not a write to the working set: it requires the Worker "
+        "still assigned, and drops only the assignment",
+    ),
     ("servers/application/schedule_runner.py", "_precondition_skip"): (
         2,
         "a pre-check only: StartServer and CreateBackup refuse an assigned row "

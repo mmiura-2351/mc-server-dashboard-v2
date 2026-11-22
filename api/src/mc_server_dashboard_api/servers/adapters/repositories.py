@@ -85,6 +85,7 @@ def _to_server(row: ServerModel) -> Server:
             if row.final_snapshot_refusal is None
             else FinalSnapshotRefusal(row.final_snapshot_refusal)
         ),
+        creation_incomplete=row.creation_incomplete,
     )
 
 
@@ -186,6 +187,7 @@ class SqlAlchemyServerRepository(ServerRepository):
                     if server.final_snapshot_refusal is None
                     else server.final_snapshot_refusal.value
                 ),
+                creation_incomplete=server.creation_incomplete,
             )
         )
 
@@ -268,6 +270,20 @@ class SqlAlchemyServerRepository(ServerRepository):
             update(ServerModel)
             .where(ServerModel.id == server_id.value)
             .values(backup_retention=retention)
+        )
+        await self._session.execute(stmt)
+
+    async def clear_creation_incomplete(self, server_id: ServerId) -> None:
+        # A narrow single-column write, as update_backup_retention is, so no
+        # entity's other fields ride on it. Guarded on the flag, so a row whose
+        # creation already ended is not written again.
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.id == server_id.value,
+                ServerModel.creation_incomplete.is_(True),
+            )
+            .values(creation_incomplete=False)
         )
         await self._session.execute(stmt)
 

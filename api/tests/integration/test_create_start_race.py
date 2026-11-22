@@ -13,6 +13,10 @@ storage adapter. The creator's file store parks before one write, and the
 control plane records what the store serves when the start hydrates: what a
 Worker would unpack.
 
+A creation that fails after its row commits leaves the row and what was
+written. The row says its creation did not finish until the creation ends it,
+so a start after the failure is refused and hydrates nothing (issue #4065).
+
 DB-gated (TESTING.md Section 5): runs only when ``MCD_TEST_DATABASE_URL`` is set.
 """
 
@@ -63,7 +67,11 @@ from mc_server_dashboard_api.servers.application.manage_server import CreateServ
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import CommandOutcome
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
+from mc_server_dashboard_api.servers.domain.errors import (
+    ServerBusyError,
+    ServerCreationIncompleteError,
+    WorkingSetSeedFailedError,
+)
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -145,6 +153,43 @@ class _ParkingFileStore(StorageFileStoreAdapter):
             rel_path=rel_path,
             content=content,
         )
+
+
+class _FailingFileStore(StorageFileStoreAdapter):
+    """Fails the creator's write of ``fail_at``, as a storage outage would."""
+
+    def __init__(self, *, storage: Storage, fail_at: str) -> None:
+        super().__init__(storage=storage)
+        self._fail_at = fail_at
+
+    async def write_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        if rel_path == self._fail_at:
+            raise OSError("forced storage write failure")
+        await super().write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            content=content,
+        )
+
+
+class _SecondCommitFails(ServersUnitOfWork):
+    """Fails the creation's second commit, the one that ends it."""
+
+    commits = 0
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if self.commits == 2:
+            raise OSError("connection reset")
+        await super().commit()
 
 
 class _HydrateRecorder(FakeControlPlane):
@@ -398,3 +443,73 @@ async def test_a_start_racing_a_creation_past_its_budget_is_refused(
     row = await _load(engine, server_id)
     assert row.desired_state is DesiredState.STOPPED
     assert row.assigned_worker_id is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param("seed", id="a-seed-write"),
+        pytest.param("import", id="an-import-member-write"),
+        pytest.param("end", id="the-commit-that-ends-it"),
+    ],
+)
+async def test_a_start_after_a_failed_creation_is_refused(
+    engine: AsyncEngine, tmp_path: Path, failure: str
+) -> None:
+    # Issue #4065: the creation answers seed_failed and leaves the row, with
+    # the working set as far as it got. The start that follows, accepting the
+    # EULA as the Web UI's retry does, is refused and hydrates nothing.
+    storage = FsStorage(tmp_path)
+    lock = PgLifecycleLock(engine)
+    community_id = await _seed_community(engine)
+    file_store = _FailingFileStore(
+        storage=storage,
+        fail_at={
+            "seed": "server.properties",
+            "import": "world/region/r.0.0.mca",
+            "end": "",
+        }[failure],
+    )
+    session_factory = create_session_factory(engine)
+    create = CreateServer(
+        uow=(
+            _SecondCommitFails(session_factory)
+            if failure == "end"
+            else ServersUnitOfWork(session_factory)
+        ),
+        clock=_FixedClock(),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=PortRange(start=25565, end=25664),
+        lifecycle_lock=lock,
+    )
+    creation = (
+        ImportServer(create_server=create, file_store=file_store)(
+            community_id=community_id, name="survival", content=_archive()
+        )
+        if failure == "import"
+        else create(
+            community_id=community_id,
+            name="survival",
+            mc_edition="java",
+            mc_version="1.21.1",
+            server_type="vanilla",
+            config={},
+            accept_eula=True,
+        )
+    )
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await creation
+    server_id = ServerId(uuid.UUID(exc_info.value.server_id))
+    start, plane = _start_server(engine, storage, lock)
+
+    with pytest.raises(ServerCreationIncompleteError):
+        await start(community_id=community_id, server_id=server_id, accept_eula=True)
+
+    assert plane.hydrated == []
+    row = await _load(engine, server_id)
+    assert (row.desired_state, row.assigned_worker_id, row.creation_incomplete) == (
+        DesiredState.STOPPED,
+        None,
+        True,
+    )

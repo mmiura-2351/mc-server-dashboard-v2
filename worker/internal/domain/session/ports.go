@@ -188,6 +188,13 @@ type CommandResult struct {
 	// Register.held_servers, so "held at 0" and "nothing declared" must stay
 	// distinguishable.
 	HeldGeneration *uint64
+	// SwapBegan says whether a failed HydrateTrigger got as far as replacing the
+	// working dir (issue #4041): set on every CommandErrorTransferFailed the
+	// hydrate handler answers, and on nothing else. True from the first rename
+	// that moves the working dir aside or the new tree in; false when the
+	// hydrate failed before it, and the working dir is as it was. nil means
+	// "not said", which the API reads as true.
+	SwapBegan *bool
 }
 
 // FileListing is a directory listing returned by a ListFiles command. Truncated

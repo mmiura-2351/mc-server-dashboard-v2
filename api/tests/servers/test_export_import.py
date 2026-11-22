@@ -43,6 +43,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
     ResolveServerExport,
 )
 from mc_server_dashboard_api.servers.application.files import _archive_entries
+from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -54,6 +55,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     LifecycleLockLostError,
     PortAlreadyTakenError,
     ServerAssignedError,
+    ServerCreationIncompleteError,
     ServerFilesUnsettledError,
     UnreadableArchiveError,
     WorkingSetSeedFailedError,
@@ -81,9 +83,12 @@ from tests.servers.executor_starvation import (
 )
 from tests.servers.fakes import (
     FakeClock,
+    FakeControlPlane,
     FakeFileStore,
+    FakeJarProvisioner,
     FakeLifecycleLock,
     FakeServerRepository,
+    FakeStoreGenerationReader,
     FakeUnitOfWork,
     FakeVersionValidator,
 )
@@ -676,8 +681,163 @@ async def test_import_publish_failure_is_seed_failed() -> None:
             name="fresh",
             content=archive,
         )
-    # The row was created before the publish failed (degraded but repairable).
+    # The row was created before the publish failed, and it stays.
     assert len(dst_uow.servers.by_id) == 1
+
+
+class _FailingWriteStore(FakeFileStore):
+    """Fails the write of ``fail_at``, as a storage outage mid-creation would."""
+
+    def __init__(self, fail_at: str) -> None:
+        super().__init__()
+        self._fail_at = fail_at
+
+    async def write_file(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        content: bytes,
+    ) -> None:
+        if rel_path == self._fail_at:
+            raise OSError("forced storage write failure")
+        await super().write_file(
+            community_id=community_id,
+            server_id=server_id,
+            rel_path=rel_path,
+            content=content,
+        )
+
+
+def _start_server(
+    uow: FakeUnitOfWork, store: FakeFileStore
+) -> tuple[StartServer, FakeControlPlane]:
+    control_plane = FakeControlPlane(place_to=WorkerId(uuid.uuid4()))
+    start = StartServer(
+        uow=uow,
+        control_plane=control_plane,
+        clock=FakeClock(_NOW),
+        jar_provisioner=FakeJarProvisioner(),
+        store_generation=FakeStoreGenerationReader(),
+        file_store=store,
+    )
+    return start, control_plane
+
+
+# The archive of an import a start would launch as soon as it read it: it
+# carries an accepted EULA, written first.
+_STARTABLE_ARCHIVE = {
+    EXPORT_METADATA_FILENAME: _metadata(),
+    "eula.txt": b"eula=true\n",
+    "server.properties": b"motd=imported\n",
+    "world/level.dat": b"level",
+    "world/region/r.0.0.mca": b"region",
+}
+
+
+@pytest.mark.parametrize(
+    "fail_at",
+    [
+        pytest.param("world/level.dat", id="a-member"),
+        pytest.param("world/region/r.0.0.mca", id="the-last-member"),
+    ],
+)
+async def test_an_import_whose_publish_failed_cannot_start(fail_at: str) -> None:
+    # Issue #4065: the row stands after a failed publish, but its working set
+    # is the archive as far as the publish got. A start would hydrate that, and
+    # Minecraft would generate the chunks the missing region files held. The
+    # row says its creation did not finish, so the start is refused with
+    # nothing dispatched and nothing written.
+    community = CommunityId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    store = _FailingWriteStore(fail_at)
+    imp = ImportServer(create_server=_create_server(uow, store), file_store=store)
+
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await imp(
+            community_id=community, name="fresh", content=_zip(_STARTABLE_ARCHIVE)
+        )
+
+    server_id = ServerId(uuid.UUID(exc_info.value.server_id))
+    tree = dict(store.files)
+    start, control_plane = _start_server(uow, store)
+    with pytest.raises(ServerCreationIncompleteError):
+        await start(community_id=community, server_id=server_id)
+    assert control_plane.dispatched == []
+    assert store.files == tree
+    row = uow.servers.by_id[server_id]
+    assert (row.desired_state, row.assigned_worker_id) == (DesiredState.STOPPED, None)
+    assert row.creation_incomplete is True
+
+
+async def test_a_cancelled_import_cannot_start() -> None:
+    # Issue #4065: a request cancelled mid-publish raises no seed failure and
+    # answers nothing, and the process can as well die there. The row was
+    # created saying its creation had not finished, so it still says so.
+    community = CommunityId(uuid.uuid4())
+    uow = FakeUnitOfWork()
+    parked = asyncio.Event()
+
+    class _ParkingStore(FakeFileStore):
+        async def write_file(
+            self,
+            *,
+            community_id: CommunityId,
+            server_id: ServerId,
+            rel_path: str,
+            content: bytes,
+        ) -> None:
+            if rel_path == "world/region/r.0.0.mca":
+                parked.set()
+                await asyncio.Event().wait()
+            await super().write_file(
+                community_id=community_id,
+                server_id=server_id,
+                rel_path=rel_path,
+                content=content,
+            )
+
+    store = _ParkingStore()
+    imp = ImportServer(create_server=_create_server(uow, store), file_store=store)
+    importing = asyncio.create_task(
+        imp(community_id=community, name="fresh", content=_zip(_STARTABLE_ARCHIVE))
+    )
+    await parked.wait()
+    importing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await importing
+
+    [server] = uow.servers.by_id.values()
+    start, control_plane = _start_server(uow, store)
+    with pytest.raises(ServerCreationIncompleteError):
+        await start(community_id=community, server_id=server.id)
+    assert control_plane.dispatched == []
+    assert uow.servers.by_id[server.id].creation_incomplete is True
+
+
+@pytest.mark.parametrize("plugins", [None, "Geyser-Spigot"], ids=["bare", "plugins"])
+async def test_a_finished_import_can_start(plugins: str | None) -> None:
+    # The creation ends once the last member is written: the row and the
+    # entity the import answers with both say so, with plugin rows or without.
+    community = uuid.uuid4()
+    archive = await _export_archive(community=community, mod_identifier=plugins)
+    uow, store = FakeUnitOfWork(), FakeFileStore(seed_eula=True)
+    imp = ImportServer(
+        create_server=_create_server(uow, store),
+        file_store=store,
+        bedrock_port_range=_BEDROCK_RANGE,
+    )
+
+    server = await imp(
+        community_id=CommunityId(community), name="imported", content=archive
+    )
+
+    assert server.creation_incomplete is False
+    assert uow.servers.by_id[server.id].creation_incomplete is False
+    start, _ = _start_server(uow, store)
+    started = await start(community_id=CommunityId(community), server_id=server.id)
+    assert started.desired_state is DesiredState.RUNNING
 
 
 @pytest.mark.parametrize(
@@ -1174,14 +1334,18 @@ async def test_import_geyser_exhausted_bedrock_window_is_seed_failed() -> None:
             content=archive,
         )
     # The row and its working set are already committed by the time the plugin
-    # import runs (one commit, from create_server); the plugin-import transaction
+    # import runs (two commits, from create_server: the row, and the end of its
+    # creation once the working set is whole); the plugin-import transaction
     # itself never reaches its own commit -- the abort signal is that the commit
-    # count stops at 1 (the real UoW rolls the failed transaction back; the fake's
+    # count stops at 2 (the real UoW rolls the failed transaction back; the fake's
     # staged plugin add is not transactional, mirroring the install-path
     # exhaustion test's same caveat).
     [server] = [s for s in dst_uow.servers.by_id.values() if s.name.value == "imported"]
     assert server.bedrock_port is None
-    assert dst_uow.commits == 1
+    assert dst_uow.commits == 2
+    # The working set is whole, so the server can start (issue #4065); only its
+    # plugin rows are missing.
+    assert server.creation_incomplete is False
 
 
 async def test_import_geyser_port_racer_is_seed_failed() -> None:
@@ -1214,10 +1378,12 @@ async def test_import_geyser_port_racer_is_seed_failed() -> None:
             content=archive,
         )
     # Same abort signal as the exhaustion test: the plugin-import transaction
-    # never reaches its own commit (count stays at 1, from create_server); the
+    # never reaches its own commit (count stays at 2, from create_server); the
     # real UoW rolls back the staged plugin rows and the failed port UPDATE
     # together (the fake's staged in-memory state is not transactional).
-    assert dst_uow.commits == 1
+    assert dst_uow.commits == 2
+    [server] = dst_uow.servers.by_id.values()
+    assert server.creation_incomplete is False
 
 
 # --- import: lost-update protection (issue #1587) ----------------------------

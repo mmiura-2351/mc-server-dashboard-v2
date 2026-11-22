@@ -10,6 +10,7 @@ import datetime as dt
 import inspect
 import uuid
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -319,6 +320,7 @@ class ServerRepositoryContract:
         contract_community_id: CommunityId,
     ) -> None:
         item = server(contract_community_id)
+        item.creation_incomplete = True
         async with server_repository_harness.open() as tx:
             await tx.repository.add(item)
             await tx.commit()
@@ -336,6 +338,7 @@ class ServerRepositoryContract:
         changed.backup_retention = {"nested": {"keep": 7}}
         changed.awaiting_hydrate = True
         changed.final_snapshot_refusal = FinalSnapshotRefusal.BUSY
+        changed.creation_incomplete = False
         async with server_repository_harness.open() as tx:
             await tx.repository.update(changed)
             await tx.commit()
@@ -360,6 +363,61 @@ class ServerRepositoryContract:
         assert stored.backup_retention == {"nested": {"keep": 2}}
         assert stored.awaiting_hydrate is False
         assert stored.final_snapshot_refusal is None
+        # Only the end of the creation clears it (issue #4065): an edit keeps
+        # what the row holds, whatever the entity it was built from says.
+        assert stored.creation_incomplete is True
+
+    async def test_a_creation_reads_unfinished_until_its_end_is_written(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #4065: a server is added saying its creation has not finished,
+        # and the write that ends the creation changes that and nothing else.
+        item = server(contract_community_id)
+        item.creation_incomplete = True
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            stored = await tx.repository.get_by_id(item.id)
+        assert stored is not None
+        assert stored.creation_incomplete is True
+
+        async with server_repository_harness.open() as tx:
+            await tx.repository.clear_creation_incomplete(item.id)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            ended = await tx.repository.get_by_id(item.id)
+        assert ended is not None
+        assert ended.creation_incomplete is False
+        assert replace(ended, creation_incomplete=True) == stored
+
+    async def test_ending_one_creation_leaves_another_unfinished(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #4065: a creation that finishes ends its own row's creation
+        # only. Another server whose import failed stays unstartable.
+        ended = server(contract_community_id)
+        ended.creation_incomplete = True
+        unfinished = server(contract_community_id, name="other")
+        unfinished.game_port = 25566
+        unfinished.bedrock_port = 19133
+        unfinished.creation_incomplete = True
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(ended)
+            await tx.repository.add(unfinished)
+            await tx.commit()
+
+        async with server_repository_harness.open() as tx:
+            await tx.repository.clear_creation_incomplete(ended.id)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            other = await tx.repository.get_by_id(unfinished.id)
+        assert other is not None
+        assert other.creation_incomplete is True
 
     async def test_lifecycle_update_is_guarded_and_writes_only_lifecycle_fields(
         self,

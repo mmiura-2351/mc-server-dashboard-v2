@@ -261,8 +261,16 @@ class CreateServer:
     files compose when both apply (sequential write_file calls on a fresh server
     publish correctly). A storage failure during seeding is caught, WARN-logged, and
     surfaced as a typed :class:`WorkingSetSeedFailedError` (mapped to 503 at the
-    edge): the committed row stays in a degraded-but-repairable state (the missing
-    files can be written via the files API), rather than leaking an unmapped 500.
+    edge) rather than an unmapped 500. The committed row stays, and cannot start
+    (below): the remedy is to delete it and create or import it again.
+
+    The row is added with ``creation_incomplete`` set (issue #4065), and the
+    creation ends, clearing it, once the last write of the working set has
+    returned: the seed's, or ``populate``'s when one is given. A creation that
+    fails, is cancelled or dies before then leaves it set, and
+    :class:`StartServer` refuses the row, since its working set is only what was
+    written. The clear is a single-column write of its own; a failure of it is
+    the seed failure too, with the flag left set.
 
     The server's **lifecycle lock** is held from before the row commits until the
     last create-time write (issue #4045). Each seed write publishes on its own, so
@@ -271,12 +279,14 @@ class CreateServer:
     lock taken on it before the row is visible to anyone, so nothing else can hold
     it; a start racing the creation waits for it and then hydrates the whole seed,
     or is refused ``server_busy`` once its acquire budget runs out. ``populate`` is
-    more create-time work run inside the same hold, after the seed: import passes
-    the publish of its archive and the re-creation of its plugin rows. The held
-    lock is confirmed before the row's commit and before each seed write (issue
-    #3927). A loss before the commit raises :class:`LifecycleLockLostError` with
-    no row created; a loss before a seed write is the seed failure above, as the
-    row already stands.
+    more of the working set, written inside the same hold after the seed: import
+    passes the publish of its archive. ``after_creation`` is create-time work that
+    is not the working set, run inside the same hold once the creation has ended:
+    import passes the re-creation of its plugin rows, whose failure leaves the
+    server startable. The held lock is confirmed before the row's commit and
+    before each seed write (issue #3927). A loss before the commit raises
+    :class:`LifecycleLockLostError` with no row created; a loss before a seed
+    write is the seed failure above, as the row already stands.
 
     A new server's ``server.properties`` also gets ``sync-chunk-writes=false``
     (issue #3443), a default that the user's own value replaces. With
@@ -314,7 +324,8 @@ class CreateServer:
         game_port: int | None = None,
         slug: str | None = None,
         new_server_defaults: bool = True,
-        populate: Callable[[Server, HeldLifecycleLock], Awaitable[Server]]
+        populate: Callable[[Server, HeldLifecycleLock], Awaitable[None]] | None = None,
+        after_creation: Callable[[Server, HeldLifecycleLock], Awaitable[Server]]
         | None = None,
     ) -> Server:
         # The name is refused before any other check, as an update refuses it
@@ -407,6 +418,8 @@ class CreateServer:
                     assigned_worker_id=None,
                     created_at=now,
                     updated_at=now,
+                    # Unstartable until its working set is whole (issue #4065).
+                    creation_incomplete=True,
                 )
                 await self.uow.servers.add(server)
                 # A start may take the lock once it is lost, so the row is not
@@ -424,8 +437,43 @@ class CreateServer:
                 lock=lock,
             )
             if populate is not None:
-                server = await populate(server, lock)
+                await populate(server, lock)
+            await self._end_creation(server)
+            if after_creation is not None:
+                server = await after_creation(server, lock)
         return server
+
+    async def _end_creation(self, server: Server) -> None:
+        """Clear the row's ``creation_incomplete``: its working set is whole (#4065).
+
+        Runs once the last write of the working set has returned. There is no
+        ``ensure_held()`` before it, as there is before each of those writes: it
+        writes nothing a start hydrates, and every write it vouches for is done.
+        Were the lock lost by now, a start taking it would read the flag still
+        set and be refused, which loses nothing, while refusing the clear would
+        leave a whole working set unstartable. Any other operation taking a lost
+        lock, such as a files write, could land during the last write, the one
+        no check follows. Both stores take their per-server lock in
+        ``write_file``, so within one process such a write composes with the
+        last write instead of replacing it. That lock is in-process only, and
+        across processes this is the window between a check and the writes it
+        guards that issue #3927 leaves open (``adapters/lifecycle_lock.py``).
+        A failure of the write or its commit is
+        :class:`WorkingSetSeedFailedError`, the row still unstartable.
+        """
+
+        try:
+            async with self.uow:
+                await self.uow.servers.clear_creation_incomplete(server.id)
+                await self.uow.commit()
+        except Exception as exc:
+            _logger.warning(
+                "ending the server's creation failed; its working set is whole "
+                "but it cannot start (delete it and create or import it again)",
+                extra={"server_id": str(server.id.value)},
+            )
+            raise WorkingSetSeedFailedError(str(server.id.value)) from exc
+        server.creation_incomplete = False
 
     async def _seed_initial_working_set(
         self,
@@ -454,8 +502,10 @@ class CreateServer:
 
         A storage failure, or a lifecycle lock ``lock`` lost before the writes, is
         caught and re-raised as :class:`WorkingSetSeedFailedError` (mapped to
-        503): the row is already committed and is repairable via the files API, so
-        this never rolls back the server — it only signals the degraded state.
+        503): the row is already committed, so this never rolls back the server —
+        it only signals that the creation did not finish. The row keeps
+        ``creation_incomplete`` set, so it cannot start: delete it and create or
+        import it again (issue #4065).
         """
 
         password = self.token_generator()
@@ -486,11 +536,12 @@ class CreateServer:
                     content=content,
                 )
         except Exception as exc:
-            # The committed row stays (degraded but repairable via the files API);
-            # surface a mapped 503 instead of an unmapped 500.
+            # The committed row stays, unstartable (issue #4065); surface a
+            # mapped 503 instead of an unmapped 500.
             _logger.warning(
                 "initial working-set seeding failed; server row committed but "
-                "working set is unseeded (repairable via files API)",
+                "working set is unseeded (delete it and create or import it "
+                "again)",
                 extra={"server_id": str(server_id.value)},
             )
             raise WorkingSetSeedFailedError(str(server_id.value)) from exc

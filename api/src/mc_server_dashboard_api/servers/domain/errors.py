@@ -97,10 +97,11 @@ class WorkingSetSeedFailedError(ServerError):
     """The create-time working-set seeding step hit a storage failure (issue #243).
 
     The server row has already committed; only the seed write (eula.txt /
-    server.properties) failed. The row is left in place -- a degraded but
-    repairable state, since the operator can write the missing files via the files
-    API -- and the failure is surfaced as a mapped 503 ``seed_failed`` rather than
-    an unmapped 500. The edge logs a WARN at the create route.
+    server.properties) failed. The row is left in place, and the failure is
+    surfaced as a mapped 503 ``seed_failed`` rather than an unmapped 500. The edge
+    logs a WARN at the create route. The row's creation did not finish, so it
+    cannot start (:class:`ServerCreationIncompleteError`, issue #4065): delete it
+    and create or import it again.
 
     A start raises it too, when it cannot regenerate a player file a group change
     left stale (issue #3223). Nothing has committed there: the start is refused
@@ -270,6 +271,18 @@ class ServerPropertiesMissingError(ServerError):
     def __init__(self, server_id: str, *, committed: bool) -> None:
         super().__init__(server_id)
         self.committed = committed
+
+
+class ServerCreationIncompleteError(ServerError):
+    """The server's create seed or import did not finish (issue #4065).
+
+    Its working set is only what was written before the creation failed or was
+    interrupted, so a start would hydrate that: an import missing its region
+    files would run, and Minecraft would generate the chunks they held.
+    :class:`StartServer` refuses the row before it writes or places anything.
+    The remedy is to delete the server and create or import it again. The edge
+    maps it to 409 ``creation_incomplete``.
+    """
 
 
 class EulaNotAcceptedError(ServerError):

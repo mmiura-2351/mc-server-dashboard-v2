@@ -176,6 +176,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerCreationIncompleteError,
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotRunningError,
@@ -266,7 +267,9 @@ _HYDRATE_REFUSALS_KEEPING_THE_WORKER = frozenset(
 
 # The hydrate answers that leave the Worker's working set as it was (issue #4024):
 # the Worker refused the hydrate before the pull, or never ran it. A failed transfer
-# is not one of them: the Worker can report it after its swap renamed the new tree in.
+# is not one of them by its code: the Worker can report it after its swap renamed the
+# new tree in. It says which in the outcome's ``swap_began`` (issue #4041), and only a
+# ``False`` there says the swap never began.
 _HYDRATE_REFUSALS_BEFORE_THE_SWAP = _HYDRATE_REFUSALS_KEEPING_THE_WORKER | {
     CommandStatus.INVALID_STATE
 }
@@ -456,6 +459,13 @@ class StartServer:
         # desired=running and 409, so the slow network launch needs no lock.
         async with self.lifecycle_lock.hold(server_id) as lock, self.uow:
             server = await _load(self.uow, community_id, server_id)
+            if server.creation_incomplete:
+                # A create seed or import that failed or was interrupted (issue
+                # #4065): the working set is only what it wrote, so a hydrate
+                # would launch that. Refused before the EULA write below. Every
+                # other start path needs desired=running, which only this flip
+                # sets, so this is the one check.
+                raise ServerCreationIncompleteError(str(server_id.value))
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             if server.assigned_worker_id is not None:
@@ -755,6 +765,12 @@ class StartServer:
             # redispatch_start to this Worker, and record what is known.
             await self._record_unknown(server, worker_id, owe_again=owed_group_files)
             raise failure
+        # A failed transfer's ``swap_began`` is not read here, unlike in
+        # ``redispatch_start`` (issue #4041). The row's mark is this placement's
+        # own, and the release below clears it. A row the release skips, because a
+        # stop or drain withdrew the intent, keeps that mark: this Worker never
+        # hydrated under the placement, and clearing it would let the final
+        # snapshot publish a stale or absent scratch over the store (#3890).
         await self._compensate(
             community_id,
             server_id,
@@ -958,6 +974,9 @@ class StartServer:
             # HYDRATE outcome (not dispatched) never reached the start, so unassign,
             # unless its answer leaves an instance of this server on the Worker
             # possible (issue #3890): then keep the Worker, as ``__call__`` does.
+            # As there, a failed transfer's ``swap_began`` is not read (issue
+            # #4041): the mark is this placement's own, and clearing it would let
+            # a final snapshot publish a stale or absent scratch (#3890).
             if not dispatch.attempted:
                 if outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER:
                     await self._record_unknown(
@@ -996,9 +1015,10 @@ class StartServer:
         and assignment stand; only the dispatch is replayed, so this changes no DB
         row but the ``awaiting_hydrate`` mark — set before a hydrate, as a
         placement sets it, and put back as it was when that hydrate cannot have
-        replaced the Worker's working set (issue #4024), or cleared by ``_launch``
-        once it lands (issue #3890) — and on failure it reverts nothing else (a
-        later reconcile tick retries under backoff). The placement load was
+        replaced the Worker's working set (issue #4024; a failed transfer only
+        when the Worker said its swap did not begin, issue #4041), or cleared by
+        ``_launch`` once it lands (issue #3890) — and on failure it reverts nothing
+        else (a later reconcile tick retries under backoff). The placement load was
         already counted on the original assignment, so it is not incremented
         again.
 
@@ -1130,9 +1150,14 @@ class StartServer:
         if (
             marked is not None
             and not dispatch.attempted
-            and outcome.status in _HYDRATE_REFUSALS_BEFORE_THE_SWAP
+            and (
+                outcome.status in _HYDRATE_REFUSALS_BEFORE_THE_SWAP
+                or outcome.swap_began is False
+            )
         ):
-            # The Worker refused the hydrate before it replaced anything.
+            # The Worker refused the hydrate before it replaced anything, or its
+            # transfer failed before the swap, as the Worker said (issue #4041). One
+            # that did not say, an older Worker's, may have swapped.
             await self._unmark(marked, worker_id, stop_intent_count)
         if outcome.status is CommandStatus.INVALID_STATE:
             await self._record_running(server, worker_id)
@@ -1696,8 +1721,9 @@ class StartServer:
         """Put back the mark a re-sent start set, for a hydrate that changed nothing.
 
         ``redispatch_start`` marks the row ``awaiting_hydrate`` before its wait
-        (issue #4024). When its hydrate was not sent, or the Worker refused it
-        before the pull, the Worker's working set is the one the row described
+        (issue #4024). When its hydrate was not sent, the Worker refused it
+        before the pull, or the Worker said its transfer failed before the swap
+        (issue #4041), the Worker's working set is the one the row described
         before the mark, so the row goes back to that. ``marked`` is the row as
         the start read it when its mark changed it.
 

@@ -573,7 +573,8 @@ export interface paths {
          *     (#243); ``accept_eula`` is never implied. The archive contents then publish as
          *     the initial working set through the hardened extraction (zip-slip / size / entry
          *     caps -> 413 / 422). A publish failure after the row commits is 503
-         *     ``seed_failed`` (the row is repairable via the files API).
+         *     ``seed_failed``: the row stands but cannot start, as its working set is only
+         *     what was written (issue #4065); delete it and import again.
          *
          *     **An archive that does not read (issue #3769).** A body the zip reader fails
          *     on — not a zip at all, cut short, damage the reader detects in a member, or an
@@ -2092,6 +2093,30 @@ export interface paths {
         get: operations["check_plugin_update_api_communities__community_id__servers__server_id__plugins__plugin_id__updates_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/communities/{community_id}/servers/{server_id}/release-without-snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release Server Without Snapshot
+         * @description Release a server its Worker holds after refusing the final snapshot (#4055).
+         *
+         *     Not a ``/stop`` parameter: ``force`` means "kill now" only, and this gives up
+         *     the progression since the last snapshot, so it has its own route, audit
+         *     operation and confirmation. It sends the Worker nothing.
+         */
+        post: operations["release_server_without_snapshot_api_communities__community_id__servers__server_id__release_without_snapshot_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4371,6 +4396,8 @@ export interface components {
             crash_not_restarted: boolean;
             /** Crash Reason */
             crash_reason: string | null;
+            /** Creation Incomplete */
+            creation_incomplete: boolean;
             /** Desired State */
             desired_state: string;
             /** Final Snapshot Refusal */
@@ -7836,6 +7863,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PluginUpdateInfoResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_server_without_snapshot_api_communities__community_id__servers__server_id__release_without_snapshot_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerResponse"];
                 };
             };
             /** @description Validation Error */

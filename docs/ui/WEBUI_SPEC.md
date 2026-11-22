@@ -105,7 +105,8 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / HEAD | `…/{sid}/export` | ZIP export (download). Accepts the Bearer access token, or a `?grant=` download grant so the browser can stream a multi-GB export straight to disk, or the `HttpOnly` download cookie a redemption sets so an interrupted transfer can be retried. The response declares `Cache-Control: no-store` under every credential. `HEAD` is the metadata probe: the same gate and the same headers with no body — including no `Content-Length`, since the zip is built incrementally and the `GET` declares none either — and it neither builds the zip nor records a `server:export` audit event. |
 | POST | `…/{sid}/export/download-grant` | Mint that grant: `{download_url, expires_at}`, `Cache-Control: no-store`. Same `file:read` gate as the export, and the same pre-flight — a running server is 409 `server_unsettled` and no grant is issued; `auth.token.download_grant_ttl_seconds`, 30 s by default (AUTH_API.md Section 3). |
 | GET / PATCH / DELETE | `…/{sid}` | Read / update (name, config, game_port) / delete. Every PATCH edit needs `server:update`. A `name` that is blank or carries a control character, a line or paragraph separator or a lone surrogate is a `422` (`invalid_server_name`), with nothing changed (#3957, #3988). The check is on the name sent, even when it equals the stored one. The Settings tab sends the name only when it changed (#3988), so a server stored with such a name before the rule still saves its other settings; a rename onto a name another server of the community holds is a `409` (`server_name_exists`), shown as its own toast. Reads return a stored name as it is. `backup_interval_hours` is not a config key; a PATCH carrying it is `422` (`retired_config_key`; DATABASE.md Section 7) — backup cadence is a `backup` schedule. A `config` breaking the blob's bounds is a `422` naming the rule it broke, the same four reasons create answers with — `config_invalid_shape` / `config_null_value` / `config_lone_surrogate` / `config_too_large` (rules and limits: DATABASE.md Section 7). A `game_port` change against a server whose `server.properties` is missing is a `409` (`server_properties_missing`): the rewrite preserves the file's other keys, so it refuses rather than republish one without `rcon.password`. A DELETE needs the server at rest (`409 server_not_stopped` otherwise) and no Worker assigned: a stop holds its Worker until the final snapshot settles and the server is released, which can wait for the reconciler, and a delete before then is a `409` (`server_assigned`) whose `detail` says to stop the server and wait for the release. A DELETE that waited out the lifecycle lock's acquire budget behind another lifecycle operation is the `409 server_busy` instead, which a retry in a moment clears. |
-| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
+| POST | `…/{sid}/start` · `/stop?force=` · `/restart` | Lifecycle. Stop supports force. A stop of a server already `desired=stopped` but still assigned to a Worker (a drained server still running, a stop left half-done) is accepted and converges it at once, as the reconciler would after its grace window; with no Worker assigned it is `409 invalid_transition`, and while another stop of that server is still converging it is `409 transition_conflict`. A stop of a server `desired=running` with no Worker assigned yet withdraws the start intent and dispatches nothing. A start of a server whose create seed or import did not finish (`creation_incomplete`, DATABASE.md Section 7) is `409 creation_incomplete`, with nothing written or dispatched: its working set is only what was written, and no retry clears it, so the remedy is to delete the server and create or import it again. A `503 worker_unavailable` from any of the three carries a `worker_state` member, `not_connected` or `no_answer`, when the API knows why the Worker gave no answer ([AUTH_API.md](../app/AUTH_API.md) Section 2); Section 7.4 says how the UI uses it. |
+| POST | `…/{sid}/release-without-snapshot` | Release a server whose Worker refused its stop's final snapshot (`final_snapshot_refusal` set) without that snapshot (#4055). Needs `server:stop`; no body; answers the server, unassigned and with `final_snapshot_refusal: null`. It sends the Worker nothing and cannot be undone; what it gives up is in "A stopped server a Worker still holds", below. It is `409 invalid_transition` unless the server is `desired=stopped`, at rest (`stopped`, `crashed` or `unknown`), still assigned to a Worker and holds a refusal: a server held for any other reason waits for its snapshot. It is `409 transition_conflict`, with nothing changed, while a stop of the server is still converging or its final snapshot is still in flight, or when a Worker report lands as it releases. Recorded as `server:release_without_snapshot`, `success` or `denied`. Nothing records a refusal until #4056, so until then it is always `409 invalid_transition`. |
 | POST | `…/{sid}/command` | RCON line → `{output}`. `line` is at most 1,446 UTF-8 bytes (`422`; "Console lines" below). |
 | GET | `…/{sid}/files?path=&list=` | Read file (base64) or list directory (entries + `truncated`). |
 | PUT / DELETE | `…/{sid}/files?path=` | Write (base64, versioned) / delete. The root `server.properties` is guarded on **every** files-API write path — `PUT`, `DELETE`, either end of a rename, an upload (direct or archive member), and a rollback: an operation that would change or drop a platform-managed key — `server-port`, the RCON triple, the resource-pack keys — is a `422` (`platform_managed_key`) naming it in the `key` member. The guard is over the keys, not the filename: editing the file's other keys is unaffected, and a root `server.properties` that carries none of those keys still deletes and still renames away. A `PUT` to a path **under** that name is a `422` (`platform_managed_path`) instead — the write creates the name as a directory, which the key guard cannot see and the platform's writes cannot survive. A `PUT` to a root name starting `.mcsd_generation` — the Worker's generation marker — or under one is a `422` (`reserved_name`), running or at rest; a `DELETE` of such an entry stays allowed, so one planted before the guard can be removed while the server is stopped. A `PUT` whose path the member-name rule refuses ([`STORAGE.md`](../app/STORAGE.md) Section 6.2) is a `422`, running or at rest and on either storage backend: `path_too_deep` for a file more than 128 directory levels deep (the root is level 0 and only directories count, so a file path may have 129 components), `name_too_long` for a component over 255 bytes in UTF-8, `path_too_long` for a path over 4,095 bytes. One whose path carries a `\`, a C1 control character, a line or paragraph separator, a lone surrogate or a Unicode noncharacter in any component is a `422` (`invalid_name_character`); C0 and DEL stay `invalid_path` (#3969, #3973). A `DELETE` does not ask, so a name created before the rule, or by the running server, can still be removed. |
@@ -145,6 +146,26 @@ again (#3998). Reads are served. A scheduled backup waits for the release by
 itself. The server read's `final_snapshot_refusal` says when the Worker has
 refused that final snapshot (`busy` / `unavailable`) rather than not answered
 yet (#4054).
+While a refusal is recorded, a holder of `server:stop` can release the
+server without the snapshot (`…/release-without-snapshot`, above; #4055).
+Its confirmation must say the three things the release gives up:
+
+- the progression since the last snapshot, which is lost once the server
+  starts on another Worker, or once a write to its files advances the store,
+  after which even the same Worker hydrates over it;
+- a copy of the server may still run on the old Worker until that Worker
+  next starts the server, reclaims it or boots, so a start elsewhere can run
+  the world twice;
+- it cannot be undone.
+
+The confirmation is its own dialog, never the force-stop one and never an
+entry of the Stop menu. Its draft wording, to be settled with the UI (#4057):
+title "Release this server without its final save?"; body "The server's host
+has not saved this server's latest world. If you release it now, changes
+since the last snapshot can be lost: they are gone if the server next starts
+on another host, or as soon as its files are edited or restored. A copy of
+the server may still be running on that host. This cannot be undone.";
+confirm (danger) "Release without saving"; cancel has the default focus.
 
 **Request body limits.** Every route reads at most a fixed amount of request
 body and answers a larger one **413**, by `Content-Length` before reading
@@ -300,7 +321,9 @@ stopping stands, as after any other failure at that point. A restore that had
 already published answers **503 `restore_incomplete`** instead (Section 6.7).
 A create or an import whose server already exists, and an update whose row
 change has committed, answer 503 `seed_failed`, as for their other failures
-after that commit. A loss found only when the operation releases the lock,
+after that commit. A create or import that answers it leaves a server that
+cannot start (`creation_incomplete`), unless only an import's plugin rows
+failed. A loss found only when the operation releases the lock,
 after its last write, changes nothing: the operation answers as it finished.
 
 Server response fields: `id`, `community_id`, `name`, `mc_edition`,
@@ -321,6 +344,9 @@ that crash alone, false under a stopped intent; CONFIGURATION.md Section 5.6),
 `final_snapshot_refusal` (`busy` / `unavailable`: why the assigned Worker
 refused the stop's final snapshot, null otherwise; DATABASE.md Section 7. No
 stop is held on a refusal yet, issue #4056, so it reads null),
+`creation_incomplete` (whether the server's create seed or import has yet to
+finish: true while it runs, and for good once it failed or was interrupted,
+when a start is `409 creation_incomplete`; DATABASE.md Section 7),
 `backup_retention` (the scheduled-backup retention policy; null while
 unconfigured).
 

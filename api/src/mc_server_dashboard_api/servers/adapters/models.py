@@ -154,3 +154,9 @@ class ServerModel(Base):
     # ``busy`` / ``unavailable``, written only while the stopped row is still
     # assigned to that Worker, and cleared with the assignment. NULL otherwise.
     final_snapshot_refusal: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Whether the server's creation has yet to finish (issue #4065): set by the
+    # insert, cleared once the last write of the working set has returned. A
+    # start refuses the row while it is set.
+    creation_incomplete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false()
+    )

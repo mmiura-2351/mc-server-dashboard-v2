@@ -715,8 +715,17 @@ def _to_result(message: pb.CommandResult) -> CommandResult:
     reason = _FILE_ACCESS_REASON_FROM_PROTO.get(
         message.error.file_access_reason, FileAccessReason.UNSPECIFIED
     )
+    # By PRESENCE, as held_generation is (issue #4041): a proto3 bool reads False
+    # when unset, and an older Worker never sets it, so the default would say its
+    # hydrate left the working set as it was.
+    swap_began = (
+        message.error.swap_began if message.error.HasField("swap_began") else None
+    )
     return CommandResult(
-        code=code, message=message.error.message, file_access_reason=reason
+        code=code,
+        message=message.error.message,
+        file_access_reason=reason,
+        swap_began=swap_began,
     )
 
 
