@@ -1092,8 +1092,9 @@ numbers): the UI for the general scheduler.
   generic line says it could not be counted. Either way the checkbox is
   still required; with nothing to prune there is none.
 - Once the schedule is created, the step reads the server again and leaves a
-  policy set since (from another session) in place; otherwise keep-last-N
-  `PUT`s `{keep_last}` to `…/{sid}/backups/retention`. Keep all sends nothing.
+  policy set since (from another session) in place, and the success toast
+  says so; otherwise keep-last-N `PUT`s `{keep_last}` to
+  `…/{sid}/backups/retention`. Keep all sends nothing.
   After any retention attempt the server, the backups list and its statistics
   are refetched, so the keep-all warning follows what the server holds, even
   after a write reported as failed that had landed. A failed retention write

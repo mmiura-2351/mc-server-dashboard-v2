@@ -1888,7 +1888,11 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     await openBackupCreate();
     await submitCreate();
 
-    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    // The number chosen is not set, and the toast says why.
+    expect(
+      await screen.findByText(t("schedules.createdRetentionKept")),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(t("schedules.created"))).not.toBeInTheDocument();
     expect(createCalls().length).toBe(1);
     expect(mockApi.put).not.toHaveBeenCalled();
     expect(

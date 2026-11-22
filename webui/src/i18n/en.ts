@@ -821,6 +821,9 @@ export const en = {
   "schedules.cadence.everyMinutes": "Every {count} min",
   "schedules.cadence.everyHours": "Every {count} h",
   "schedules.created": "Schedule created.",
+  // The retention step found a policy set since the dialog opened (#4084).
+  "schedules.createdRetentionKept":
+    "Schedule created. The server already had a retention policy, which was left in place instead of the one chosen here.",
   "schedules.updated": "Schedule updated.",
   "schedules.deleted": "Schedule deleted.",
   "schedules.toggle.enabled": "Schedule enabled.",

@@ -732,6 +732,9 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.cadence.everyMinutes": "{count}分ごと",
   "schedules.cadence.everyHours": "{count}時間ごと",
   "schedules.created": "スケジュールを作成しました。",
+  // The retention step found a policy set since the dialog opened (#4084).
+  "schedules.createdRetentionKept":
+    "スケジュールを作成しました。サーバーにはすでに保持ポリシーがあったため、ここで選んだものではなく既存のポリシーをそのまま残しました。",
   "schedules.updated": "スケジュールを更新しました。",
   "schedules.deleted": "スケジュールを削除しました。",
   "schedules.toggle.enabled": "スケジュールを有効にしました。",

@@ -853,8 +853,15 @@ function ScheduleDialog({
       }
     },
     onSuccess: (retention) => {
+      // "kept" sets none of the step's choice, so the toast says why.
       showToast(
-        t(editing ? "schedules.updated" : "schedules.created"),
+        t(
+          editing
+            ? "schedules.updated"
+            : retention === "kept"
+              ? "schedules.createdRetentionKept"
+              : "schedules.created",
+        ),
         "success",
       );
       if (retention !== "none") {
