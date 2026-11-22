@@ -459,6 +459,26 @@ def test_quarantined_newest_yields_the_week_and_still_keeps_its_day() -> None:
     assert pruned == []
 
 
+def test_one_healthy_row_takes_two_buckets_from_two_quarantined_rows() -> None:
+    # The accepted case where overlapping tiers keep fewer rows than ignoring
+    # health would: ISO week 27 spans June and July, and the healthy June 29 row
+    # takes both week 27 and June, so neither quarantined row keeps a bucket.
+    # Health-blind, Y would keep week 27 and X June, and Z would go.
+    policy = RetentionPolicy.from_fields(weekly=2, monthly=2)
+    w = _backup(_NOW)  # week 28, July
+    y = _backup(
+        dt.datetime(2026, 7, 3, 12, 0, tzinfo=dt.timezone.utc),  # week 27, July
+        health=BackupHealth.QUARANTINED,
+    )
+    x = _backup(
+        dt.datetime(2026, 6, 30, 12, 0, tzinfo=dt.timezone.utc),  # week 27, June
+        health=BackupHealth.QUARANTINED,
+    )
+    z = _backup(dt.datetime(2026, 6, 29, 12, 0, tzinfo=dt.timezone.utc))  # wk 27, June
+    pruned = backups_to_prune(policy, [w, y, x, z], _NOW)
+    assert pruned == [y, x]
+
+
 @pytest.mark.parametrize(
     ("policy", "pruned_indexes"),
     [
