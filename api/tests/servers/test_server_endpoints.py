@@ -721,20 +721,20 @@ def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
     assert recorder.events[0].actor_id is not None
 
 
-def _create_whose_end_meets_outages(outages: int) -> tuple[TestClient, FakeUnitOfWork]:
+def _create_whose_end_meets_outages(
+    outages: int,
+) -> tuple[TestClient, ClearCreationFailsRepository]:
     # The write that ends the creation meets ``outages`` pool timeouts (#4051)
     # before it is made (issue #4088). The sleep returns for one wait more than
     # the retry makes, so an extra attempt fails the test instead of parking it.
-    uow = FakeUnitOfWork(
-        servers=ClearCreationFailsRepository(
-            *(sqlalchemy.exc.TimeoutError("QueuePool limit") for _ in range(outages))
-        )
+    servers = ClearCreationFailsRepository(
+        *(sqlalchemy.exc.TimeoutError("QueuePool limit") for _ in range(outages))
     )
     app = _app(
         member=True,
         allow=True,
         create=CreateServer(
-            uow=uow,
+            uow=FakeUnitOfWork(servers=servers),
             clock=FakeClock(_NOW),
             version_validator=FakeVersionValidator(),
             file_store=FakeFileStore(),
@@ -742,29 +742,31 @@ def _create_whose_end_meets_outages(outages: int) -> tuple[TestClient, FakeUnitO
             sleep=RecordingSleep(returns=3),
         ),
     )
-    return _client(app), uow
+    return _client(app), servers
 
 
 def test_create_whose_end_met_an_outage_once_is_201_and_finished() -> None:
-    client, uow = _create_whose_end_meets_outages(1)
+    client, servers = _create_whose_end_meets_outages(1)
 
     resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
 
     assert resp.status_code == 201
     assert resp.json()["creation_incomplete"] is False
-    [server] = uow.servers.by_id.values()
+    [server] = servers.by_id.values()
     assert server.creation_incomplete is False
+    assert servers.clear_attempts == 2
 
 
 def test_create_whose_end_met_an_outage_on_every_attempt_is_503_seed_failed() -> None:
-    client, uow = _create_whose_end_meets_outages(3)
+    client, servers = _create_whose_end_meets_outages(3)
 
     resp = client.post(f"/api/communities/{uuid.uuid4()}/servers", json=_create_body())
 
     assert resp.status_code == 503
     assert resp.json()["reason"] == "seed_failed"
-    [server] = uow.servers.by_id.values()
+    [server] = servers.by_id.values()
     assert server.creation_incomplete is True
+    assert servers.clear_attempts == 3
 
 
 def test_create_that_lost_the_lock_before_its_row_is_503_lifecycle_lock_lost() -> None:
