@@ -96,6 +96,8 @@ async def test_a_wait_past_the_bound_fails_as_a_transient_database_timeout() -> 
     assert is_database_timeout(error) is True
 
 
+# A stall guard: without the bound the request waits SQLAlchemy's 30 s.
+@pytest.mark.timeout(10)
 def test_a_wait_past_the_bound_answers_503(monkeypatch: pytest.MonkeyPatch) -> None:
     # The real app, its engine swapped for the exhausted one: authenticating the
     # caller is the route's first checkout.
