@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import json
 import logging
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 import grpc
@@ -1947,6 +1949,120 @@ async def test_stale_rebuild_failure_does_not_offline_newer_session() -> None:
         await call_c.done_writing()
     finally:
         await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Registration deadline (issue #4050)
+# ---------------------------------------------------------------------------
+
+_REGISTRATION_DEADLINE_SECONDS = 0.2
+_LIMITS_PATH = (
+    Path(__file__).resolve().parents[3]
+    / "proto"
+    / "contract"
+    / "control_plane_limits.json"
+)
+
+
+def _grpc_server_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _GRPC_SERVER_LOGGER and r.levelno >= logging.WARNING
+    ]
+
+
+class _StalledRegistrationSink(FakeServerStateSink):
+    """A database that does not answer the registration's rebuild, or its
+    held-server lookup."""
+
+    def __init__(self, *, rebuild: bool, lookup: bool) -> None:
+        super().__init__(running_ids={_WORKER_ID: {_SERVER_A}})
+        self._rebuild = rebuild
+        self._lookup = lookup
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        if self._rebuild:
+            await asyncio.Event().wait()
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+    async def existing_server_ids(self, *, server_ids: list[str]) -> set[str]:
+        if self._lookup:
+            await asyncio.Event().wait()
+        return await super().existing_server_ids(server_ids=server_ids)
+
+
+def test_the_registration_deadline_is_a_third_of_the_workers_wait_for_its_ack() -> None:
+    limits = json.loads(_LIMITS_PATH.read_text())
+
+    assert (
+        grpc_server._REGISTRATION_DATABASE_TIMEOUT_SECONDS * 3
+        <= limits["register_ack_timeout_seconds"]
+    )
+
+
+async def test_a_rebuild_the_database_does_not_answer_refuses_the_registration(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_StalledRegistrationSink(rebuild=True, lookup=False),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        code = await asyncio.wait_for(call.code(), timeout=5)
+        details = await call.details()
+        candidates = h.registry.candidates_for_placement()
+        outbound = h.control_plane.outbound_for(WorkerId(_WORKER_ID))
+    finally:
+        await h.stop()
+
+    assert code is grpc.StatusCode.UNAVAILABLE
+    assert details == "the database did not answer the registration in time"
+    assert candidates == []
+    assert outbound is None
+    assert _grpc_server_warnings(caplog) == [
+        "the database did not answer the assignment rebuild within 0.2s; "
+        "refusing the registration"
+    ]
+
+
+async def test_a_held_lookup_the_database_does_not_answer_still_acks_in_time(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_StalledRegistrationSink(rebuild=False, lookup=True),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
+        response = await asyncio.wait_for(call.read(), timeout=5)
+        candidates = h.registry.candidates_for_placement()
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+    assert list(response.register_ack.unknown_held_server_ids) == []
+    assert [candidate.load for candidate in candidates] == [1]
+    assert _grpc_server_warnings(caplog) == [
+        "failed to compute unknown held servers; sending empty list"
+    ]
 
 
 # ---------------------------------------------------------------------------
