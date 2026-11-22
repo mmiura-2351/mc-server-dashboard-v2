@@ -260,13 +260,17 @@ class DownloadResourcePack:
 async def _load_server_at_rest(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
 ) -> Server:
-    """Return the server, validating it exists, is in community, and is at rest."""
+    """Return the server, validating it exists, is in community, and is quiescent.
+
+    At rest and released (issue #3998): a stop that still holds its Worker would
+    publish its final snapshot over the ``server.properties`` rewrite.
+    """
 
     server = await uow.servers.get_by_id(server_id)
     if server is None or server.community_id != community_id:
         raise ServerNotFoundError(str(server_id.value))
-    if not server.is_at_rest():
-        raise ServerFilesUnsettledError(str(server_id.value))
+    if not server.is_quiescent():
+        raise server.not_quiescent_error(ServerFilesUnsettledError)
     return server
 
 

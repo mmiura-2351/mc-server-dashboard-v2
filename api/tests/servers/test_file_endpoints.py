@@ -112,6 +112,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidVersionIdError,
     LifecycleLockLostError,
     PlatformManagedKeyError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFileStorageUnavailableError,
@@ -1682,6 +1683,56 @@ def test_a_lost_lifecycle_lock_is_503_and_audited_as_an_error(
     assert resp.json()["reason"] == "lifecycle_lock_lost"
     assert [e.operation for e in recorder.events] == [operation]
     assert recorder.events[0].outcome is Outcome.ERROR
+
+
+@pytest.mark.parametrize(
+    ("route", "operation"),
+    [
+        ("write", ops.FILE_WRITE),
+        ("rollback", ops.FILE_ROLLBACK),
+        ("upload", ops.FILE_UPLOAD),
+        ("rename", ops.FILE_RENAME),
+        ("delete", ops.FILE_DELETE),
+        ("mkdir", ops.FILE_MKDIR),
+    ],
+)
+def test_a_server_a_worker_still_holds_is_409_server_assigned_and_denied(
+    route: str, operation: str
+) -> None:
+    # At rest, but the stop still holds its Worker for the final snapshot, which
+    # would publish over the write (issue #3998): refused like an unsettled
+    # server, under its own reason.
+    recorder = RecordingAuditRecorder()
+    error = ServerAssignedError("x")
+    use_case: dict[str, Any] = {
+        route: _FakeUpload(error=error)
+        if route == "upload"
+        else _FakeUseCase(error=error)
+    }
+    app = _app(member=True, allow=True, recorder=recorder, **use_case)
+    client = _client(app)
+    base = _url(uuid.uuid4(), uuid.uuid4())
+    if route == "write":
+        resp = client.put(base, params={"path": "f"}, json={"content_base64": ""})
+    elif route == "rollback":
+        resp = client.post(
+            f"{base}/rollback", params={"path": "f"}, json={"version_id": "v1"}
+        )
+    elif route == "upload":
+        resp = client.post(
+            f"{base}/upload", files={"file": ("f", b"x", "application/octet-stream")}
+        )
+    elif route == "rename":
+        resp = client.post(f"{base}/rename", json={"from": "a", "to": "b"})
+    elif route == "delete":
+        resp = client.delete(base, params={"path": "f"})
+    else:
+        resp = client.post(f"{base}/directories", params={"path": "p"})
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
+    assert [e.operation for e in recorder.events] == [operation]
+    assert recorder.events[0].outcome is Outcome.DENIED
 
 
 def test_write_validation_failure_is_not_audited() -> None:

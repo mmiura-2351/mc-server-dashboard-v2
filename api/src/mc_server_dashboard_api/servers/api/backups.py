@@ -68,6 +68,7 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
+from mc_server_dashboard_api.servers.api.server_assigned import server_assigned
 from mc_server_dashboard_api.servers.application.archive_validation import (
     ArchiveUploadAdmission,
 )
@@ -117,6 +118,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidRetentionPolicyError,
     LifecycleLockLostError,
     PluginReconcileIncompleteError,
+    ServerAssignedError,
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -284,6 +286,18 @@ async def create_backup(
             server_id,
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker: the archive would lack the
+        # final snapshot still in flight (issue #3998).
+        await _record_failure(
+            recorder,
+            ops.BACKUP_CREATE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            server_id,
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
@@ -626,6 +640,19 @@ async def restore_backup(
             target_type=ops.TARGET_BACKUP,
         )
         raise _conflict("server_not_stopped") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the restore (issue #3998).
+        await _record_failure(
+            recorder,
+            ops.BACKUP_RESTORE,
+            Outcome.DENIED,
+            authorized,
+            community_id,
+            backup_id,
+            target_type=ops.TARGET_BACKUP,
+        )
+        raise server_assigned() from exc
     except BackupUnreadableError as exc:
         # The backup's recorded verdict is UNREADABLE (issue #2374), or this
         # restore just found its archive unreadable and recorded that (issue

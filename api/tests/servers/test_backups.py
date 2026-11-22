@@ -64,6 +64,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidBackupArchiveError,
     InvalidFilePathError,
+    ServerAssignedError,
     ServerNotFoundError,
     ServerNotStoppedError,
 )
@@ -229,6 +230,41 @@ async def test_create_transitional_server_is_unsettled() -> None:
             server_id=server.id,
             source=BackupSource.MANUAL,
         )
+
+
+# A stop holds its Worker until the final snapshot settles (issue #3998): an
+# archive of ``current`` taken in that window lacks the snapshot still in flight,
+# and a restore made in it is overwritten by that snapshot. Both refuse the row
+# ``server_assigned`` in every observed state the row reads at rest.
+_AT_REST_OBSERVED = [
+    ObservedState.STOPPED,
+    ObservedState.CRASHED,
+    ObservedState.UNKNOWN,
+]
+
+
+@pytest.mark.parametrize("observed", _AT_REST_OBSERVED)
+async def test_create_at_rest_refuses_a_server_a_worker_still_holds(
+    observed: ObservedState,
+) -> None:
+    server = _server(desired=DesiredState.STOPPED, observed=observed, worker=_WORKER)
+    repo = FakeServerRepository()
+    repo.seed(server)
+    uow = FakeUnitOfWork(servers=repo)
+    control_plane = FakeControlPlane()
+    archive = FakeBackupArchiveStore()
+    create = _make_create(uow, control_plane, archive)
+
+    with pytest.raises(ServerAssignedError):
+        await create(
+            community_id=_COMMUNITY,
+            server_id=server.id,
+            source=BackupSource.MANUAL,
+        )
+
+    assert archive.created == []
+    assert await uow.backups.list_for_server(server.id) == []
+    assert control_plane.dispatched == []
 
 
 async def test_create_with_nothing_published_raises_not_found() -> None:
@@ -618,6 +654,38 @@ async def test_restore_requires_stopped_server() -> None:
             community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
         )
     assert archive.restored == []
+
+
+@pytest.mark.parametrize("observed", _AT_REST_OBSERVED)
+async def test_restore_refuses_a_server_a_worker_still_holds(
+    observed: ObservedState,
+) -> None:
+    server = _server(desired=DesiredState.STOPPED, observed=observed, worker=_WORKER)
+    repo = FakeServerRepository()
+    repo.seed(server)
+    backups = FakeBackupRepository()
+    backup = Backup(
+        id=BackupId.new(),
+        server_id=server.id,
+        storage_ref="ref",
+        size_bytes=None,
+        source=BackupSource.MANUAL,
+        health=BackupHealth.HEALTHY,
+        created_by=None,
+        created_at=_NOW,
+    )
+    backups.seed(backup)
+    archive = FakeBackupArchiveStore()
+    archive.archives.add("ref")
+    uow = FakeUnitOfWork(servers=repo, backups=backups)
+
+    with pytest.raises(ServerAssignedError):
+        await RestoreBackup(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id, backup_id=backup.id
+        )
+
+    assert archive.restored == []
+    assert archive.restore_calls == []
 
 
 async def test_restore_at_rest_republishes_known_ref() -> None:

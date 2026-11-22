@@ -13,6 +13,10 @@ import datetime as dt
 from dataclasses import dataclass
 from typing import Any
 
+from mc_server_dashboard_api.servers.domain.errors import (
+    ServerAssignedError,
+    ServerError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     NOT_RESTARTED_CRASH_REASONS,
     CommunityId,
@@ -131,8 +135,9 @@ class Server:
         is one with no live working set to diverge from: ``stopped``,
         ``unknown``, or ``crashed`` (the process died, so there is no live
         working set — strictly safer than ``unknown``, where the Worker may still
-        hold a live instance we cannot see). Config/name edits and deletion are
-        gated on this (Section 6.9 spirit).
+        hold a live instance we cannot see). Reads of the store and deletion are
+        gated on this (Section 6.9 spirit); an API-side write to the working set
+        gates on :meth:`is_quiescent`, which also wants the server released.
 
         ``unknown`` has two provenances and the caveat above covers both.
         API-inferred: the owning Worker is gone, so nobody can speak for the
@@ -147,9 +152,10 @@ class Server:
         it has a failed-stop orphan recorded for the id, that Worker refuses
         start, hydrate, stopped-id snapshot and scratch reclamation for it, so
         nothing can overwrite or capture a possibly-live working set whatever
-        this returns. What this gates is API-side editing and deletion of the
-        row, and excluding ``unknown`` would wedge those forever for a server
-        whose Worker is gone — nothing will ever report a terminal state for it.
+        this returns. What this gates is API-side reading, editing and deletion
+        of the row, and excluding ``unknown`` would wedge those forever for a
+        server whose Worker is gone — nothing will ever report a terminal state
+        for it.
         """
 
         return self.desired_state is DesiredState.STOPPED and self.observed_state in (
@@ -157,3 +163,30 @@ class Server:
             ObservedState.UNKNOWN,
             ObservedState.CRASHED,
         )
+
+    def is_quiescent(self) -> bool:
+        """Return whether nothing can publish over the server's store (#3998).
+
+        At rest *and* unassigned. A stop keeps its Worker assigned until the final
+        snapshot settles (#869), and that snapshot publishes over the store: the
+        publish guard lets the assigned Worker through even behind an API
+        sentinel ``current`` (the #1703 exemption, kept for adoption, #3865). So an
+        API-side write to the working set made while the row is at rest but still
+        assigned is overwritten. Every such write gates on this predicate, not on
+        :meth:`is_at_rest`; reads, which write nothing, may keep the latter.
+        """
+
+        return self.assigned_worker_id is None and self.is_at_rest()
+
+    def not_quiescent_error(self, not_at_rest: type[ServerError]) -> ServerError:
+        """The error a write door refuses a server that is not quiescent with.
+
+        The door's own ``not_at_rest`` error while the server is not at rest, so
+        each door keeps the reason it has always answered; otherwise the server is
+        at rest but still assigned, and the refusal is :class:`ServerAssignedError`
+        (409 ``server_assigned``): the operator retries once the stop releases it.
+        """
+
+        if not self.is_at_rest():
+            return not_at_rest(str(self.id.value))
+        return ServerAssignedError(str(self.id.value))

@@ -143,6 +143,7 @@ from mc_server_dashboard_api.identity.domain.token_service import TokenService
 from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
+from mc_server_dashboard_api.servers.api.server_assigned import server_assigned
 from mc_server_dashboard_api.servers.application.archive_validation import (
     ArchiveUploadAdmission,
 )
@@ -177,6 +178,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidVersionIdError,
     LifecycleLockLostError,
     PlatformManagedKeyError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFileNotFoundError,
     ServerFileStorageUnavailableError,
@@ -509,6 +511,13 @@ async def write_file(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_file_failure(
+            recorder, ops.FILE_WRITE, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_file_failure(
             recorder, ops.FILE_WRITE, authorized, community_id, server_id
@@ -692,6 +701,13 @@ async def rollback_file(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
         )
         raise _conflict("server_not_stopped") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_file_failure(
+            recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_file_failure(
             recorder, ops.FILE_ROLLBACK, authorized, community_id, server_id
@@ -857,6 +873,13 @@ async def upload_file(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_file_failure(
+            recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_file_failure(
             recorder, ops.FILE_UPLOAD, authorized, community_id, server_id
@@ -1245,6 +1268,13 @@ async def rename_file(
             recorder, ops.FILE_RENAME, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_file_failure(
+            recorder, ops.FILE_RENAME, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_file_failure(
             recorder, ops.FILE_RENAME, authorized, community_id, server_id
@@ -1319,6 +1349,13 @@ async def delete_file(
             recorder, ops.FILE_DELETE, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_file_failure(
+            recorder, ops.FILE_DELETE, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_file_failure(
             recorder, ops.FILE_DELETE, authorized, community_id, server_id
@@ -1406,6 +1443,13 @@ async def make_directory(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_file_failure(
+            recorder, ops.FILE_MKDIR, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_file_failure(
             recorder, ops.FILE_MKDIR, authorized, community_id, server_id

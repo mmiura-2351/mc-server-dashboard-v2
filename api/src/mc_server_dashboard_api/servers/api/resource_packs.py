@@ -58,6 +58,7 @@ from mc_server_dashboard_api.http_head import head_response
 from mc_server_dashboard_api.http_problem import ProblemException, problem
 from mc_server_dashboard_api.http_streaming import counted, started
 from mc_server_dashboard_api.identity.domain.entities import User
+from mc_server_dashboard_api.servers.api.server_assigned import server_assigned
 from mc_server_dashboard_api.servers.application.resource_packs import (
     MAX_RESOURCE_PACK_BYTES,
     AssignResourcePack,
@@ -78,6 +79,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ResourcePackInUseError,
     ResourcePackNotFoundError,
     ResourcePackStorageUnavailableError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
@@ -649,6 +651,10 @@ async def assign_resource_pack(
         raise _not_found() from exc
     except ServerFilesUnsettledError as exc:
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the server.properties rewrite (issue #3998).
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         raise _conflict("server_busy") from exc
     except WorkingSetSeedFailedError as exc:
@@ -719,6 +725,10 @@ async def unassign_resource_pack(
         raise _not_found() from exc
     except ServerFilesUnsettledError as exc:
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the server.properties rewrite (issue #3998).
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         raise _conflict("server_busy") from exc
     except ServerFileStorageUnavailableError as exc:

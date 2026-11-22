@@ -14,7 +14,7 @@ import asyncio
 import datetime as dt
 import logging
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 
 import pytest
 
@@ -429,6 +429,167 @@ async def test_backup_with_option_off_still_backs_up_a_stopped_server() -> None:
 
     assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
     assert len(await env.uow.backups.list_for_server(server.id)) == 1
+
+
+# --- a backup of a server a Worker still holds (issue #3998) ---------------
+#
+# A stop holds its Worker until the final snapshot settles. An archive taken then
+# would lack that snapshot, so CreateBackup refuses the row ``server_assigned``.
+# The occurrence is not a skip and not a failure: it is not recorded, its
+# ``next_run_at`` stays, and the next tick runs it again.
+
+
+def _deferred_lines(caplog: pytest.LogCaptureFixture, schedule: Schedule) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+        and str(schedule.id.value) in record.getMessage()
+        and "deferred" in record.getMessage()
+    ]
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+async def test_a_backup_of_a_server_a_worker_still_holds_waits_for_the_next_tick(
+    observed: ObservedState, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO)
+    env = _env()
+    server = _server(desired=DesiredState.STOPPED, observed=observed, worker=_WORKER)
+    due = _NOW - dt.timedelta(seconds=10)
+    schedule = _schedule(
+        server, action=ScheduleAction.BACKUP, only_when_running=False, next_run_at=due
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == due
+    assert await env.uow.backups.list_for_server(server.id) == []
+    assert env.notifier.notifications == []
+    assert env.audit.events == []
+    assert len(_deferred_lines(caplog, schedule)) == 1
+
+    # The final snapshot settles and the stop releases the server: the next tick
+    # takes the backup.
+    env.uow.servers.by_id[server.id].assigned_worker_id = None
+    env.clock.set(_NOW + dt.timedelta(seconds=20))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    assert len(await env.uow.backups.list_for_server(server.id)) == 1
+
+
+@dataclass(frozen=True)
+class _StopLandsFirst(CreateBackup):
+    """Lands a stop between the runner's read of the row and the backup's own.
+
+    The runner reads the row outside the lifecycle lock, so a stop can make the
+    running server it saw read at rest, still assigned, by the time the backup
+    reads it.
+    """
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        source: BackupSource,
+        created_by: uuid.UUID | None = None,
+    ) -> Backup:
+        assert isinstance(self.uow, FakeUnitOfWork)
+        stored = self.uow.servers.by_id[server_id]
+        stored.desired_state = DesiredState.STOPPED
+        stored.observed_state = ObservedState.STOPPED
+        return await super().__call__(
+            community_id=community_id,
+            server_id=server_id,
+            source=source,
+            created_by=created_by,
+        )
+
+
+async def test_a_backup_raced_by_a_stop_waits_for_the_next_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    env = _env()
+    server = _running_server()
+    due = _NOW - dt.timedelta(seconds=10)
+    schedule = _schedule(
+        server, action=ScheduleAction.BACKUP, only_when_running=False, next_run_at=due
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    base_factory = env.runner.make_execute
+
+    def _make_raced() -> ExecuteScheduleAction:
+        base = base_factory()
+        return replace(
+            base,
+            create_backup=_StopLandsFirst(
+                **{
+                    f.name: getattr(base.create_backup, f.name)
+                    for f in fields(base.create_backup)
+                }
+            ),
+        )
+
+    env.runner.make_execute = _make_raced
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == due
+    assert await env.uow.backups.list_for_server(server.id) == []
+    assert env.notifier.notifications == []
+    assert env.runner._backup_retry == {}
+    assert len(_deferred_lines(caplog, schedule)) == 1
+
+
+async def test_a_backup_retry_of_a_server_a_worker_still_holds_waits_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()  # fails -> arms the retry
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+
+    # At the retry, the server is at rest but a stop still holds its Worker.
+    env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
+    store._missing = False
+    env.clock.set(_NOW + dt.timedelta(minutes=30))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    assert len(_deferred_lines(caplog, schedule)) == 1
+
+    # Released: the next tick takes the retry it still owes.
+    env.uow.servers.by_id[server.id].assigned_worker_id = None
+    env.clock.set(_NOW + dt.timedelta(minutes=30, seconds=20))
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
 
 
 # --- failure path ----------------------------------------------------------

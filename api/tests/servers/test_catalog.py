@@ -35,6 +35,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginAlreadyExistsError,
     PluginNotFoundError,
     PortRangeExhaustedError,
+    ServerAssignedError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
     UnsupportedPluginServerTypeError,
@@ -53,6 +54,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.servers.fakes import (
     FakeCatalogProvider,
@@ -1857,6 +1859,67 @@ async def test_update_plugin_not_at_rest() -> None:
             plugin_id=plugin.id,
             version_id="ver-2",
         )
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+@pytest.mark.parametrize("door", ["install", "update"])
+async def test_a_catalog_door_refuses_a_server_a_worker_still_holds(
+    door: str, observed: ObservedState
+) -> None:
+    # A stop holds its Worker until the final snapshot settles, and that snapshot
+    # publishes over the store (issue #3998). ApplyPluginResolution installs
+    # through InstallFromCatalog, so it is refused the same way.
+    uow = FakeUnitOfWork()
+    server = _server(observed_state=observed)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(server)
+    plugin = _plugin(server_id=server.id)
+    uow.plugins.seed(plugin)
+    fs = FakeFileStore()
+    fs.files[plugin.rel_path] = b"old-jar"
+
+    project = _project()
+    new_content = b"new-jar"
+    version, _ = _version(
+        version_id="ver-2",
+        version_number="0.93.0",
+        filename="fabric-api-0.93.0.jar",
+        file_content=new_content,
+    )
+    catalog = FakeCatalogProvider()
+    catalog.seed_project(project, [version])
+    catalog.seed_file(version.files[0].url, new_content)
+    cache, clock = FakePluginCacheStore(), FakeClock(_NOW)
+
+    with pytest.raises(ServerAssignedError):
+        if door == "install":
+            uow.plugins.by_id.clear()
+            await InstallFromCatalog(
+                uow=uow, catalog=catalog, file_store=fs, cache=cache, clock=clock
+            )(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                project_id="proj-1",
+                version_id="ver-2",
+            )
+        else:
+            await UpdatePlugin(
+                uow=uow, catalog=catalog, file_store=fs, cache=cache, clock=clock
+            )(
+                community_id=_COMMUNITY,
+                server_id=server.id,
+                plugin_id=plugin.id,
+                version_id="ver-2",
+            )
+
+    assert fs.files == {plugin.rel_path: b"old-jar"}
+    assert fs.writes == []
+    if door == "update":
+        assert uow.plugins.by_id == {plugin.id: plugin}
+    else:
+        assert uow.plugins.by_id == {}
 
 
 async def test_update_plugin_checksum_mismatch() -> None:

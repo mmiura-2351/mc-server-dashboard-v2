@@ -56,6 +56,7 @@ from mc_server_dashboard_api.http_streaming import (
     ClosingStreamingResponse,
     started,
 )
+from mc_server_dashboard_api.servers.api.server_assigned import server_assigned
 from mc_server_dashboard_api.servers.application.catalog import (
     CheckPluginUpdate,
     CheckUpdates,
@@ -104,6 +105,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginNotFoundError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
+    ServerAssignedError,
     ServerBusyError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -548,6 +550,18 @@ async def install_plugin(
             target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_INSTALL,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder,
@@ -749,6 +763,18 @@ async def apply_plugin_resolution(
             target_type=ops.TARGET_SERVER,
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder,
+            ops.PLUGIN_RESOLVE,
+            authorized,
+            community_id,
+            server_id,
+            target_type=ops.TARGET_SERVER,
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder,
@@ -917,6 +943,13 @@ async def update_plugin(
             recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_UPDATE, authorized, community_id, plugin_id
@@ -1030,6 +1063,13 @@ async def remove_plugin(
             recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_REMOVE, authorized, community_id, plugin_id
@@ -1099,6 +1139,13 @@ async def enable_plugin(
             recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_ENABLE, authorized, community_id, plugin_id
@@ -1177,6 +1224,13 @@ async def disable_plugin(
             recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_DISABLE, authorized, community_id, plugin_id
@@ -1261,6 +1315,13 @@ async def set_plugin_side(
             recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the change (issue #3998).
+        await _record_plugin_failure(
+            recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id
+        )
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         await _record_plugin_failure(
             recorder, ops.PLUGIN_SET_SIDE, authorized, community_id, plugin_id

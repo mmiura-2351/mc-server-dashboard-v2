@@ -222,9 +222,11 @@ class CreateBackup:
                 await self.snapshot_server(
                     community_id=server.community_id, server_id=server.id
                 )
-            elif not server.is_at_rest():
+            elif not server.is_quiescent():
                 # starting / stopping / restarting / crashed / mismatch: no source.
-                raise BackupUnsettledError(str(server_id.value))
+                # At rest but still held for the final snapshot: ``current`` lacks
+                # that snapshot, so archiving it now would miss it (issue #3998).
+                raise server.not_quiescent_error(BackupUnsettledError)
 
             # Commit the metadata row BEFORE writing the archive (#1707): a crash
             # after the row commit but before the archive write leaves a dangling
@@ -476,8 +478,8 @@ class RestoreBackup:
                     if backup.health is BackupHealth.UNREADABLE:
                         raise BackupUnreadableError(str(backup_id.value))
                     storage_ref = backup.storage_ref
-                if not server.is_at_rest():
-                    raise ServerNotStoppedError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerNotStoppedError)
                 try:
                     # The store confirms the lock under its own per-server lock,
                     # after the slow staging and right before it publishes (issue

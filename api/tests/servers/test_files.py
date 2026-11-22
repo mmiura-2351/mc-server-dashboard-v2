@@ -29,7 +29,7 @@ import tracemalloc
 import uuid
 import zipfile
 import zlib
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -73,6 +73,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     FileTooLargeError,
     InvalidFilePathError,
     PlatformManagedKeyError,
+    ServerAssignedError,
     ServerFileNotFoundError,
     ServerFilesUnsettledError,
     ServerNotFoundError,
@@ -2613,6 +2614,8 @@ async def test_write_running_versions_prior_authoritative_content() -> None:
     assert versions
     uow.servers.by_id[ServerId(server_id)].desired_state = DesiredState.STOPPED
     uow.servers.by_id[ServerId(server_id)].observed_state = ObservedState.STOPPED
+    # The stop released the server once its final snapshot settled (issue #3998).
+    uow.servers.by_id[ServerId(server_id)].assigned_worker_id = None
     await RollbackFile(uow=uow, file_store=store)(
         community_id=CommunityId(community),
         server_id=ServerId(server_id),
@@ -6507,3 +6510,134 @@ async def test_rollback_to_a_legacy_version_at_the_reserved_marker_name_is_refus
         )
     assert caught.value.reason == "reserved_name"
     assert store.rollbacks == []
+
+
+# --- a server at rest that a Worker still holds (issue #3998) ---------------
+#
+# A stop keeps its Worker assigned until the final snapshot settles, and that
+# snapshot publishes over the store: an at-rest write made while the row is still
+# assigned is overwritten (the #1703 exemption lets the assigned Worker through).
+# Every at-rest write door therefore refuses an assigned row ``server_assigned``
+# and writes nothing, in each observed state the row reads at rest.
+
+_AT_REST_OBSERVED = [
+    ObservedState.STOPPED,
+    ObservedState.CRASHED,
+    ObservedState.UNKNOWN,
+]
+
+_FileDoor = Callable[
+    [FakeUnitOfWork, FakeFileStore, CommunityId, ServerId], Awaitable[None]
+]
+
+
+async def _door_write(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await WriteFile(uow=uow, control_plane=FakeControlPlane(), file_store=store)(
+        community_id=c, server_id=s, rel_path="ops.json", content=b"[1]"
+    )
+
+
+async def _door_rollback(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await RollbackFile(uow=uow, file_store=store)(
+        community_id=c, server_id=s, rel_path="ops.json", version_id="v1"
+    )
+
+
+async def _door_upload(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await UploadFile(uow=uow, file_store=store)(
+        community_id=c,
+        server_id=s,
+        dir_path=".",
+        filename="notes.txt",
+        content=b"x",
+        extract=False,
+    )
+
+
+async def _door_upload_extract(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await UploadFile(uow=uow, file_store=store)(
+        community_id=c,
+        server_id=s,
+        dir_path=".",
+        filename="pack.zip",
+        content=_zip_bytes({"notes.txt": b"x"}),
+        extract=True,
+    )
+
+
+async def _door_delete(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await DeleteFile(uow=uow, file_store=store)(
+        community_id=c, server_id=s, rel_path="ops.json"
+    )
+
+
+async def _door_make_dir(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await MakeDir(uow=uow, file_store=store)(
+        community_id=c, server_id=s, rel_path="datapacks"
+    )
+
+
+async def _door_rename(
+    uow: FakeUnitOfWork, store: FakeFileStore, c: CommunityId, s: ServerId
+) -> None:
+    await RenameFile(uow=uow, file_store=store)(
+        community_id=c, server_id=s, from_path="ops.json", to_path="ops-old.json"
+    )
+
+
+_FILE_DOORS: dict[str, _FileDoor] = {
+    "write": _door_write,
+    "rollback": _door_rollback,
+    "upload": _door_upload,
+    "upload-extract": _door_upload_extract,
+    "delete": _door_delete,
+    "make-dir": _door_make_dir,
+    "rename": _door_rename,
+}
+
+
+@pytest.mark.parametrize("observed", _AT_REST_OBSERVED)
+@pytest.mark.parametrize("door", list(_FILE_DOORS))
+async def test_an_at_rest_file_door_refuses_a_server_a_worker_still_holds(
+    door: str, observed: ObservedState
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    _seed(
+        uow,
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=DesiredState.STOPPED,
+            observed=observed,
+            worker=uuid.uuid4(),
+        ),
+    )
+    store = FakeFileStore()
+    store.files["ops.json"] = b"[]"
+    store.versions["ops.json"] = ["v1"]
+    store.version_bytes[("ops.json", "v1")] = b"[0]"
+
+    with pytest.raises(ServerAssignedError):
+        await _FILE_DOORS[door](uow, store, CommunityId(community), ServerId(server_id))
+
+    assert store.files == {"ops.json": b"[]"}
+    assert store.writes == []
+    assert store.retained == []
+    assert store.rollbacks == []
+    assert store.deleted_files == []
+    assert store.deleted_dirs == []
+    assert store.renamed_dirs == []
+    assert store.made_dirs == []

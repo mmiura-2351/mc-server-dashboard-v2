@@ -80,6 +80,7 @@ from mc_server_dashboard_api.identity.domain.value_objects import (
     UserId as IdentityUserId,
 )
 from mc_server_dashboard_api.servers.api.console_line import ConsoleLine
+from mc_server_dashboard_api.servers.api.server_assigned import server_assigned
 from mc_server_dashboard_api.servers.application.archive_validation import (
     ArchiveUploadAdmission,
 )
@@ -925,6 +926,14 @@ async def export_server(
                 recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
             )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker: the export would lack the
+        # final snapshot still in flight (issue #3998).
+        if not probing:
+            await _record_denied(
+                recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
+            )
+        raise server_assigned() from exc
     headers = {
         "Content-Disposition": content_disposition(f"{export.server_name}.zip"),
         # A per-user body is never stored, whichever credential fetched it
@@ -1014,6 +1023,12 @@ async def issue_export_download_grant(
             recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
         )
         raise _conflict("server_unsettled") from exc
+    except ServerAssignedError as exc:
+        # The pre-flight answers what the export would (issue #3998).
+        await _record_denied(
+            recorder, ops.SERVER_EXPORT, authorized, community_id, server_id
+        )
+        raise server_assigned() from exc
 
     grant = tokens.issue_download_grant(
         IdentityUserId(authorized.user_id.value), _export_grant_resource(request)
@@ -1119,6 +1134,10 @@ async def update_server(
         raise _not_found() from exc
     except ServerNotStoppedError as exc:
         raise _conflict("server_not_stopped") from exc
+    except ServerAssignedError as exc:
+        # At rest, but a stop still holds its Worker for the final snapshot,
+        # which would publish over the server.properties rewrite (issue #3998).
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
@@ -1185,12 +1204,6 @@ async def update_server(
     )
 
 
-_SERVER_ASSIGNED_DETAIL = (
-    "The server is still assigned to a Worker. Stop the server and wait for it "
-    "to be released before deleting it."
-)
-
-
 @router.delete(
     "/communities/{community_id}/servers/{server_id}",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -1225,11 +1238,7 @@ async def delete_server(
         # and the release (#1704). Not the retry-soon ``server_busy``: the hold can
         # last until the reconciler's release, so the detail names the remedy
         # (issue #3852).
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "server_assigned",
-            extensions={"detail": _SERVER_ASSIGNED_DETAIL},
-        ) from exc
+        raise server_assigned() from exc
     except ServerBusyError as exc:
         # A concurrent lifecycle op held the per-server lock past the acquire
         # budget (issue #876): a transient 409 the caller retries.
