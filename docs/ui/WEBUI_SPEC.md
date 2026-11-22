@@ -1546,9 +1546,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   stop released nothing, and it names what does release the server: the
   host's return with the save, the full reconcile wait without it (about 11
   minutes by default), and the release without saving. The client picks it
-  by the refusal it holds for the server, not by the response: the API's 503
-  for a held stop carries a `detail`, but a retry of the held server's
-  snapshot whose session ends answers a bare one and keeps the refusal. The
+  when it holds a refusal for the server or when the 503 carries a `detail`,
+  which of the lifecycle 503s only the API's answer to a held stop does: a
+  client that has yet to see the refusal still gets the `detail`, and a retry
+  of the held server's snapshot whose session ends answers a bare 503 and
+  keeps the refusal. The
   restart message says the system cannot restart the server
   and the restart is not sent again, so the operator restarts it once the host
   is back, or moves it: stop, stop again, start. Both say to move it only once

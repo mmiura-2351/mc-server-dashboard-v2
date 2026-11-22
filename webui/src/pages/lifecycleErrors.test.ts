@@ -504,26 +504,35 @@ describe("lifecycleErrorMessage", () => {
       },
     );
 
-    // The 503 the API answers a held stop carries a `detail`, but a retry
-    // whose session ends answers a bare one and keeps the refusal, so the
-    // caller's held state decides, not the body.
-    it("keys on the held state, not on the detail member", () => {
+    // A retry of a held server's snapshot whose session ends answers a bare
+    // `not_connected` 503 and keeps the refusal: the refusal the caller holds
+    // for the server says it is held.
+    it("maps a bare 503 to the held-offline message when the server is held", () => {
       const bare = new ApiError(503, {
         reason: "worker_unavailable",
         worker_state: "not_connected",
       });
-      const detailed = new ApiError(503, {
-        reason: "worker_unavailable",
-        worker_state: "not_connected",
-        detail: "The server's Worker refused its final snapshot …",
-      });
       expect(lifecycleErrorMessage(bare, "stop", "busy")).toBe(
         "dashboard.lifecycle.stopHeldWorkerOffline",
       );
-      expect(lifecycleErrorMessage(detailed, "stop", null)).toBe(
-        "dashboard.lifecycle.stopWorkerOffline",
-      );
     });
+
+    // Of the lifecycle 503s, only the API's answer to a held stop carries a
+    // `detail`: it says the server is held to a caller that has yet to see
+    // the refusal.
+    it.each([null, undefined])(
+      "maps a 503 that carries a detail to the held-offline message (refusal %s)",
+      (refusal) => {
+        const detailed = new ApiError(503, {
+          reason: "worker_unavailable",
+          worker_state: "not_connected",
+          detail: "The server's Worker refused its final snapshot …",
+        });
+        expect(lifecycleErrorMessage(detailed, "stop", refusal)).toBe(
+          "dashboard.lifecycle.stopHeldWorkerOffline",
+        );
+      },
+    );
 
     it("keeps the offline-stop message for a server no refusal holds", () => {
       expect(lifecycleErrorMessage(offline, "stop", null)).toBe(

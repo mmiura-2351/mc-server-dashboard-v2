@@ -405,10 +405,12 @@ const WORKER_NOT_CONNECTED_503_MESSAGE: Record<
 // it, or by the release without the snapshot, and the message names those
 // three (issue #4057).
 //
-// It keys on the caller's held state, not on the response. The API's 503 for
-// a held stop carries a `detail`, but a retry of the held server's snapshot
-// whose session ends answers a bare `not_connected` 503 and keeps the refusal,
-// so the same server is just as held after it.
+// It keys on the caller's held state or on the response, whichever shows the
+// server held. Of the lifecycle 503s, only the API's answer to a held stop
+// carries a `detail`, so it shows the server held to a caller that has yet to
+// see the refusal. A retry of the held server's snapshot whose session ends
+// answers a bare `not_connected` 503 instead and keeps the refusal, so there
+// the caller's held state shows it.
 const HELD_WORKER_NOT_CONNECTED_503_MESSAGE: Record<
   string,
   Partial<Record<LifecycleAction, TranslationKey>>
@@ -441,7 +443,8 @@ export function isEulaNotAccepted(error: unknown): boolean {
 /**
  * The toast for a failed lifecycle request. `refusal` is the final-snapshot
  * refusal the caller's server is held for (`finalSnapshotRefusal`), when the
- * caller knows it: a held server's offline stop is worded apart (issue #4057).
+ * caller knows it: a held server's offline stop is worded apart, whether the
+ * refusal or the 503's `detail` shows it held (issue #4057).
  */
 export function lifecycleErrorMessage(
   error: unknown,
@@ -467,7 +470,7 @@ export function lifecycleErrorMessage(
   if (error instanceof ApiError && error.status === 503) {
     if (error.reason !== undefined) {
       const held =
-        refusal != null
+        refusal != null || error.detail !== undefined
           ? verbSpecificMessage(
               HELD_WORKER_NOT_CONNECTED_503_MESSAGE,
               error.reason,
