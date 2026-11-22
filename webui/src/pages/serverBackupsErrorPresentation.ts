@@ -70,6 +70,10 @@ export function backupErrorPresentation(
       // sending it again shortly is the remedy, so the 503 below would blame a
       // server host that is fine.
       return "backups.error.uploadBusy";
+    case "database_unavailable":
+      // The API's database is down (issue #4010): the 503 below would blame a
+      // server host that is fine.
+      return "common.databaseUnavailable";
     case CREDENTIAL_REQUIRED_FOR_BODY:
       // A 413 for a lapsed session the client's one refresh could not mend;
       // without this case the 413 below would call the archive too large.

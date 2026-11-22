@@ -35,6 +35,7 @@ async def test_a_database_with_no_connection_slot_left_is_transient() -> None:
     assert _DB_URL is not None
     role = f"mcsd_full_{uuid.uuid4().hex}"
     admin = create_engine(_DB_URL)
+    first_error: BaseException | None = None
     try:
         async with admin.begin() as conn:
             await conn.execute(
@@ -51,10 +52,21 @@ async def test_a_database_with_no_connection_slot_left_is_transient() -> None:
                     await conn.execute(text("SELECT 1"))
         finally:
             await full.dispose()
+    except BaseException as exc:
+        first_error = exc
+        raise
     finally:
-        async with admin.begin() as conn:
-            await conn.execute(text(f"DROP ROLE IF EXISTS {role}"))
-        await admin.dispose()
+        # A cleanup that fails after the test did must not hide why it did.
+        try:
+            try:
+                async with admin.begin() as conn:
+                    await conn.execute(text(f"DROP ROLE IF EXISTS {role}"))
+            finally:
+                await admin.dispose()
+        except Exception as cleanup_error:
+            if first_error is None:
+                raise
+            first_error.add_note(f"dropping role {role} failed too: {cleanup_error!r}")
 
     orig = caught.value.orig
     assert type(caught.value) is sqlalchemy.exc.DBAPIError

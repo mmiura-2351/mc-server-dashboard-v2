@@ -32,6 +32,8 @@ const PLUGIN_REASON_PRESENTATION: Record<string, TranslationKey> = {
   // Also a 503, but the jar store rather than the server's Worker: the status
   // fallback below would blame an agent that is fine.
   storage_unavailable: "plugins.error.storageUnavailable",
+  // The API's database is down (issue #4010), for the same reason.
+  database_unavailable: "common.databaseUnavailable",
   not_found: "plugins.error.notFound",
   plugin_jar_missing: "plugins.error.jarMissing",
   // A 413 for a lapsed session the client's one refresh could not mend, not a

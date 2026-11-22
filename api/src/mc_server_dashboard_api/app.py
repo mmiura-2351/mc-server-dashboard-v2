@@ -39,6 +39,7 @@ from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
+    translate_connect_outages,
 )
 from mc_server_dashboard_api.core.adapters.installation import read_installation_id
 from mc_server_dashboard_api.core.adapters.metrics import HTTP_TELEMETRY
@@ -773,6 +774,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             pool_size=settings.database.pool_size,
             max_overflow=settings.database.max_overflow,
         )
+        # A refused connect is then typed, not the bare ``OSError`` a disk fault
+        # raises too, so the problem handler answers it 503 (issue #4010).
+        translate_connect_outages(engine)
         app.state.engine = engine
         # The data-plane assignment fence reads the server row while holding the
         # storage per-server publish lock (issue #3544), so it gets its own
@@ -781,6 +785,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         assignment_fence_engine = create_engine(
             settings.database.url, pool_size=1, max_overflow=0
         )
+        translate_connect_outages(assignment_fence_engine)
         app.state.assignment_fence_engine = assignment_fence_engine
         app.state.settings = settings
         app.state.storage = storage
