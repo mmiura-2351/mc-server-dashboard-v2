@@ -440,7 +440,9 @@ configuration edit that rewrites `server.properties`) is refused, since the
 snapshot would overwrite it, and so are a backup and an export, whose archive
 would lack that snapshot. Reads are served. The refusal is a
 `409 server_assigned`, and the operator retries once the server is released; a
-scheduled backup waits for the release by itself.
+scheduled backup waits for the release by itself, for up to
+`reconciler.grace_seconds`, and then records a skipped run
+([docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 5.14).
 
 ### 6.10 File Management
 
