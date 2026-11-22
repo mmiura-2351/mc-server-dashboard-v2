@@ -140,7 +140,7 @@ async def lock_actor_ceiling(
         [] if membership is None else await uow.memberships.list_role_ids(membership.id)
     )
     roles = await uow.roles.lock_by_ids(
-        [*role_ids, *roles_to_share], for_update=role_to_update
+        community_id, [*role_ids, *roles_to_share], for_update=role_to_update
     )
     ceiling: set[Permission] = set()
     if membership is not None:

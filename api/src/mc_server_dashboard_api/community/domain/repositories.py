@@ -228,9 +228,16 @@ class RoleRepository(abc.ABC):
 
     @abc.abstractmethod
     async def lock_by_ids(
-        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+        self,
+        community_id: CommunityId,
+        role_ids: Sequence[RoleId],
+        *,
+        for_update: RoleId | None = None,
     ) -> list[Role]:
         """Lock the roles of ``role_ids`` and ``for_update``; return those that exist.
+
+        Only roles of ``community_id`` are locked and returned; a role of another
+        community is neither (issue #4027).
 
         ``for_update`` is locked as :meth:`lock_by_id` does, every other role
         share-locked: a concurrent edit or deletion of it waits for this

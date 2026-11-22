@@ -155,9 +155,13 @@ class _PausingRoleRepository(SqlAlchemyRoleRepository):
         return role
 
     async def lock_by_ids(
-        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+        self,
+        community_id: CommunityId,
+        role_ids: Sequence[RoleId],
+        *,
+        for_update: RoleId | None = None,
     ) -> list[Role]:
-        roles = await super().lock_by_ids(role_ids, for_update=for_update)
+        roles = await super().lock_by_ids(community_id, role_ids, for_update=for_update)
         await self._pause.hold("role-pass")
         return roles
 

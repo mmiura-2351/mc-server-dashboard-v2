@@ -293,7 +293,9 @@ class AssignRole:
                 roles_to_share=[role_id],
             )
             # Re-reads the role the ceiling's pass already holds.
-            role = next(iter(await self.uow.roles.lock_by_ids([role_id])), None)
+            role = next(
+                iter(await self.uow.roles.lock_by_ids(community_id, [role_id])), None
+            )
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
 
