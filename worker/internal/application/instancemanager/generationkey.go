@@ -55,8 +55,8 @@ const maxWarnedUnverified = 256
 
 // GenerationKey is the key the Worker signs and verifies its generation markers with.
 // A key that could not be loaded is UNUSABLE: no marker verifies under it, so every
-// start hydrates, and a marker written under it is still written — the launch guard
-// needs one — but in a form that never verifies. One GenerationKey serves the whole
+// held set is advertised at generation 0 and hydrates, and a marker written under it is
+// still written — the launch guard needs one — but in a form that never verifies. One GenerationKey serves the whole
 // process, so the warning about a marker that fails verification is logged once per
 // server.
 type GenerationKey struct {
@@ -78,9 +78,9 @@ func LoadGenerationKey(scratchDir string, log *slog.Logger) *GenerationKey {
 	key, err := loadOrCreateGenerationKey(scratchDir)
 	if err != nil {
 		if log != nil {
-			log.Error("generation key unusable: no generation marker is believed, so every start "+
-				"hydrates; the key is left as it is (remove it and restart the Worker to make a new "+
-				"one, see STORAGE.md Section 8)",
+			log.Error("generation key unusable: no generation marker is believed, so every held "+
+				"server is advertised at generation 0 and hydrates; the key is left as it is (remove "+
+				"it and restart the Worker to make a new one, see STORAGE.md Section 8)",
 				"path", filepath.Join(scratchDir, generationKeyFile), "error", err)
 		}
 		return &GenerationKey{}
@@ -89,15 +89,16 @@ func LoadGenerationKey(scratchDir string, log *slog.Logger) *GenerationKey {
 }
 
 // loadOrCreateGenerationKey reads the key in scratchDir, or creates it when there is
-// none. Both are done relative to the scratch root's descriptor and without following a
-// link.
+// none. Both are done relative to the scratch root's descriptor, and the key's name is
+// never followed as a link. The root itself is the operator's configured path, so a
+// link to it is followed, as the edit staging's open of it does.
 func loadOrCreateGenerationKey(scratchDir string) ([]byte, error) {
 	if err := os.MkdirAll(scratchDir, 0o750); err != nil {
 		return nil, err
 	}
-	dirFd, err := nofollow.OpenDir(scratchDir)
+	dirFd, err := nofollow.OpenAt(unix.AT_FDCWD, scratchDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return nil, &os.PathError{Op: "open", Path: scratchDir, Err: err}
 	}
 	defer func() { _ = unix.Close(dirFd) }()
 

@@ -2414,11 +2414,14 @@ name never holds a partial key.
   replaced tree aside as it does any other (Section 4.6).
 - **An unusable key** is one that exists but is not a regular file of exactly
   32 bytes, or cannot be read. The Worker logs an `ERROR` naming the path and
-  keeps running. It believes no marker, so every start hydrates, and it never
+  keeps running. It believes no marker, so every registration advertises each
+  held server at generation 0, which makes its next start hydrate. It never
   replaces the key, so the file stays as it was for inspection. It still writes
   markers, which keeps the launch guard satisfied, but declares no held
-  generation to the API. The remedy is to remove the file and restart the
-  Worker, which creates a new key at the cost above.
+  generation to the API. Within one session the API may still skip a later
+  start's hydrate on the store generation it read for the hydrate before. The
+  remedy is to remove the file and restart the Worker, which creates a new key
+  at the cost above.
 - **Upgrading** a Worker from a version that wrote bare-number markers
   invalidates them all in the same way: each held server hydrates once.
 

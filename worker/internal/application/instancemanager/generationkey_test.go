@@ -332,10 +332,11 @@ func describeKey(t *testing.T, path string) string {
 }
 
 // A key that exists but cannot be used is logged at ERROR and left as it is. Nothing
-// is believed under it, so every start hydrates, and it is never replaced by a fresh
-// key, which would leave the operator nothing to inspect. A start still succeeds: the
-// marker is still written, so the launch guard finds it, but the hydrate declares no
-// generation, since a marker the Worker cannot authenticate backs none.
+// is believed under it, so every held set reads as generation 0, and it is never
+// replaced by a fresh key, which would leave the operator nothing to inspect. A start
+// still succeeds: the marker is still written, so the launch guard finds it, but the
+// hydrate declares no generation, since a marker the Worker cannot authenticate backs
+// none.
 func TestACorruptGenerationKeyIsNeitherBelievedNorReplaced(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -387,12 +388,15 @@ func TestACorruptGenerationKeyIsNeitherBelievedNorReplaced(t *testing.T) {
 			}
 
 			dir := seedScratch(t, m, s1)
+			if err := os.Remove(filepath.Join(dir, generationFile)); err != nil {
+				t.Fatal(err)
+			}
 			res := m.Handle(context.Background(), hydrateCmd())
 			if !res.Success || res.HeldGeneration != nil {
 				t.Fatalf("hydrate = %+v, want success declaring no generation", res)
 			}
-			if err := generationMarkerPresent(dir); err != nil {
-				t.Fatalf("no marker after the hydrate: %v", err)
+			if marker, err := os.ReadFile(filepath.Join(dir, generationFile)); err != nil || string(marker) != "7" {
+				t.Fatalf("marker after the hydrate = %q, %v; want the unsigned 7 it wrote", marker, err)
 			}
 			if res := m.Handle(context.Background(), startCmd()); !res.Success {
 				t.Fatalf("start = %+v, want success: the launch guard needs only the marker", res)
@@ -407,6 +411,27 @@ func TestACorruptGenerationKeyIsNeitherBelievedNorReplaced(t *testing.T) {
 				t.Fatalf("the key was replaced: %q, then %q", before, after)
 			}
 		})
+	}
+}
+
+// A scratch root reached through a symlink is the operator's own path, so the key is
+// loaded through it as through any other: only the key's own name is not followed.
+func TestTheGenerationKeyLoadsThroughASymlinkedScratchRoot(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	if err := os.Symlink(target, scratch); err != nil {
+		t.Fatal(err)
+	}
+	h := &syncSlogHandler{}
+	key := LoadGenerationKey(scratch, slog.New(h))
+	if !key.usable() {
+		t.Fatalf("key loaded through a symlinked scratch root is unusable; logged %+v", h.snapshot())
+	}
+	if info, err := os.Lstat(filepath.Join(target, ".generation-key")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("key in the scratch root's target = %v, %v; want a regular file", info, err)
 	}
 }
 

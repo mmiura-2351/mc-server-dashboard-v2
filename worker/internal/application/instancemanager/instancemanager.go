@@ -197,7 +197,7 @@ type Manager struct {
 
 	// genKey signs every generation marker this manager writes and verifies every one
 	// it reads (issue #3349). It is unusable until WithGenerationKey is called: no
-	// marker is believed then, so every start hydrates.
+	// marker is believed then, so every held set is advertised at generation 0.
 	genKey *GenerationKey
 
 	clock           session.Clock
