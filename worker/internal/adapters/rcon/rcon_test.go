@@ -535,11 +535,28 @@ func TestExecuteTimeoutIsNotADroppedCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
 
-	_, err = c.Execute(context.Background(), "list")
-	if err == nil || errors.Is(err, execution.ErrCommandDropped) {
-		t.Fatalf("Execute error = %v, want a timeout that is not execution.ErrCommandDropped", err)
+	var wg sync.WaitGroup
+	done := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := c.Execute(context.Background(), "list")
+		done <- err
+	}()
+	// Close the connection on cleanup so a hung Execute unblocks, then wait for
+	// the goroutine to finish, as in TestExecuteDefaultDeadlineUnblocksSilentServer.
+	t.Cleanup(func() {
+		_ = c.Close()
+		wg.Wait()
+	})
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, execution.ErrCommandDropped) {
+			t.Fatalf("Execute error = %v, want a timeout that is not execution.ErrCommandDropped", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute hung past the default deadline against a silent server")
 	}
 }
 
@@ -668,10 +685,28 @@ func TestExecutePoisonsConnAfterIOError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
 
-	if _, err := c.Execute(context.Background(), "save-off"); err == nil {
-		t.Fatal("first Execute returned nil against a silent server, want timeout error")
+	var wg sync.WaitGroup
+	done := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := c.Execute(context.Background(), "save-off")
+		done <- err
+	}()
+	// Close the connection on cleanup so a hung Execute unblocks, then wait for
+	// the goroutine to finish, as in TestExecuteDefaultDeadlineUnblocksSilentServer.
+	t.Cleanup(func() {
+		_ = c.Close()
+		wg.Wait()
+	})
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("first Execute returned nil against a silent server, want timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Execute hung past the default deadline against a silent server")
 	}
 
 	// The connection is now poisoned; the next Execute must fail fast without
