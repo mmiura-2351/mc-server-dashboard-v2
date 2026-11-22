@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import errno
 import json
 import os
 from dataclasses import replace
@@ -199,10 +200,11 @@ async def test_apply_stops_when_the_store_stops_being_this_databases_mid_pass(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # The fs root's mount drops after the first deletion and leaves the empty
-    # mount point, so every later HEAD answers NotFound, the sound row's too.
-    # The marker went with the mount: the check before the next deletion
-    # refuses, the command exits 2, and the sound row is kept.
+    # The fs root's mount drops after the first deletion, before the next
+    # HEAD, and leaves the empty mount point, so every later HEAD answers
+    # NotFound, the sound row's too. The marker went with the mount: the check
+    # before the next deletion refuses, the command exits 2, and the sound row
+    # is kept.
     root = tmp_path / "root"
     root.mkdir()
     community, server = await _seed_server(engine)
@@ -222,22 +224,25 @@ async def test_apply_stops_when_the_store_stops_being_this_databases_mid_pass(
     _point_the_command_at(monkeypatch, root)
 
     unmounted = tmp_path / "unmounted"
+    heads = 0
 
-    class _MountDropsAfterTheFirstDelete(StorageBackupStoreAdapter):
-        async def delete(
+    class _MountDropsBeforeTheSecondHead(StorageBackupStoreAdapter):
+        async def size(
             self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
-        ) -> None:
-            await super().delete(
-                community_id=community_id, server_id=server_id, storage_ref=storage_ref
-            )
-            if not unmounted.exists():
+        ) -> int:
+            nonlocal heads
+            heads += 1
+            if heads == 2:
                 root.rename(unmounted)
                 root.mkdir()
+            return await super().size(
+                community_id=community_id, server_id=server_id, storage_ref=storage_ref
+            )
 
     monkeypatch.setattr(
         integrity_sweep_cli,
         "StorageBackupStoreAdapter",
-        _MountDropsAfterTheFirstDelete,
+        _MountDropsBeforeTheSecondHead,
     )
 
     # ``main`` runs its own event loop, so it runs in a thread of its own.
@@ -249,6 +254,63 @@ async def test_apply_stops_when_the_store_stops_being_this_databases_mid_pass(
     assert status == 2
     assert await _row_ids(engine) == {sound.id}
     assert "dangling backups: refusing to delete: " in capsys.readouterr().err
+
+
+@pytest.mark.timeout(6 * 10 + 30)
+@pytest.mark.usefixtures("app_log_handler_restored")
+async def test_an_outage_reading_the_marker_before_a_deletion_stops_the_pass(
+    engine: AsyncEngine,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The marker reads before the pass and before the first deletion, then the
+    # store fails on it. The pass stops before the second deletion, with one
+    # line and exit 1 rather than a traceback, and that row is kept.
+    community, server = await _seed_server(engine)
+    # Newest first: ``first`` is checked, and deleted, before ``second``.
+    first = _row(server, "no-such-archive-1")
+    second = replace(
+        _row(server, "no-such-archive-2"), created_at=_NOW - dt.timedelta(days=1)
+    )
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(first)
+        await uow.backups.add(second)
+        await uow.commit()
+    installation = await read_installation_id(factory)
+    (tmp_path / ownership.OWNER_MARKER).write_text(
+        json.dumps({"installation_id": str(installation)})
+    )
+    _point_the_command_at(monkeypatch, tmp_path)
+    reads = 0
+
+    class _MarkerReadFailsFromTheThird(ownership.FsStoreOwnership):
+        def _read_marker(self) -> bytes | None:
+            nonlocal reads
+            reads += 1
+            if reads > 2:
+                raise OSError(errno.EIO, "Input/output error")
+            return super()._read_marker()
+
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership", _MarkerReadFailsFromTheThird
+    )
+
+    status = await asyncio.to_thread(
+        integrity_sweep_cli.main,
+        ["--delete-dangling", "--apply", "--server", str(server.value)],
+    )
+
+    assert status == 1
+    assert await _row_ids(engine) == {second.id}
+    err = capsys.readouterr().err
+    assert (
+        "dangling backups aborted: the store owner marker could not be read "
+        "(OSError: [Errno 5] Input/output error), so the pass stopped. Rows "
+        "already deleted this run stay deleted, and it is safe to re-run.\n"
+    ) in err
+    assert "Traceback" not in err
 
 
 async def test_a_backup_whose_delete_is_between_its_removals_is_skipped_busy(

@@ -36,23 +36,35 @@ alone does not prove a store outage.
 ``--delete-dangling`` runs :class:`DeleteDanglingBackups` instead of the sweep
 (issue #4107): it lists the backup rows whose archive the store reports missing,
 with a HEAD per row rather than a full read, and deletes nothing. ``--apply``
-deletes the rows it lists, each audited as ``backup:delete_dangling``; it runs
-only while the store owner marker names this database's installation
-(STORAGE.md Section 4.3), since a store that is not this database's answers
-NotFound for every row. The marker is checked before the pass and again before
-each deletion. ``--server`` scopes it the same way::
+deletes the rows it lists, each audited as ``backup:delete_dangling``. It deletes
+the row only and sends the store no archive delete (issue #4158), so a NotFound
+that was false leaves the archive in the store, with no row. It runs only while
+the store owner marker names this database's installation (STORAGE.md Section
+4.3), since a store that is not this database's answers NotFound for every row.
+The marker is checked before the pass and again before each deletion.
+``--server`` scopes it the same way::
 
     cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
         --delete-dangling [--apply] [--server <server-uuid>]
 
+The marker check does not catch three cases, in which a HEAD answers NotFound
+for an archive that exists while the marker names this installation (issue
+#4158): a subtree below the fs root that goes missing while the root's marker
+still reads, such as a mount or a symlink of its own under ``communities/``; a
+store that is away for a row's HEAD and back for the marker read; and a store
+that carries this installation's marker but is not the API's, such as the old fs
+root after a move to the object backend, which needs a configuration other than
+the API's. The row is then deleted and its archive kept. Review the dry run's
+list before ``--apply``.
+
 Its exit status keeps the meanings above: 0 when the pass completed; 1 when it
 completed but skipped a row the store could not answer for (an outage, a
-timeout), or stopped when deleting an archive met an outage; 2 on a bad
-argument, ``--apply`` without ``--delete-dangling`` among them, on a bad
-configuration, or when ``--apply`` refuses a store not marked for this
-database, before the pass or mid-pass; 3 when the database failed or a
-lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
-safe.
+timeout), or when ``--apply`` stopped because the store owner marker could not
+be read, before the pass or before a deletion; 2 on a bad argument, ``--apply``
+without ``--delete-dangling`` among them, on a bad configuration, or when
+``--apply`` refuses a store not marked for this database, before the pass or
+mid-pass; 3 when the database failed or a lifecycle lock was lost. A stop says
+so in one line. Rows already deleted stay deleted, so a re-run is safe.
 """
 
 from __future__ import annotations
@@ -188,6 +200,13 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
         await engine.dispose()
 
 
+class _OwnerMarkerUnreadableError(Exception):
+    """The store owner marker could not be read, so whose store it is is unknown.
+
+    The message names the read's error (issue #4158).
+    """
+
+
 @dataclass(frozen=True)
 class _MarkedForThisDatabase:
     """The ``StoreOwnership`` port for a command that never claims the store.
@@ -195,13 +214,19 @@ class _MarkedForThisDatabase:
     The store's own ``refusal`` always refuses in a process that never called
     ``claim``, so this asks whether the marker names ``installation_id``, the
     installation of the database the command was pointed at (issue #4107).
+    A marker read that fails, however it fails, raises
+    :class:`_OwnerMarkerUnreadableError`: the pass cannot tell whether the
+    store is this database's, so it deletes nothing more (issue #4158).
     """
 
     ownership: FsStoreOwnership | ObjectStoreOwnership
     installation_id: uuid.UUID
 
     async def refusal(self) -> str | None:
-        return await self.ownership.refusal_for(self.installation_id)
+        try:
+            return await self.ownership.refusal_for(self.installation_id)
+        except Exception as exc:
+            raise _OwnerMarkerUnreadableError(f"{type(exc).__name__}: {exc}") from exc
 
 
 async def run_delete_dangling(
@@ -377,13 +402,11 @@ def _delete_dangling(
     except StoreNotOwnedError as exc:
         sys.stderr.write(f"dangling backups: refusing to delete: {exc}\n")
         return 2
-    except BackupStorageUnavailableError as exc:
-        # The HEAD answered NotFound, then the (idempotent) archive delete of
-        # the row met an outage: the row was not deleted.
+    except _OwnerMarkerUnreadableError as exc:
+        _LOG.debug("dangling backups: the owner marker read failed", exc_info=True)
         sys.stderr.write(
-            f"dangling backups aborted: the object store failed while deleting "
-            f"the archive of a dangling row on server {exc}, {stopped} it is safe "
-            f"to re-run.\n"
+            f"dangling backups aborted: the store owner marker could not be read "
+            f"({exc}), {stopped} it is safe to re-run.\n"
         )
         return 1
     except LifecycleLockLostError as exc:

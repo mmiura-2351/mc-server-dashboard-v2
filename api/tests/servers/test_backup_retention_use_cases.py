@@ -17,6 +17,7 @@ from dataclasses import replace
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 
 from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
@@ -525,6 +526,56 @@ async def test_a_store_error_while_sizing_fails_the_prune_before_any_deletion(
         if r.levelno == logging.WARNING and str(env.server.id.value) in r.getMessage()
     ]
     assert warned
+
+
+class _DeniedStore(FakeBackupArchiveStore):
+    """Answers a HEAD of a ref in ``denied`` with S3's 403, which names no key."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.denied: set[str] = set()
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        if storage_ref in self.denied:
+            self.size_calls.append(storage_ref)
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
+                "HeadObject",
+            )
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+async def test_the_sizing_warning_names_the_backup_the_store_failed_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The HEADs stop at the first failure, whose error may name no key, so the
+    # WARNING names the backup that failed: its server, id and storage ref.
+    store = _DeniedStore()
+    env = _Env(store=store)
+    await env.seed_retention({"keep_last": 1})
+    sized = _unsized(_backup(env.server.id, _NOW))
+    failed = _unsized(_backup(env.server.id, _NOW - dt.timedelta(days=1)))
+    for backup in (sized, failed):
+        env.seed_backup(backup)
+    store.denied.add(failed.storage_ref)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ClientError):
+            await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert store.size_calls == [sized.storage_ref, failed.storage_ref]
+    [warning] = [
+        r.getMessage() for r in caplog.records if "could not be sized" in r.getMessage()
+    ]
+    assert str(env.server.id.value) in warning
+    assert str(failed.id.value) in warning
+    assert failed.storage_ref in warning
+    assert str(sized.id.value) not in warning
+    assert sized.storage_ref not in warning
 
 
 async def test_a_database_failure_writing_a_size_is_not_logged_as_unsized(

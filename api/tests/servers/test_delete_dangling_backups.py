@@ -36,6 +36,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupNotFoundError,
     BackupStorageUnavailableError,
     LifecycleLockLostError,
     ServerBusyError,
@@ -99,12 +100,22 @@ def _backup(server_id: ServerId, ref: str, *, minutes: int = 0) -> Backup:
 
 
 class _HeadRecordingStore(FakeBackupArchiveStore):
-    """A :class:`FakeBackupArchiveStore` that puts each size HEAD on ``events``."""
+    """A :class:`FakeBackupArchiveStore` that puts each size HEAD on ``events``.
+
+    A HEAD of a ref in ``false_not_found`` answers NotFound although the store
+    holds its archive, as a store that flaps between two requests can.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.false_not_found: set[str] = set()
 
     async def size(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> int:
         self.events.append((server_id, "head-archive"))
+        if storage_ref in self.false_not_found:
+            raise BackupNotFoundError(storage_ref)
         return await super().size(
             community_id=community_id, server_id=server_id, storage_ref=storage_ref
         )
@@ -113,10 +124,10 @@ class _HeadRecordingStore(FakeBackupArchiveStore):
 class _OwnerMarker:
     """The store owner marker, as the pass's ``StoreOwnership`` port reads it.
 
-    It names this database's installation until ``store`` has deleted
-    ``lost_after`` archives, as when the fs root's mount drops or the bucket
-    goes mid-pass. Each check is put on the store's ``events``, so a test can
-    place it on the timeline.
+    It names this database's installation for the first ``lost_after`` checks,
+    one before each deletion, and is gone after them, as when the fs root's
+    mount drops or the bucket goes mid-pass. Each check is put on the store's
+    ``events``, so a test can place it on the timeline.
     """
 
     def __init__(
@@ -129,10 +140,12 @@ class _OwnerMarker:
         self.server_id = server_id
         self.store = store
         self.lost_after = lost_after
+        self.checks = 0
 
     async def refusal(self) -> str | None:
         self.store.events.append((self.server_id, "owner-check"))
-        if self.lost_after is not None and len(self.store.deleted) >= self.lost_after:
+        self.checks += 1
+        if self.lost_after is not None and self.checks > self.lost_after:
             return "the store owner marker is gone"
         return None
 
@@ -224,13 +237,13 @@ async def test_apply_deletes_each_dangling_row_under_the_lock_and_audits_it() ->
     assert env.rows() == {sound.id}
     # Each row is HEADed inside a hold of its own. Each deletion falls in that
     # hold, after a check that the store is still this database's and a check
-    # that the lock is still held; the sound row's hold deletes nothing.
+    # that the lock is still held, and deletes the row only: the store is sent
+    # no archive delete. The sound row's hold deletes nothing.
     deletion = [
         (sid, "acquire"),
         (sid, "head-archive"),
         (sid, "owner-check"),
         (sid, "check"),
-        (sid, "delete-archive"),
         (sid, "delete-row"),
         (sid, "release"),
     ]
@@ -243,6 +256,24 @@ async def test_apply_deletes_each_dangling_row_under_the_lock_and_audits_it() ->
         assert event.actor_id is None
         assert event.community_id == _COMMUNITY.value
         assert event.target_type == TARGET_BACKUP
+
+
+async def test_a_false_not_found_deletes_the_row_and_keeps_the_archive() -> None:
+    # A HEAD can answer NotFound for an archive the store still holds, as a
+    # store that flaps can. The pass deletes the row only, so the archive
+    # survives in the store, with no row, rather than going with it.
+    sid = ServerId.new()
+    row = _backup(sid, "flapped")
+    env = _Env([_server(sid)], [row], missing=set())
+    env.store.false_not_found.add("flapped")
+
+    report = await env.delete(apply=True)
+
+    assert [b.id for b in report.dangling] == [row.id]
+    assert env.rows() == set()
+    assert "flapped" in env.store.archives
+    assert env.store.deleted == []
+    assert [e.target_id for e in env.audit.events] == [row.id.value]
 
 
 async def test_a_store_that_stops_being_this_databases_mid_pass_stops_it() -> None:

@@ -1058,10 +1058,11 @@ async def _delete_archive_then_row(
 ) -> None:
     """Delete a backup's archive first, then its metadata row (module docstring).
 
-    The single delete path (epic #649 constraint): :class:`DeleteBackup`, the
-    retention prune (:class:`PruneScheduledBackups`, issue #1841) and the
-    dangling-row repair (:class:`DeleteDanglingBackups`, issue #4107) all run
+    The single delete path (epic #649 constraint): :class:`DeleteBackup` and the
+    retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
     through here, each under the per-server lifecycle lock it already holds.
+    The dangling-row repair (:class:`DeleteDanglingBackups`) deletes the row
+    only, of a backup whose archive the store reports missing (issue #4158).
     The archive delete is idempotent, so a crash between the two leaves a
     re-deletable dangling row (not harmless until then, see the module
     docstring), never an orphaned archive. Both run only once ``lock`` confirms
@@ -1094,8 +1095,8 @@ class PruneScheduledBackups:
     their sizes recorded: a legacy row whose archive exists then ranks as the
     sized row it is. A row whose archive the store reports missing stays NULL,
     so it ranks last. Any other store failure stops the prune before it selects
-    or deletes anything, with a WARNING, rather than rank on partial
-    information; the next run retries.
+    or deletes anything, with a WARNING that names the backup, rather than rank
+    on partial information; the next run retries.
 
     Runs under the same per-server :class:`LifecycleLock` that
     :class:`RestoreBackup` / :class:`DeleteBackup` hold, so a backup can never
@@ -1136,21 +1137,27 @@ class PruneScheduledBackups:
                 )
                 return []
             scheduled = [b for b in rows if b.source is BackupSource.SCHEDULED]
-            try:
-                sizes = await _probe_null_sizes(
-                    self.backup_store, community_id, server_id, scheduled
-                )
-            except Exception as exc:
-                _LOG.warning(
-                    "retention prune of server %s stopped before selecting "
-                    "anything: a NULL-size scheduled backup could not be sized "
-                    "(%s: %s), and the ranking needs its size. The next run "
-                    "retries.",
-                    server_id.value,
-                    type(exc).__name__,
-                    exc,
-                )
-                raise
+            sizes: dict[BackupId, int] = {}
+            # One row at a time, so the WARNING names the backup the store
+            # failed on: the error itself may name no key (issue #4158).
+            for backup in scheduled:
+                try:
+                    sizes |= await _probe_null_sizes(
+                        self.backup_store, community_id, server_id, [backup]
+                    )
+                except Exception as exc:
+                    _LOG.warning(
+                        "retention prune of server %s stopped before selecting "
+                        "anything: NULL-size scheduled backup %s (storage_ref "
+                        "%s) could not be sized (%s: %s), and the ranking needs "
+                        "its size. The next run retries.",
+                        server_id.value,
+                        backup.id.value,
+                        backup.storage_ref,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    raise
             await _record_sizes(self.uow, sizes)
             pruned = backups_to_prune(policy, scheduled, self.clock.now())
             for backup in pruned:
@@ -1220,11 +1227,14 @@ class DeleteDanglingBackups:
     way (an outage, a timeout, a 5xx) skips the row, which is never deleted on
     it.
 
-    With ``apply``, each dangling row is deleted in the same hold through
-    :func:`_delete_archive_then_row`, the single delete path, whose archive
-    delete is a no-op for an archive already gone. Each deletion is audited
-    post-commit as ``backup:delete_dangling`` with ``actor_id``, ``None`` when
-    run headless, as the sweep audits its verdicts.
+    With ``apply``, each dangling row is deleted in the same hold, once the
+    lock is confirmed still held. Only the row is deleted; the store is sent no
+    archive delete (issue #4158). A true dangling row has no archive to delete,
+    and a NotFound that was false, from a store that flapped, would take the
+    real archive with the row. A false one instead leaves the archive in the
+    store with no row: no listing shows it, and the server's delete prunes it.
+    Each deletion is audited post-commit as ``backup:delete_dangling`` with
+    ``actor_id``, ``None`` when run headless, as the sweep audits its verdicts.
 
     Before each deletion, in the same hold, ``ownership`` is asked whether the
     store is still this database's (STORAGE.md Section 4.3). A store that stops
@@ -1318,15 +1328,12 @@ class DeleteDanglingBackups:
         refusal = await self.ownership.refusal()
         if refusal is not None:
             raise StoreNotOwnedError(refusal)
-        await _delete_archive_then_row(
-            self.uow,
-            self.backup_store,
-            lock,
-            community_id=server.community_id,
-            server_id=server.id,
-            backup_id=backup.id,
-            storage_ref=backup.storage_ref,
-        )
+        # The row only: a NotFound that was false, from a store that flapped,
+        # would take the real archive with the row (issue #4158).
+        await lock.ensure_held()
+        async with self.uow:
+            await self.uow.backups.delete(backup.id)
+            await self.uow.commit()
         _LOG.info(
             "dangling backups: deleted backup %s of server %s, whose archive the "
             "store reports missing",
