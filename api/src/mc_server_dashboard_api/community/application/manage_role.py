@@ -208,6 +208,8 @@ class DeleteRole:
     the role that keeps it administrable (the same invariant the membership context
     guards — issue #71). A role outside this community is reported as not-found. A
     non-preset role's ``membership_role`` rows cascade via the DB FK (Section 10).
+    So is a role a concurrent deletion of it or of its community removed while
+    the DELETE waited for it (issue #4033).
     """
 
     uow: UnitOfWork
@@ -219,5 +221,6 @@ class DeleteRole:
                 raise RoleNotFoundError(str(role_id.value))
             if role.is_preset:
                 raise PresetRoleNotEditableError(str(role_id.value))
-            await self.uow.roles.delete(role_id)
+            if not await self.uow.roles.delete(role_id):
+                raise RoleNotFoundError(str(role_id.value))
             await self.uow.commit()

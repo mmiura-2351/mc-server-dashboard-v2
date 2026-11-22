@@ -27,6 +27,13 @@ Two races take a third write: a rename onto the name of a role the deletion has
 deleted, while a role deletion holds the deletion back; and a role deletion,
 which takes no hold, stalled mid-cascade with the deletion waiting for it.
 
+Deletions of other contexts race it too (#4033): a server deletion, which
+locks its server and then cascades to the server's grants, and an account
+deletion, which cascades to the account's membership and grants. A community
+that holds a server -- as any community with a grant does -- is refused before
+its DELETE cascades, so it takes none of those rows. A role deletion and a grant
+revocation whose row a concurrent deletion removed answer their own not-found.
+
 One race takes no deletion: two permission edits, each of the other
 community's Owner role. Each edit's role locks match its own community, so the
 two hold nothing the other waits for (issue #4027).
@@ -67,7 +74,10 @@ from mc_server_dashboard_api.community.adapters.user_directory import (
 from mc_server_dashboard_api.community.application.manage_community import (
     DeleteCommunity,
 )
-from mc_server_dashboard_api.community.application.manage_grant import CreateGrant
+from mc_server_dashboard_api.community.application.manage_grant import (
+    CreateGrant,
+    RevokeGrant,
+)
 from mc_server_dashboard_api.community.application.manage_membership import (
     AddMember,
     AssignRole,
@@ -88,6 +98,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     CommunityNotFoundError,
     GrantTargetNotMemberError,
     PermissionCeilingExceededError,
+    ResourceGrantNotFoundError,
     RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -101,7 +112,23 @@ from mc_server_dashboard_api.core.adapters.database import create_session_factor
 from mc_server_dashboard_api.identity.adapters.unit_of_work import (
     SqlAlchemyUnitOfWork as IdentityUnitOfWork,
 )
+from mc_server_dashboard_api.identity.application.admin_delete_user import (
+    AdminDeleteUser,
+)
+from mc_server_dashboard_api.identity.domain.value_objects import (
+    UserId as IdentityUserId,
+)
+from mc_server_dashboard_api.servers.adapters.unit_of_work import (
+    SqlAlchemyUnitOfWork as ServersUnitOfWork,
+)
+from mc_server_dashboard_api.servers.application.manage_server import DeleteServer
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    CommunityId as ServersCommunityId,
+)
+from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from tests.identity.fakes import FakeClock
 from tests.integration.races import SETTLE_TIMEOUT, await_settled, race_database
+from tests.servers.fakes import FakeBackupArchiveStore
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -847,17 +874,14 @@ async def test_ceiling_of_a_removed_member_of_a_live_community_stays_forbidden(
         )
 
 
-async def test_grant_committed_after_its_community_was_deleted_reports_not_found(
-    engine: AsyncEngine,
-) -> None:
-    # Not reachable through CreateGrant (see the module docstring), so staged
-    # directly. The INSERT fails both its community key and its membership key
-    # (the membership went with the community); PostgreSQL checks them in its
-    # constraint triggers' name order, which embeds their OIDs, so either may
-    # be the one reported, and both answer the same 404. The server lives in
-    # another community, which a community holding one could not be deleted
-    # without.
-    world = await _world(engine)
+async def _grant_on_another_communitys_server(world: _World) -> ResourceGrant:
+    """The member's grant in this community on a server of another one, unsaved.
+
+    The server lives in another community, which a community holding one could
+    not be deleted without. :class:`CreateGrant` refuses such a grant, so a test
+    that needs one stages it directly.
+    """
+
     async with SqlAlchemyUnitOfWork(world.factory) as uow:
         membership = await uow.memberships.get_by_user_and_community(
             world.member, world.community_id
@@ -867,7 +891,7 @@ async def test_grant_committed_after_its_community_was_deleted_reports_not_found
         uow=SqlAlchemyUnitOfWork(world.factory), clock=SystemClock()
     )(name="other", owner_user_id=world.owner)
     server_id = uuid.uuid4()
-    async with engine.begin() as conn:
+    async with world.engine.begin() as conn:
         await conn.execute(
             text(
                 "INSERT INTO server "
@@ -879,10 +903,8 @@ async def test_grant_committed_after_its_community_was_deleted_reports_not_found
             ),
             {"id": server_id, "cid": other.id.value},
         )
-    await _delete_community(world)
-
     now = SystemClock().now()
-    grant = ResourceGrant(
+    return ResourceGrant(
         id=ResourceGrantId.new(),
         membership_id=membership.id,
         user_id=world.member,
@@ -893,8 +915,343 @@ async def test_grant_committed_after_its_community_was_deleted_reports_not_found
         created_at=now,
         updated_at=now,
     )
+
+
+async def test_grant_committed_after_its_community_was_deleted_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # Not reachable through CreateGrant (see the module docstring), so staged
+    # directly. The INSERT fails both its community key and its membership key
+    # (the membership went with the community); PostgreSQL checks them in its
+    # constraint triggers' name order, which embeds their OIDs, so either may
+    # be the one reported, and both answer the same 404.
+    world = await _world(engine)
+    grant = await _grant_on_another_communitys_server(world)
+    await _delete_community(world)
+
     with pytest.raises((CommunityNotFoundError, GrantTargetNotMemberError)):
         async with SqlAlchemyUnitOfWork(world.factory) as uow:
             await uow.resource_grants.add(grant)
             await uow.commit()
+    assert await _count(engine, "resource_grant") == 0
+
+
+async def _delete_builders(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
+    await DeleteRole(uow=uow)(community_id=world.community_id, role_id=world.builders)
+    return None
+
+
+async def test_role_deletion_racing_an_uncommitted_deletion_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The role deletion's pre-read still sees the role; its DELETE waits for the
+    # deletion and then matches nothing, which is the role's 404, not a 204.
+    world = await _world(engine)
+
+    outcome = await _run_racing_an_uncommitted_deletion(world, _delete_builders)
+
+    assert isinstance(outcome, RoleNotFoundError), outcome
+
+
+async def test_grant_revocation_racing_an_uncommitted_deletion_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The revocation's pre-read still sees the grant; its DELETE waits for the
+    # deletion and then matches nothing. No community deletion through the use
+    # cases removes a grant -- a grant names a server of its community, and a
+    # community holding one is refused before it cascades -- so the grant is
+    # staged on another community's server.
+    world = await _world(engine)
+    grant = await _grant_on_another_communitys_server(world)
+    async with SqlAlchemyUnitOfWork(world.factory) as uow:
+        await uow.resource_grants.add(grant)
+        await uow.commit()
+
+    async def revoke(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
+        await RevokeGrant(uow=uow)(community_id=world.community_id, grant_id=grant.id)
+        return None
+
+    outcome = await _run_racing_an_uncommitted_deletion(world, revoke)
+
+    assert isinstance(outcome, ResourceGrantNotFoundError), outcome
+    assert await _count(engine, "resource_grant") == 0
+
+
+async def test_grant_revocation_racing_an_uncommitted_member_removal_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # A member removal cascades to the member's grants, so a revocation of one
+    # waits for the removal and then matches nothing.
+    world = await _world(engine)
+    await _add_server(world)
+    grant = await _create_grant(world, SqlAlchemyUnitOfWork(world.factory))
+    assert isinstance(grant, ResourceGrant)
+
+    async def revoke(uow: SqlAlchemyUnitOfWork) -> None:
+        await RevokeGrant(uow=uow)(community_id=world.community_id, grant_id=grant.id)
+
+    pause = _Pause()
+    removal = asyncio.create_task(
+        _remove_member(
+            world,
+            _UnitOfWork(world.factory, pause=pause, pause_after="memberships.delete"),
+        )
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    revocation = await _run_until_blocked(world, revoke)
+    pause.resume.set()
+    removed, revoked = await asyncio.gather(removal, revocation, return_exceptions=True)
+
+    assert removed is None, removed
+    assert isinstance(revoked, ResourceGrantNotFoundError), revoked
+
+
+# A deletion of another context, run on its own connection; it reports the
+# backend pid of the transaction a lock would block.
+_Deletion = Callable[[_World, asyncio.Future[int]], Coroutine[Any, Any, None]]
+
+
+async def _settled(world: _World, deletion: _Deletion) -> asyncio.Task[None]:
+    """Start ``deletion``; return once it has finished or is blocked on a lock."""
+
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    task = asyncio.create_task(deletion(world, pid))
+    await await_settled(
+        world.engine, task, lambda: pid.result() if pid.done() else None
+    )
+    return task
+
+
+async def _delete_the_community(world: _World, pid: asyncio.Future[int]) -> None:
+    await DeleteCommunity(uow=_UnitOfWork(world.factory, pid=pid))(
+        community_id=world.community_id
+    )
+
+
+class _ServersUnitOfWork(ServersUnitOfWork):
+    """Reports the backend pid of the transaction that deletes the server.
+
+    :class:`DeleteServer` enters its unit of work twice (an at-rest check, then
+    the deleting transaction); the second entry is the one a lock would block.
+    """
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        pid: asyncio.Future[int],
+    ) -> None:
+        super().__init__(session_factory)
+        self._pid = pid
+        self._entries = 0
+
+    async def __aenter__(self) -> _ServersUnitOfWork:
+        await super().__aenter__()
+        self._entries += 1
+        if self._entries == 2:
+            assert self._session is not None
+            result = await self._session.execute(text("SELECT pg_backend_pid()"))
+            self._pid.set_result(result.scalar_one())
+        return self
+
+
+async def _delete_the_server(world: _World, pid: asyncio.Future[int]) -> None:
+    await DeleteServer(
+        uow=_ServersUnitOfWork(world.factory, pid),
+        backup_store=FakeBackupArchiveStore(),
+    )(
+        community_id=ServersCommunityId(world.community_id.value),
+        server_id=ServerId(world.server_id),
+    )
+
+
+@pytest.mark.parametrize("stalled", [False, True], ids=["prompt", "stalled"])
+async def test_deletion_racing_a_server_deletion_mid_cascade_is_refused(
+    engine: AsyncEngine, stalled: bool
+) -> None:
+    # A server deletion locks the server, then, in the same statement, its
+    # cascades: its game sessions before its grants. A deletion that cascaded
+    # before it checked for servers took the server's grant and then waited for
+    # the server, which deadlocked once the server deletion reached the grant.
+    # Staged with the server deletion stalled on a game session a third
+    # transaction holds, and released at once or once the deletion has waited
+    # past deadlock_timeout. The deletion still sees the server, so it is
+    # refused before its DELETE and waits for nothing.
+    world = await _world(engine)
+    await _add_server(world)
+    await _create_grant(world, SqlAlchemyUnitOfWork(world.factory))
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("INSERT INTO game_session (id, server_id) VALUES (:id, :server)"),
+            {"id": uuid.uuid4(), "server": world.server_id},
+        )
+
+    async with engine.connect() as holder:
+        await holder.execute(
+            text("SELECT 1 FROM game_session WHERE server_id = :server FOR SHARE"),
+            {"server": world.server_id},
+        )
+        server_deletion = await _settled(world, _delete_the_server)
+        assert not server_deletion.done()
+        deletion = await _settled(world, _delete_the_community)
+        if stalled:
+            await asyncio.sleep(await _deadlock_timeout(engine) + 0.5)
+        await holder.commit()
+    server_deleted, deleted = await asyncio.gather(
+        server_deletion, deletion, return_exceptions=True
+    )
+
+    assert server_deleted is None, server_deleted
+    assert isinstance(deleted, CommunityHasServersError), deleted
+    assert await _count(engine, "server") == 0
+    assert await _count(engine, "resource_grant") == 0
+    assert await _count(engine, "community") == 1
+
+
+class _IdentityUnitOfWork(IdentityUnitOfWork):
+    """Reports its backend pid, or pauses after the account's DELETE."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        pid: asyncio.Future[int] | None = None,
+        pause: _Pause | None = None,
+    ) -> None:
+        super().__init__(session_factory)
+        self._pid = pid
+        self._pause = pause
+
+    async def __aenter__(self) -> _IdentityUnitOfWork:
+        await super().__aenter__()
+        assert self._session is not None
+        if self._pid is not None:
+            result = await self._session.execute(text("SELECT pg_backend_pid()"))
+            self._pid.set_result(result.scalar_one())
+        if self._pause is not None:
+            _pause_after(self.users, "delete", self._pause)
+        return self
+
+
+async def _delete_the_members_account(world: _World, uow: IdentityUnitOfWork) -> None:
+    # The acting admin is irrelevant to the guards; only "not the target" is.
+    await AdminDeleteUser(uow=uow, clock=FakeClock(SystemClock().now()))(
+        actor_id=IdentityUserId.new(), target_id=IdentityUserId(world.member.value)
+    )
+
+
+async def _delete_the_account(world: _World, pid: asyncio.Future[int]) -> None:
+    await _delete_the_members_account(
+        world, _IdentityUnitOfWork(world.factory, pid=pid)
+    )
+
+
+async def _cascade_memberships_last_from_the_account(engine: AsyncEngine) -> None:
+    """Recreate the membership's foreign key onto ``user`` (see :func:`_cascade_last`).
+
+    An account deletion then cascades to the account's grants before its
+    memberships.
+    """
+
+    key = "fk_membership_user_id_user"
+    async with engine.begin() as conn:
+        await conn.execute(text(f"ALTER TABLE membership DROP CONSTRAINT {key}"))
+        await conn.execute(
+            text(
+                f"ALTER TABLE membership ADD CONSTRAINT {key} FOREIGN KEY (user_id) "
+                'REFERENCES "user" (id) ON DELETE CASCADE'
+            )
+        )
+
+
+async def test_deletion_waiting_for_an_account_deletion_is_refused(
+    engine: AsyncEngine,
+) -> None:
+    # Both deletions cascade to the member's membership and grant, and both take
+    # the membership first: the deletion waits for the account deletion there.
+    world = await _world(engine)
+    await _add_server(world)
+    await _create_grant(world, SqlAlchemyUnitOfWork(world.factory))
+
+    pause = _Pause()
+    account_deletion = asyncio.create_task(
+        _delete_the_members_account(
+            world, _IdentityUnitOfWork(world.factory, pause=pause)
+        )
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    deletion = await _settled(world, _delete_the_community)
+    pause.resume.set()
+    account_deleted, deleted = await asyncio.gather(
+        account_deletion, deletion, return_exceptions=True
+    )
+
+    assert account_deleted is None, account_deleted
+    assert isinstance(deleted, CommunityHasServersError), deleted
+    assert await _count(engine, "membership") == 1
+    assert await _count(engine, "resource_grant") == 0
+
+
+async def test_account_deletion_waiting_for_a_deletion_succeeds(
+    engine: AsyncEngine,
+) -> None:
+    # Without a server the community has no grant, so the two deletions meet
+    # only at the member's membership and its role assignments, which both take
+    # membership first: the account deletion waits there holding nothing the
+    # deletion needs.
+    world = await _world(engine)
+
+    pause = _Pause()
+    deletion = asyncio.create_task(
+        DeleteCommunity(uow=_UnitOfWork(world.factory, pause=pause))(
+            community_id=world.community_id
+        )
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    account_deletion = await _settled(world, _delete_the_account)
+    assert not account_deletion.done()
+    pause.resume.set()
+    deleted, account_deleted = await asyncio.gather(
+        deletion, account_deletion, return_exceptions=True
+    )
+
+    assert deleted is None, deleted
+    assert account_deleted is None, account_deleted
+    for table in ("membership", "role", "membership_role"):
+        assert await _count(engine, table) == 0
+    assert await _count(engine, '"user"') == 2
+
+
+@pytest.mark.parametrize("stalled", [False, True], ids=["prompt", "stalled"])
+async def test_deletion_crossing_an_account_deletion_that_takes_grants_first_is_refused(
+    engine: AsyncEngine, stalled: bool
+) -> None:
+    # With the account's grants cascading before its memberships, the account
+    # deletion took the member's grant and then waited for the membership the
+    # deletion held. The deletion, held back by a role a third transaction
+    # holds, then reached the grant: a deadlock. Released at once or once the
+    # account deletion has waited past deadlock_timeout. A grant names a server
+    # of its community, so the deletion is refused before it cascades and
+    # meets the account deletion nowhere.
+    world = await _world(engine)
+    await _add_server(world)
+    await _create_grant(world, SqlAlchemyUnitOfWork(world.factory))
+    await _cascade_memberships_last_from_the_account(engine)
+
+    async with engine.connect() as holder:
+        await holder.execute(
+            text("SELECT 1 FROM role WHERE id = :role FOR KEY SHARE"),
+            {"role": world.builders.value},
+        )
+        deletion = await _settled(world, _delete_the_community)
+        account_deletion = await _settled(world, _delete_the_account)
+        if stalled:
+            await asyncio.sleep(await _deadlock_timeout(engine) + 0.5)
+        await holder.commit()
+    deleted, account_deleted = await asyncio.gather(
+        deletion, account_deletion, return_exceptions=True
+    )
+
+    assert isinstance(deleted, CommunityHasServersError), deleted
+    assert account_deleted is None, account_deleted
+    assert await _count(engine, "membership") == 1
     assert await _count(engine, "resource_grant") == 0

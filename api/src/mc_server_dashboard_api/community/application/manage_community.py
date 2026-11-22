@@ -17,6 +17,7 @@ from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Community
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityHasServersError,
     CommunityNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.unit_of_work import UnitOfWork
@@ -71,26 +72,32 @@ class DeleteCommunity:
     server, in any state (issue #3218). Deleting a row cannot stop a server or
     retain its storage, so each server goes through ``DeleteServer`` first.
 
-    The refusal is the ``server`` -> ``community`` foreign key
-    (``ON DELETE RESTRICT``), not a pre-read, and the same key serializes this
-    with a concurrent server creation. The DELETE locks the community row first
-    and a server INSERT's foreign-key check takes that row ``FOR KEY SHARE``, so
-    one waits for the other: a creation that inserted first makes the DELETE wait
-    and then refuses it; a DELETE that ran first makes the INSERT wait and then
-    fail as "community not found". This transaction's locks are those of the
-    DELETE statement alone -- the community row, then the rows it cascades to --
-    which is the lock order in ``permission_ceiling``: every write of this
-    context that locks one of those rows and then another holds the community
-    row first, so the two wait for each other there instead of deadlocking
-    (issue #4021).
+    The refusal comes before the DELETE (issue #4033). The ``server`` ->
+    ``community`` foreign key (``ON DELETE RESTRICT``) refuses a DELETE only
+    after it has cascaded to every other table, and a server deletion locks its
+    server and then cascades to that server's grants, which such a DELETE took
+    first: the two deadlocked. So the deletion locks the community row, the lock
+    its DELETE takes, then checks for servers, and a refused deletion holds the
+    community row alone. The foreign key stays as the backstop.
+
+    The lock orders the check against a server creation. The creation's INSERT
+    holds the community row ``FOR KEY SHARE`` for its foreign key, which
+    conflicts with the lock: a creation that inserted first makes the lock wait
+    and is then found by the check; one that comes later waits for the deletion
+    and then fails as "community not found". The community row first, then the
+    rows the DELETE cascades to, is the lock order in ``permission_ceiling``:
+    every write of this context that locks one of those rows and then another
+    holds the community row first, so the two wait for each other there instead
+    of deadlocking (issue #4021).
     """
 
     uow: UnitOfWork
 
     async def __call__(self, *, community_id: CommunityId) -> None:
         async with self.uow:
-            community = await self.uow.communities.get_by_id(community_id)
-            if community is None:
+            if not await self.uow.communities.lock(community_id):
                 raise CommunityNotFoundError(str(community_id.value))
+            if await self.uow.communities.has_servers(community_id):
+                raise CommunityHasServersError(str(community_id.value))
             await self.uow.communities.delete(community_id)
             await self.uow.commit()
