@@ -24,6 +24,7 @@ import {
   utf8ByteLength,
 } from "../api/limits.ts";
 import { apiPath } from "../api/path.ts";
+import { schedulesKey } from "../api/scheduleQueryKeys.ts";
 import type { components } from "../api/schema";
 import { fieldErrorsFromValidation } from "../api/validationErrors.ts";
 import { Modal } from "../components/Modal.tsx";
@@ -99,11 +100,6 @@ function supportedTimeZones(): readonly string[] {
 }
 
 const TIMEZONES = supportedTimeZones();
-
-/** Schedules list query key — scoped to the server, invalidated on change. */
-function schedulesKey(communityId: string, serverId: string) {
-  return ["schedules", communityId, serverId] as const;
-}
 
 /** Run-history query key for one schedule. */
 function runsKey(communityId: string, serverId: string, scheduleId: string) {
