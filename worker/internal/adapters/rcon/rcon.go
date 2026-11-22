@@ -88,7 +88,13 @@ func Dial(ctx context.Context, addr, password string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rcon: dial %s: %w", addr, err)
 	}
+	return NewClient(ctx, conn, addr, password)
+}
 
+// NewClient authenticates with password over conn, an open connection to addr,
+// and returns the Client that owns conn; Redial dials addr again. The handshake
+// is bounded as Dial's is. It closes conn when the handshake fails.
+func NewClient(ctx context.Context, conn net.Conn, addr, password string) (*Client, error) {
 	c := &Client{conn: conn, nextID: 1, addr: addr, password: password}
 	if err := c.withDeadline(ctx, func() error { return c.authenticate(password) }); err != nil {
 		_ = conn.Close()
