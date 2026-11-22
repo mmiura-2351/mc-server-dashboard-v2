@@ -1288,7 +1288,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # (#871). The control plane, clock, and JAR seams are stateless and
             # reused across the per-action use cases.
             reconciler = RunReconcilerTick(
-                uow=ServersUnitOfWork(create_session_factory(engine)),
+                uow=ServersUnitOfWork(create_session_factory(engine), real_time_events),
                 make_start_server=lambda: StartServer(
                     uow=ServersUnitOfWork(
                         create_session_factory(engine), real_time_events
@@ -1341,6 +1341,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     settings.reconciler.refused_stop_grace_seconds
                 ),
                 restart_timeout_seconds=settings.control.restart_timeout_seconds,
+                heartbeat_timeout_seconds=settings.control.heartbeat_timeout_seconds,
                 backoff_base_seconds=settings.reconciler.backoff_base_seconds,
                 backoff_max_seconds=settings.reconciler.backoff_max_seconds,
                 listener_started_at=listener_started_at,

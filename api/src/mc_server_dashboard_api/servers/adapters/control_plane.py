@@ -299,6 +299,10 @@ class FleetControlPlaneAdapter(ControlPlane):
         snapshot = self._registry.get(_fleet_worker(worker_id))
         return None if snapshot is None else snapshot.offline_since
 
+    def worker_session_ended_at(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        snapshot = self._registry.get(_fleet_worker(worker_id))
+        return None if snapshot is None else snapshot.disconnected_at
+
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int
     ) -> None:

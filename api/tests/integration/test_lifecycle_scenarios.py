@@ -379,6 +379,7 @@ async def _reconciler_tick(
         held_start_grace_seconds=held_start_grace_seconds,
         refused_stop_grace_seconds=refused_stop_grace_seconds,
         restart_timeout_seconds=restart_timeout_seconds,
+        heartbeat_timeout_seconds=30,
         backoff_base_seconds=30,
         backoff_max_seconds=3600,
         listener_started_at=_STARTED_LONG_AGO,

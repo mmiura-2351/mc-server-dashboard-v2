@@ -786,6 +786,20 @@ class SqlAlchemyServerRepository(ServerRepository):
                 .values(observed_at=observed_at)
             )
 
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        stmt = (
+            select(ServerModel.assigned_worker_id)
+            .where(
+                ServerModel.assigned_worker_id.is_not(None),
+                ServerModel.observed_state.notin_(
+                    [ObservedState.UNKNOWN.value, ObservedState.CRASHED.value]
+                ),
+            )
+            .distinct()
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return {WorkerId(row) for row in rows if row is not None}
+
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         # Assigned rows whose observed state is non-terminal (an in-flight cache
         # of a worker report). Terminal/cache-stable states (stopped, crashed,

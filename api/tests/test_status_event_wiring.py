@@ -27,12 +27,13 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parent.parent / "src" / "mc_server_dashboard_api"
 
 # The use cases that write ``observed_state`` or ``desired_state`` through their
-# unit of work (the latter since issue #3428).
+# unit of work (the latter since issue #3428; the reconciler's own since #4130).
 _WRITERS = {
     "StartServer",
     "StopServer",
     "StopServersAssignedToWorker",
     "ResetUnverifiableObservedStates",
+    "RunReconcilerTick",
 }
 
 # The names the servers unit of work is constructed under.

@@ -298,6 +298,19 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
+    def worker_session_ended_at(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        """The instant ``worker_id``'s current session ended (issue #4130).
+
+        Set as the session's teardown, or the refusal of its registration,
+        marks the Worker disconnected, which comes after every report of that
+        session. ``None`` while that session is current, a Worker whose
+        heartbeats have lapsed included, and for a Worker that has not
+        registered with this process. The reconciler marks the servers of a
+        Worker whose session ended a grace ago ``unknown``, stamped with this
+        instant, in case the teardown's own write did not land.
+        """
+
+    @abc.abstractmethod
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int
     ) -> None:

@@ -621,7 +621,9 @@ stamps, the start of this process's control-plane listener (issue #3916), and
 the instant the Worker first read disconnected (issue #3963): the stream's end,
 or the heartbeat lapse the registry reports before the teardown runs. The
 server's stamps lag that instant until the teardown's write lands, and keep the
-old one if the write fails. A Worker that re-registers within the grace, after a
+old one if the write fails, until the reconciler makes that write itself, stamped
+with the session's end (Teardown, below).
+A Worker that re-registers within the grace, after a
 drop, a graceful restart or a crash, still gets the final snapshot or the stop,
 and so does one that drops before the reconciler's release has taken the final
 snapshot or sent the owed stop: the release is abandoned and waits that grace
@@ -669,7 +671,15 @@ write commits first (issue #4092). After a refused registration
 (Section 4.1), whose Worker is alive and retries, the write is held to the
 registration's 10 s deadline and skipped past it with a warning, so a stalled
 database does not hold a connection for each retry; the Worker's next accepted
-registration re-establishes its state (issue #4091). The
+registration re-establishes its state (issue #4091). If the write fails or is
+skipped and the Worker does not come back, the reconciler's tick makes the same
+write once the session has been over for `control.heartbeat_timeout_seconds`
+with no newer one (issue #4130). It reads the session's end from this process's
+registry, so it assumes a single API process, as the teardown does, and stamps
+the write with that instant: the servers end as the teardown's write would have
+left them, a newer session's reports survive it, and each server it changes is
+published as a status frame. A heartbeat lapse alone does not count as the end;
+the session lasts until the watchdog ends it. The
 teardown runs in a task the API owns, not in the RPC task. When a Worker's
 transport dies, gRPC reports the end of the inbound stream and cancels the RPC
 separately, and the cancel can arrive while the teardown is already writing. The

@@ -1180,6 +1180,15 @@ class FakeServerRepository(ServerRepository):
                 # A crash under a stopped intent keeps its crash, stamped anew.
                 server.observed_at = observed_at
 
+    async def workers_with_trusted_observed_state(self) -> set[WorkerId]:
+        return {
+            server.assigned_worker_id
+            for server in self.by_id.values()
+            if server.assigned_worker_id is not None
+            and server.observed_state
+            not in (ObservedState.UNKNOWN, ObservedState.CRASHED)
+        }
+
     async def reset_unverifiable_observed_states(self, observed_at: dt.datetime) -> int:
         non_terminal = (
             ObservedState.STARTING,
@@ -2188,6 +2197,7 @@ class FakeControlPlane(ControlPlane):
         connected: dict[WorkerId, bool] | None = None,
         held: dict[tuple[WorkerId, ServerId], int] | None = None,
         offline_since: dict[WorkerId, dt.datetime] | None = None,
+        session_ended_at: dict[WorkerId, dt.datetime] | None = None,
         hydrate_timeout_seconds: float = 600.0,
     ) -> None:
         self._place_to = place_to
@@ -2210,6 +2220,10 @@ class FakeControlPlane(ControlPlane):
         # The instant each Worker first read disconnected (issue #3963); a Worker
         # absent here reads None, as one that never registered with this process.
         self.offline_since = offline_since or {}
+        # The instant each Worker's session ended (issue #4130); a Worker absent
+        # here reads None, as one whose session is current or that never
+        # registered with this process.
+        self.session_ended_at = session_ended_at or {}
         # Held-working-set generation map for the skip-hydrate decision (issue #763);
         # a (worker, server) pair absent here returns None (NOT held), so the default
         # is to hydrate.
@@ -2254,11 +2268,15 @@ class FakeControlPlane(ControlPlane):
     def worker_offline_since(self, *, worker_id: WorkerId) -> dt.datetime | None:
         return self.offline_since.get(worker_id)
 
+    def worker_session_ended_at(self, *, worker_id: WorkerId) -> dt.datetime | None:
+        return self.session_ended_at.get(worker_id)
+
     def end_session(self, worker_id: WorkerId, *, at: dt.datetime) -> None:
-        """``worker_id``'s session ends at ``at`` (issue #3963)."""
+        """``worker_id``'s session ends at ``at`` (issues #3963, #4130)."""
 
         self._connected[worker_id] = False
         self.offline_since[worker_id] = at
+        self.session_ended_at[worker_id] = at
 
     def record_held_generation(
         self, *, worker_id: WorkerId, server_id: ServerId, generation: int

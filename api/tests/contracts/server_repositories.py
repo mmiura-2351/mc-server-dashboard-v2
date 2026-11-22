@@ -870,6 +870,45 @@ class ServerRepositoryContract:
         assert row is not None
         assert (row.observed_state, row.observed_at) == (state, _NOW)
 
+    async def test_lists_the_workers_whose_servers_a_disconnect_would_change(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #4130: a Worker assigned a server observed neither unknown nor
+        # crashed, one server per state on a Worker of its own; an unassigned
+        # server names no Worker.
+        items = []
+        for offset, state in enumerate(ObservedState):
+            item = server(contract_community_id, name=f"srv-{state.value}")
+            item.observed_state = state
+            if state is not ObservedState.CRASHED:
+                item.crash_reason = None
+                item.crash_detail = None
+            item.game_port = 25565 + offset
+            item.bedrock_port = 19132 + offset
+            items.append(item)
+        unassigned = server(contract_community_id, name="unassigned")
+        unassigned.observed_state = ObservedState.STOPPED
+        unassigned.crash_reason = None
+        unassigned.crash_detail = None
+        unassigned.assigned_worker_id = None
+        unassigned.game_port = 25600
+        unassigned.bedrock_port = 19200
+        async with server_repository_harness.open() as tx:
+            for item in [*items, unassigned]:
+                await tx.repository.add(item)
+            await tx.commit()
+
+        async with server_repository_harness.open() as tx:
+            listed = await tx.repository.workers_with_trusted_observed_state()
+
+        assert listed == {
+            item.assigned_worker_id
+            for item in items
+            if item.observed_state not in (ObservedState.UNKNOWN, ObservedState.CRASHED)
+        }
+
     @pytest.mark.parametrize(
         ("state", "observed_at"),
         [(ObservedState.RUNNING, _NOW), (ObservedState.STOPPED, None)],
