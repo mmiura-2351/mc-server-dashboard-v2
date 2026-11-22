@@ -120,6 +120,10 @@ export const en = {
   "common.resizeColumn": "Drag to resize, double-click to reset",
   "common.chooseFile": "Choose file",
   "common.noFileChosen": "No file chosen",
+  // A 503 `database_unavailable`, which any request can answer while the API's
+  // database is down (issue #4010).
+  "common.databaseUnavailable":
+    "The dashboard's database is unavailable right now. Please try again shortly.",
 
   // Upload progress (issue #1207). `{loaded}`/`{total}` are humanized byte
   // sizes; `{percent}` is an integer; `{seconds}` is the elapsed seconds.

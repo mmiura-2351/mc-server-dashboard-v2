@@ -19,7 +19,8 @@ This makes parallel runs that share one base URL — e.g. two agent worktrees
 pointed at the same local Postgres — collide-proof: each session owns a disjoint
 database, so the `downgrade base` / `upgrade head` dance in the fixtures can no
 longer race or leave orphan tables behind (issue #379). The base user must be
-able to `CREATE DATABASE`.
+able to `CREATE DATABASE`, and `CREATE ROLE` for
+`test_transient_database_error.py`, which makes a role with no connection slot.
 
 CI is unaffected: it provisions a fresh Postgres service per run, and the per-run
 database derived from that service's URL is just as fresh.

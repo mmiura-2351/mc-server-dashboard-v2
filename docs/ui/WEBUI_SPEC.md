@@ -1159,6 +1159,13 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   `permission` and `worker_state` members are enumerated in
   [`AUTH_API.md`](../app/AUTH_API.md) Section 2.
 - API error surfaced via toast + inline field errors (422 `errors` list).
+- **Database outages.** A 503 `database_unavailable`, which any request can
+  answer while the API's database is down ([`AUTH_API.md`](../app/AUTH_API.md)
+  Section 2), has one shared message that names the database and asks to try
+  again shortly. The Files, Players, Plugins and Backups tabs, whose bare 503
+  names the server agent, and the lifecycle toasts map it by reason first, so
+  the agent is not blamed; elsewhere it takes the page's generic message. The
+  client adds no retry of its own: a query retries a 5xx as any query does.
 - **Toast timing.** An error toast stays until it is dismissed, since many
   errors name a remedy to act on. Any other toast closes on its own after 2 s
   plus 100 ms per character of its message, clamped to 3.2–12 s. It counts
@@ -1223,14 +1230,22 @@ backend support; the tab body also self-guards with an "unsupported" notice).
 - **Keys behind a menu.** While a page menu is open (the Files tab's context
   menu, the stop menu), the Files tab's shortcuts do nothing, so a key never
   acts on the listing behind the menu. The menu's own keys still work.
-- **Keys an IME takes.** A key pressed while an input method composes text
-  (`isComposing`, or the `keyCode` 229 some browsers send instead) is left to
-  the IME and not prevented. So an Escape that cancels a conversion in a
+- **Keys an IME takes.** Every key handler leaves a key pressed while an
+  input method composes text (`isComposing`, or the `keyCode` 229 some
+  browsers send instead) to the IME, and does not prevent it. An IME composes
+  only in a field, so this concerns the handlers on a field and those on the
+  document or the window, which hear its keys; one on a button, a tab or a
+  column header hears none. So an Escape that cancels a conversion in a
   dialog field does not close the modal, and none closes a popover, a menu
-  or a toast, or clears the Files selection; the stop menu's keys and the
-  Files tab's shortcuts ignore it too. The stop menu's type-ahead also skips a
-  letter pressed with Ctrl, Meta or Alt, so the browser's own shortcut, such
-  as Ctrl+F's find, still works.
+  or a toast, or clears the Files selection. An Enter that confirms a
+  conversion does not send the console's command or commit the dashboard's
+  search, and ↑/↓ that pick a candidate do not recall console history. A Tab
+  at the edge of a modal's focus trap is not taken over; one the browser runs
+  out of the dialog all the same is pulled back like any other. The stop
+  menu's keys and the Files tab's shortcuts ignore such a key too.
+- **Type-ahead and shortcuts.** The stop menu's type-ahead skips a letter
+  pressed with Ctrl, Meta or Alt, so the browser's own shortcut, such as
+  Ctrl+F's find, still works. A letter typed with Shift still types ahead.
 - **Toast focus.** While a modal is open, its focus trap runs on through the
   toast stack, so an error raised over it is reachable by keyboard: Tab past
   the dialog's last control reaches the first toast, Tab past the last toast

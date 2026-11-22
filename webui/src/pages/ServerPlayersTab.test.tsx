@@ -307,6 +307,25 @@ describe("ServerPlayersTab", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("names the database when a detach answers 503 database_unavailable (#4010)", async () => {
+    routeGet({
+      attached: [group({ id: "g1", name: "Admins" })],
+      community: [],
+    });
+    mockApi.delete.mockRejectedValue(
+      new ApiError(503, { reason: "database_unavailable" }),
+    );
+    renderTab();
+    await openPlayers();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("players.detach") }),
+    );
+    expect(
+      await screen.findByText(t("common.databaseUnavailable")),
+    ).toBeInTheDocument();
+  });
+
   it("routes a 403 on detach through onForbidden (named-permission toast)", async () => {
     routeGet({
       attached: [group({ id: "g1", name: "Admins" })],

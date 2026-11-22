@@ -607,7 +607,10 @@ its result or its own error.
 
 The lock needs a direct or session-pooled connection to PostgreSQL. Behind a
 transaction-mode pooler a session-level lock does not hold, and the check passes
-or fails by chance, so that setup is unsupported.
+or fails by chance, so that setup is unsupported. A pooler's own errors would
+answer `500 internal_error`, not `503 database_unavailable`: PgBouncer reports
+some of them with SQLSTATE `08P01`, which is not an outage
+([`AUTH_API.md`](AUTH_API.md) Section 2).
 
 What remains is the window from a check until the writes it guards are done: a
 lock lost there goes unnoticed, and closing it would take fencing tokens that

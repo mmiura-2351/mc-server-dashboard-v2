@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import http
 import logging
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
@@ -39,6 +40,10 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 from starlette.responses import Response
+
+from mc_server_dashboard_api.core.adapters.database import (
+    is_transient_database_error,
+)
 
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
@@ -69,6 +74,22 @@ VALIDATION_REASON = "validation_error"
 # ``text/plain`` 500 that escapes the RFC 9457 contract; this keeps one body shape
 # while logging the traceback server-side and never leaking internals to clients.
 INTERNAL_ERROR_REASON = "internal_error"
+
+# Reason for the 503 the catch-all answers instead when the exception is the
+# database being unavailable (issue #4010): a refused connect, a server that is
+# full, starting up or shutting down, a connection lost mid-query. Retrying
+# later is the remedy, after ``Retry-After`` seconds.
+DATABASE_UNAVAILABLE_REASON = "database_unavailable"
+_DATABASE_RETRY_AFTER_SECONDS = 5
+
+# An outage fails every request until it ends, so each of its causes (the
+# exception's type and the first line of its message) is logged at WARNING at
+# most once in this many seconds, with no traceback; each request's traceback
+# is logged at DEBUG. Only the causes warned about last are remembered, so a
+# run of distinct causes cannot grow the map.
+_OUTAGE_WARNING_INTERVAL_SECONDS = 30.0
+_OUTAGE_CAUSES_REMEMBERED = 16
+_outage_warnings: dict[tuple[str, str], float] = {}
 
 
 def _title_for(status_code: int) -> str:
@@ -238,10 +259,29 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     500 that escapes the RFC 9457 contract. This last-resort handler logs the full
     traceback server-side for diagnosis and returns a 500 whose body leaks no
     exception internals (no message, no path), keeping one error shape (#371).
+    A database outage is answered 503 ``database_unavailable`` instead (#4010).
     """
 
     if _is_client_disconnect(exc):
         raise  # let Starlette handle normally (issue #2161)
+    return _unhandled_exception_response(request, exc)
+
+
+def _unhandled_exception_response(request: Request, exc: Exception) -> JSONResponse:
+    """The answer to an exception no handler took, shared by both catch-alls.
+
+    A database outage is a 503 ``database_unavailable`` (issue #4010), logged by
+    :func:`_log_database_outage`. Anything else is a 500 ``internal_error`` with
+    its traceback logged.
+    """
+
+    if _is_database_outage(exc):
+        _log_database_outage(request, exc)
+        return problem_response(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            DATABASE_UNAVAILABLE_REASON,
+            headers={"Retry-After": str(_DATABASE_RETRY_AFTER_SECONDS)},
+        )
     _logger.exception(
         "unhandled exception serving %s %s",
         request.method,
@@ -250,6 +290,49 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     )
     return problem_response(
         status.HTTP_500_INTERNAL_SERVER_ERROR, INTERNAL_ERROR_REASON
+    )
+
+
+def _is_database_outage(exc: Exception) -> bool:
+    """Whether ``exc`` means the database is unavailable for now (issue #4010).
+
+    A bare ``OSError`` does not: a full disk or a permission fault escapes a
+    route as one (issue #542). The app's engines raise their refused connect as
+    ``DatabaseConnectError`` (``translate_connect_outages``), so the two differ.
+    """
+
+    return not isinstance(exc, OSError) and is_transient_database_error(exc)
+
+
+def _log_database_outage(request: Request, exc: Exception) -> None:
+    """Log an outage's request: a WARNING per cause at most every 30 s, the
+    traceback at DEBUG."""
+
+    # The message's first line names the cause; a ``DBAPIError`` renders its
+    # statement and parameters on the lines after it, which stay out.
+    cause = (type(exc).__name__, str(exc).partition("\n")[0])
+    now = time.monotonic()
+    last = _outage_warnings.get(cause)
+    if last is None or now - last >= _OUTAGE_WARNING_INTERVAL_SECONDS:
+        # Re-inserted, so the first key is always the one warned about longest
+        # ago.
+        _outage_warnings.pop(cause, None)
+        _outage_warnings[cause] = now
+        while len(_outage_warnings) > _OUTAGE_CAUSES_REMEMBERED:
+            del _outage_warnings[next(iter(_outage_warnings))]
+        _logger.warning(
+            "database unavailable serving %s %s (%s: %s): answered 503; this "
+            "cause's next requests for %g s are logged at DEBUG only",
+            request.method,
+            request.url.path,
+            *cause,
+            _OUTAGE_WARNING_INTERVAL_SECONDS,
+        )
+    _logger.debug(
+        "database unavailable serving %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
     )
 
 
@@ -293,15 +376,7 @@ async def unhandled_exception_middleware(
     except Exception as exc:  # noqa: BLE001 — intentional catch-all
         if _is_client_disconnect(exc):
             raise  # let Starlette handle normally (issue #2161)
-        _logger.exception(
-            "unhandled exception serving %s %s",
-            request.method,
-            request.url.path,
-            exc_info=exc,
-        )
-        return problem_response(
-            status.HTTP_500_INTERNAL_SERVER_ERROR, INTERNAL_ERROR_REASON
-        )
+        return _unhandled_exception_response(request, exc)
 
 
 def install_problem_handlers(app: FastAPI) -> None:

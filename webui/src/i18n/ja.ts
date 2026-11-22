@@ -128,6 +128,8 @@ export const ja: Record<TranslationKey, string> = {
   "common.resizeColumn": "ドラッグで幅を変更、ダブルクリックでリセット",
   "common.chooseFile": "ファイルを選択",
   "common.noFileChosen": "ファイルが選択されていません",
+  "common.databaseUnavailable":
+    "現在、ダッシュボードのデータベースを利用できません。しばらくしてから再度お試しください。",
 
   // Upload progress (issue #1207).
   "upload.label": "アップロード中",

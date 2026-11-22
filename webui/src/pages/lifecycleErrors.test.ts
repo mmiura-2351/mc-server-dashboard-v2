@@ -441,6 +441,16 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  it.each(["start", "stop", "restart"] as const)(
+    "maps a 503 database_unavailable on %s to the database message (#4010)",
+    (action) => {
+      const error = new ApiError(503, { reason: "database_unavailable" });
+      expect(lifecycleErrorMessage(error, action)).toBe(
+        "common.databaseUnavailable",
+      );
+    },
+  );
+
   it("falls back to the generic message for a 503 with an unknown reason", () => {
     const error = new ApiError(503, { reason: "something_else" });
     expect(lifecycleErrorMessage(error)).toBe("dashboard.actionFailed");

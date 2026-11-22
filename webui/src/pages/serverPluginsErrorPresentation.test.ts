@@ -97,6 +97,11 @@ describe("pluginErrorPresentation", () => {
       "plugins.error.storageUnavailable",
     ],
     [
+      "maps database_unavailable apart from the unavailable worker (#4010)",
+      new ApiError(503, { reason: "database_unavailable" }),
+      "common.databaseUnavailable",
+    ],
+    [
       "maps a reason-less 503 by status",
       new ApiError(503, {}),
       "plugins.error.workerUnavailable",

@@ -272,6 +272,8 @@ const SPECIFIC_503_MESSAGE: Record<string, TranslationKey> = {
   no_eligible_worker: "dashboard.lifecycle.noEligibleWorker",
   worker_unavailable: "dashboard.lifecycle.workerUnavailable",
   jar_unavailable: "dashboard.lifecycle.jarUnavailable",
+  // The API's database is down (issue #4010).
+  database_unavailable: "common.databaseUnavailable",
 };
 
 // The 503 counterpart of VERB_SPECIFIC_409_MESSAGE, consulted the same way and

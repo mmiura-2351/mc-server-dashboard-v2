@@ -9,6 +9,7 @@ and tests can branch on one stable shape.
 
 from __future__ import annotations
 
+import asyncpg
 from fastapi import FastAPI, status
 from fastapi.testclient import TestClient
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
@@ -27,6 +28,7 @@ from mc_server_dashboard_api.middleware import (
     correlation_id_middleware,
     security_headers_middleware,
 )
+from tests.core.fakes import server_error
 
 
 class _Secret(BaseModel):
@@ -71,6 +73,10 @@ def _client() -> TestClient:
         # raised, issue #542) must be normalized to problem+json, not leak as a
         # bare text/plain 500 with the secret in the detail.
         raise IsADirectoryError(21, "Is a directory: '/secret/path'")
+
+    @app.get("/full")
+    def full() -> None:
+        raise server_error(asyncpg.TooManyConnectionsError("too many clients"))
 
     return TestClient(app, raise_server_exceptions=False)
 
@@ -161,6 +167,15 @@ def test_unhandled_exception_handler_answers_the_generic_body() -> None:
     resp = _client().get("/boom")
     assert resp.status_code == 500
     assert resp.json() == _GENERIC_500_BODY
+
+
+def test_unhandled_exception_handler_answers_a_database_outage_503() -> None:
+    # The handler maps an outage as the middleware does (#4010); the real app's
+    # routes are tested in test_http_database_outage.py.
+    resp = _client().get("/full")
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"] == "5"
+    assert resp.json()["reason"] == "database_unavailable"
 
 
 def test_validation_error_entries_omit_input_and_ctx() -> None:

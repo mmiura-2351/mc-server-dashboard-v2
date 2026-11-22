@@ -41,6 +41,14 @@ describe("backupErrorPresentation", () => {
     );
   });
 
+  // The API's database, not the server host, is down (issue #4010).
+  it("names the database for a 503 database_unavailable", () => {
+    const key = backupErrorPresentation(503, "database_unavailable");
+    expect(key).toBe("common.databaseUnavailable");
+    expect(en[key]).toMatch(/database.*try again/i);
+    expect(ja[key]).toMatch(/データベース.*お試しください/);
+  });
+
   // A working set whose archive would pass the 8 GiB backup cap (issue #3859):
   // nothing was written, and trying again cannot help until the server's files
   // are smaller, so the message names the limit instead of asking for a retry.

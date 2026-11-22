@@ -98,6 +98,9 @@ export function fileOperationErrorPresentation(
         // and sending it again shortly is the remedy.
         case "upload_busy":
           return { key: "files.error.uploadBusy" };
+        // The API's database is down (issue #4010), not the server's Worker.
+        case "database_unavailable":
+          return { key: "common.databaseUnavailable" };
         default:
           return { key: "files.error.workerUnavailable" };
       }
