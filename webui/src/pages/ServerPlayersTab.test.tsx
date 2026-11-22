@@ -52,6 +52,7 @@ function serverResponse() {
     observed_state: "running",
     observed_at: null,
     assigned_worker_id: "worker-a",
+    final_snapshot_refusal: null,
     config: {},
     slug: "survival",
     join_hostname: null,

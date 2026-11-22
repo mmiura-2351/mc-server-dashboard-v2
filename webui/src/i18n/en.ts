@@ -299,6 +299,12 @@ export const en = {
   // instead of the contradictory generic state-changed toast.
   "dashboard.lifecycle.startAlreadyRunning":
     "The server is already running or starting up, so there is nothing to start.",
+  // 409 final_snapshot_refused on stop (#4056): a stop of a server held by a
+  // refused final snapshot retried it, and the Worker refused it again. The
+  // server stays held and the API keeps retrying; the release without the
+  // snapshot is the way out (#4057).
+  "dashboard.lifecycle.finalSnapshotRefused":
+    "The server's host refused the final save again, so the server stays held. The save is retried automatically. To free the server without it, use “Release without saving…” on the server's page.",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the server's process may still be running — it never went down, and
   // repeating the same action is refused identically. Asking the operator to stop
@@ -306,12 +312,6 @@ export const en = {
   // converges the orphan itself (probing the process, retrying the stop while it
   // is alive, retiring the record once it is confirmed gone), so the message names
   // the condition and says the work is already under way (issue #2476).
-  // 409 final_snapshot_refused on stop (#4056): a stop of a server held by a
-  // refused final snapshot retried it, and the Worker refused it again. The
-  // server stays held and the API keeps retrying; the release without the
-  // snapshot is the way out (#4057).
-  "dashboard.lifecycle.finalSnapshotRefused":
-    "The server's host refused the final save again, so the server stays held. The save is retried automatically. To free the server without it, use “Release without saving…” on the server's page.",
   "dashboard.lifecycle.failedStopOrphan":
     "The server's previous stop did not finish, so its process may still be running. The system is shutting it down automatically; wait a moment and try again.",
   // 503 service-unavailable reasons (issue #1092): post-restart scenarios where

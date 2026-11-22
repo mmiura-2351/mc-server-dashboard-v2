@@ -280,13 +280,13 @@ export const ja: Record<TranslationKey, string> = {
   // 起動を伝えられた後の再試行にはこのメッセージを返す。
   "dashboard.lifecycle.startAlreadyRunning":
     "サーバーはすでに起動中または起動処理中のため、起動する必要はありません。",
+  "dashboard.lifecycle.finalSnapshotRefused":
+    "サーバーホストが再び最終スナップショットを拒否したため、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。スナップショットなしで切り離すには、サーバーの画面で「保存せずに切り離す…」を使ってください。",
   // 409 failed_stop_orphan (issue #2466): the host could not confirm an earlier
   // stop, so the process may still be running. A retry of the same action is
   // refused identically, and since issue #2475 the host converges the orphan on
   // its own, so the message says the work is already under way rather than asking
   // the operator to stop it again (issue #2476).
-  "dashboard.lifecycle.finalSnapshotRefused":
-    "サーバーホストが再び最終スナップショットを拒否したため、サーバーは切り離されないままです。最終スナップショットは自動で再試行されます。スナップショットなしで切り離すには、サーバーの画面で「保存せずに切り離す…」を使ってください。",
   "dashboard.lifecycle.failedStopOrphan":
     "前回の停止が完了していないため、このサーバーのプロセスがまだ稼働している可能性があります。システムが自動的に停止処理を進めているため、しばらく待ってから再試行してください。",
   // 503 service-unavailable reasons (issue #1092).

@@ -461,6 +461,11 @@ function Header({
             {statusDetail}
           </div>
         )}
+        {/* The refusal alone shows the notice: the API clears it only
+            together with the assignment, and every release frame, snapshot
+            and read carries both (#4054), so it never shows on a released
+            server. Not a live region, like Start's held note it stands in
+            for (#3818); the converging pill beside it is one. */}
         {refusal !== null && (
           <div className="held-notice" id={heldNoticeId}>
             {t(heldNoticeKey(refusal))}
