@@ -1197,7 +1197,8 @@ once it has ended, and the API has already failed the command with the rest of
 that session's in-flight commands (Section 4.4). The Worker reports it as
 cancelled, not as abandoned at its deadline.
 
-On the deadline the command answers `TRANSFER_FAILED`, with one exception. The
+On a deadline that passes once the work has started, the command answers
+`TRANSFER_FAILED`, with one exception. The
 work marks the attempt committed as soon as its upload has returned a publish,
 and the command marks it abandoned at the deadline; whichever comes first wins.
 If the commit won, the answer is a success that declares no `held_generation`.

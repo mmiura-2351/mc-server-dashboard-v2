@@ -344,6 +344,43 @@ func TestGuardRefusalOnCallerCancelIsStillUnavailable(t *testing.T) {
 	}
 }
 
+// A stopped server's snapshot asks its leftover guard under the command's deadline
+// (issue #4053): ending a leftover can take a graceful stop, so it is not left
+// outside the bound. A deadline that has ended cuts the guard short, and the
+// snapshot is refused UNAVAILABLE with nothing packed, as for a cancelled caller.
+func TestStoppedSnapshotGuardRunsUnderTheCommandDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cmd   session.Command
+		calls []string
+	}{
+		{"stopped snapshot", snapshotCmd(), []string{"busy"}},
+		{"final stopped snapshot", finalSnapshotCmd(), []string{"end", "busy"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, g, tr := newGuardedManager(t)
+			seedScratch(t, m, s1)
+			m.snapshotContextHook = func(ctx context.Context, _ bool) (context.Context, context.CancelFunc) {
+				ended, cancel := context.WithCancel(ctx)
+				cancel()
+				return ended, cancel
+			}
+
+			res := m.Handle(context.Background(), tc.cmd)
+			if res.Success || res.ErrorCode != session.CommandErrorUnavailable ||
+				!strings.Contains(res.ErrorMessage, context.Canceled.Error()) {
+				t.Fatalf("%s = %+v, want UNAVAILABLE carrying the ended deadline", tc.name, res)
+			}
+			if want := guardCalls(m, tc.calls...); !slices.Equal(g.callLog(), want) {
+				t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+			}
+			if n := packCount(tr); n != 0 {
+				t.Fatalf("packs = %d, want none", n)
+			}
+		})
+	}
+}
+
 // The running-server paths ask the guard nothing: a running instance already
 // refuses the hydrate, and a running snapshot quiesces with its save-off
 // bracket, so neither pays a daemon round-trip (issue #3672). A final snapshot of
