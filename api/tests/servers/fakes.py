@@ -1438,19 +1438,15 @@ class FakeGroupRepository(GroupRepository):
         # took the row, so it raises the not-found its re-read asserts, whether or
         # not there are players left to write (#2613; before that the emptied-set
         # branch stayed silent and reported the edit as a success).
-        # The port names three routes to that same not-found -- the re-read above,
-        # the StaleDataError a rename's zero-row UPDATE raises (#2937), and
+        # The adapter's other route to that same not-found,
         # fk_group_player_group_id_player_group at the replacement rows' flush
-        # (#2583) -- and all three mean the one thing a dict can see: the group is
-        # gone.
+        # (#2583), means the one thing a dict can see as well: the group is gone.
         if group.id not in self.by_id:
             raise GroupNotFoundError(str(group.id.value))
         # A rename has the same UNIQUE as ``add``: the player-row DELETE
         # autoflushes the pending name UPDATE, so a racer that took the target
         # (community_id, kind, name) since the caller's pre-check raises
         # GroupNameAlreadyExistsError inside ``save`` too (#2000, #2923).
-        # uq_group_player_group_uuid (GroupPlayerEditConflictError, #2613) stays
-        # unmodelled: reaching it needs two interleaved transactions.
         if self._other_holder_of_name(group) is not None:
             raise GroupNameAlreadyExistsError(group.name.value)
         self.by_id[group.id] = self._copy(group)
@@ -1483,13 +1479,11 @@ class FakeGroupRepository(GroupRepository):
     async def is_attached(self, group_id: GroupId, server_id: ServerId) -> bool:
         return (group_id, server_id) in self.attachments
 
-    async def lock_against_attach(self, group_id: GroupId) -> None:
+    async def lock_against_attach(
+        self, community_id: CommunityId, group_id: GroupId
+    ) -> None:
         # Nothing to hold: this fake has no second transaction to hold off. The
         # interleaving is pinned in tests/integration/test_group_attach_races.py.
-        return None
-
-    async def lock_for_edit(self, group_id: GroupId) -> None:
-        # Nothing to hold, as above; pinned in the same module.
         return None
 
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:

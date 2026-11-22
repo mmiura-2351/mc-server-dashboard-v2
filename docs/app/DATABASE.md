@@ -741,11 +741,19 @@ file from the then-current union before it decides whether to hydrate:
   no snapshot publishes over the regenerated file. A start that finds the
   assignment still held by that snapshot is refused at once with 409
   `transition_conflict`, so it cannot go on to launch once the hold is released.
-- A change to a group itself (player add/remove, delete) locks the group row
-  before it writes anything and before it lists the attached servers, so a
-  concurrent attach either is in that list or waits for the change; no attached
-  server is left without a row. Taking the lock before the player rows are
-  written keeps a player edit and a group delete on one lock order.
+- A change to a group itself (rename, player add/remove, delete) locks the group
+  row before it reads the group, writes anything or lists the attached servers,
+  so a concurrent attach either is in that list or waits for the change; no
+  attached server is left without a row. Taking the lock before the player rows
+  are written keeps a player edit and a group delete on one lock order, and
+  reading under it means a change behind another sees what that one committed:
+  an edit keeps the earlier edit, and a second delete finds the group gone. The
+  lock matches the group's community as well, so a request naming another
+  community's group locks nothing.
+- Recording the row locks the server row (`FOR KEY SHARE`, in id order), which
+  holds off the server's deletion but not a state write to it. A detach and a group
+  delete record their rows before they remove any `server_group` row, the order
+  a server deletion takes: the server row, then its attachments.
 - The write advances the working-set generation like any at-rest edit, so a
   Worker still holding the previous run's scratch hydrates instead of booting the
   pre-change file ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1).

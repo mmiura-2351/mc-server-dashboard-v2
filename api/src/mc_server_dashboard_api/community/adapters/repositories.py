@@ -430,12 +430,19 @@ class SqlAlchemyRoleRepository(RoleRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_role(row) for row in rows]
 
-    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+    async def lock_by_id(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> Role | None:
         # populate_existing so the locked read, not an identity-map copy an
         # earlier read in this transaction left alive, is what the caller sees.
+        # The community is matched in the statement (it never changes), so
+        # another community's role is not locked.
         stmt = (
             select(RoleModel)
-            .where(RoleModel.id == role_id.value)
+            .where(
+                RoleModel.id == role_id.value,
+                RoleModel.community_id == community_id.value,
+            )
             .with_for_update()
             .execution_options(populate_existing=True)
         )

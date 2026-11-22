@@ -611,6 +611,30 @@ async def test_update_role_persists_name_and_permissions(engine: AsyncEngine) ->
     assert loaded.permissions == {Permission("server:restart")}
 
 
+async def test_lock_by_id_locks_no_role_of_another_community(
+    engine: AsyncEngine,
+) -> None:
+    # A request whose path names another community gets no role back, and takes
+    # no lock on the role it named (issue #4027).
+    factory = create_session_factory(engine)
+    community, stranger = _community(), _community("strangers")
+    role = _role(community.id, "Editor")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.communities.add(stranger)
+        await uow.roles.add(role)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.roles.lock_by_id(stranger.id, role.id) is None
+        async with engine.connect() as other:
+            lockable = await other.execute(
+                text("SELECT id FROM role WHERE id = :id FOR UPDATE SKIP LOCKED"),
+                {"id": role.id.value},
+            )
+            assert lockable.scalars().all() == [role.id.value]
+
+
 async def test_delete_role_removes_the_row(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     community = _community()

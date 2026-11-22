@@ -331,6 +331,29 @@ async def test_deleting_server_cascades_pending_sync(engine: AsyncEngine) -> Non
     assert pending == 0
 
 
+async def test_a_mark_leaves_the_server_row_open_to_updates(
+    engine: AsyncEngine,
+) -> None:
+    # The mark key-share locks the server row: enough to hold off the server's
+    # delete (pinned in test_group_attach_races.py), and no stronger, so a group
+    # change neither waits for nor holds off an UPDATE of the server's non-key
+    # columns, which takes FOR NO KEY UPDATE.
+    community_id = await _seed_community(engine)
+    server_id = await _seed_server(engine, community_id)
+    factory = create_session_factory(engine)
+
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.groups.mark_sync_pending([ServerId(server_id)], GroupKind.OP)
+        async with engine.connect() as other:
+            updatable = await other.execute(
+                text(
+                    "SELECT id FROM server WHERE id = :id FOR NO KEY UPDATE SKIP LOCKED"
+                ),
+                {"id": server_id},
+            )
+            assert updatable.scalars().all() == [server_id]
+
+
 # --- concurrent group delete during a player edit (issue #2583) ---------------
 
 

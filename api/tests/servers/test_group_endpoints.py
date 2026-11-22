@@ -43,7 +43,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
-    GroupPlayerEditConflictError,
     InvalidGroupKindError,
     ServerNotFoundError,
 )
@@ -252,60 +251,6 @@ def test_create_in_a_concurrently_deleted_community_is_404() -> None:
     assert resp.json()["reason"] == "not_found"
 
 
-def _edit_conflict() -> GroupPlayerEditConflictError:
-    # ``save`` replaces the player set wholesale, so an interleaved edit on the
-    # same group can collide on uq_group_player_group_uuid from any of the three
-    # routes that reach it -- the rename re-inserts the set too (issue #2613).
-    return GroupPlayerEditConflictError("uq_group_player_group_uuid")
-
-
-def test_rename_losing_an_interleaved_player_edit_is_409() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        rename=_FakeUseCase(error=_edit_conflict()),
-        recorder=_RecordingRecorder(),
-    )
-    client = _client(app)
-    resp = client.patch(
-        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}",
-        json={"name": "admins"},
-    )
-    assert resp.status_code == 409
-    assert resp.json()["reason"] == "group_edit_conflict"
-
-
-def test_add_player_losing_an_interleaved_player_edit_is_409() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        add_player=_FakeUseCase(error=_edit_conflict()),
-        recorder=_RecordingRecorder(),
-    )
-    client = _client(app)
-    resp = client.post(
-        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/players",
-        json={"uuid": str(uuid.uuid4()), "username": "alice"},
-    )
-    assert resp.status_code == 409
-    assert resp.json()["reason"] == "group_edit_conflict"
-
-
-def test_remove_player_losing_an_interleaved_player_edit_is_409() -> None:
-    app = _app(
-        member=True,
-        allow=True,
-        remove_player=_FakeUseCase(error=_edit_conflict()),
-        recorder=_RecordingRecorder(),
-    )
-    client = _client(app)
-    resp = client.delete(
-        f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}/players/{uuid.uuid4()}"
-    )
-    assert resp.status_code == 409
-    assert resp.json()["reason"] == "group_edit_conflict"
-
-
 def test_read_missing_group_is_404() -> None:
     app = _app(
         member=True,
@@ -341,3 +286,19 @@ def test_delete_group_returns_204() -> None:
     client = _client(app)
     resp = client.delete(f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
     assert resp.status_code == 204
+
+
+def test_delete_missing_group_is_404_and_not_audited() -> None:
+    # A delete that waited behind another delete of the group finds it gone
+    # (issue #4027): one GROUP_DELETE audit entry, the first delete's.
+    recorder = _RecordingRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        delete=_FakeUseCase(error=GroupNotFoundError("x")),
+        recorder=recorder,
+    )
+    client = _client(app)
+    resp = client.delete(f"/api/communities/{uuid.uuid4()}/groups/{uuid.uuid4()}")
+    assert resp.status_code == 404
+    assert recorder.events == []

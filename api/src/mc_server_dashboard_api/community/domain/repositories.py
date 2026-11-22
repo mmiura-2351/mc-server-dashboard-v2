@@ -204,12 +204,15 @@ class RoleRepository(abc.ABC):
         """Return all roles defined in ``community_id``."""
 
     @abc.abstractmethod
-    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+    async def lock_by_id(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> Role | None:
         """Return the role with ``role_id`` locked until the transaction ends.
 
         For a caller whose write depends on the role's current state (#3215): a
         concurrent locker waits, then reads the row as this transaction left it.
-        ``None`` if absent.
+        ``None`` if absent or not in ``community_id``; such a role is not locked
+        (issue #4027).
         """
 
     @abc.abstractmethod

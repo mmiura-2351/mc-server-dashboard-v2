@@ -166,7 +166,7 @@ class UpdateRole:
                     community_id=community_id,
                     role_to_update=role_id,
                 )
-                role = await self.uow.roles.lock_by_id(role_id)
+                role = await self.uow.roles.lock_by_id(community_id, role_id)
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
             if role.is_preset:

@@ -20,9 +20,8 @@ group-deleted-mid-edit backstop (issue #2583);
 ``uq_server_plugin_server_rel`` (migration 0019) is the per-server plugin path
 backstop; ``fk_server_group_group_id_player_group`` /
 ``fk_server_group_server_id_server`` (migration 0012) are the
-attach-target-vanished backstops (issue #2612);
-``uq_group_player_group_uuid`` (migration 0012) is the interleaved-player-edit
-backstop (issue #2613); and ``fk_player_group_community_id_community``
+attach-target-vanished backstops (issue #2612); and
+``fk_player_group_community_id_community``
 (migration 0012) / ``fk_server_community_id_community`` (migration 0005) are the
 community-deleted-mid-create backstops (issues #2924, #2940).
 
@@ -52,18 +51,13 @@ backstop and has been reached that way since it was mapped. That is the
 difference from ``fk_player_group_community_id_community``, whose row is emitted
 by ``add``'s own explicit flush.
 
-``uq_group_player_group_uuid`` is a third shape: neither caller duplicated
-anything a pre-read could have caught, and neither is gone. Two player edits on
-one group interleave, and because ``save`` replaces the player set wholesale the
-loser's DELETE cannot see rows the winner committed after it ran, so the loser
-re-inserts a pair that now exists. The delete-then-insert stays (the owner's
-#2613 ruling: a 409 for a genuinely simultaneous edit of one group is acceptable
-at this scale), so the constraint is translated to a conflict the loser can
-retry -- its transaction rolls back whole, the winner's edit stands, and
-re-reading the group and reapplying the edit succeeds. Since issue #2965
-``save`` locks the group row before its DELETE, so the second edit waits for
-the first to commit and its DELETE sees those rows: the interleave no longer
-forms through ``save``, and the entry is kept as the constraint's translation.
+``uq_group_player_group_uuid`` is deliberately left out. Two player edits on
+one group used to interleave so that the loser's wholesale DELETE could not see
+a row the winner committed after it ran, and the loser re-inserted that pair; it
+was answered 409 (issue #2613). Since issue #2965 ``save`` locks the group row
+before its DELETE, so the second edit waits for the first to commit and its
+DELETE sees those rows. The violation cannot form, and its 409 was removed
+(issue #4027).
 
 The map below is **deliberately partial**. The issue #2583 audit walked every
 named UNIQUE and FOREIGN KEY constraint in ``api/migrations/`` against it and
@@ -139,7 +133,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
-    GroupPlayerEditConflictError,
     PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
@@ -155,7 +148,6 @@ _PORT_CONSTRAINTS = frozenset({"uq_server_game_port", "uq_server_bedrock_port"})
 _SLUG_CONSTRAINTS = frozenset({"uq_server_slug"})
 _SCHEDULE_NAME_CONSTRAINTS = frozenset({"uq_schedule_server_id_name"})
 _GROUP_NAME_CONSTRAINTS = frozenset({"uq_player_group_community_kind_name"})
-_GROUP_PLAYER_EDIT_CONSTRAINTS = frozenset({"uq_group_player_group_uuid"})
 _GROUP_MISSING_CONSTRAINTS = frozenset(
     {
         "fk_group_player_group_id_player_group",
@@ -194,8 +186,6 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise ScheduleNameAlreadyExistsError(str(constraint)) from exc
     if constraint in _GROUP_NAME_CONSTRAINTS:
         raise GroupNameAlreadyExistsError(str(constraint)) from exc
-    if constraint in _GROUP_PLAYER_EDIT_CONSTRAINTS:
-        raise GroupPlayerEditConflictError(str(constraint)) from exc
     if constraint in _GROUP_MISSING_CONSTRAINTS:
         raise GroupNotFoundError(str(constraint)) from exc
     if constraint in _SERVER_MISSING_CONSTRAINTS:

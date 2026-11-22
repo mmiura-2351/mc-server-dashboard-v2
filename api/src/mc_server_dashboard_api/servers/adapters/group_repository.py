@@ -14,7 +14,6 @@ from sqlalchemy import delete, literal, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.exc import StaleDataError
 
 from mc_server_dashboard_api.servers.adapters.group_models import (
     GroupPlayerModel,
@@ -149,17 +148,6 @@ class SqlAlchemyGroupRepository(GroupRepository):
         except IntegrityError as exc:
             translate_integrity_error(exc)
             raise
-        except StaleDataError as exc:
-            # The name UPDATE is the only statement in this block the ORM
-            # rowcount-checks -- the player-row DELETE is a bulk statement and the
-            # replacement rows are INSERTs -- so a zero-row match here means one
-            # thing: the group is gone. Same cause and same answer as the FK above,
-            # translated here because StaleDataError carries no constraint name and
-            # is not an IntegrityError, so it would otherwise cross the port
-            # boundary raw and surface as a 500 (issue #2937). A delete racer used to
-            # reach it by committing between the re-read and this block; it now
-            # waits on the re-read's row lock instead (issue #2965).
-            raise GroupNotFoundError(str(group.id.value)) from exc
 
     async def delete(self, group_id: GroupId) -> None:
         # group_player and server_group rows cascade from the FK ON DELETE CASCADE.
@@ -206,24 +194,21 @@ class SqlAlchemyGroupRepository(GroupRepository):
         )
         return row is not None
 
-    async def lock_against_attach(self, group_id: GroupId) -> None:
+    async def lock_against_attach(
+        self, community_id: CommunityId, group_id: GroupId
+    ) -> None:
         # FOR UPDATE, the one row lock that conflicts with the FOR KEY SHARE an
         # attach's fk_server_group_group_id_player_group check takes on this row.
-        # A weaker lock would let the attach's INSERT through.
+        # A weaker lock would let the attach's INSERT through. The community is
+        # matched too (it never changes), so another community's group is left
+        # unlocked.
         await self._session.execute(
             select(PlayerGroupModel.id)
-            .where(PlayerGroupModel.id == group_id.value)
+            .where(
+                PlayerGroupModel.id == group_id.value,
+                PlayerGroupModel.community_id == community_id.value,
+            )
             .with_for_update()
-        )
-
-    async def lock_for_edit(self, group_id: GroupId) -> None:
-        # FOR NO KEY UPDATE, the lock save's re-read takes: it conflicts with a
-        # delete's FOR UPDATE and with another edit's lock, but not with the FOR
-        # KEY SHARE an attach's FK check takes.
-        await self._session.execute(
-            select(PlayerGroupModel.id)
-            .where(PlayerGroupModel.id == group_id.value)
-            .with_for_update(key_share=True)
         )
 
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
@@ -253,7 +238,9 @@ class SqlAlchemyGroupRepository(GroupRepository):
         # Insert from the server rows themselves, key-share locked, rather than
         # from the ids: a server deleted since the caller listed its attachments
         # is then skipped instead of violating the FK, and one that exists cannot
-        # be deleted under the INSERT.
+        # be deleted under the INSERT. FOR KEY SHARE is enough for that, and an
+        # UPDATE that leaves the server's unique columns alone (a state write)
+        # is not held off.
         #
         # DO UPDATE, not DO NOTHING: recording the mark again must change its
         # token, which is what lets the start that read the old one tell that a
@@ -265,10 +252,12 @@ class SqlAlchemyGroupRepository(GroupRepository):
                 literal(uuid.uuid4()).label("token"),
             )
             .where(ServerModel.id.in_([s.value for s in server_ids]))
-            # One lock order for every caller, so two changes marking the same
-            # servers cannot deadlock on each other's rows.
+            # Id order, the order the server repository's bulk state writes
+            # lock rows in (FOR UPDATE, which this waits for), so a mark cannot
+            # deadlock with one. Two changes marking the same servers share these
+            # locks and upsert the marks in the same order.
             .order_by(ServerModel.id)
-            .with_for_update(key_share=True)
+            .with_for_update(key_share=True, read=True)
         )
         stmt = pg_insert(ServerGroupSyncPendingModel).from_select(
             ["server_id", "kind", "token"], servers
