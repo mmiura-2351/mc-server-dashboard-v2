@@ -857,8 +857,9 @@ Notes:
   start that replays a launch refused for a missing working set (Section 7)
   sends its hydrate after a start, and handles a refusal of it as it would a
   refused start: `UNAVAILABLE` and `EXPIRED` give the Worker back there.
-- **Nothing publishes a snapshot from a Worker that has not hydrated the
-  server.** A Worker kept by the previous note has not hydrated the server, and
+- **Nothing publishes a snapshot from a Worker that is not known to hold the
+  store's working set.** A Worker kept by the previous note has not hydrated the
+  server, and
   its scratch may be a leftover older than the store: a previous run's that no
   final snapshot published, since overtaken by a run on another Worker, a backup
   restore or an at-rest file edit. Publishing it would replace the store's
@@ -872,13 +873,16 @@ Notes:
   hydrate cannot have replaced the Worker's working set, the re-sent start puts
   the mark back as it found it: the Worker refused the hydrate before the pull
   (`BUSY`, `UNAVAILABLE` or `EXPIRED`, or `INVALID_STATE`, which clears the mark
-  anyway, below), or the hydrate was never sent because the wait ran out or the
-  start's intent was withdrawn. A hydrate that failed or got no answer may have
-  swapped the new tree in, as the Worker can report a failed transfer after its
-  swap, so the mark stays until a hydrate lands. The start puts the mark back
+  anyway, below), or the hydrate was never sent: the wait ran out, the start's
+  intent was withdrawn, or the Worker had no session to send it on. A hydrate
+  that failed, timed out, or lost its session while it awaited its answer may
+  have swapped the new tree in, as the Worker can report a failed transfer after
+  its swap, so the mark stays until a hydrate lands. The start puts the mark back
   only while it is still its own: while the row is as the start marked it, or
-  stopped on that Worker by the one stop that withdrew the start. While the mark
-  is set:
+  while the one stop that withdrew the start holds it, as that stop's flip left
+  it. For that stop the put-back is best effort: the stop reads the mark for its
+  final snapshot as soon as the Worker answers it, and if that comes before the
+  start's wait ends, the stop takes no final snapshot. While the mark is set:
   - the periodic snapshot skips the server but keeps it due, so the first tick
     after the mark clears takes it;
   - a final snapshot is not taken, whether a stop, a replayed stop or the

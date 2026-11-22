@@ -1107,6 +1107,20 @@ class StartServer:
             if marked is not None and not dispatch.hydrate_sent:
                 await self._unmark(marked, worker_id, stop_intent_count)
             raise
+        except WorkerUnavailableError as exc:
+            # A hydrate the Worker never received leaves its tree as it was: it
+            # had no session when the hydrate was dispatched, or this API lacks
+            # the data-plane URL or credential to send one. One that timed out,
+            # or whose session ended while it awaited its answer, may have
+            # swapped the tree in, and the mark stays.
+            if (
+                marked is not None
+                and not dispatch.attempted
+                and not exc.upload_may_be_live
+                and not exc.session_ended_in_flight
+            ):
+                await self._unmark(marked, worker_id, stop_intent_count)
+            raise
         if outcome.success:
             return server
         if (
@@ -1685,12 +1699,14 @@ class StartServer:
 
         The clear lands only while the mark is still this start's: while the row
         is as the start marked it, or while the one stop that withdrew the
-        start's intent holds it for its final snapshot (the count moved exactly
-        once, and the row is stopped on this Worker). Any other row may carry a
-        newer placement on this Worker, made after a release, whose own hydrate
-        has not landed, and its mark stays. One residue: a stop's flip is visible
-        before its commit returns and it bumps, so a newer placement that a second
-        stop has just stopped can read as withdrawn once, and lose its mark.
+        start's intent holds it for its final snapshot. That stop is the only
+        withdrawal since (the count moved exactly once), and the row still
+        carries the ``updated_at`` its flip wrote, which its bump recorded. Any
+        other row may carry a newer placement on this Worker, made after a
+        release, whose own hydrate has not landed, and its mark stays. That
+        includes a newer placement a second stop has just stopped: its flip is
+        visible before its commit returns and it bumps, but it wrote a stamp of
+        its own.
 
         This is best effort for a stop: the stop reads the mark for its final
         snapshot once the Worker has answered it, which can come before the wait
@@ -1705,6 +1721,7 @@ class StartServer:
             held_by_its_stop = (
                 current.desired_state is DesiredState.STOPPED
                 and self.stop_intents.current(server_id) == stop_intent_count + 1
+                and self.stop_intents.flipped_at(server_id) == current.updated_at
             )
             if current.updated_at != marked.updated_at and not held_by_its_stop:
                 return
@@ -2042,10 +2059,12 @@ class StopServer:
                 # sent at all. The cost: a commit that truly failed refuses an
                 # in-flight start of the still-running intent, which then waits for
                 # the reconciler's re-send.
+                # The bump records the stamp the flip wrote (issue #4024, see
+                # ``StartServer._unmark``).
                 try:
                     await self.uow.commit()
                 finally:
-                    self.stop_intents.bump(server_id)
+                    self.stop_intents.bump(server_id, flipped_at=server.updated_at)
 
         if owed == "redispatch_stop":
             # The same replay the reconciler sends, with the operator's ``force``.
@@ -2492,14 +2511,14 @@ class StopServer:
         server from the older store.
 
         A row whose Worker is not known to hold the store's working set
-        (``awaiting_hydrate``: it has not hydrated the server under this
-        assignment, issue #3890, or a re-sent start's hydrate of it has not landed,
-        issue #4024) is not snapshotted at all, and this returns ``False`` so the
-        caller releases it. That Worker's scratch may be a
-        leftover older than the store, and publishing it would replace the newer
-        working set. The store wins, as it did when a refused hydrate gave the
-        Worker back, and the next start's hydrate displaces the scratch. The row is
-        read here, so all three callers pass this one check.
+        (``awaiting_hydrate``: it has not hydrated the server under this assignment,
+        issue #3890, or a re-sent start marked it for a new hydrate that has not
+        cleared the mark, issue #4024) is not snapshotted at all, and this returns
+        ``False`` so the caller releases it. That Worker's scratch may be a leftover
+        older than the store, and publishing it would replace the newer working set.
+        The store wins, as it did when a refused hydrate gave the Worker back, and
+        the next start's hydrate displaces the scratch. The row is read here, so all
+        three callers pass this one check.
         """
 
         # A dispatched snapshot may outlive its caller, so a finished stop recorded
@@ -2517,9 +2536,7 @@ class StopServer:
         ):
             _LOG.warning(
                 "final snapshot skipped for server %s: worker %s is not known to hold "
-                "the store's working set (no hydrate of it has landed under this "
-                "assignment since it was marked), so its scratch may be older than the "
-                "store. "
+                "the store's working set, so its scratch may be older than the store. "
                 "The store's working set stands, and the next start's hydrate "
                 "replaces the scratch (issue #3890)",
                 server_id.value,

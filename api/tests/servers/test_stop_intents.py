@@ -716,6 +716,33 @@ async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot() ->
     assert world.stored() == (DesiredState.STOPPED, None)
 
 
+async def test_a_stop_after_a_re_sent_starts_hydrate_takes_no_final_snapshot() -> None:
+    # Issue #4024. The same stop, but it commits once the re-sent start's hydrate
+    # has landed, as the start re-reads the row before it sends. The start
+    # answers the conflict, and its hydrate may have replaced the Worker's
+    # working set, so it leaves its mark: the stop, whose answer comes after
+    # that, takes no final snapshot, as after a user start.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    world.cp.hold_stop_answer = asyncio.Event()
+    stops: list[asyncio.Task[Server]] = []
+
+    async def stop_is_sent() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+        await world.cp.stop_sent.wait()
+
+    world.after_hydrate_and_next_read(stop_is_sent)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server().redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    world.cp.hold_stop_answer.set()
+    await stops[0]
+
+    assert world.kinds() == ["hydrate", "stop"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
 async def test_a_re_sent_start_reads_the_counter_before_it_finds_the_intent() -> None:
     # The re-sent start's first read finds the intent it re-sends. A stop and a
     # newer start on the same Worker can land while that read's unit of work

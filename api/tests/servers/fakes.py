@@ -2006,8 +2006,10 @@ class BumpHookStopIntents(StopIntentCounter):
 
     on_bump: Callable[[], None] | None = None
 
-    def bump(self, server_id: ServerId) -> None:
-        super().bump(server_id)
+    def bump(
+        self, server_id: ServerId, *, flipped_at: dt.datetime | None = None
+    ) -> None:
+        super().bump(server_id, flipped_at=flipped_at)
         on_bump, self.on_bump = self.on_bump, None
         if on_bump is not None:
             on_bump()

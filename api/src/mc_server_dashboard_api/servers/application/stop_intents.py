@@ -67,7 +67,9 @@ failed start's or placement's revert of its own intent (``_compensate``,
 ``_unassign``), which also bumps when its commit raises, and the two stop
 convergences above. A revert sends no stop, so a re-sent start of that same
 intent already enqueued when the revert lands is not caught. The final-snapshot
-clears do not bump: the flow that took the snapshot already did.
+clears do not bump: the flow that took the snapshot already did. A stop's bump
+also records the ``updated_at`` its flip wrote, so that a re-sent start can tell
+the row that stop holds from a later write (issue #4024).
 
 The value a start reads also identifies its intent: an unchanged count means no
 write in this process has withdrawn the intent since. A failed start's revert
@@ -90,6 +92,7 @@ server's own start left still covers it. Issue #3854 tracks both.
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass, field
 
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
@@ -102,16 +105,32 @@ class StopIntentCounter:
     Also which servers have had a start sent that no stop has stopped yet.
     """
 
-    # Neither drops a deleted server's entry: each holds at most one per server
+    # No field drops a deleted server's entry: each holds at most one per server
     # this process has seen.
     _counts: dict[ServerId, int] = field(default_factory=dict)
     _unstopped_starts: set[ServerId] = field(default_factory=set)
+    _flipped_at: dict[ServerId, dt.datetime | None] = field(default_factory=dict)
 
     def current(self, server_id: ServerId) -> int:
         return self._counts.get(server_id, 0)
 
-    def bump(self, server_id: ServerId) -> None:
+    def bump(
+        self, server_id: ServerId, *, flipped_at: dt.datetime | None = None
+    ) -> None:
+        """Count a withdrawal of the server's start intent.
+
+        ``flipped_at`` is the ``updated_at`` a stop's ``running -> stopped`` flip
+        wrote, for a re-sent start to tell that stop's row from any later write
+        (issue #4024). A withdrawal that wrote no flip of its own passes nothing.
+        """
+
         self._counts[server_id] = self.current(server_id) + 1
+        self._flipped_at[server_id] = flipped_at
+
+    def flipped_at(self, server_id: ServerId) -> dt.datetime | None:
+        """The ``updated_at`` the latest withdrawal's flip wrote, if it recorded one."""
+
+        return self._flipped_at.get(server_id)
 
     def start_sent(self, server_id: ServerId) -> None:
         """Note a start enqueued for ``server_id``, as it is enqueued."""

@@ -642,8 +642,8 @@ class WorkerAssignment:
 
     ``awaiting_hydrate`` is the row's mark that this Worker is not known to hold
     the store's working set: it has not hydrated the server under the assignment
-    yet (issue #3890), or a re-sent start's hydrate of it has not landed (issue
-    #4024). Its scratch may be older than the store.
+    yet (issue #3890), or a re-sent start marked it for a new hydrate that has
+    not cleared the mark (issue #4024). Its scratch may be older than the store.
     """
 
     worker_id: str
@@ -653,7 +653,8 @@ class WorkerAssignment:
 # An async lookup of a server's current assignment, or None if unassigned. The
 # data-plane snapshot endpoint uses it to fence late publishes from a worker that
 # is no longer assigned (issue #1703), and to refuse every publish from the
-# assigned worker while it has not hydrated the server yet (issue #3890).
+# assigned worker while it is not known to hold the server's working set
+# (``awaiting_hydrate``, issues #3890 and #4024).
 AssignedWorkerLookup = Callable[
     [uuid.UUID, uuid.UUID], Awaitable[WorkerAssignment | None]
 ]

@@ -17,7 +17,6 @@ import contextlib
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 import pytest
 
@@ -397,62 +396,109 @@ def _hydrate_answers(precondition: str) -> CommandOutcome:
 _PRIOR = None
 
 
+class _HydrateRaises(FakeControlPlane):
+    """A control plane whose hydrate raises ``error``."""
+
+    def __init__(self, error: WorkerUnavailableError) -> None:
+        super().__init__(hydrate_timeout_seconds=_BUDGET)
+        self._error = error
+
+    async def hydrate(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
+    ) -> CommandOutcome:
+        raise self._error
+
+
+def _hydrate_raising(
+    *, upload_may_be_live: bool = False, session_ended_in_flight: bool = False
+) -> Callable[[], FakeControlPlane]:
+    return lambda: _HydrateRaises(
+        WorkerUnavailableError(
+            "worker",
+            upload_may_be_live=upload_may_be_live,
+            session_ended_in_flight=session_ended_in_flight,
+        )
+    )
+
+
+def _hydrate_answering(
+    outcome: CommandOutcome | None,
+) -> Callable[[], FakeControlPlane]:
+    return lambda: FakeControlPlane(
+        hydrate_timeout_seconds=_BUDGET,
+        outcomes={} if outcome is None else {"hydrate": outcome},
+    )
+
+
 @pytest.mark.parametrize(
-    ("cp_kwargs", "settled", "stopped", "marked"),
+    ("make_cp", "settled", "stopped", "marked"),
     [
-        pytest.param({}, True, False, False, id="hydrated"),
+        pytest.param(_hydrate_answering(None), True, False, False, id="hydrated"),
         pytest.param(
-            {"outcomes": {"hydrate": _hydrate_answers("command_in_flight")}},
+            _hydrate_answering(_hydrate_answers("command_in_flight")),
             True,
             False,
             _PRIOR,
             id="busy",
         ),
         pytest.param(
-            {"outcomes": {"hydrate": _hydrate_answers("untracked_container")}},
+            _hydrate_answering(_hydrate_answers("untracked_container")),
             True,
             False,
             _PRIOR,
             id="unavailable",
         ),
         pytest.param(
-            {"outcomes": {"hydrate": _hydrate_answers("command_expired")}},
+            _hydrate_answering(_hydrate_answers("command_expired")),
             True,
             False,
             _PRIOR,
             id="expired",
         ),
         pytest.param(
-            {"outcomes": {"hydrate": _hydrate_answers("instance_running")}},
+            _hydrate_answering(_hydrate_answers("instance_running")),
             True,
             False,
             False,
             id="instance-running",
         ),
-        pytest.param({}, False, False, _PRIOR, id="wait-ran-out"),
-        pytest.param({}, True, True, _PRIOR, id="stopped-during-the-wait"),
+        pytest.param(_hydrate_answering(None), False, False, _PRIOR, id="wait-ran-out"),
         pytest.param(
-            {
-                "outcomes": {
-                    "hydrate": CommandOutcome(
-                        status=CommandStatus.TRANSFER_FAILED, message="unpack"
-                    )
-                }
-            },
+            _hydrate_answering(None), True, True, _PRIOR, id="stopped-during-the-wait"
+        ),
+        pytest.param(
+            _hydrate_raising(), True, False, _PRIOR, id="worker-not-connected"
+        ),
+        pytest.param(
+            _hydrate_answering(
+                CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="unpack")
+            ),
             True,
             False,
             True,
             id="transfer-failed",
         ),
         pytest.param(
-            {"unavailable_kinds": {"hydrate"}}, True, False, True, id="unanswered"
+            _hydrate_raising(upload_may_be_live=True), True, False, True, id="timed-out"
+        ),
+        pytest.param(
+            _hydrate_raising(session_ended_in_flight=True),
+            True,
+            False,
+            True,
+            id="session-ended-in-flight",
         ),
     ],
 )
 @pytest.mark.parametrize("prior", [False, True], ids=["unmarked", "marked"])
 async def test_a_resent_start_keeps_the_mark_only_if_its_hydrate_may_have_swapped(
     prior: bool,
-    cp_kwargs: dict[str, Any],
+    make_cp: Callable[[], FakeControlPlane],
     settled: bool,
     stopped: bool,
     marked: bool | None,
@@ -462,16 +508,16 @@ async def test_a_resent_start_keeps_the_mark_only_if_its_hydrate_may_have_swappe
     # - a hydrate that landed clears the mark, as does an instance the Worker
     #   proved there, whose working set is the server's from then on;
     # - a hydrate that may have replaced the Worker's working set keeps it: a
-    #   failed transfer, which the Worker can report after its swap, and one
-    #   that got no answer;
+    #   failed transfer, which the Worker can report after its swap, one that
+    #   timed out, and one whose session ended while it awaited its answer;
     # - one that left the working set as it was puts back the mark the start
-    #   found: a refusal before the pull, a wait that ran out before the
-    #   hydrate was sent, and a stop that withdrew the start during the wait.
+    #   found: a refusal before the pull, a hydrate never sent because the
+    #   Worker had no session, a wait that ran out before the hydrate was sent,
+    #   and a stop that withdrew the start during the wait.
     server = _server(desired=DesiredState.RUNNING, on_worker=True)
     server.awaiting_hydrate = prior
     uow = FakeUnitOfWork()
     uow.servers.seed(server)
-    cp = FakeControlPlane(hydrate_timeout_seconds=_BUDGET, **cp_kwargs)
     clock = FakeClock(_NOW)
     at_wait: list[bool] = []
 
@@ -479,16 +525,16 @@ async def test_a_resent_start_keeps_the_mark_only_if_its_hydrate_may_have_swappe
         row = uow.servers.by_id[server.id]
         at_wait.append(row.awaiting_hydrate)
         if stopped:
-            # The stop's commit and bump: the row keeps its Worker for the final
-            # snapshot.
+            # The stop's flip, commit and bump: the row keeps its Worker for the
+            # final snapshot.
             row.desired_state = DesiredState.STOPPED
             row.updated_at = _NOW + dt.timedelta(seconds=1)
-            start.stop_intents.bump(server.id)
+            start.stop_intents.bump(server.id, flipped_at=row.updated_at)
 
     reader = _Uploads(
         clock, takes=0 if settled else _BUDGET, settled=settled, during=_during
     )
-    start = _start(uow, cp, reader, clock)
+    start = _start(uow, make_cp(), reader, clock)
 
     with contextlib.suppress(ServerError, WorkerUnavailableError):
         await start.redispatch_start(
@@ -502,14 +548,40 @@ async def test_a_resent_start_keeps_the_mark_only_if_its_hydrate_may_have_swappe
     )
 
 
-@pytest.mark.parametrize("newer", ["placed", "placed-and-stopped"])
+async def test_a_resent_start_puts_the_mark_back_when_its_adoption_is_not_written() -> (
+    None
+):
+    # Issue #4024. The Worker refused the hydrate INVALID_STATE, so an instance of
+    # the server runs there and its working set is the server's. Recording it
+    # running clears the mark, but that write can be dropped: the row was
+    # observed at the same instant, or later after a wall-clock step back. The
+    # hydrate replaced nothing all the same, so the start puts back the mark it
+    # found, and the instance's snapshots publish.
+    server = _server(desired=DesiredState.RUNNING, on_worker=True)
+    server.observed_at = _NOW
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    clock = FakeClock(_NOW)
+    cp = _hydrate_answering(_hydrate_answers("instance_running"))()
+
+    await _start(
+        uow, cp, _Uploads(clock, takes=0, settled=True), clock
+    ).redispatch_start(community_id=server.community_id, server_id=server.id)
+
+    row = uow.servers.by_id[server.id]
+    assert (row.observed_state, row.awaiting_hydrate) == (ObservedState.STOPPED, False)
+
+
+@pytest.mark.parametrize(
+    "newer", ["placed", "placed-and-stopped", "placed-and-being-stopped"]
+)
 async def test_a_resent_start_leaves_the_mark_of_a_newer_placement(newer: str) -> None:
     # Issue #4024. While the re-sent start waited, a stop withdrew its intent and
     # released the row, and a newer start placed the server on the same Worker,
-    # whose hydrate has not landed. A stop of that newer start may hold the row
-    # too. The mark is the newer placement's, so the re-sent start answers the
-    # conflict and leaves it: the newer start's scratch may be older than the
-    # store.
+    # whose hydrate has not landed. A second stop, of that newer start, may hold
+    # the row too, its flip visible before it has bumped. The mark is the newer
+    # placement's, so the re-sent start answers the conflict and leaves it: the
+    # newer start's scratch may be older than the store.
     server = _server(desired=DesiredState.RUNNING, on_worker=True)
     uow = FakeUnitOfWork()
     uow.servers.seed(server)
@@ -518,13 +590,14 @@ async def test_a_resent_start_leaves_the_mark_of_a_newer_placement(newer: str) -
 
     def _during() -> None:
         row = uow.servers.by_id[server.id]
-        start.stop_intents.bump(server.id)
-        row.updated_at = _NOW + dt.timedelta(seconds=1)
+        start.stop_intents.bump(server.id, flipped_at=_NOW + dt.timedelta(seconds=1))
+        row.updated_at = _NOW + dt.timedelta(seconds=2)
         row.awaiting_hydrate = True
-        if newer == "placed-and-stopped":
+        if newer != "placed":
             row.desired_state = DesiredState.STOPPED
-            row.updated_at = _NOW + dt.timedelta(seconds=2)
-            start.stop_intents.bump(server.id)
+            row.updated_at = _NOW + dt.timedelta(seconds=3)
+        if newer == "placed-and-stopped":
+            start.stop_intents.bump(server.id, flipped_at=row.updated_at)
 
     start = _start(
         uow, cp, _Uploads(clock, takes=0, settled=True, during=_during), clock
