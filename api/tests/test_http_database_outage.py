@@ -23,18 +23,28 @@ import pytest
 import sqlalchemy.exc
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 
 from mc_server_dashboard_api import http_problem
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.core.adapters.database import DatabaseConnectError
+from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
+    is_transient_database_error,
+)
 from mc_server_dashboard_api.dependencies import get_authenticate_request
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from tests.client_utils import enter_client
-from tests.core.fakes import interface_error, server_error
+from tests.core.fakes import (
+    black_hole_database,
+    first_failure,
+    interface_error,
+    server_error,
+    silent_database,
+)
 from tests.identity.fakes import (
     FakeClock,
     FakeTokenService,
@@ -348,3 +358,58 @@ def test_each_app_engine_raises_a_refused_connect_typed(
 
     with pytest.raises(DatabaseConnectError):
         client.portal.call(connect)
+
+
+# The bound the stalled-server tests configure, and how long they allow for it:
+# generous against a loaded host, far below what the driver applies unbounded.
+_BOUND = "0.2"
+_WITHIN_SECONDS = 2.0
+
+
+def _bounded_client(
+    monkeypatch: pytest.MonkeyPatch, url: str, *, setting: str
+) -> TestClient:
+    """The real app, its lifespan open, its database ``url``, ``setting`` small."""
+
+    monkeypatch.setenv("MCD_API_DATABASE__URL", url)
+    monkeypatch.setenv(f"MCD_API_DATABASE__{setting.upper()}", _BOUND)
+    return enter_client(TestClient(create_app(), raise_server_exceptions=False))
+
+
+def _first_query_failure(client: TestClient, engine: str) -> tuple[Exception, float]:
+    app = client.app
+    assert isinstance(app, FastAPI) and client.portal is not None
+
+    async def query() -> None:
+        async with getattr(app.state, engine).connect() as conn:
+            await conn.execute(text("SELECT 1"))
+
+    return client.portal.call(first_failure, query)
+
+
+@pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])
+def test_each_app_engine_bounds_a_connect_the_server_never_answers(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # A database host that stopped responding fails a connect at the configured
+    # bound (issue #4042), typed as the refused connect is.
+    with black_hole_database() as url:
+        client = _bounded_client(monkeypatch, url, setting="connect_timeout_seconds")
+        error, elapsed = _first_query_failure(client, engine)
+
+    assert elapsed < _WITHIN_SECONDS
+    assert isinstance(error, DatabaseConnectError)
+
+
+@pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])
+def test_each_app_engine_bounds_a_query_the_server_never_answers(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # A connection gone silent fails its statement at the configured bound
+    # (issue #4042), as an outage.
+    with silent_database() as url:
+        client = _bounded_client(monkeypatch, url, setting="statement_timeout_seconds")
+        error, elapsed = _first_query_failure(client, engine)
+
+    assert elapsed < _WITHIN_SECONDS
+    assert is_transient_database_error(error) is True

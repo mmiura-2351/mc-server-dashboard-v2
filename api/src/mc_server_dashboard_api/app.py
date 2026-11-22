@@ -775,6 +775,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.database.url,
             pool_size=settings.database.pool_size,
             max_overflow=settings.database.max_overflow,
+            connect_timeout=settings.database.connect_timeout_seconds,
+            statement_timeout=settings.database.statement_timeout_seconds,
         )
         # A refused connect is then typed, not the bare ``OSError`` a disk fault
         # raises too, so the problem handler answers it 503 (issue #4010).
@@ -785,7 +787,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # connection rather than a slot in the pool that operations waiting on
         # that lock can hold. One is enough: each read is a single short query.
         assignment_fence_engine = create_engine(
-            settings.database.url, pool_size=1, max_overflow=0
+            settings.database.url,
+            pool_size=1,
+            max_overflow=0,
+            connect_timeout=settings.database.connect_timeout_seconds,
+            statement_timeout=settings.database.statement_timeout_seconds,
         )
         translate_connect_outages(assignment_fence_engine)
         app.state.assignment_fence_engine = assignment_fence_engine

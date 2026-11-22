@@ -15,6 +15,8 @@ import errno
 import logging
 import socket
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,14 +25,18 @@ from sqlalchemy.exc import DBAPIError, InterfaceError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from mc_server_dashboard_api import integrity_sweep_cli
-from mc_server_dashboard_api.config import Settings
-from mc_server_dashboard_api.core.adapters.database import DatabaseConnectError
+from mc_server_dashboard_api.config import Settings, load_settings
+from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
+    is_transient_database_error,
+)
 from mc_server_dashboard_api.servers.application.integrity_sweep import SweepSummary
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from tests.core.fakes import black_hole_database, first_failure, silent_database
 
 _EMPTY = SweepSummary(
     servers_scanned=0,
@@ -411,3 +417,33 @@ def test_main_reports_a_configuration_fault_in_one_line(
     assert (
         capsys.readouterr().err == f"integrity sweep: invalid configuration: {line}\n"
     )
+
+
+@pytest.mark.parametrize(
+    ("stalled", "setting"),
+    [
+        pytest.param(black_hole_database, "connect_timeout_seconds", id="connect"),
+        pytest.param(silent_database, "statement_timeout_seconds", id="statement"),
+    ],
+)
+async def test_the_sweep_holds_a_database_that_stopped_answering_to_its_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalled: Callable[[], AbstractContextManager[str]],
+    setting: str,
+) -> None:
+    """A database that hangs fails the sweep at the configured bound (issue #4042)
+    rather than leaving it waiting, as an outage."""
+
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setenv(f"MCD_API_DATABASE__{setting.upper()}", "0.2")
+    with stalled() as url:
+        monkeypatch.setenv("MCD_API_DATABASE__URL", url)
+        settings = load_settings(config_file=None)
+        error, elapsed = await first_failure(
+            lambda: integrity_sweep_cli.run(settings, server_id=None)
+        )
+
+    assert elapsed < 2.0
+    assert is_transient_database_error(error) is True

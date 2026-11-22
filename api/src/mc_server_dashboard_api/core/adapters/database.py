@@ -57,12 +57,22 @@ def create_engine(
     *,
     pool_size: int | None = None,
     max_overflow: int | None = None,
+    connect_timeout: float | None = None,
+    statement_timeout: float | None = None,
 ) -> AsyncEngine:
     """Create the application's async engine for ``url`` (e.g. asyncpg DSN).
 
     ``pool_size`` and ``max_overflow`` are forwarded to SQLAlchemy's
     ``create_async_engine`` when supplied; when omitted SQLAlchemy's own
     defaults (5 / 10) apply (issue #884).
+
+    ``connect_timeout`` bounds a new connection, its authentication included,
+    and ``statement_timeout`` each exchange with the server on a connection, in
+    seconds (issue #4042). Either one omitted keeps asyncpg's own default: 60 s
+    for a connect, no bound for a statement. Both are the driver's, not the
+    server's ``statement_timeout``, so they also fail a connection that went
+    silent, on which no server-side timeout can answer. A bound that runs out
+    raises the bare ``TimeoutError``.
     """
 
     kwargs: dict[str, object] = {"pool_pre_ping": True}
@@ -70,6 +80,13 @@ def create_engine(
         kwargs["pool_size"] = pool_size
     if max_overflow is not None:
         kwargs["max_overflow"] = max_overflow
+    connect_args: dict[str, float] = {}
+    if connect_timeout is not None:
+        connect_args["timeout"] = connect_timeout
+    if statement_timeout is not None:
+        connect_args["command_timeout"] = statement_timeout
+    if connect_args:
+        kwargs["connect_args"] = connect_args
     return create_async_engine(url, **kwargs)
 
 
@@ -102,7 +119,10 @@ class DatabaseConnectError(Exception):
 # connection invalidated. No ``DBAPIError`` subclass is an outage by type
 # (#4010): an ``InterfaceError`` on a live connection is a concurrency bug or a
 # bad connect argument. asyncpg's own outage classes count for an error that
-# reaches a caller untranslated; through SQLAlchemy 2.1 none does.
+# reaches a caller untranslated; through SQLAlchemy 2.1 none does. A statement
+# that outlasts the engine's bound is the bare ``TimeoutError``, an ``OSError``
+# (#4042). A cancel the server reports, 57014, is never that bound: it is someone's
+# cancel or the operator's own ``statement_timeout``, and not an outage.
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     DatabaseConnectError,
     OSError,

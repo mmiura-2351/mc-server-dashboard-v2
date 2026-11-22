@@ -48,6 +48,7 @@ from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSys
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
 from mc_server_dashboard_api.config import (
+    DatabaseSettings,
     Settings,
     describe_settings_error,
     load_settings,
@@ -78,15 +79,24 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 _LOG = logging.getLogger(__name__)
 
 
-def _engine(url: str, *, pool_size: int, max_overflow: int) -> AsyncEngine:
+def _engine(
+    database: DatabaseSettings, *, pool_size: int, max_overflow: int
+) -> AsyncEngine:
     """An engine whose connect outage is a :class:`DatabaseConnectError`.
 
     asyncpg raises a refused connect as the raw ``OSError`` a store read can also
     raise, so ``main`` could not tell a database outage from a disk fault by type
-    (issue #3942). Both of the sweep's engines are built here.
+    (issue #3942). Both of the sweep's engines are built here, held to the
+    configured connect and statement bounds (issue #4042).
     """
 
-    engine = create_engine(url, pool_size=pool_size, max_overflow=max_overflow)
+    engine = create_engine(
+        database.url,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        connect_timeout=database.connect_timeout_seconds,
+        statement_timeout=database.statement_timeout_seconds,
+    )
     translate_connect_outages(engine)
     return engine
 
@@ -109,7 +119,7 @@ def _is_database_failure(exc: Exception) -> bool:
 
 async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary:
     engine = _engine(
-        settings.database.url,
+        settings.database,
         pool_size=settings.database.pool_size,
         max_overflow=settings.database.max_overflow,
     )
@@ -118,7 +128,7 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
     # own engine rather than a slot in the configured pool, leaving that pool
     # whole for the sweep's work. One connection is enough: the sweep holds one
     # lock at a time.
-    lock_engine = _engine(settings.database.url, pool_size=1, max_overflow=0)
+    lock_engine = _engine(settings.database, pool_size=1, max_overflow=0)
     try:
         session_factory = create_session_factory(engine)
         # The integrity sweep only reads the store, so it needs no owner marker

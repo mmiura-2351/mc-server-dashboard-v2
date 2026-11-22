@@ -21,14 +21,18 @@ import os
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from mc_server_dashboard_api import store_claim_cli
+from mc_server_dashboard_api.config import load_settings
+from mc_server_dashboard_api.core.adapters.database import is_transient_database_error
 from mc_server_dashboard_api.storage.adapters import ownership as ownership_module
 from mc_server_dashboard_api.storage.adapters.ownership import OWNER_MARKER
+from tests.core.fakes import black_hole_database, first_failure, silent_database
 from tests.storage.fake_s3 import FakeS3Store, fake_s3_factory
 
 # ``main`` installs the app's log handler (issue #3942); take it off afterwards.
@@ -249,3 +253,30 @@ def test_the_command_logs_in_the_configured_format(
         "installation \\x1b[31mred\\x1b[0m\\nINFO forged\n"
     ) in err
     assert "\x1b" not in err
+
+
+@pytest.mark.parametrize(
+    ("stalled", "setting"),
+    [
+        pytest.param(black_hole_database, "connect_timeout_seconds", id="connect"),
+        pytest.param(silent_database, "statement_timeout_seconds", id="statement"),
+    ],
+)
+async def test_the_command_holds_a_database_that_stopped_answering_to_its_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalled: Callable[[], AbstractContextManager[str]],
+    setting: str,
+) -> None:
+    # A database that hangs fails the claim at the configured bound (issue
+    # #4042), as an outage, before the store is touched.
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setenv(f"MCD_API_DATABASE__{setting.upper()}", "0.2")
+    with stalled() as url:
+        monkeypatch.setenv("MCD_API_DATABASE__URL", url)
+        settings = load_settings(config_file=None)
+        error, elapsed = await first_failure(lambda: store_claim_cli.run(settings))
+
+    assert elapsed < 2.0
+    assert is_transient_database_error(error) is True

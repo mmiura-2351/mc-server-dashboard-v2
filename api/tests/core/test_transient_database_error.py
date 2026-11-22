@@ -129,7 +129,9 @@ def test_an_outage_the_server_reports_is_transient(
         # A protocol violation is a driver or proxy fault, not an outage (#4010).
         pytest.param(asyncpg.ProtocolViolationError("x"), "08P01", id="08P01"),
         # A cancelled or timed-out statement, a dropped database and an idle
-        # session timed out are not an outage of the server.
+        # session timed out are not an outage of the server. The engine's own
+        # statement bound is the driver's ``TimeoutError``, never a 57014
+        # (#4042).
         pytest.param(asyncpg.QueryCanceledError("x"), "57014", id="57014"),
         pytest.param(asyncpg.DatabaseDroppedError("x"), "57P04", id="57P04"),
         pytest.param(asyncpg.IdleSessionTimeoutError("x"), "57P05", id="57P05"),
