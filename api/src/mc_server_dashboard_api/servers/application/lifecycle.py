@@ -266,7 +266,9 @@ _HYDRATE_REFUSALS_KEEPING_THE_WORKER = frozenset(
 
 # The hydrate answers that leave the Worker's working set as it was (issue #4024):
 # the Worker refused the hydrate before the pull, or never ran it. A failed transfer
-# is not one of them: the Worker can report it after its swap renamed the new tree in.
+# is not one of them by its code: the Worker can report it after its swap renamed the
+# new tree in. It says which in the outcome's ``swap_began`` (issue #4041), and only a
+# ``False`` there says the swap never began.
 _HYDRATE_REFUSALS_BEFORE_THE_SWAP = _HYDRATE_REFUSALS_KEEPING_THE_WORKER | {
     CommandStatus.INVALID_STATE
 }
@@ -996,9 +998,10 @@ class StartServer:
         and assignment stand; only the dispatch is replayed, so this changes no DB
         row but the ``awaiting_hydrate`` mark — set before a hydrate, as a
         placement sets it, and put back as it was when that hydrate cannot have
-        replaced the Worker's working set (issue #4024), or cleared by ``_launch``
-        once it lands (issue #3890) — and on failure it reverts nothing else (a
-        later reconcile tick retries under backoff). The placement load was
+        replaced the Worker's working set (issue #4024; a failed transfer only
+        when the Worker said its swap did not begin, issue #4041), or cleared by
+        ``_launch`` once it lands (issue #3890) — and on failure it reverts nothing
+        else (a later reconcile tick retries under backoff). The placement load was
         already counted on the original assignment, so it is not incremented
         again.
 
@@ -1130,9 +1133,14 @@ class StartServer:
         if (
             marked is not None
             and not dispatch.attempted
-            and outcome.status in _HYDRATE_REFUSALS_BEFORE_THE_SWAP
+            and (
+                outcome.status in _HYDRATE_REFUSALS_BEFORE_THE_SWAP
+                or outcome.swap_began is False
+            )
         ):
-            # The Worker refused the hydrate before it replaced anything.
+            # The Worker refused the hydrate before it replaced anything, or its
+            # transfer failed before the swap, as the Worker said (issue #4041). One
+            # that did not say, an older Worker's, may have swapped.
             await self._unmark(marked, worker_id, stop_intent_count)
         if outcome.status is CommandStatus.INVALID_STATE:
             await self._record_running(server, worker_id)
@@ -1696,8 +1704,9 @@ class StartServer:
         """Put back the mark a re-sent start set, for a hydrate that changed nothing.
 
         ``redispatch_start`` marks the row ``awaiting_hydrate`` before its wait
-        (issue #4024). When its hydrate was not sent, or the Worker refused it
-        before the pull, the Worker's working set is the one the row described
+        (issue #4024). When its hydrate was not sent, the Worker refused it
+        before the pull, or the Worker said its transfer failed before the swap
+        (issue #4041), the Worker's working set is the one the row described
         before the mark, so the row goes back to that. ``marked`` is the row as
         the start read it when its mark changed it.
 

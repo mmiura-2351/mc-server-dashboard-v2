@@ -392,6 +392,14 @@ def _hydrate_answers(precondition: str) -> CommandOutcome:
     )
 
 
+def _transfer_failed(*, swap_began: bool | None) -> CommandOutcome:
+    # What the Worker said of its swap (issue #4041); ``None`` is an older Worker's
+    # answer, which says nothing.
+    return CommandOutcome(
+        status=CommandStatus.TRANSFER_FAILED, message="unpack", swap_began=swap_began
+    )
+
+
 # What a re-sent start leaves of the mark: cleared, set, or as it found it.
 _PRIOR = None
 
@@ -475,13 +483,25 @@ def _hydrate_answering(
             _hydrate_raising(), True, False, _PRIOR, id="worker-not-connected"
         ),
         pytest.param(
-            _hydrate_answering(
-                CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="unpack")
-            ),
+            _hydrate_answering(_transfer_failed(swap_began=False)),
+            True,
+            False,
+            _PRIOR,
+            id="transfer-failed-before-the-swap",
+        ),
+        pytest.param(
+            _hydrate_answering(_transfer_failed(swap_began=True)),
             True,
             False,
             True,
-            id="transfer-failed",
+            id="transfer-failed-after-the-swap-began",
+        ),
+        pytest.param(
+            _hydrate_answering(_transfer_failed(swap_began=None)),
+            True,
+            False,
+            True,
+            id="transfer-failed-unsaid",
         ),
         pytest.param(
             _hydrate_raising(upload_may_be_live=True), True, False, True, id="timed-out"
@@ -508,10 +528,12 @@ async def test_a_resent_start_keeps_the_mark_only_if_its_hydrate_may_have_swappe
     # - a hydrate that landed clears the mark, as does an instance the Worker
     #   proved there, whose working set is the server's from then on;
     # - a hydrate that may have replaced the Worker's working set keeps it: a
-    #   failed transfer, which the Worker can report after its swap, one that
-    #   timed out, and one whose session ended while it awaited its answer;
+    #   failed transfer whose swap began, or whose Worker did not say (issue
+    #   #4041), one that timed out, and one whose session ended while it awaited
+    #   its answer;
     # - one that left the working set as it was puts back the mark the start
-    #   found: a refusal before the pull, a hydrate never sent because the
+    #   found: a refusal before the pull, a failed transfer whose Worker said its
+    #   swap did not begin (issue #4041), a hydrate never sent because the
     #   Worker had no session, a wait that ran out before the hydrate was sent,
     #   and a stop that withdrew the start during the wait.
     server = _server(desired=DesiredState.RUNNING, on_worker=True)

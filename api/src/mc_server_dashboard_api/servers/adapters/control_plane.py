@@ -149,6 +149,7 @@ def _to_outcome(result: CommandResult) -> CommandOutcome:
         listing=listing,
         file_access_reason=_REASON_BY_FLEET_REASON[result.file_access_reason],
         held_generation=result.held_generation,
+        swap_began=result.swap_began,
     )
 
 

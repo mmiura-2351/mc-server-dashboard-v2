@@ -98,7 +98,12 @@
     "left unpinned where a handler answering one is reporting a failed operation, not",
     "a precondition. A row carries one only where a precondition alone determines it:",
     "an over-long console line ('internal') and a running snapshot whose quiesce RCON",
-    "drops ('transfer_failed')."
+    "drops ('transfer_failed').",
+    "A HydrateTrigger's 'transfer_failed' is unpinned too: no precondition determines",
+    "it. It carries CommandError.swap_began (issue #4041), and",
+    "lifecycle.py:StartServer.redispatch_start reads that field, not the code, to put",
+    "back its awaiting_hydrate mark after a hydrate whose swap never began. So no site",
+    "matches the pair, and the field is pinned by the Worker's and the API's own tests."
   ],
   "kinds": [
     "StartServer",

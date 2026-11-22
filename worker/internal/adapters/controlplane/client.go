@@ -253,6 +253,9 @@ func (t *transport) SendCommandResult(_ context.Context, result session.CommandR
 			// FileAccessReason refines a FILE_ACCESS_DENIED failure (issue #548);
 			// it is UNSPECIFIED for every other code, the proto3 default.
 			FileAccessReason: mapFileAccessReason(result.FileAccessReason),
+			// SwapBegan is carried through verbatim (issue #4041): nil stays
+			// absent, which the API reads as "may have begun".
+			SwapBegan: result.SwapBegan,
 		}
 	}
 	msg := &controlplanev1.WorkerMessage{

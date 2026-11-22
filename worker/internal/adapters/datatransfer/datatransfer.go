@@ -112,17 +112,19 @@ func (c *Client) WithLogger(l *slog.Logger) *Client {
 // idempotent on the 200 path. A 204 response
 // means "no published working set"; destDir is left empty and Hydrate returns nil
 // (the Worker launches against an empty dir). Any archive member that would
-// escape destDir is rejected and aborts the transfer.
+// escape destDir is rejected and aborts the transfer. An error from before the
+// swap's first rename wraps scratchformat.ErrBeforeSwap (issue #4041): destDir is
+// as it was.
 func (c *Client) Hydrate(ctx context.Context, url, token, destDir string, marker func(gen uint64) []byte) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return 0, fmt.Errorf("datatransfer: build hydrate request: %w", err)
+		return 0, beforeSwap(fmt.Errorf("datatransfer: build hydrate request: %w", err))
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("datatransfer: hydrate request: %w", err)
+		return 0, beforeSwap(fmt.Errorf("datatransfer: hydrate request: %w", err))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -147,7 +149,7 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string, marker
 		return parseGeneration(resp.Header), nil
 	case http.StatusOK:
 	default:
-		return 0, fmt.Errorf("datatransfer: hydrate: unexpected status %s", resp.Status)
+		return 0, beforeSwap(fmt.Errorf("datatransfer: hydrate: unexpected status %s", resp.Status))
 	}
 
 	gen := parseGeneration(resp.Header)
@@ -387,7 +389,17 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // marker — the API reads gen 0 and re-dispatches hydrate, and that spurious retry
 // discards this working set whenever a .displaced-<id> is retained (issue #2278).
 // Writing it pre-swap closes that window.
-func unpackAndSwap(r io.Reader, destDir string, marker []byte, log *slog.Logger) error {
+//
+// A failure before the swap's first rename, (1) or, with destDir absent, (2), wraps
+// scratchformat.ErrBeforeSwap: destDir is as it was (issue #4041). One from that rename
+// on does not, since destDir may then be absent or the new tree.
+func unpackAndSwap(r io.Reader, destDir string, marker []byte, log *slog.Logger) (err error) {
+	swapBegan := false
+	defer func() {
+		if err != nil && !swapBegan {
+			err = beforeSwap(err)
+		}
+	}()
 	parent := filepath.Dir(destDir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return err
@@ -524,12 +536,14 @@ func unpackAndSwap(r io.Reader, destDir string, marker []byte, log *slog.Logger)
 			// under an intermediate name a later sweep would delete (issue #910).
 			asideAt = displaced
 		}
+		swapBegan = true
 		if err := asideRename(destDir, asideAt); err != nil {
 			return err
 		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	swapBegan = true
 	if err := swapRename(tmpDir, destDir); err != nil {
 		if asideAt != "" {
 			// Restore the live working set so the failure does not lose it. If this
@@ -657,6 +671,12 @@ const displacedPrefix = ".displaced-"
 // renames within one parent dir are symmetric, so there is no static-perms way to
 // fail only this one). Production always uses os.Rename.
 var swapRename = os.Rename
+
+// beforeSwap marks err as a hydrate failure from before the swap's first rename, which
+// left the working dir as it was (scratchformat.ErrBeforeSwap, issue #4041).
+func beforeSwap(err error) error {
+	return fmt.Errorf("%w (%w)", err, scratchformat.ErrBeforeSwap)
+}
 
 // asideRename is the rename that parks the live working set aside before the swap-in,
 // and fsyncParent the scratch root's fsync after the swap. Both go through a package
