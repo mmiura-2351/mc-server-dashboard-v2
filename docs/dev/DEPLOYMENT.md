@@ -1224,8 +1224,9 @@ for any new code is in place before the worker starts emitting it.
 >     so the retry declares no base generation, and the publish-time generation
 >     guard has none to compare. Past the grace, the server is released without
 >     the snapshot, and its next start hydrates from the store, losing what the
->     snapshot owed. See [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md)
->     Section 5.6 for the hold and the one way it is released at once today.
+>     snapshot owed. A `stop` of that server while the Worker is down releases
+>     it at once, without the snapshot (issue #4111). See
+>     [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md) Section 5.6.
 >   - One that fails any other way, such as the region check's
 >     `TRANSFER_FAILED`, releases the server and keeps the working set, and the
 >     upgrade then hydrates over it.
