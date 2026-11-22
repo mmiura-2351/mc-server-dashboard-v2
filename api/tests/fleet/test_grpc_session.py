@@ -52,6 +52,7 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
 )
 from tests.fleet.fakes import (
     FakeClock,
+    FakeDatabasePing,
     FakeServerStateSink,
     RecordingRealTimeEvents,
     make_worker,
@@ -106,6 +107,7 @@ class _Harness:
         control_plane: ControlPlaneState | None = None,
         real_time_events: RecordingRealTimeEvents | None = None,
         worker_credential: str = _CREDENTIAL,
+        database_ping: FakeDatabasePing | None = None,
     ) -> None:
         self.worker_credential = worker_credential
         self.registry = registry
@@ -119,6 +121,7 @@ class _Harness:
         self.state_sink = state_sink or FakeServerStateSink()
         self.control_plane = control_plane or ControlPlaneState()
         self.real_time_events = real_time_events or RecordingRealTimeEvents()
+        self.database_ping = database_ping or FakeDatabasePing()
         self.servicer: WorkerSessionServicer | None = None
         self._server: aio.Server | None = None
         self._port: int | None = None
@@ -135,6 +138,7 @@ class _Harness:
             control_plane=self.control_plane,
             state_sink=self.state_sink,
             real_time_events=self.real_time_events,
+            database_ping=self.database_ping,
         )
         add_WorkerServiceServicer_to_server(servicer, server)
         self._port = server.add_insecure_port("127.0.0.1:0")
@@ -351,6 +355,7 @@ async def test_non_ascii_presented_credential_is_rejected() -> None:
         control_plane=ControlPlaneState(),
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
     context = _FakeContext(_auth("\u00e9"))
 
@@ -692,9 +697,9 @@ async def test_stale_session_teardown_does_not_mark_servers_unknown(
 
 
 async def test_poison_status_change_does_not_end_session(harness: _Harness) -> None:
-    # A transient DB error while handling ONE StatusChange must not tear down the
-    # whole worker session; the bad event is logged-and-skipped and a later
-    # StatusChange is still reconciled (issue #776).
+    # A handler failure on ONE StatusChange must not tear down the whole worker
+    # session; the bad event is logged-and-skipped and a later StatusChange is
+    # still reconciled (issue #776).
     bad_server = "33333333-3333-3333-3333-333333333333"
     good_server = "11111111-1111-1111-1111-111111111111"
     h = _Harness(
@@ -733,11 +738,10 @@ async def _drain_to_eof(call: aio.StreamStreamCall) -> None:
 
 
 async def test_consecutive_handler_failures_end_session(harness: _Harness) -> None:
-    # A permanently poisoned sink (e.g. the DB is down) makes every StatusChange
-    # handler raise. The per-message log-and-continue (issue #776) is bounded
-    # (issue #807): after the cap of consecutive failures, the next failure ends
-    # the session, so teardown marks the worker disconnected and writes its
-    # servers unknown — surfacing the outage to the reconciler.
+    # A permanently poisoned sink makes every StatusChange handler raise. The
+    # per-message log-and-continue (issue #776) is bounded (issue #807): after the
+    # cap of consecutive failures, the next failure ends the session, so teardown
+    # marks the worker disconnected and writes its servers unknown.
     server = "11111111-1111-1111-1111-111111111111"
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
@@ -854,6 +858,7 @@ async def test_cancelled_session_cancels_pending_outbound_get() -> None:
         control_plane=control_plane,
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
 
     gen = servicer.Session(_requests(), _Ctx())
@@ -960,6 +965,7 @@ async def test_rebuild_keeps_a_confirm_that_lands_during_the_tally_read() -> Non
         control_plane=ControlPlaneState(),
         state_sink=_ConfirmDuringReadSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
 
     await servicer._rebuild_assignments(worker, session)
@@ -2590,4 +2596,565 @@ async def test_drain_cancels_a_teardown_handed_off_while_settling(
     finally:
         for task in _pending_teardowns():
             task.cancel()
+        await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Holding a report through a database outage (issue #3614)
+# ---------------------------------------------------------------------------
+
+_SERVER_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_SERVER_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+_HOLD_STARTED = "holding a worker message while the database is unavailable"
+_HOLD_APPLIED = "applied a held worker message"
+_HOLD_LOST = "lost a held worker message: its session ended"
+_HOLD_REFUSED = (
+    "dropping a held worker message: the database answers, yet the message "
+    "still fails as if it were down"
+)
+_SESSION_REPLACED = (
+    "a newer session replaced this one; dropping its queued worker messages"
+)
+
+
+# An error is_transient_database_error classifies as an outage, and one it does not.
+_OUTAGE = ConnectionRefusedError
+_BUG = RuntimeError
+
+
+class _OutageSink(FakeServerStateSink):
+    """Fails some reports' writes, counting every attempt by server.
+
+    While ``down`` is set, every write fails with an outage. A server's writes
+    raise the errors ``errors[server]`` lists, in turn, and then succeed. A
+    ``broken`` server's writes always fail with an error that is not an outage.
+    ``gate`` holds every write until it is set.
+    """
+
+    def __init__(
+        self,
+        *,
+        down: bool = False,
+        errors: dict[str, list[type[Exception]]] | None = None,
+        broken: frozenset[str] = frozenset(),
+        gate: asyncio.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self.down = down
+        self.attempts: dict[str, int] = {}
+        self._errors = {server: list(e) for server, e in (errors or {}).items()}
+        self._broken = broken
+        self._gate = gate
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._gate is not None:
+            await self._gate.wait()
+        self.attempts[server_id] = self.attempts.get(server_id, 0) + 1
+        if server_id in self._broken:
+            raise _BUG("the handler has a bug")
+        if self.down:
+            raise _OUTAGE("connect call failed")
+        if self._errors.get(server_id):
+            raise self._errors[server_id].pop(0)("scripted failure")
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.fixture
+def fast_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(grpc_server, "_HOLD_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(grpc_server, "_HOLD_RETRY_MAX_SECONDS", 0.02)
+
+
+async def _wait_until(condition: Any, what: str) -> None:
+    for _ in range(500):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{what} in time")
+
+
+def _logged(caplog: pytest.LogCaptureFixture, message: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == message]
+
+
+async def _registered(stub: WorkerServiceStub) -> aio.StreamStreamCall:
+    call = stub.Session(metadata=_auth(_CREDENTIAL))
+    await call.write(_register_message())
+    await call.read()  # ack
+    return call
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_report_held_through_an_outage_is_applied_in_order(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A report whose write fails because the database is down, its ping failing
+    # too, is held at the head of the queue and retried: it lands once the
+    # database is back, ahead of the report behind it. The hold logs one WARNING
+    # as it starts and one INFO as it ends, not a line a retry.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    gate = asyncio.Event()
+    sink = _OutageSink(errors={_SERVER_A: [_OUTAGE] * 2}, gate=gate)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        # The reader reads in order, so once the heartbeat sent behind them is
+        # recorded, both reports are queued before A's first write fails.
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+        gate.set()
+        await _wait_until(lambda: len(sink.observed) == 2, "both reports not applied")
+
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        assert sink.attempts == {_SERVER_A: 3, _SERVER_B: 1}
+        started = _logged(caplog, _HOLD_STARTED)
+        assert [r.levelno for r in started] == [logging.WARNING]
+        assert started[0].exc_info is not None
+        assert started[0].exc_info[0] is ConnectionRefusedError
+        assert [r.levelno for r in _logged(caplog, _HOLD_APPLIED)] == [logging.INFO]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize("end", ["half_close", "superseded", "heartbeat_lapse"])
+async def test_a_held_report_is_lost_when_its_session_ends(
+    end: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The hold has no time budget but ends with its session, which loses the
+    # report: no retry lands it once the database is back. A session ends when
+    # the Worker closes the stream, when a newer session replaces it, or when its
+    # heartbeats lapse.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    sink = _OutageSink(down=True)
+    clock = FakeClock(_T0)
+    timeout = _SHORT_TIMEOUT if end == "heartbeat_lapse" else _TIMEOUT
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=timeout),
+        clock,
+        heartbeat_timeout=timeout,
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        stub = await h.start()
+        call = await _registered(stub)
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+
+        if end == "half_close":
+            await call.done_writing()
+            await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+        elif end == "superseded":
+            await _registered(stub)
+        else:
+            clock.set(_T0 + timeout + dt.timedelta(seconds=1))
+            await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+        await _wait_until(lambda: _logged(caplog, _HOLD_LOST), "the hold did not end")
+        attempts = sink.attempts[_SERVER_A]
+        sink.down = False
+        await asyncio.sleep(0.2)
+
+        assert sink.observed == []
+        assert sink.attempts[_SERVER_A] == attempts
+        assert [r.levelno for r in _logged(caplog, _HOLD_LOST)] == [logging.INFO]
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_only_failures_that_are_not_an_outage_count_toward_the_cap() -> None:
+    # An outage's failures are held and never count toward #807's cap, however
+    # many there are. Any other failure is dropped at once, without a retry, and
+    # counts: one more than the cap of them ends the session. The outage outlasts
+    # enough doublings that only a capped backoff retries it in time.
+    outage = 12
+    sink = _OutageSink(
+        errors={_SERVER_A: [_OUTAGE] * outage}, broken=frozenset({_SERVER_B})
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        for _ in range(_MAX_CONSECUTIVE_HANDLER_FAILURES + 1):
+            await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: (
+                sink.attempts.get(_SERVER_B) == _MAX_CONSECUTIVE_HANDLER_FAILURES + 1
+            ),
+            "the failing reports were not all attempted",
+        )
+        # The reader sees the ended processor on the next message it reads.
+        await call.write(_heartbeat_message())
+        await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert sink.attempts == {
+            _SERVER_A: outage + 1,
+            _SERVER_B: _MAX_CONSECUTIVE_HANDLER_FAILURES + 1,
+        }
+        assert h.registry.list_workers()[0].status is WorkerStatus.OFFLINE
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_an_outage_the_database_ping_contradicts_is_dropped_and_counted(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A write that fails as if the database were down while the database answers
+    # its ping fails for the message's own reason, and holding it would block the
+    # queue for good. It is dropped after one confirming retry, logged at ERROR,
+    # and counts toward #807's cap: one more than the cap of them ends the session.
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=True),
+    )
+    try:
+        call = await _registered(await h.start())
+        for _ in range(_MAX_CONSECUTIVE_HANDLER_FAILURES + 1):
+            await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: (
+                sink.attempts.get(_SERVER_A)
+                == 2 * (_MAX_CONSECUTIVE_HANDLER_FAILURES + 1)
+            ),
+            "each report was not tried twice",
+        )
+        # The reader sees the ended processor on the next message it reads.
+        await call.write(_heartbeat_message())
+        await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+
+        assert sink.attempts == {_SERVER_A: 2 * (_MAX_CONSECUTIVE_HANDLER_FAILURES + 1)}
+        assert h.registry.list_workers()[0].status is WorkerStatus.OFFLINE
+        assert [r.levelno for r in _logged(caplog, _HOLD_REFUSED)] == [
+            logging.ERROR
+        ] * (_MAX_CONSECUTIVE_HANDLER_FAILURES + 1)
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_heartbeats_are_read_while_a_report_is_held() -> None:
+    # A held report blocks only the queue behind it, which is far from full here,
+    # so the reader still records heartbeats and the session outlives the outage.
+    sink = _OutageSink(down=True)
+    clock = FakeClock(_T0)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_SHORT_TIMEOUT),
+        clock,
+        heartbeat_timeout=_SHORT_TIMEOUT,
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+        # Each step stays under the 0.3 s liveness window, so only a heartbeat
+        # left unread would let the session lapse.
+        for i in range(1, 5):
+            beat = _T0 + dt.timedelta(seconds=0.2 * i)
+            clock.set(beat)
+            await call.write(_heartbeat_message())
+            await _wait_for_heartbeat_at(h, beat)
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+
+        sink.down = False
+        await _wait_until(lambda: sink.observed, "the held report was not applied")
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_superseded_session_applies_nothing_more_from_its_backlog() -> None:
+    # The old session holds A through the outage with B queued behind it. The
+    # Worker re-registers, the database comes back and the new session reports B
+    # stopped. Nothing from the old session's backlog may land after that: its B
+    # running would set the row back to the older state.
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        stub = await h.start()
+        old = await _registered(stub)
+        await old.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await old.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await old.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+
+        new = await _registered(stub)
+        sink.down = False
+        await new.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await _wait_until(lambda: sink.observed, "the new session's report not applied")
+        await asyncio.sleep(0.2)
+
+        assert sink.observed == [(_SERVER_B, _WORKER_ID, "stopped")]
+        assert sink.attempts[_SERVER_B] == 1
+        await new.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_superseded_session_handles_no_further_queued_message() -> None:
+    # A superseded session's processor stops wherever it is, hold or not: the
+    # report queued behind a slow write is never handled once a newer session
+    # owns the Worker.
+    gate = asyncio.Event()
+    sink = _OutageSink(gate=gate)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        old = await _registered(stub)
+        await old.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await old.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await old.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+
+        new = await _registered(stub)
+        gate.set()
+        await _wait_until(lambda: _SERVER_A in sink.attempts, "A was not written")
+        await asyncio.sleep(0.2)
+
+        assert _SERVER_B not in sink.attempts
+        await new.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_superseded_session_drops_a_message_it_reads_after_the_new_one(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The old session is idle when the Worker re-registers, so its processor is
+    # waiting for a message. A report the old stream still delivers after the new
+    # session applied its own is dropped, not applied over it.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    sink = _OutageSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        old = await _registered(stub)
+        new = await _registered(stub)
+        await new.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await _wait_until(lambda: sink.observed, "the new session's report not applied")
+
+        await old.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: _logged(caplog, _SESSION_REPLACED), "the old session did not stop"
+        )
+
+        assert sink.observed == [(_SERVER_B, _WORKER_ID, "stopped")]
+        assert sink.attempts == {_SERVER_B: 1}
+        await new.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_report_whose_retry_fails_otherwise_is_dropped_and_counted() -> (
+    None
+):
+    # A retry that fails for a reason other than an outage drops the held report
+    # and counts toward #807's cap, so one bad message cannot hold the queue
+    # until the session ends.
+    reports = _MAX_CONSECUTIVE_HANDLER_FAILURES + 1
+    sink = _OutageSink(errors={_SERVER_A: [_OUTAGE, _BUG] * reports})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        for _ in range(reports):
+            await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A) == 2 * reports,
+            "each report was not tried twice",
+        )
+        # The reader sees the ended processor on the next message it reads.
+        await call.write(_heartbeat_message())
+        await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+
+        assert sink.observed == []
+        assert sink.attempts == {_SERVER_A: 2 * reports}
+        assert h.registry.list_workers()[0].status is WorkerStatus.OFFLINE
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_after_a_clean_close_an_outage_failure_is_dropped_and_counted() -> None:
+    # Once the Worker closes the stream nothing is held: the held report and each
+    # report queued behind it get one attempt, and an outage failure drops the
+    # report and counts toward #807's cap, so the drain stays bounded.
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+        for _ in range(_MAX_CONSECUTIVE_HANDLER_FAILURES + 5):
+            await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+        await call.done_writing()
+        await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+
+        # A's last attempt is the first failure the cap counts, so the cap ends
+        # the session on the fifth B, each tried once.
+        assert sink.attempts[_SERVER_B] == _MAX_CONSECUTIVE_HANDLER_FAILURES
+        assert sink.observed == []
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_report_stays_held_when_the_ping_after_its_retry_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The database answered just before the retry, but the retry failed and the
+    # database stopped answering right after it: the outage is flapping, the
+    # error is not the message's own, so the report stays held and lands.
+    sink = _OutageSink(errors={_SERVER_A: [_OUTAGE] * 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(answers=[True, False], reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(lambda: sink.observed, "the held report was not applied")
+
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert sink.attempts == {_SERVER_A: 3}
+        assert _logged(caplog, _HOLD_REFUSED) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_report_stays_held_when_the_ping_before_its_retry_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The ping before a retry fails and so does the retry, but the database is
+    # back by the next ping: the recovery edge every outage has. Only a database
+    # that answered both before and after the failed retry drops the report, so
+    # it stays held and lands.
+    sink = _OutageSink(errors={_SERVER_A: [_OUTAGE] * 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(answers=[False], reachable=True),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.observed or _logged(caplog, _HOLD_REFUSED),
+            "the held report was neither applied nor dropped",
+        )
+
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert sink.attempts == {_SERVER_A: 3}
+        assert _logged(caplog, _HOLD_REFUSED) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_held_report_gets_a_last_attempt_when_the_worker_closes_the_stream(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The database is back, but the hold is still waiting out its backoff when
+    # the Worker closes the stream. The held report gets one last attempt, as
+    # each report queued behind it does, and lands ahead of them.
+    monkeypatch.setattr(grpc_server, "_HOLD_RETRY_INITIAL_SECONDS", 60.0)
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_STOPPED))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        await _wait_until(lambda: _logged(caplog, _HOLD_STARTED), "no hold started")
+
+        sink.down = False
+        await call.done_writing()
+        await asyncio.wait_for(_drain_to_eof(call), timeout=5)
+
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "stopped"),
+            (_SERVER_B, _WORKER_ID, "running"),
+        ]
+        assert sink.attempts == {_SERVER_A: 2, _SERVER_B: 1}
+    finally:
         await h.stop()

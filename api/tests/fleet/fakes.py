@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.drain_store import WorkerDrainStore
 from mc_server_dashboard_api.fleet.domain.entities import Worker
@@ -42,6 +43,23 @@ class FakeClock(Clock):
 
     def now(self) -> dt.datetime:
         return self._now
+
+
+class FakeDatabasePing(DatabasePing):
+    """Answers the probes with ``answers`` in turn, then ``reachable``; counts them."""
+
+    def __init__(
+        self, *, reachable: bool = True, answers: list[bool] | None = None
+    ) -> None:
+        self.reachable = reachable
+        self._answers = list(answers or [])
+        self.calls = 0
+
+    async def is_reachable(self) -> bool:
+        self.calls += 1
+        if self._answers:
+            return self._answers.pop(0)
+        return self.reachable
 
 
 class FakeWorkerDrainStore(WorkerDrainStore):
@@ -89,12 +107,13 @@ class FakeServerStateSink(ServerStateSink):
         self.counted_for: list[str] = []
         self._running_ids = running_ids or {}
         # Server ids whose next record_observed_state call raises, simulating a
-        # transient DB error while handling one StatusChange; the id is dropped
-        # after raising so a later report for the same server succeeds.
+        # handler failure on one StatusChange that is not a database outage (an
+        # outage's message is held, issue #3614); the id is dropped after raising
+        # so a later report for the same server succeeds.
         self._fail_observed_for = fail_observed_for or set()
         # When set, every record_observed_state call raises, simulating a sink
-        # that is permanently down (e.g. the DB is unreachable); used to exercise
-        # the consecutive-failure containment cap (issue #807).
+        # that is permanently broken with an error that is not a database outage;
+        # used to exercise the consecutive-failure containment cap (issue #807).
         self._always_fail_observed = always_fail_observed
         # The set of server ids the sink reports as existing (issue #924). When
         # None, all ids are treated as existing (the default for tests that do not

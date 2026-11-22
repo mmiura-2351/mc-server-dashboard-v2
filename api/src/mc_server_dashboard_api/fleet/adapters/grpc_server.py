@@ -38,6 +38,7 @@ the few interactions with them are annotated pragmatically.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 from collections.abc import AsyncIterator
@@ -46,6 +47,10 @@ from typing import Any
 import grpc
 from grpc import aio
 
+from mc_server_dashboard_api.core.adapters.database import (
+    is_transient_database_error,
+)
+from mc_server_dashboard_api.core.domain.health import DatabasePing
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     MAX_MESSAGE_BYTES,
     ControlPlaneState,
@@ -116,15 +121,19 @@ _HEARTBEAT_INTERVAL_DIVISOR = 3
 # Cap on consecutive per-message handler failures before the session is treated
 # as terminal (issue #807). The per-message log-and-continue (issue #776)
 # contains a single bad event, but an unbounded skip keeps the session alive
-# against a permanently poisoned sink (e.g. the DB is down): every StatusChange
-# is discarded while the worker stays "online" and its servers are never marked
-# unknown, silently hiding the outage from the reconciler. After this many
-# consecutive failures, letting the next one propagate ends the session, which
-# marks the worker disconnected and surfaces the outage. The counter resets on
-# any successful handle, so transient blips never accumulate to the cap. The
-# value is small enough to fail fast yet absorbs a short burst of transient
-# errors without bouncing a healthy session.
+# against a permanently poisoned sink: every StatusChange is discarded while the
+# worker stays "online". After this many consecutive failures, letting the next
+# one propagate ends the session, which marks the worker disconnected. The
+# counter resets on any successful handle. A database outage is not such a
+# failure: its message is held and retried instead (issue #3614), since ending
+# the session would only lose the report.
 _MAX_CONSECUTIVE_HANDLER_FAILURES = 5
+
+# Backoff between the retries of a message held through a database outage
+# (issue #3614): it doubles from the first value up to the cap. The hold itself
+# has no time budget; it ends when the message is applied or the session ends.
+_HOLD_RETRY_INITIAL_SECONDS = 0.5
+_HOLD_RETRY_MAX_SECONDS = 10.0
 
 # Backpressure limit on the queue between the inbound reader task and the
 # processor task (issue #1698). Heartbeats bypass this queue entirely, so only
@@ -269,6 +278,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         control_plane: ControlPlaneState,
         state_sink: ServerStateSink,
         real_time_events: RealTimeEvents,
+        database_ping: DatabasePing,
     ) -> None:
         self._registry = registry
         self._clock = clock
@@ -283,6 +293,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self._control_plane = control_plane
         self._state_sink = state_sink
         self._real_time_events = real_time_events
+        self._database_ping = database_ping
         # Session teardowns still in flight, by worker, held so a teardown that
         # outlives its cancelled RPC task is neither garbage-collected nor cut
         # off at shutdown (issue #3555, :meth:`drain_teardowns`).
@@ -636,7 +647,12 @@ class WorkerSessionServicer(WorkerServiceServicer):
         queue: asyncio.Queue[pb.WorkerMessage | None] = asyncio.Queue(
             maxsize=_INBOUND_QUEUE_MAXSIZE
         )
-        processor = asyncio.ensure_future(self._process_inbound(worker_id, queue))
+        # Set at a clean EOF: the session is ending, so a held message gets one
+        # last attempt rather than holding up the teardown (issue #3614).
+        stream_ended = asyncio.Event()
+        processor = asyncio.ensure_future(
+            self._process_inbound(worker_id, session, queue, stream_ended)
+        )
         try:
             async for message in request_iterator:
                 if processor.done():
@@ -648,6 +664,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     )
                     continue
                 await queue.put(message)
+            stream_ended.set()
             await queue.put(None)  # sentinel for clean EOF
             await processor
         finally:
@@ -667,35 +684,42 @@ class WorkerSessionServicer(WorkerServiceServicer):
     async def _process_inbound(
         self,
         worker_id: WorkerId,
+        session: SessionToken,
         queue: asyncio.Queue[pb.WorkerMessage | None],
+        stream_ended: asyncio.Event,
     ) -> None:
-        """Consume queued inbound messages with the failure-cap guard.
+        """Consume queued inbound messages in order, with the failure-cap guard.
 
-        Moved from the old ``_read_inbound`` loop body; the try/except with
-        the consecutive-failure cap (issues #776, #807) is preserved verbatim.
+        A message the database is out for is held at the head of the queue
+        (:meth:`_handle_held`); any other handler failure drops it and counts
+        toward the consecutive-failure cap (issues #776, #807). Once a newer
+        session has replaced this one, nothing more is handled: a message this
+        session still holds or queues would land after the newer session's
+        reports and set a row back to an older state (issue #3614).
         """
 
         consecutive_failures = 0
-        while True:
+        while self._registry.is_current_session(worker_id, session):
             message = await queue.get()
             if message is None:
                 return
-            # Contain a per-message handler failure (e.g. a transient DB error
-            # while recording one StatusChange) so a single bad event is logged
-            # and skipped rather than tearing down the whole worker session
-            # (issue #776). Stream-level errors from iterating request_iterator
-            # are not caught here, so a real transport drop still ends the loop;
-            # CancelledError propagates so teardown is not swallowed.
+            # The get may have waited for the message.
+            if not self._registry.is_current_session(worker_id, session):
+                break
+            # Contain a per-message handler failure so a single bad event is
+            # logged and skipped rather than tearing down the whole worker
+            # session (issue #776). Stream-level errors from iterating
+            # request_iterator are not caught here, so a real transport drop
+            # still ends the loop; CancelledError propagates so teardown is not
+            # swallowed.
             #
             # The skip is bounded (issue #807): a permanently poisoned sink would
-            # otherwise keep discarding every event while the session stays alive
-            # and the worker's servers are never marked unknown. Once the failures
-            # have already reached the cap, the next failure is allowed to
-            # propagate, ending the session so teardown marks the worker
-            # disconnected and surfaces the outage to the reconciler. Any success
-            # resets the streak, so only a sustained outage trips the cap.
+            # otherwise keep discarding every event while the session stays
+            # alive. Once the failures have already reached the cap, the next
+            # failure is allowed to propagate, ending the session so teardown
+            # marks the worker disconnected. Any success resets the streak.
             try:
-                await self._handle(worker_id, message)
+                await self._handle_held(worker_id, session, message, stream_ended)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -716,6 +740,101 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 )
             else:
                 consecutive_failures = 0
+        _LOG.info(
+            "a newer session replaced this one; dropping its queued worker messages",
+            extra={"worker_id": worker_id.value},
+        )
+
+    async def _handle_held(
+        self,
+        worker_id: WorkerId,
+        session: SessionToken,
+        message: pb.WorkerMessage,
+        stream_ended: asyncio.Event,
+    ) -> None:
+        """Handle ``message``, holding it through a database outage (issue #3614).
+
+        A failure :func:`is_transient_database_error` classifies as an outage is
+        retried in place, with a capped backoff and no time budget, so the
+        messages behind it wait and keep their order. The hold ends when the
+        message is applied, or when the session ends, which loses it. At a clean
+        EOF the message first gets one last attempt, as each message behind it
+        does. Any other failure is raised, and so is an outage's failure on a
+        retry the database answered a ping both just before and just after: that
+        error is the message's own, and holding it would block the queue for good.
+        """
+
+        try:
+            await self._handle(worker_id, message)
+            return
+        except Exception as exc:
+            if (
+                not is_transient_database_error(exc)
+                or stream_ended.is_set()
+                or not self._registry.is_current_session(worker_id, session)
+            ):
+                raise
+            _LOG.warning(
+                "holding a worker message while the database is unavailable",
+                extra={"worker_id": worker_id.value},
+                exc_info=True,
+            )
+        attempts = 1
+        delay = _HOLD_RETRY_INITIAL_SECONDS
+        try:
+            while True:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stream_ended.wait(), timeout=delay)
+                delay = min(delay * 2, _HOLD_RETRY_MAX_SECONDS)
+                # At a clean EOF the message gets one last attempt, as each
+                # message behind it does, and any failure of it drops it.
+                last = stream_ended.is_set()
+                answered_before = (
+                    False if last else await self._database_ping.is_reachable()
+                )
+                # Checked after the ping, which can last as long as a connect
+                # timeout.
+                if not self._registry.is_current_session(worker_id, session):
+                    _LOG.info(
+                        "lost a held worker message: its session ended",
+                        extra={"worker_id": worker_id.value, "attempts": attempts},
+                    )
+                    return
+                attempts += 1
+                try:
+                    await self._handle(worker_id, message)
+                except Exception as exc:
+                    if last:
+                        _LOG.info(
+                            "lost a held worker message: its session ended",
+                            extra={"worker_id": worker_id.value, "attempts": attempts},
+                        )
+                        raise
+                    if not is_transient_database_error(exc):
+                        raise
+                    # Both pings must answer: one that fails after the retry
+                    # means the database went down again, not that the error
+                    # is the message's own.
+                    if answered_before and await self._database_ping.is_reachable():
+                        _LOG.error(
+                            "dropping a held worker message: the database "
+                            "answers, yet the message still fails as if it were "
+                            "down",
+                            extra={"worker_id": worker_id.value, "attempts": attempts},
+                        )
+                        raise
+                    continue
+                _LOG.info(
+                    "applied a held worker message",
+                    extra={"worker_id": worker_id.value, "attempts": attempts},
+                )
+                return
+        except asyncio.CancelledError:
+            _LOG.info(
+                "lost a held worker message: its session ended",
+                extra={"worker_id": worker_id.value, "attempts": attempts},
+            )
+            raise
 
     async def _rebuild_assignments(
         self, worker_id: WorkerId, session: SessionToken
@@ -965,6 +1084,7 @@ def make_grpc_server(
     control_plane: ControlPlaneState,
     state_sink: ServerStateSink,
     real_time_events: RealTimeEvents,
+    database_ping: DatabasePing,
     host: str,
     port: int,
     cert_file: str | None = None,
@@ -990,6 +1110,7 @@ def make_grpc_server(
         control_plane=control_plane,
         state_sink=state_sink,
         real_time_events=real_time_events,
+        database_ping=database_ping,
     )
     add_WorkerServiceServicer_to_server(servicer, server)
     _bind_port(
