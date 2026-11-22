@@ -107,10 +107,33 @@ func hydrateCount(tr *fakeTransfer) int {
 	return len(tr.hydrated)
 }
 
+// packCount is the packs the transfer took, split (a running server's) or
+// combined with the upload (a stopped server's).
 func packCount(tr *fakeTransfer) int {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	return len(tr.packs)
+	return len(tr.packs) + len(tr.snapshots)
+}
+
+// finalSnapshotCmd is a stop's final snapshot (issue #4053).
+func finalSnapshotCmd() session.Command {
+	cmd := snapshotCmd()
+	cmd.Final = true
+	return cmd
+}
+
+// guardCalls is the guard's call log for s1 in steps: "end" ends its leftovers,
+// watching its working dir, and "busy" asks whether one may still run.
+func guardCalls(m *Manager, steps ...string) []string {
+	calls := make([]string, 0, len(steps))
+	for _, step := range steps {
+		if step == "end" {
+			calls = append(calls, "end "+s1+" "+filepath.Join(m.scratchDir, s1))
+		} else {
+			calls = append(calls, "busy "+s1)
+		}
+	}
+	return calls
 }
 
 // A hydrate over a stopped server first ends what the driver left running for
@@ -178,40 +201,110 @@ func TestHydrateRefusedUnavailableWhileAnUntrackedContainerMayRun(t *testing.T) 
 	}
 }
 
+// A stop's final snapshot of a stopped server first ends what the driver left
+// running for it, as a hydrate does, and packs only then (issue #4053). That
+// container's shutdown save is the progression the stop exists to keep, so ending
+// it after the pack would publish the set without it. The publish GCs the scratch,
+// as any stopped snapshot's does.
+func TestFinalStoppedSnapshotEndsLeftoversBeforeItPacks(t *testing.T) {
+	m, g, tr := newGuardedManager(t)
+	dir := seedScratch(t, m, s1)
+	// The recorded leftover keeps the server busy until it is ended.
+	g.set(nil, errLeftover)
+	packedAtEnd := -1
+	g.onEnd = func() {
+		packedAtEnd = packCount(tr)
+		g.set(nil, nil)
+	}
+
+	if res := m.Handle(context.Background(), finalSnapshotCmd()); !res.Success {
+		t.Fatalf("final snapshot = %+v, want success", res)
+	}
+	if want := guardCalls(m, "end", "busy"); !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+	if packedAtEnd != 0 || packCount(tr) != 1 {
+		t.Fatalf("packs when the leftover was ended = %d, after = %d; want 0 then 1", packedAtEnd, packCount(tr))
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("scratch after the publish: stat error = %v, want it removed", err)
+	}
+}
+
+// A stop's final snapshot of a stopped server with no working set still ends
+// what the driver left running for it, then answers the pinned working_set_absent
+// refusal (issue #4053). The API reads that refusal as nothing left to capture and
+// releases the server, so a leftover the snapshot did not end would outlive the
+// stop.
+func TestFinalStoppedSnapshotWithNoWorkingSetEndsLeftoversThenAnswersAbsent(t *testing.T) {
+	m, g, tr := newGuardedManager(t)
+	g.set(nil, errLeftover)
+	g.onEnd = func() { g.set(nil, nil) }
+
+	res := m.Handle(context.Background(), finalSnapshotCmd())
+	if res.Success || res.ErrorCode != session.CommandErrorServerNotFound ||
+		!strings.Contains(res.ErrorMessage, "working dir absent") {
+		t.Fatalf("final snapshot = %+v, want SERVER_NOT_FOUND carrying the API-pinned phrase %q", res, "working dir absent")
+	}
+	if want := guardCalls(m, "end", "busy"); !slices.Equal(g.callLog(), want) {
+		t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+	}
+	if n := packCount(tr); n != 0 {
+		t.Fatalf("packs = %d, want none with no working set", n)
+	}
+}
+
 // A stopped server's snapshot is refused UNAVAILABLE, and packs nothing, while a
 // container the manager does not track may be running against the working set
-// (issues #3672, #3678). It does not end the leftover: the snapshot is no precondition
-// of the start that ends it, and the leftover's own shutdown save would be what
-// it packed. The reservation is released, so the retry goes ahead once the
-// server is clear.
+// (issues #3672, #3678). A periodic or on-demand one ends nothing: under a running
+// intent the re-sent start's hydrate ends the leftover. A stop's final one first
+// tries to end it, as a hydrate does, and is refused for what that leaves (issue
+// #4053). The reservation is released, so the retry goes ahead once the server is
+// clear.
 func TestStoppedSnapshotRefusedUnavailableWhileAnUntrackedContainerMayRun(t *testing.T) {
+	running := errors.New("test: container /mcsd-s1 of the server is \"running\"; its working set is in use")
+	daemonDown := errors.New("test: cannot establish that no container of the server is running: daemon down")
 	for _, tc := range []struct {
-		name    string
-		busyErr error
+		name            string
+		final           bool
+		endErr, busyErr error
+		calls           []string
 	}{
-		{name: "leftover recorded", busyErr: errLeftover},
-		{name: "untracked container running", busyErr: errors.New("test: container /mcsd-s1 of the server is \"running\"; its working set is in use")},
-		{name: "busy query fails", busyErr: errors.New("test: cannot establish that no container of the server is running: daemon down")},
+		{name: "leftover recorded", busyErr: errLeftover, calls: []string{"busy"}},
+		{name: "untracked container running", busyErr: running, calls: []string{"busy"}},
+		{name: "busy query fails", busyErr: daemonDown, calls: []string{"busy"}},
+		// A leftover the driver failed to end refuses on its own, as for the hydrate.
+		{name: "final, leftover not ended", final: true, endErr: errLeftover, busyErr: errLeftover, calls: []string{"end"}},
+		{name: "final, untracked container running", final: true, busyErr: running, calls: []string{"end", "busy"}},
+		{name: "final, busy query fails", final: true, busyErr: daemonDown, calls: []string{"end", "busy"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, g, tr := newGuardedManager(t)
 			seedScratch(t, m, s1)
-			g.set(nil, tc.busyErr)
+			g.set(tc.endErr, tc.busyErr)
+			cmd := snapshotCmd()
+			if tc.final {
+				cmd = finalSnapshotCmd()
+			}
 
-			res := m.Handle(context.Background(), snapshotCmd())
+			res := m.Handle(context.Background(), cmd)
+			want := tc.busyErr
+			if tc.endErr != nil {
+				want = tc.endErr
+			}
 			if res.Success || res.ErrorCode != session.CommandErrorUnavailable ||
-				!strings.Contains(res.ErrorMessage, tc.busyErr.Error()) {
-				t.Fatalf("snapshot = %+v, want UNAVAILABLE carrying %q", res, tc.busyErr)
+				!strings.Contains(res.ErrorMessage, want.Error()) {
+				t.Fatalf("snapshot = %+v, want UNAVAILABLE carrying %q", res, want)
 			}
 			if n := packCount(tr); n != 0 {
 				t.Fatalf("packs = %d, want none while the working set may be in use", n)
 			}
-			if want := []string{"busy " + s1}; !slices.Equal(g.callLog(), want) {
-				t.Fatalf("guard calls = %v, want %v: no leftover ended by a snapshot", g.callLog(), want)
+			if want := guardCalls(m, tc.calls...); !slices.Equal(g.callLog(), want) {
+				t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
 			}
 
 			g.set(nil, nil)
-			if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
+			if res := m.Handle(context.Background(), cmd); !res.Success {
 				t.Fatalf("retry = %+v, want success once the server is clear", res)
 			}
 		})
@@ -221,17 +314,20 @@ func TestStoppedSnapshotRefusedUnavailableWhileAnUntrackedContainerMayRun(t *tes
 // A guard answer the command's own cancellation cut short still refuses the
 // hydrate and the stopped snapshot UNAVAILABLE (issue #3678): nothing was ruled
 // out, and the answer of a cancelled command reaches no caller, so it is not
-// worth a code of its own.
+// worth a code of its own. A stop's final snapshot answers so too, after trying to
+// end the leftover as the hydrate does (issue #4053).
 func TestGuardRefusalOnCallerCancelIsStillUnavailable(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		cmd  session.Command
+		name  string
+		cmd   session.Command
+		calls []string
 	}{
-		{"hydrate", hydrateCmd()},
-		{"stopped snapshot", snapshotCmd()},
+		{"hydrate", hydrateCmd(), []string{"end", "busy"}},
+		{"stopped snapshot", snapshotCmd(), []string{"busy"}},
+		{"final stopped snapshot", finalSnapshotCmd(), []string{"end", "busy"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m, _, _ := newGuardedManager(t)
+			m, g, _ := newGuardedManager(t)
 			seedScratch(t, m, s1)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
@@ -241,13 +337,17 @@ func TestGuardRefusalOnCallerCancelIsStillUnavailable(t *testing.T) {
 				!strings.Contains(res.ErrorMessage, context.Canceled.Error()) {
 				t.Fatalf("%s = %+v, want UNAVAILABLE carrying the cancellation", tc.name, res)
 			}
+			if want := guardCalls(m, tc.calls...); !slices.Equal(g.callLog(), want) {
+				t.Fatalf("guard calls = %v, want %v", g.callLog(), want)
+			}
 		})
 	}
 }
 
 // The running-server paths ask the guard nothing: a running instance already
 // refuses the hydrate, and a running snapshot quiesces with its save-off
-// bracket, so neither pays a daemon round-trip (issue #3672).
+// bracket, so neither pays a daemon round-trip (issue #3672). A final snapshot of
+// a running server ends nothing either: its instance is tracked (issue #4053).
 func TestRunningServerPathsAskTheGuardNothing(t *testing.T) {
 	g := &fakeGuard{busyErr: errLeftover, endErr: errLeftover}
 	tr := &fakeTransfer{}
@@ -259,6 +359,9 @@ func TestRunningServerPathsAskTheGuardNothing(t *testing.T) {
 	}
 	if res := m.Handle(context.Background(), snapshotCmd()); !res.Success {
 		t.Fatalf("snapshot of a running server = %+v, want success", res)
+	}
+	if res := m.Handle(context.Background(), finalSnapshotCmd()); !res.Success {
+		t.Fatalf("final snapshot of a running server = %+v, want success", res)
 	}
 	if calls := g.callLog(); len(calls) != 0 {
 		t.Fatalf("guard calls = %v, want none on the running-server paths", calls)
