@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -1661,6 +1662,41 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     const mode = screen.getByLabelText(t("backups.retention.modeLabel"));
     fireEvent.change(mode, { target: { value: "none" } });
     fireEvent.change(mode, { target: { value: "keepLast" } });
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
+  });
+
+  it("asks again once the backups that were loading are counted", async () => {
+    let answer: (list: object) => void = () => {};
+    routeGet({ schedules: [] });
+    const get = mockApi.get.getMockImplementation() as (
+      path: string,
+    ) => Promise<unknown>;
+    mockApi.get.mockImplementation((path: string) =>
+      path.endsWith("/backups")
+        ? new Promise((resolve) => {
+            answer = resolve;
+          })
+        : get(path),
+    );
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    // Confirmed against the generic line while the list loads.
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).toBeInTheDocument();
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    // The count arrives: that confirmation does not cover three deletions.
+    await act(async () => answer({ backups: scheduled(10) }));
+    expect(
+      await screen.findByText(
+        t("schedules.dialog.retentionPrune", { count: 3 }),
+      ),
+    ).toBeInTheDocument();
     expect(pruneAck()).not.toBeChecked();
     expect(createButton()).toBeDisabled();
   });
