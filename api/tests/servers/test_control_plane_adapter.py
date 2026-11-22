@@ -129,6 +129,26 @@ async def test_hydrate_builds_working_set_url_and_token() -> None:
     assert fleet.last.transfer_token == "shhh"
 
 
+@pytest.mark.parametrize("said", [True, False, None])
+async def test_hydrate_outcome_carries_whether_its_swap_began(
+    said: bool | None,
+) -> None:
+    # Issue #4041: the re-sent start reads it to put back its awaiting_hydrate mark.
+    fleet = _CapturingFleetControlPlane(
+        result=CommandResult(
+            code=CommandResultCode.TRANSFER_FAILED, message="x", swap_began=said
+        )
+    )
+
+    outcome = await _adapter(fleet).hydrate(
+        worker_id=WorkerId(uuid.uuid4()),
+        community_id=CommunityId(uuid.uuid4()),
+        server_id=ServerId(uuid.uuid4()),
+    )
+
+    assert (outcome.status, outcome.swap_began) == (CommandStatus.TRANSFER_FAILED, said)
+
+
 async def test_hydrate_carries_the_hydrate_timeout_override() -> None:
     # The start's hydrate phase dispatches with the longer hydrate budget so a
     # large-world pull does not time out under the general command deadline (#822).

@@ -415,6 +415,31 @@ def test_to_result_reports_no_held_generation_when_the_field_is_absent() -> None
     assert result.held_generation is None
 
 
+@pytest.mark.parametrize(
+    ("said", "read"),
+    [(True, True), (False, False), (None, None)],
+    ids=["began", "did-not-begin", "not-said"],
+)
+def test_to_result_reads_whether_a_failed_hydrates_swap_began(
+    said: bool | None, read: bool | None
+) -> None:
+    """A hydrate's word on its swap reaches the domain result as said (#4041).
+
+    The API puts back its ``awaiting_hydrate`` mark only on ``False``. An older
+    Worker never sets the field, and a proto3 bool reads ``False`` when unset, so
+    the mapping has to test presence: reading the default would put the mark back
+    over a working set that Worker may have replaced.
+    """
+
+    error = pb.CommandError(code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED, message="x")
+    if said is not None:
+        error.swap_began = said
+
+    result = _to_result(pb.CommandResult(success=False, error=error))
+
+    assert (result.code, result.swap_began) == (CommandResultCode.TRANSFER_FAILED, read)
+
+
 async def test_start_carries_forge_launch_mode_on_the_wire(harness: _Harness) -> None:
     stub = await harness.start()
     call = await _registered_call(harness, stub)

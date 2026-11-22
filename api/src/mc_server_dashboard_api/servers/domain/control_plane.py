@@ -217,6 +217,12 @@ class CommandOutcome:
     # when the Worker's own generation marker was published at that value;
     # ``None`` is "declared nothing". See :meth:`ControlPlane.record_held_generation`.
     held_generation: int | None = None
+    # Whether a failed hydrate got as far as replacing the Worker's working dir
+    # (issue #4041): ``False`` when it failed before its swap, so the working dir
+    # is as it was. ``None`` is "not said", which a caller must read as "it may
+    # have": the Worker says it on a hydrate's TRANSFER_FAILED only, and an older
+    # Worker never does.
+    swap_began: bool | None = None
 
     @property
     def success(self) -> bool:
