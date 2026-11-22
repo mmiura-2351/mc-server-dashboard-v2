@@ -262,7 +262,7 @@ async def test_an_orphan_placement_keeps_its_worker_when_the_wait_runs_out() -> 
     )
 
 
-async def test_a_redispatch_changes_nothing_when_the_wait_runs_out() -> None:
+async def test_a_redispatch_keeps_its_worker_when_the_wait_runs_out() -> None:
     server = _server(desired=DesiredState.RUNNING, on_worker=True)
     uow = FakeUnitOfWork()
     uow.servers.seed(server)
