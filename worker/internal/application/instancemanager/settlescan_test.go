@@ -495,7 +495,7 @@ func TestSettleTimeoutWarnNamesItsCaller(t *testing.T) {
 			m.flushBeforeStopWithDriver(context.Background(), s1, "container", "")
 		}},
 		{"snapshot quiesce", "stop flush", func(m *Manager) {
-			_, restore, _ := m.quiesceRunning(context.Background(), s1, t.TempDir(), &snapshotAttempt{})
+			_, restore, _ := m.quiesceRunning(context.Background(), s1, t.TempDir(), &snapshotAttempt{}, rconRoundTrips{})
 			restore()
 		}},
 	} {
