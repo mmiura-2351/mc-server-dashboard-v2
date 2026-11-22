@@ -2352,6 +2352,36 @@ async def test_a_retry_whose_claim_raises_stays_armed_for_a_later_tick(
     assert len(_lines_naming(caplog, logging.WARNING, schedule)) == 1
 
 
+async def test_a_retry_whose_server_read_raises_stays_armed_for_a_later_tick() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # fails, arms the retry
+    store._missing = False
+
+    # The retry is claimed, but its first read of the server raises, as on a
+    # database going down between the two: nothing was attempted.
+    real_get = env.uow.servers.get_by_id
+    failures = [RuntimeError("database down")]
+
+    async def failing_get(server_id: ServerId) -> Server | None:
+        if failures:
+            raise failures.pop()
+        return await real_get(server_id)
+
+    env.uow.servers.get_by_id = failing_get  # type: ignore[method-assign]
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+    await _tick_at(env, retry_at + _TICK)
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+
+
 async def test_corrupt_backup_failure_is_not_retried() -> None:
     # A BackupCorruptError is provably deterministic (issue #2250): re-archiving
     # the identical corrupt working set can never succeed, so the one-shot retry

@@ -912,18 +912,22 @@ class RunScheduleTick:
                 exc_info=True,
             )
             return
-        # One-shot: the single retry is spent once claimed, REGARDLESS of its
-        # outcome (even a skip on a transitional server consumes it) — the next
-        # regular occurrence takes over. A retry-of-the-retry chain is exactly
-        # the unbounded tail the owner-confirmed "retry once" bound excludes.
-        self._backup_retry.pop(schedule_id, None)
         if (
             schedule is None
             or not schedule.enabled
             or schedule.action is not ScheduleAction.BACKUP
         ):
+            self._backup_retry.pop(schedule_id, None)
             return
+        # _execute raises only before the dispatch, canonically when its first
+        # server read meets a database that is down: nothing was attempted, so
+        # the retry stays armed for the next tick.
         result, started_at, finished_at = await self._execute(schedule)
+        # One-shot: the single retry is spent once it ran, REGARDLESS of its
+        # outcome (even a skip on a transitional server consumes it) — the next
+        # regular occurrence takes over. A retry-of-the-retry chain is exactly
+        # the unbounded tail the owner-confirmed "retry once" bound excludes.
+        self._backup_retry.pop(schedule_id, None)
         gave_up = False
         if isinstance(result, Deferred):
             if not self._deferral_outlived(schedule, retry_at, finished_at, "retry"):
