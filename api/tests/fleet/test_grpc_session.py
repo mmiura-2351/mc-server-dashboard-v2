@@ -48,6 +48,7 @@ from mc_server_dashboard_api.fleet.adapters.grpc_server import (
 )
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    CommandResultCode,
     ReclaimDeletedServerCommand,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
@@ -55,6 +56,7 @@ from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
     LateSnapshotResultSink,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
+from mc_server_dashboard_api.fleet.domain.registry import SessionToken
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mc_server_dashboard_api.servers.adapters.clock import SystemClock
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
@@ -2511,6 +2513,79 @@ async def test_failed_mark_unknown_is_logged_and_the_teardown_finishes(
         await h.stop()
 
 
+class _TurnProbeRegistry(InMemoryWorkerRegistry):
+    """Records whether the event loop has run anything else since a session was
+    last found current."""
+
+    def __init__(self) -> None:
+        super().__init__(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+        self.loop_ran_since_check = True
+
+    def is_current_session(self, worker_id: WorkerId, session: SessionToken) -> bool:
+        current = super().is_current_session(worker_id, session)
+        if current:
+            self.loop_ran_since_check = False
+            asyncio.get_running_loop().call_soon(self._loop_ran)
+        return current
+
+    def _loop_ran(self) -> None:
+        self.loop_ran_since_check = True
+
+
+class _TurnProbeSink(FakeServerStateSink):
+    """Records, as each mark-unknown is entered, whether the loop has run
+    anything else since the teardown's check. With ``refuse_first``, the first
+    registration's rebuild never answers, so that registration is refused."""
+
+    def __init__(self, registry: _TurnProbeRegistry, *, refuse_first: bool) -> None:
+        super().__init__()
+        self._registry = registry
+        self._refuse_first = refuse_first
+        self.loop_ran_before_write: list[bool] = []
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        if self._refuse_first:
+            self._refuse_first = False
+            await asyncio.Event().wait()
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+    async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        self.loop_ran_before_write.append(self._registry.loop_ran_since_check)
+        await super().mark_worker_servers_unknown(worker_id=worker_id)
+
+
+@pytest.mark.parametrize("ending", ["closed", "refused"])
+async def test_a_teardown_enters_its_write_before_anything_else_runs_after_its_check(
+    monkeypatch: pytest.MonkeyPatch, ending: str
+) -> None:
+    # Issue #4092: the sink stamps the write as it is entered, and the write
+    # leaves every server observed later than that stamp. A newer session's
+    # reports are stamped later only if nothing, its registration included,
+    # can run between the teardown's current-session check and that entry.
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    registry = _TurnProbeRegistry()
+    sink = _TurnProbeSink(registry, refuse_first=ending == "refused")
+    h = _Harness(registry, FakeClock(_T0), state_sink=sink)
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        if ending == "closed":
+            await call.read()  # ack
+            await call.done_writing()
+        await _wait_until(
+            lambda: sink.loop_ran_before_write, "the teardown did not write"
+        )
+    finally:
+        await h.stop()
+
+    assert sink.loop_ran_before_write == [False]
+
+
 async def test_shutdown_drain_waits_for_a_live_session_to_tear_down() -> None:
     # PR #3566 review: the gRPC stop does not wait for the Python handlers, so a
     # live Session may not have reached its teardown when the drain starts. The
@@ -3414,7 +3489,7 @@ class _OutageLateSnapshotSink(LateSnapshotResultSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:

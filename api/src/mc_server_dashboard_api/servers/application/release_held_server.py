@@ -49,7 +49,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 _LOG = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReleaseHeldServer:
     """Release a server held by a refused final snapshot, without it (#4055).
 

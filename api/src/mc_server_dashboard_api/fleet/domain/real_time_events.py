@@ -54,9 +54,11 @@ class RealTimeEvent:
     change carries ``state``/``detail``; a log line carries ``line``/``stream``);
     the adapter maps the proto to this shape at the transport edge. A STATUS
     event the API publishes for a change of a server's intent carries
-    ``desired_state`` (issue #3428), and one for a change of its assignment
-    ``assigned_worker_id`` (issue #3818); each event carries only the fields its
-    write changed. A ``GAP`` event carries an empty payload.
+    ``desired_state`` (issue #3428), one for a change of its assignment
+    ``assigned_worker_id`` (issue #3818), and one for a change of the refusal of
+    its stop's final snapshot ``final_snapshot_refusal`` (issue #4054), which a
+    release also clears; each event carries only the fields its write changed. A
+    ``GAP`` event carries an empty payload.
 
     ``emitted_at`` is the Worker's authoritative clock reading for the event
     (``WorkerMessage.emitted_at``), so a queued subscriber sees the true event

@@ -70,6 +70,12 @@ class ServerStateSink(abc.ABC):
         it (issue #3885); under a stopped intent its ``observed_at`` is stamped
         anew. Each server whose state this changes is relayed to subscribed
         clients as a live status event, once committed.
+
+        The write is stamped when called, before its first await, and leaves
+        a server observed later than that stamp (issue #4092). The caller
+        calls it right after finding the worker's session current, so a newer
+        session's report is stamped later and survives the write however late
+        it lands.
         """
 
     @abc.abstractmethod

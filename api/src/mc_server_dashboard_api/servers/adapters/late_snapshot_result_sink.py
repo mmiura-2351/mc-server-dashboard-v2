@@ -8,7 +8,8 @@ abandoned the pending future (issue #891) — a failure, canonically a
 and wait out the reconciler grace, it hands the (server, worker, outcome, failure
 detail) to this Port so the held (stopped, stopped, assigned) row is released
 immediately and the Worker's own account of the failure reaches the release log
-(#2766).
+(#2766). The result's code crosses too, so a late refusal that keeps the Worker
+(``BUSY`` or ``UNAVAILABLE``) holds the row instead (issue #3697).
 
 The servicer depends on the fleet-domain Port; this adapter fulfils it against the
 ``StopServer`` use case's guarded clear, building a fresh use case per call from
@@ -24,10 +25,12 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
     LateSnapshotResultSink,
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
+from mc_server_dashboard_api.servers.adapters.control_plane import _STATUS_BY_CODE
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
 from mc_server_dashboard_api.servers.application.lifecycle import StopServer
 from mc_server_dashboard_api.servers.application.stop_convergence import (
@@ -37,7 +40,10 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    ControlPlane,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
 
 _LOG = logging.getLogger(__name__)
@@ -102,7 +108,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
@@ -120,7 +126,6 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         await stop_server.clear_assignment_after_late_snapshot(
             server_id=ServerId(parsed),
             worker_id=WorkerId(parsed_worker),
-            succeeded=succeeded,
-            message=message,
+            outcome=CommandOutcome(status=_STATUS_BY_CODE[code], message=message or ""),
             retry=retry,
         )

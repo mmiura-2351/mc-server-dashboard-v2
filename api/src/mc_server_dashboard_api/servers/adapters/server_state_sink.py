@@ -210,6 +210,10 @@ class ServersServerStateSink(ServerStateSink):
             return applied
 
     async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        # Stamped before any await (issue #4092): the caller has just found the
+        # Worker's session current, so every report of a newer session is
+        # stamped after this, and the write leaves it however late it lands.
+        observed_at = self._clock.now()
         parsed = _parse_id(worker_id, kind="worker_id")
         if parsed is None:
             return
@@ -223,7 +227,7 @@ class ServersServerStateSink(ServerStateSink):
         # of running -> CloseBedrockTunnel), never on a mere disconnect.
         async with self._session_factory() as session:
             repo = SqlAlchemyServerRepository(session)
-            await repo.mark_worker_servers_unknown(WorkerId(parsed), self._clock.now())
+            await repo.mark_worker_servers_unknown(WorkerId(parsed), observed_at)
             require_status_events_wired(repo, self._real_time_events)
             await session.commit()
             publish_status_events(repo, self._real_time_events)

@@ -836,6 +836,72 @@ class ServerRepositoryContract:
         assert (row.observed_state, row.observed_at) == (ObservedState.UNKNOWN, _LATER)
 
     @pytest.mark.parametrize(
+        ("state", "desired"),
+        [
+            (ObservedState.RUNNING, DesiredState.RUNNING),
+            (ObservedState.CRASHED, DesiredState.STOPPED),
+        ],
+        ids=["report", "crash-under-stopped-intent"],
+    )
+    async def test_a_worker_disconnect_leaves_a_server_observed_after_it(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        state: ObservedState,
+        desired: DesiredState,
+    ) -> None:
+        # Issue #4092: a disconnect's write that lands late must not overwrite a
+        # report the Worker's next session made after it, nor move that report's
+        # stamp back.
+        item = server(contract_community_id)
+        assert item.assigned_worker_id is not None
+        item.observed_state = state
+        item.desired_state = desired
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            await tx.repository.mark_worker_servers_unknown(
+                item.assigned_worker_id, _NOW - dt.timedelta(microseconds=1)
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.observed_at) == (state, _NOW)
+
+    @pytest.mark.parametrize(
+        ("state", "observed_at"),
+        [(ObservedState.RUNNING, _NOW), (ObservedState.STOPPED, None)],
+        ids=["observed-at-its-stamp", "never-observed"],
+    )
+    async def test_a_worker_disconnect_marks_a_server_observed_no_later_than_it(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        state: ObservedState,
+        observed_at: dt.datetime | None,
+    ) -> None:
+        item = server(contract_community_id)
+        assert item.assigned_worker_id is not None
+        item.observed_state = state
+        item.observed_at = observed_at
+        item.crash_reason = None
+        item.crash_detail = None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            await tx.repository.mark_worker_servers_unknown(
+                item.assigned_worker_id, _NOW
+            )
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.observed_state, row.observed_at) == (ObservedState.UNKNOWN, _NOW)
+
+    @pytest.mark.parametrize(
         ("state", "reason", "worker", "at"),
         [
             # The ownership guard (issue #1708): a report from a Worker the
@@ -1263,7 +1329,9 @@ class ServerRepositoryContract:
         assert row is not None
         assert (row.assigned_worker_id, row.final_snapshot_refusal) == (None, None)
 
-    @pytest.mark.parametrize("write", ["running-report", "disconnect"])
+    @pytest.mark.parametrize(
+        "write", ["running-report", "disconnect", "lifecycle-keeps-worker"]
+    )
     async def test_a_write_that_keeps_the_worker_keeps_the_final_snapshot_refusal(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
@@ -1284,6 +1352,17 @@ class ServerRepositoryContract:
             if write == "running-report":
                 assert await tx.repository.record_observed_state(
                     item.id, ObservedState.RUNNING, _LATER, expected_worker=worker
+                )
+            elif write == "lifecycle-keeps-worker":
+                # Built from a read that predates the refusal: a write that keeps
+                # the assignment leaves the row's refusal as it is.
+                kept = deepcopy(item)
+                kept.final_snapshot_refusal = None
+                kept.updated_at = _LATER
+                assert await tx.repository.update_lifecycle(
+                    kept,
+                    expected_from=DesiredState.STOPPED,
+                    expected_assigned_worker_id=worker,
                 )
             else:
                 await tx.repository.mark_worker_servers_unknown(worker, _LATER)

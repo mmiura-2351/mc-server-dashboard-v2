@@ -58,7 +58,10 @@ Divergence matrix (per candidate, after a grace window has lapsed):
   disconnected Worker skips the snapshot and clears directly (same exposure as
   before, logged loud). A Worker that drops while the action runs, after the tick
   found it connected, keeps the row: the action fails, and the row then waits the
-  disconnected-Worker grace below, from the drop (issue #3963).
+  disconnected-Worker grace below, from the drop (issue #3963). A final snapshot
+  the Worker refuses ``BUSY`` or ``UNAVAILABLE`` keeps the row too, with the
+  refusal recorded on it (issue #3697): the action fails, and the next retry
+  takes the short grace below, with no bound on the retries.
 - ``desired=stopped``, observed ``unknown``, still assigned (issue #1599): a stop
   interrupted mid-flight (API restart maps STOPPING->unknown, or worker disconnect
   sets unknown without unassigning). Connected Worker -> redispatch the stop.
@@ -200,6 +203,21 @@ instant its failed write began, so a disconnect while that write fails is later
 than it (issue #3981). It is not persisted, so after an API restart the full grace
 applies again.
 
+The record also covers a final snapshot the Worker REFUSED ``BUSY`` or
+``UNAVAILABLE`` (issue #3697), which holds the row instead of releasing it. The
+refusal is recorded once it is answered, and again on every refused retry, so the
+stale-stop arm retries the snapshot on the short grace rather than the full one.
+The record only selects that grace, which is measured from the row's last report
+or intent commit (``_since``), not from the refusal.
+The #930 floor is met, since the Worker answered, and so is #847 in the form it
+takes here: the short grace only re-drives the snapshot, and the row is released
+only once a snapshot settles. A refusal is superseded like any record, a later
+drop of the Worker included. That Worker may be back with the working set, so the
+row then waits a full grace from the drop, after which the disconnected-Worker leg
+releases it without the snapshot (PM ruling 2(a) on #3697, the one release of a
+refusal-held row no operator asked for). The hold itself is the row shape, which
+an API restart keeps; only the short grace is lost with the record.
+
 Widening WHERE the predicate is true does not widen WHAT the short grace assumes.
 The two gates it rides on are unchanged, and they are what the long grace's floors
 actually rest on: the re-dispatch goes to the SAME connected
@@ -322,6 +340,13 @@ command holds the id, so nothing says the next attempt succeeds. It counts as a
 failure like any other, which is what keeps a hydrate that spends a graceful stop
 on an unendable leftover from being re-sent every tick.
 
+A stop-side action whose final snapshot the Worker refused (issue #3697) follows
+the same rule by code. ``BUSY`` leaves the entry as it was, so the retry runs on
+the tick: it costs the Worker nothing, and a backoff earned while the id was only
+busy would keep the server held after it is free. ``UNAVAILABLE`` counts, since
+each final snapshot may spend a graceful stop on a leftover the Worker cannot end.
+A stop dispatch the Worker refuses ``BUSY`` still counts, as above.
+
 Loud structured logs accompany every action and every failure so an operator can
 see the reconciler working (NFR-OBS-1). One bad action is logged and left for a
 later tick; it never aborts the rest of the tick.
@@ -369,6 +394,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    FinalSnapshotRefusedError,
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
 )
@@ -627,7 +653,8 @@ class RunReconcilerTick:
         # is in flight: the stop's round trip ended or the process was reported gone
         # (#930), and no final snapshot can still be uploading (#847). Both
         # stop-side floors are met, so either stop-side action takes the same short
-        # grace as a refused stop.
+        # grace as a refused stop. A final snapshot the Worker refused is recorded
+        # the same way (issue #3697): its retry only re-drives the snapshot.
         if action in (
             "redispatch_stop",
             "clear_stale_assignment",
@@ -840,6 +867,23 @@ class RunReconcilerTick:
                     "convergence is in flight",
                     action,
                     server.id.value,
+                )
+                return
+            if isinstance(exc, FinalSnapshotRefusedError):
+                # The Worker refused the final snapshot again, and the row stays
+                # held for the next retry (issue #3697); the refusal logged its
+                # own WARNING. BUSY clears once the other command or the orphan
+                # settles, so it is not counted and retries on the tick, like a
+                # busy start. UNAVAILABLE counts: each attempt may spend a graceful
+                # stop on a leftover the Worker cannot end.
+                if exc.status is not CommandStatus.BUSY:
+                    self._record_failure(server.id, now)
+                _LOG.info(
+                    "reconcile action %s for server %s: the worker refused its "
+                    "final snapshot %s; the server stays assigned and is retried",
+                    action,
+                    server.id.value,
+                    exc.status.value,
                 )
                 return
             if action in ("place_and_start", "redispatch_start") and isinstance(
