@@ -28,8 +28,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from mc_server_dashboard_api.config import DatabaseSettings, Settings
 from mc_server_dashboard_api.dependencies import (
+    get_create_server,
     get_delete_server,
+    get_import_server,
     get_restore_backup,
     get_upload_backup,
 )
@@ -58,6 +61,7 @@ from mc_server_dashboard_api.servers.application.groups import (
 )
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.manage_server import (
+    CreateServer,
     DeleteServer,
     UpdateServer,
 )
@@ -105,6 +109,7 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    FakeVersionValidator,
 )
 
 _NOW = dt.datetime(2026, 6, 11, 12, 0, tzinfo=dt.timezone.utc)
@@ -607,6 +612,92 @@ def test_restore_and_server_delete_factories_inject_the_shared_lifecycle_lock() 
 
     assert isinstance(restore.lifecycle_lock, PgLifecycleLock)
     assert isinstance(delete.lifecycle_lock, PgLifecycleLock)
+
+
+def _create_server(
+    lock: FakeLifecycleLock, store: FakeFileStore, repo: FakeServerRepository
+) -> CreateServer:
+    return CreateServer(
+        uow=FakeUnitOfWork(servers=repo),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=store,
+        port_range=PortRange(start=25565, end=25664),
+        lifecycle_lock=lock,
+    )
+
+
+async def _create(create: CreateServer) -> Server:
+    return await create(
+        community_id=_COMMUNITY,
+        name="srv",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+        accept_eula=True,
+    )
+
+
+async def test_create_server_takes_lock_around_its_row_and_seed() -> None:
+    # Issue #4045: each seed write publishes on its own, so a start admitted
+    # between the row's commit and the last write would hydrate the seed half
+    # written. The lock is taken before the row is added, so the start waits for
+    # the whole seed, and confirmed right before the seed writes (#3927).
+    lock = FakeLifecycleLock()
+    store = FakeFileStore()
+    store.events = lock.events
+    repo = FakeServerRepository()
+    repo.events = lock.events
+
+    server = await _create(_create_server(lock, store, repo))
+
+    _assert_around(lock.events, server.id, "add-server", "write-file")
+    writes = [i for i, e in enumerate(lock.events) if e == (server.id, "write-file")]
+    assert len(writes) == 2, lock.events
+    assert writes[-1] < lock.events.index((server.id, "release")), lock.events
+    _assert_checked_right_before(lock.events, server.id, "write-file")
+
+
+async def test_create_server_that_lost_the_lock_writes_no_seed() -> None:
+    # A lock lost before the seed stops it (issue #3927). The row already
+    # stands, so the loss is the seed failure a storage error is.
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    store = FakeFileStore()
+    repo = FakeServerRepository()
+
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await _create(_create_server(lock, store, repo))
+
+    assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
+    assert store.writes == []
+    assert len(repo.by_id) == 1
+
+
+def test_create_and_import_factories_inject_the_shared_lifecycle_lock() -> None:
+    # The production wiring (issue #4045): a NullLifecycleLock default on the
+    # create leaves a start free to hydrate a creation half-written, and import
+    # runs inside the lock of the create it composes.
+    engine = create_async_engine("postgresql+asyncpg://u:p@localhost/db")
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                engine=engine,
+                settings=Settings(database=DatabaseSettings(url="postgresql://x/y")),
+            )
+        )
+    )
+
+    create = get_create_server(
+        request,  # type: ignore[arg-type]
+        SimpleNamespace(),  # type: ignore[arg-type]
+        FakeFileStore(),
+    )
+    imp = get_import_server(request, create, FakeFileStore())  # type: ignore[arg-type]
+
+    assert isinstance(create.lifecycle_lock, PgLifecycleLock)
+    assert imp.create_server is create
 
 
 # --- Group file-sync use cases (issue #1222) --------------------------------

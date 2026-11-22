@@ -1272,11 +1272,12 @@ async def test_import_geyser_does_not_clobber_concurrent_patch() -> None:
 
 
 async def test_import_plugins_takes_lifecycle_lock() -> None:
-    """_import_plugins acquires the per-server lifecycle lock around its work.
+    """_import_plugins runs inside the per-server lifecycle lock.
 
     Mirrors the InstallPlugin / RemovePlugin lock-adoption tests: a recording
     FakeLifecycleLock asserts the lock is acquired and released for the
-    imported server's id.
+    imported server's id. The hold is the one the composed CreateServer takes
+    (issue #4045).
     """
 
     community = uuid.uuid4()
@@ -1291,10 +1292,9 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
     # [acquire, release] cannot see the insert land between them.
     dst_uow.plugins.events = lock.events
     imp = ImportServer(
-        create_server=_create_server(dst_uow, dst_store),
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
         file_store=dst_store,
         bedrock_port_range=_BEDROCK_RANGE,
-        lifecycle_lock=lock,
     )
     server = await imp(
         community_id=CommunityId(community),
@@ -1324,23 +1324,91 @@ async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> Non
     async def _import(dst_uow: FakeUnitOfWork, lock: FakeLifecycleLock) -> None:
         dst_store = FakeFileStore()
         await ImportServer(
-            create_server=_create_server(dst_uow, dst_store),
+            create_server=replace(
+                _create_server(dst_uow, dst_store), lifecycle_lock=lock
+            ),
             file_store=dst_store,
             bedrock_port_range=_BEDROCK_RANGE,
-            lifecycle_lock=lock,
         )(community_id=CommunityId(community), name="imported", content=archive)
 
     held_uow = FakeUnitOfWork()
     await _import(held_uow, FakeLifecycleLock())
     lost_uow = FakeUnitOfWork()
     lost = FakeLifecycleLock()
-    lost.checks_before_loss = 0
+    # The seed's check and the publish's pass; the plugin commit's is lost.
+    lost.checks_before_loss = 2
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await _import(lost_uow, lost)
 
     assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
     # The import's last commit, the plugin rows', is the one the loss stops.
     assert lost_uow.commits == held_uow.commits - 1
+
+
+async def test_import_publishes_inside_the_lock_its_create_took() -> None:
+    # Issue #4045: each member's write publishes on its own, so a start admitted
+    # mid-publish would hydrate the archive half-written. The publish runs in
+    # the hold the composed CreateServer took before its row committed, with no
+    # release in between, and confirms the lock first (#3927).
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    dst_uow.servers.events = lock.events
+    dst_store.events = lock.events
+    imp = ImportServer(
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
+        file_store=dst_store,
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "world/level.dat": b"level",
+            "world/region/r.0.0.mca": b"region",
+        }
+    )
+
+    server = await imp(
+        community_id=CommunityId(community), name="fresh", content=archive
+    )
+
+    ev = lock.events
+    assert [e for e in ev if e[1] in {"acquire", "release"}] == [
+        (server.id, "acquire"),
+        (server.id, "release"),
+    ], ev
+    acquire_at = ev.index((server.id, "acquire"))
+    release_at = ev.index((server.id, "release"))
+    assert acquire_at < ev.index((server.id, "add-server")), ev
+    writes = [i for i, e in enumerate(ev) if e == (server.id, "write-file")]
+    # The create's server.properties seed, then the two members.
+    assert len(writes) == 3, ev
+    assert writes[-1] < release_at, ev
+    # The seed's check, then the publish's, each right before its first write.
+    assert ev[writes[0] - 1] == (server.id, "check"), ev
+    assert ev[writes[1] - 1] == (server.id, "check"), ev
+
+
+async def test_import_that_lost_the_lock_before_its_publish_writes_no_member() -> None:
+    # A lock lost after the seed stops the publish before its first write
+    # (issue #3927); the row stands, so it is the seed failure.
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 1
+    imp = ImportServer(
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
+        file_store=dst_store,
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"x"})
+
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await imp(community_id=CommunityId(community), name="fresh", content=archive)
+
+    assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
+    assert set(dst_store.files) == {"server.properties"}
+    assert len(dst_uow.servers.by_id) == 1
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------

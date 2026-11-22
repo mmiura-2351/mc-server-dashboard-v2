@@ -584,6 +584,16 @@ dedicated connection across the operation's several transactions and its storage
 writes. A waiter gives up after a few seconds with `409 server_busy`
 ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.2 sizes the pool for it).
 
+A server's creation holds it too, from before its row commits until its last
+create-time write: the seed of `server.properties` and `eula.txt`, and for an
+import the publish of the archive and its plugin rows (issue #4045). Each of
+those writes publishes on its own, so a start admitted in between would hydrate
+the working set half-written. The id is new, so nothing else holds its lock; a
+start racing the creation waits for it, and one still waiting when the acquire
+budget runs out, as behind a large import, is the `409 server_busy`. A creation
+that fails after its row commits (`503 seed_failed`) leaves the row and what was
+written; a start after it hydrates that.
+
 PostgreSQL releases the lock when its session ends (a dropped connection, a
 database restart, a terminated backend) and tells the holder nothing, so another
 operation on the same server can take it while the first still runs (issue
@@ -597,11 +607,11 @@ more. A restore and a server delete check inside the storage call, under the
 per-server storage lock, right before the restore's flip and the prune's first
 removal, so the slow copy or pack before them is covered too. A restore that
 loses the lock after its flip answers `503 restore_incomplete` instead, as the
-restored files are live and only the steps after the flip were skipped. An
-import whose server row is committed, and an update whose row change is, answer
-`503 seed_failed` instead, as for their other failures after that commit
-(Section 9). A route that audits a busy lock records a lost one as an `error`
-event. A loss that only the release finds is logged, not raised: every write the
+restored files are live and only the steps after the flip were skipped. A
+create or an import whose server row is committed, and an update whose row
+change is, answer `503 seed_failed` instead, as for their other failures after
+that commit (Section 9). A route that audits a busy lock records a lost one as
+an `error` event. A loss that only the release finds is logged, not raised: every write the
 operation made followed a check that passed, so it answers as it finished, with
 its result or its own error.
 

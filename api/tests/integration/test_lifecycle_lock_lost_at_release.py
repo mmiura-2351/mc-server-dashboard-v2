@@ -18,6 +18,7 @@ import os
 import tarfile
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -236,10 +237,9 @@ async def test_an_import_is_returned_although_its_session_ended_after_the_plugin
     lock = _SessionEndsBeforeRelease(engine)
 
     server = await ImportServer(
-        create_server=_create_server(uow, store),
+        create_server=replace(_create_server(uow, store), lifecycle_lock=lock),
         file_store=store,
         bedrock_port_range=_BEDROCK_RANGE,
-        lifecycle_lock=lock,
     )(community_id=CommunityId(community), name="imported", content=archive)
 
     assert lock.ended == 1
