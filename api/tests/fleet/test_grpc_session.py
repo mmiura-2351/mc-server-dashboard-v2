@@ -3213,3 +3213,207 @@ async def test_a_held_late_final_snapshot_result_releases_on_its_retry() -> None
         await call.done_writing()
     finally:
         await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Log lines and metrics read while a report is held (issue #4028)
+# ---------------------------------------------------------------------------
+
+# A short server id keeps a flood well inside the stream's flow-control window,
+# so the Worker's writes complete even when the reader stops reading.
+_FLOOD_SERVER = "s"
+
+
+def _dropped(logs: int, metrics: int) -> str:
+    return (
+        f"dropped {logs} log lines and {metrics} metric samples during a database hold"
+    )
+
+
+def _log_message(server_id: str, line: str) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        event=pb.Event(server_id=server_id, log_line=pb.LogLine(line=line))
+    )
+
+
+def _metrics_message(server_id: str, cpu_millis: int) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        event=pb.Event(server_id=server_id, metrics=pb.Metrics(cpu_millis=cpu_millis))
+    )
+
+
+async def _write_all(
+    call: aio.StreamStreamCall, messages: list[pb.WorkerMessage]
+) -> None:
+    async def _write() -> None:
+        for message in messages:
+            await call.write(message)
+
+    await asyncio.wait_for(_write(), timeout=30)
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _GRPC_SERVER_LOGGER and r.levelno >= logging.WARNING
+    ]
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_log_flood_during_a_hold_does_not_fill_the_queue(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Queued behind a held report, a busy log stream would fill the queue, stop
+    # the reader, heartbeats included, and end the session with the report when
+    # they lapse. The log lines and metrics read during the hold are dropped
+    # instead, and the held report and the one behind it land once the database
+    # is back.
+    sink = _OutageSink(down=True)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call,
+            [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+            + [_metrics_message(_FLOOD_SERVER, i) for i in range(3)],
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        assert h.real_time_events.published == []
+
+        sink.down = False
+        await _wait_until(lambda: len(sink.observed) == 2, "the reports not applied")
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        assert _logged(caplog, _dropped(flood, 3)) != []
+        # Once the hold is over, log lines are relayed again.
+        await call.write(_log_message(_FLOOD_SERVER, "after"))
+        await _wait_until(lambda: h.real_time_events.published, "no line relayed")
+        assert [e.payload["line"] for _, e in h.real_time_events.published] == ["after"]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize("end", ["applied", "refused"])
+async def test_a_hold_reports_what_it_dropped_in_one_warning(
+    end: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The lines a hold drops are counted, not logged one by one: one WARNING
+    # gives both counts as the hold ends, whether its report is applied or
+    # dropped because the database answers. A log line read after it is
+    # relayed again.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    sink = _OutageSink(down=True)
+    ping = FakeDatabasePing(reachable=False)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=ping,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: sink.attempts.get(_SERVER_A, 0) >= 2, "the report was not held"
+        )
+        await _write_all(
+            call,
+            [_log_message(_SERVER_A, str(i)) for i in range(3)]
+            + [_metrics_message(_SERVER_A, i) for i in range(2)],
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, beat)
+
+        if end == "applied":
+            sink.down = False
+        else:
+            ping.reachable = True
+        await _wait_until(lambda: _logged(caplog, _dropped(3, 2)), "no counts logged")
+        await call.write(_log_message(_SERVER_A, "after"))
+        await _wait_until(lambda: h.real_time_events.published, "no line relayed")
+
+        expected = (
+            [_HOLD_STARTED, _dropped(3, 2)]
+            if end == "applied"
+            else [
+                _HOLD_STARTED,
+                _HOLD_REFUSED,
+                _dropped(3, 2),
+                "dropping a worker message after a handler error",
+            ]
+        )
+        assert _warnings(caplog) == expected
+        assert [e.payload["line"] for _, e in h.real_time_events.published] == ["after"]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_without_a_hold_log_lines_queue_in_order_and_back_pressure_the_reader(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Outside a hold nothing is dropped. Behind a slow write, which is no outage,
+    # log lines and metrics queue; the full queue stops the reader, heartbeats
+    # included, and every line and sample is relayed in order once the write
+    # completes.
+    gate = asyncio.Event()
+    sink = _OutageSink(gate=gate)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call,
+            [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+            + [_metrics_message(_FLOOD_SERVER, i) for i in range(3)],
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        await asyncio.sleep(0.2)
+
+        assert h.registry.list_workers()[0].last_heartbeat_at == _T0
+        assert h.real_time_events.published == []
+
+        gate.set()
+        await _wait_for_heartbeat_at(h, beat)
+        await _wait_until(
+            lambda: len(h.real_time_events.published) == flood + 3,
+            "not every line and sample relayed",
+        )
+        assert [e.payload for _, e in h.real_time_events.published] == [
+            {"line": str(i), "stream": "stdout"} for i in range(flood)
+        ] + [{"cpu_millis": i, "memory_bytes": 0, "player_count": 0} for i in range(3)]
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert _warnings(caplog) == []
+        await call.done_writing()
+    finally:
+        await h.stop()
