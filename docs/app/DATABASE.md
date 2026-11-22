@@ -750,8 +750,10 @@ file from the then-current union before it decides whether to hydrate:
   an edit keeps the earlier edit, and a second delete finds the group gone. The
   lock matches the group's community as well, so a request naming another
   community's group locks nothing.
-- Recording the row locks the server row (`FOR KEY SHARE`, in id order), which
-  holds off the server's deletion but not a state write to it. A detach and a group
+- Recording the row locks the server row (`FOR KEY SHARE`, in id order). That
+  holds off the server's deletion, an observed-state write (it locks the row
+  `FOR UPDATE`) and a change of a unique column such as the slug, but not a plain
+  update such as a `desired_state` or assignment change. A detach and a group
   delete record their rows before they remove any `server_group` row, the order
   a server deletion takes: the server row, then its attachments.
 - The write advances the working-set generation like any at-rest edit, so a

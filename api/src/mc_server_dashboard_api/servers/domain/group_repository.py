@@ -183,10 +183,13 @@ class GroupRepository(abc.ABC):
         rather than refused: its file went with it.
 
         Each server row is locked ``FOR KEY SHARE``, in id order, until this
-        transaction ends: a delete of the server waits, and an update that leaves
-        its unique columns alone, such as a state write, does not. A server delete
-        locks the row before it cascades to the server's attachments, so a change
-        that removes attachments marks first (issue #4027).
+        transaction ends. That holds off a delete of the server, and every write
+        that locks the row ``FOR UPDATE``: an observed-state write, and an update
+        of a unique column such as the slug. A plain update of the other columns,
+        such as a ``desired_state`` or assignment change, is not held off. A
+        server delete locks the row before it cascades to the server's
+        attachments, so a change that removes attachments marks first (issue
+        #4027).
         """
 
     @abc.abstractmethod

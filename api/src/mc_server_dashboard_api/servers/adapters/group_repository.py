@@ -238,9 +238,10 @@ class SqlAlchemyGroupRepository(GroupRepository):
         # Insert from the server rows themselves, key-share locked, rather than
         # from the ids: a server deleted since the caller listed its attachments
         # is then skipped instead of violating the FK, and one that exists cannot
-        # be deleted under the INSERT. FOR KEY SHARE is enough for that, and an
-        # UPDATE that leaves the server's unique columns alone (a state write)
-        # is not held off.
+        # be deleted under the INSERT. FOR KEY SHARE is enough for that. It still
+        # waits for, and holds off, the observed-state writes (they lock the row
+        # FOR UPDATE, see below) and an update of a unique column; a plain UPDATE
+        # of the other columns (desired state, the assignment) goes through.
         #
         # DO UPDATE, not DO NOTHING: recording the mark again must change its
         # token, which is what lets the start that read the old one tell that a

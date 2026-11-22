@@ -22,7 +22,9 @@ group gone. The lock matches the group's community, so a request naming another
 community locks nothing (issue #4027).
 
 The last ones pin the order a detach and a group delete share with a server
-delete (issue #4027): the server row, then its attachments.
+delete (issue #4027): the server row, then its attachments. One holds the change
+right after a mark recorded again over a standing one, where nothing but the
+mark's own row lock holds the server delete off.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5).
@@ -132,6 +134,12 @@ class _PausingGroupRepository(SqlAlchemyGroupRepository):
         removed = await super().detach(group_id, server_id)
         await self._pause.passed("detach")
         return removed
+
+    async def mark_sync_pending(
+        self, server_ids: list[ServerId], kind: GroupKind
+    ) -> None:
+        await super().mark_sync_pending(server_ids, kind)
+        await self._pause.passed("mark_sync_pending")
 
 
 class _PausingUnitOfWork(ServersUnitOfWork):
@@ -252,6 +260,13 @@ class _World:
 
         async with ServersUnitOfWork(self.factory) as uow:
             await uow.groups.attach(self.group.id, self.server_id)
+            await uow.commit()
+
+    async def mark_now(self) -> None:
+        """Record the server's mark for the group's kind, committed."""
+
+        async with ServersUnitOfWork(self.factory) as uow:
+            await uow.groups.mark_sync_pending([self.server_id], self.group.kind)
             await uow.commit()
 
     async def another_community(self) -> CommunityId:
@@ -765,6 +780,42 @@ async def test_a_server_delete_behind_a_group_change_waits_and_lands(
     pause.resume.set()
 
     # Both complete: the change commits, then the server delete it held off.
+    outcomes = await asyncio.gather(change, deletion, return_exceptions=True)
+    assert list(outcomes) == [None, None]
+    assert await world.count("server") == 0
+    assert await world.count("server_group") == 0
+
+
+@pytest.mark.parametrize("kind", ["detach", "delete"])
+async def test_a_server_delete_behind_a_marked_server_waits_and_lands(
+    engine: AsyncEngine, kind: str
+) -> None:
+    # The server already owes a regeneration, as a running server usually does,
+    # so recording the mark again updates that row: no foreign-key check locks
+    # the server, and only the mark's own row lock holds the server delete off.
+    # The change is held between its mark and the removal. Without that lock,
+    # the server delete would cascade to the attachment and wait on the mark,
+    # the change would wait on the attachment, and PostgreSQL would abort one
+    # of the two as a deadlock.
+    world = _World(engine)
+    await world.seed()
+    await world.attach_now()
+    await world.mark_now()
+    pause = _Pause(after="mark_sync_pending")
+    change = asyncio.create_task(
+        _remove_attachment(kind, world, _PausingUnitOfWork(world.factory, pause))
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        _delete_server(world, _PidUnitOfWork(world.factory, pid))
+    )
+    await await_settled(
+        world.engine, deletion, lambda: pid.result() if pid.done() else None
+    )
+    assert not deletion.done()
+    pause.resume.set()
+
     outcomes = await asyncio.gather(change, deletion, return_exceptions=True)
     assert list(outcomes) == [None, None]
     assert await world.count("server") == 0
