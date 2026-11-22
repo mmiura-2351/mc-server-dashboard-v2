@@ -562,6 +562,68 @@ Work from the cheapest, most-reversible step to the most invasive, and re-check
    > s3.clean.uploads
    ```
 
+#### Repair: dangling backup rows
+
+A backup row whose archive the store does not hold is **dangling**: the Web UI
+lists it, but it cannot be downloaded or restored. Since issue #4086 a create or
+an upload records its row only once its archive is written, but a deployment
+that ran an older release through a storage incident can still hold such rows,
+and nothing removes them on its own. Once the store and the database are healthy
+again (the Recovery steps above), find them with a dry run, then delete them:
+
+```sh
+# 1. List the dangling rows. Nothing is deleted.
+docker compose exec api python -m mc_server_dashboard_api.integrity_sweep_cli \
+  --delete-dangling
+# 2. Delete the rows it listed.
+docker compose exec api python -m mc_server_dashboard_api.integrity_sweep_cli \
+  --delete-dangling --apply
+```
+
+Add `--server <server-uuid>` to either command to check one server only. The
+pass sends one HEAD per backup row, under the server's lifecycle lock; it reads
+no archive bytes and does not run the integrity sweep.
+
+- **Only a "not found" answer marks a row dangling.** A row the store could not
+  answer for (an outage, a timeout, a 5xx) is listed as skipped and is never
+  deleted, and the command exits 1. Re-run it once the store is healthy.
+- **A busy row is skipped.** When another lifecycle operation holds the server
+  past the lock's wait budget, such as a backup delete in flight or a restore,
+  the row is listed as skipped. Re-run to check it.
+- **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
+- **`--apply` checks the store first.** It refuses with exit 2 unless the store
+  owner marker names this database's installation (STORAGE.md Section 4.3). A
+  store that is not this database's, such as a wrong bucket or fs root, holds
+  none of its archives, so every row would look dangling.
+
+The other exit statuses are the command's usual ones: 3 when the database failed
+or a lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
+safe.
+
+**Worked example: the #4086 rows.** While a store's disk was full (2026-10-14
+to 10-15), one server's backup schedule kept recording rows it could not archive.
+From 2026-10-15 12:19 to 14:09 UTC it wrote 21 `scheduled` rows, about every 5.5
+minutes, each with an unknown size and no archive in the store. The dry run
+lists those rows, newest first:
+
+```text
+servers scanned: <n>
+dangling backup rows (the store reports no archive): 21
+  backup <backup-id> of server <server-id>, created 2026-10-15T14:09:<ss>+00:00, source scheduled
+  ...
+  backup <backup-id> of server <server-id>, created 2026-10-15T12:19:36+00:00, source scheduled
+skipped (the store could not say whether the archive exists; re-run once it is healthy): 0
+skipped (server busy; re-run to check them): 0
+dry run: nothing was deleted. Re-run with --apply to delete the dangling rows listed above.
+```
+
+Before you apply, check that every listed row falls in the incident window and
+belongs to the server whose schedule failed. A row outside the window has lost
+its archive some other way; find out why before you delete it. Then run the
+`--apply` command. It prints the same list and ends with
+`deleted: 21 (each audited as backup:delete_dangling)`. The rows drop out of the
+server's backup list, and retention no longer counts them.
+
 #### Steady-state prevention
 
 Three steady-state mechanisms keep the store from filling in normal operation; this

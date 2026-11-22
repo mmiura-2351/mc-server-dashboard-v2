@@ -956,6 +956,13 @@ missing after its size was recorded, as when a delete is interrupted between its
 archive removal and its row removal, still ranks by its `health`.
 Manual / uploaded / event rows are never auto-pruned.
 
+Before it ranks, the prune sizes each scheduled row whose `size_bytes` is NULL,
+as a listing does (issue #4107): a storage HEAD per row, with no database
+session held across it, and the sizes recorded in a short transaction of their
+own. A row whose archive the store reports missing stays NULL. Any other store
+failure stops the prune before it selects or deletes anything, with a WARNING;
+the next run retries.
+
 ### `file_edit_history` — Storage-layer only (no DB table)
 
 Versioned file changes for rollback (FR-FILE-3, Appendix B). Each edit retains the
