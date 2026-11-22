@@ -398,3 +398,52 @@ async def test_a_late_snapshot_release_whose_commit_answer_was_lost_is_announced
         and r.getMessage().startswith(f"released worker {_WORKER_ID} for server")
     ]
     assert len(released) == 1
+
+
+async def test_a_retry_that_changes_the_state_publishes_one_frame(
+    world: _World,  # noqa: F811
+) -> None:
+    # The attempt a retry repeats did not land: the retry's write changes the
+    # row, and stages its one frame, not a second for being a retry.
+    worker = uuid.UUID(_WORKER_ID)
+    server = await world.server("survival", worker=worker, reported="starting")
+    watching = world.watch(server)
+
+    assert await world.sink().record_observed_state(
+        server_id=str(server.id.value),
+        worker_id=_WORKER_ID,
+        state="running",
+        retry=True,
+    )
+
+    assert [event.payload for event in await _received(watching)] == [
+        _status("running")
+    ]
+
+
+async def test_a_retry_that_makes_the_release_publishes_one_frame(
+    world: _World,  # noqa: F811
+) -> None:
+    # The release a retry repeats did not land: the retry makes it, and stages
+    # its one frame.
+    worker = uuid.UUID(_WORKER_ID)
+    server = await _wedged_stop(world, worker, "stopped")
+    sink = ServersLateSnapshotResultSink(
+        create_session_factory(world.engine),
+        control_plane=FakeControlPlane(),
+        clock=world.clock,
+        stop_convergence=StopConvergenceGuard(),
+        unrecorded_stops=UnrecordedStops(),
+        real_time_events=world.bus,
+    )
+    watching = world.watch(server)
+
+    await sink.clear_held_assignment_on_late_snapshot(
+        server_id=str(server.id.value),
+        worker_id=_WORKER_ID,
+        succeeded=True,
+        message=None,
+        retry=True,
+    )
+
+    assert [event.payload for event in await _received(watching)] == [_RELEASED]
