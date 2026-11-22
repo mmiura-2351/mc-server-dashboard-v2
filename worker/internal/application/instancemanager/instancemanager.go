@@ -86,8 +86,10 @@ type Transfer interface {
 	// Hydrate downloads the working set from url into workingDir (an empty/204
 	// response leaves it empty). It returns the authoritative store GENERATION the
 	// API served (the value of its response header, issue #763); 0 when the header
-	// is absent (a server with no published snapshot, or an older API).
-	Hydrate(ctx context.Context, url, token, workingDir string) (uint64, error)
+	// is absent (a server with no published snapshot, or an older API). On a 200 it
+	// writes marker(generation) as the generation marker into the unpacked tree before
+	// swapping it in (issue #917); marker renders the signed form (issue #3349).
+	Hydrate(ctx context.Context, url, token, workingDir string, marker func(gen uint64) []byte) (uint64, error)
 	// PackSnapshot packs workingDir into a tar spool file and returns its path.
 	// The returned cleanup function removes the spool; the caller must invoke it
 	// when the spool is no longer needed. Only the pack reads the working
@@ -193,6 +195,11 @@ type Manager struct {
 	// called (older wiring / tests): the guard then treats the publisher as unknown.
 	workerID string
 
+	// genKey signs every generation marker this manager writes and verifies every one
+	// it reads (issue #3349). It is unusable until WithGenerationKey is called: no
+	// marker is believed then, so every start hydrates.
+	genKey *GenerationKey
+
 	clock           session.Clock
 	metricsInterval time.Duration
 
@@ -237,7 +244,7 @@ type Manager struct {
 	// recordedGeneration) so a test can stall them where storage would (issue
 	// #3511), mirroring scanRegion above.
 	readWorkingDir func(dir string) ([]os.DirEntry, error)
-	readGeneration func(workingDir, serverID string, log *slog.Logger) uint64
+	readGeneration func(key *GenerationKey, workingDir, serverID string, log *slog.Logger) uint64
 
 	// snapshotContextHook, when non-nil, replaces snapshotContext so a test can end a
 	// snapshot command's deadline at a chosen moment instead of by the clock.
@@ -584,6 +591,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		scanRegion:         scanRegionState,
 		readWorkingDir:     os.ReadDir,
 		readGeneration:     recordedGeneration,
+		genKey:             &GenerationKey{},
 		runningSnapshots:   map[string]bool{},
 		instances:          map[string]execution.Instance{},
 		startCmds:          map[string]session.Command{},
@@ -1079,6 +1087,15 @@ func (m *Manager) WithWorkerID(id string) *Manager {
 	return m
 }
 
+// WithGenerationKey sets the key the generation markers under the scratch root are
+// signed and verified with (issue #3349): LoadGenerationKey's, the same one the boot
+// scan (ScanHeldServers) is given, so both agree on it and on which servers' failed
+// verifications were already logged.
+func (m *Manager) WithGenerationKey(key *GenerationKey) *Manager {
+	m.genKey = key
+	return m
+}
+
 // WithMetrics sets the clock and sampling interval for periodic Metrics events
 // (FR-MON-3, worker.metrics_interval_seconds). A non-positive interval keeps the
 // default; the clock is injectable for deterministic tests.
@@ -1178,7 +1195,8 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	if err := m.endLeftovers(transferCtx, cmd.ServerID, workingDir); err != nil {
 		return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "hydrate", err))
 	}
-	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir)
+	marker := func(gen uint64) []byte { return m.genKey.seal(cmd.ServerID, gen) }
+	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, marker)
 	if err != nil {
 		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
@@ -1225,7 +1243,9 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 // The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
 // declaration has to be the write's own outcome rather than the transfer merely having
 // succeeded: a marker this call could not write is older than the tree, so declaring the
-// served generation anyway would let a later start skip the corrective hydrate.
+// served generation anyway would let a later start skip the corrective hydrate. A marker
+// written under an unusable key is reported as not published for the same reason: it
+// reads as generation 0, so it backs no declaration (issue #3349).
 func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID string, gen uint64) bool {
 	// The marker is published by renaming a temporary name (workingSetLocks). A
 	// stamp that cannot get the lock is not written, which is the safe direction.
@@ -1236,12 +1256,12 @@ func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID str
 		return false
 	}
 	defer unlock()
-	if err := writeGeneration(workingDir, gen); err != nil {
+	if err := writeGeneration(m.genKey, workingDir, serverID, gen); err != nil {
 		m.logger.Warn("could not record working-set generation",
 			"server_id", serverID, "generation", gen, "error", err)
 		return false
 	}
-	return true
+	return m.genKey.usable()
 }
 
 // recordGenerationIfUnchanged records the generation only while workingDir is still the
@@ -1274,7 +1294,8 @@ func (m *Manager) recordGeneration(ctx context.Context, workingDir, serverID str
 // The API mirrors that declaration into the inventory its skip-hydrate gate reads, so the
 // declaration has to be the marker write's own outcome rather than a second opinion about
 // it: every skip above returns false through the same statement that suppresses the write,
-// so no code path can report a generation this function did not stamp.
+// so no code path can report a generation this function did not stamp. As in
+// recordGeneration, a marker written under an unusable key backs no declaration.
 func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingDirRef, workingDir, serverID string, gen uint64) bool {
 	// The marker is published by renaming a temporary name (workingSetLocks). A
 	// stamp that cannot get the lock is not written, which is the safe direction.
@@ -1301,7 +1322,7 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 		warnSkipped()
 		return false
 	}
-	if err := writeGenerationGuarded(workingDir, gen, guard); err != nil {
+	if err := writeGenerationGuarded(m.genKey, workingDir, serverID, gen, guard); err != nil {
 		if errors.Is(err, errWorkingDirReplaced) {
 			warnSkipped()
 			return false
@@ -1310,7 +1331,7 @@ func (m *Manager) recordGenerationIfUnchanged(ctx context.Context, ref *workingD
 			"server_id", serverID, "generation", gen, "error", err)
 		return false
 	}
-	return true
+	return m.genKey.usable()
 }
 
 // restoreSaveTimeout bounds the re-enable-auto-save RCON call on the snapshot
@@ -1881,7 +1902,7 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 	// can refuse the publish if the store advanced past it. 0 (an unknown/never-
 	// hydrated set, or one whose marker the read refuses, issue #3336) leaves the guard
 	// to compare against the store's current value.
-	baseGeneration := m.readGeneration(workingDir, cmd.ServerID, m.logger)
+	baseGeneration := m.readGeneration(m.genKey, workingDir, cmd.ServerID, m.logger)
 
 	if running {
 		// Running-server snapshot (issue #1710): split pack from upload so save-on is

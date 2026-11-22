@@ -16,8 +16,9 @@ import (
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/nofollow"
 )
 
-// writeGeneration records gen as the working-set generation in workingDir. It is
-// best-effort from the caller's view: a write failure is returned for logging but
+// writeGeneration records gen as the working-set generation of serverID in workingDir,
+// signed under key (issue #3349, generationkey.go). It is best-effort from the caller's
+// view: a write failure is returned for logging but
 // must not fail the hydrate/snapshot it follows. On the 200 hydrate path the marker
 // was already written atomically into the temp tree before the swap-in rename
 // (issue #917), so this call is idempotent; on the 204 path and the snapshot path it
@@ -51,8 +52,8 @@ import (
 // such sync. A successful write also sweeps the temp siblings that earlier crashed
 // writes stranded in workingDir (sweepGenerationTemps, issue #2283), so the cleanup
 // is self-healing rather than a separate mechanism.
-func writeGeneration(workingDir string, gen uint64) error {
-	return writeGenerationGuarded(workingDir, gen, nil)
+func writeGeneration(key *GenerationKey, workingDir, serverID string, gen uint64) error {
+	return writeGenerationGuarded(key, workingDir, serverID, gen, nil)
 }
 
 // writeGenerationGuarded is writeGeneration with an optional last-moment guard, run
@@ -89,7 +90,7 @@ func writeGeneration(workingDir string, gen uint64) error {
 //
 // A refused write removes its temp, as every failed write does: it is one nothing will
 // ever publish.
-func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) error {
+func writeGenerationGuarded(key *GenerationKey, workingDir, serverID string, gen uint64, guard func() bool) error {
 	// Ensure the working dir exists: a hydrate that served a 204 (no published
 	// snapshot) does not create it, but the generation (0) still needs recording so
 	// a same-Worker restart re-reports the empty-set generation rather than nothing.
@@ -106,7 +107,7 @@ func writeGenerationGuarded(workingDir string, gen uint64, guard func() bool) er
 	if err != nil {
 		return err
 	}
-	if _, err := tmp.WriteString(strconv.FormatUint(gen, 10)); err != nil {
+	if _, err := tmp.Write(key.seal(serverID, gen)); err != nil {
 		_ = tmp.Close()
 		_ = unix.Unlinkat(dirFd, tmpName, 0)
 		return err
@@ -377,26 +378,33 @@ func fsyncDir(dir string) error {
 	return d.Sync()
 }
 
-// maxGenerationMarkerBytes is the largest marker a read accepts. A generation is a
-// uint64 in decimal — at most 20 digits — so 32 bytes leaves room for the trailing
-// newline a hand-written marker carries and nothing else.
-const maxGenerationMarkerBytes = 32
+// maxGenerationMarkerBytes is the largest marker a read accepts. A signed marker is
+// "v2 ", at most 20 decimal digits, a space and 64 hex digits — 88 bytes — so 128
+// leaves room for a trailing newline and nothing a marker needs.
+const maxGenerationMarkerBytes = 128
 
-// readGenerationMarker returns the generation recorded in workingDir.
+// errGenerationUnverified reports a marker that is a readable regular file but not one
+// this Worker signed for this server under its key (issue #3349): a bare number, which
+// is every marker written before the format, one copied from another server's working
+// set, one whose generation was edited, or any marker at all under an unusable key.
+var errGenerationUnverified = errors.New("generation marker failed verification")
+
+// readGenerationMarker returns the generation recorded in workingDir for serverID.
 //
 // An absent marker (or working dir) is 0 with a nil error: a set that was never stamped
 // (issue #763). Anything else that is not a regular file of at most
-// maxGenerationMarkerBytes holding one decimal uint64 is REFUSED: 0 with a non-nil
-// error. The marker sits in a directory the server's own code owns and can write (issue
-// #3336), so it is opened relative to the working dir's descriptor without following a
-// link or blocking, judged on the opened descriptor and read up to the cap (nofollow):
-// a link to another file is never read, a FIFO never blocks the caller, and an endless
-// or huge file costs 33 bytes.
+// maxGenerationMarkerBytes is REFUSED: 0 with a non-nil error. The marker sits in a
+// directory the server's own code owns and can write (issue #3336), so it is opened
+// relative to the working dir's descriptor without following a link or blocking, judged
+// on the opened descriptor and read up to the cap (nofollow): a link to another file is
+// never read, a FIFO never blocks the caller, and an endless or huge file costs 129
+// bytes. A regular file within the cap is believed only when key verifies it for
+// serverID; otherwise it is 0 with errGenerationUnverified.
 //
-// Both outcomes are generation 0, which means "held but at an unknown generation": the
-// API treats it as older than any published store generation and hydrates, which is the
-// safe direction (never skip a hydrate on an unknown set).
-func readGenerationMarker(workingDir string) (uint64, error) {
+// Every outcome but a verified marker is generation 0, which means "held but at an
+// unknown generation": the API treats it as older than any published store generation
+// and hydrates, which is the safe direction (never skip a hydrate on an unknown set).
+func readGenerationMarker(key *GenerationKey, workingDir, serverID string) (uint64, error) {
 	dirFd, err := nofollow.OpenDir(workingDir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
@@ -417,10 +425,10 @@ func readGenerationMarker(workingDir string) (uint64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%s %w", scratchformat.GenerationMarkerFile, err)
 	}
-	gen, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		// Neither %w nor the content: the bytes are the server's.
-		return 0, fmt.Errorf("%s does not hold a generation", scratchformat.GenerationMarkerFile)
+	gen, ok := key.open(serverID, data)
+	if !ok {
+		// The content is not reported: the bytes are the server's.
+		return 0, errGenerationUnverified
 	}
 	return gen, nil
 }
@@ -428,10 +436,23 @@ func readGenerationMarker(workingDir string) (uint64, error) {
 // recordedGeneration is readGenerationMarker for the callers that act on the value —
 // the held-set scans and the snapshot's base declaration. A refused marker is logged
 // and read as 0, exactly like an absent one, so one server's planted marker costs that
-// server a hydrate and nothing else.
-func recordedGeneration(workingDir, serverID string, log *slog.Logger) uint64 {
-	gen, err := readGenerationMarker(workingDir)
-	if err != nil && log != nil {
+// server a hydrate and nothing else. A marker that fails verification is read as 0 too,
+// and logged once per server per key (GenerationKey), since every registration reads it
+// again: once after an upgrade, when every marker is still a bare number, and once when
+// a server's own code rewrote it. Under an unusable key nothing is logged here — the
+// ERROR LoadGenerationKey logged covers every server.
+func recordedGeneration(key *GenerationKey, workingDir, serverID string, log *slog.Logger) uint64 {
+	gen, err := readGenerationMarker(key, workingDir, serverID)
+	switch {
+	case err == nil || log == nil:
+	case errors.Is(err, errGenerationUnverified):
+		if key.usable() && key.firstUnverified(serverID) {
+			log.Warn("generation marker failed verification; treating the working set as generation 0, "+
+				"which forces a hydrate (a marker written before the marker was signed, or one the "+
+				"server's own code rewrote; logged once per server)",
+				"server_id", serverID)
+		}
+	default:
 		log.Warn("generation marker refused; treating the working set as generation 0, which forces a hydrate",
 			"server_id", serverID, "error", err)
 	}

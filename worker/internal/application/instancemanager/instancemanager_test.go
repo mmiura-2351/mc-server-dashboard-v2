@@ -303,6 +303,7 @@ func newManager(t *testing.T, d execution.ExecutionDriver, ctrl execution.Server
 	// snapshot test does not pay the real 2s poll (#907); tests that exercise the
 	// settle-wait itself override it explicitly.
 	m.settlePollInterval = 0
+	m.WithGenerationKey(testGenerationKey)
 	closeWithTest(t, m)
 	return m
 }

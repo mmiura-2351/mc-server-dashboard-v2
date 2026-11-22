@@ -36,6 +36,9 @@ func TestPersistedScratchNames(t *testing.T) {
 	}
 }
 
+// A scratch tree from before the marker was authenticated (issue #3349) is still held,
+// but its bare-number marker reads as generation 0: the upgrade costs each server one
+// hydrate.
 func TestExistingScratchTreeRemainsReadable(t *testing.T) {
 	scratch := t.TempDir()
 	workingDir := filepath.Join(scratch, serverID)
@@ -49,8 +52,9 @@ func TestExistingScratchTreeRemainsReadable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []session.HeldServer{{ServerID: serverID, Generation: 17}}
-	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, want) {
+	want := []session.HeldServer{{ServerID: serverID, Generation: 0}}
+	key := instancemanager.LoadGenerationKey(scratch, nil)
+	if got := instancemanager.ScanHeldServers(scratch, key, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("existing scratch held = %v, want %v", got, want)
 	}
 }
@@ -76,17 +80,22 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 	defer srv.Close()
 
 	scratch := t.TempDir()
-	workingDir := filepath.Join(scratch, serverID)
-	gen, err := datatransfer.New(srv.Client()).Hydrate(context.Background(), srv.URL, "tok", workingDir)
-	if err != nil {
-		t.Fatalf("Hydrate: %v", err)
-	}
-	if gen != servedGeneration {
-		t.Fatalf("Hydrate generation = %d, want %d", gen, servedGeneration)
+	// The hydrate goes through the manager, as the Worker's does: the marker the transfer
+	// adapter writes into the tree is the manager's signed rendering (issue #3349).
+	key := instancemanager.LoadGenerationKey(scratch, nil)
+	m := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil).
+		WithGenerationKey(key).
+		WithTransfer(datatransfer.New(srv.Client()))
+	t.Cleanup(m.Close)
+	res := m.Handle(context.Background(), session.Command{
+		CommandID: "h1", ServerID: serverID, Kind: "HydrateTrigger", TransferURL: srv.URL, TransferToken: "tok",
+	})
+	if !res.Success || res.HeldGeneration == nil || *res.HeldGeneration != servedGeneration {
+		t.Fatalf("hydrate = %+v, want success declaring %d", res, servedGeneration)
 	}
 
 	wantHeld := []session.HeldServer{{ServerID: serverID, Generation: servedGeneration}}
-	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
+	if got := instancemanager.ScanHeldServers(scratch, key, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held after Hydrate = %v, want %v", got, wantHeld)
 	}
 
@@ -106,11 +115,9 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 		}
 	}
 
-	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
+	if got := instancemanager.ScanHeldServers(scratch, key, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held with crash-left hydrate trees = %v, want %v", got, wantHeld)
 	}
-	m := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil)
-	t.Cleanup(m.Close)
 	if got := m.HeldServers(); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("manager held with crash-left hydrate trees = %v, want %v", got, wantHeld)
 	}
@@ -121,7 +128,7 @@ func TestHydrateScratchIsDiscoveredAndCrashLeftTreesAreReclaimed(t *testing.T) {
 			t.Fatalf("crash-left hydrate tree %q remains: %v", dir, err)
 		}
 	}
-	if got := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
+	if got := instancemanager.ScanHeldServers(scratch, key, regionfsck.Checker{}, true, nil); !reflect.DeepEqual(got, wantHeld) {
 		t.Fatalf("held after reclaim = %v, want %v", got, wantHeld)
 	}
 }

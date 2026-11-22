@@ -62,7 +62,7 @@ func newGatedTransfer() *gatedTransfer {
 	return &gatedTransfer{entered: make(chan struct{}, 8), release: make(chan struct{})}
 }
 
-func (t *gatedTransfer) Hydrate(_ context.Context, _, _, _ string) (uint64, error) {
+func (t *gatedTransfer) Hydrate(_ context.Context, _, _, _ string, _ func(uint64) []byte) (uint64, error) {
 	t.entered <- struct{}{}
 	<-t.release
 	t.mu.Lock()

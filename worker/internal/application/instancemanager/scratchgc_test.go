@@ -544,7 +544,7 @@ func TestDisplacedSweepKeepsARecoveryCopyParkedAfterThePinCheck(t *testing.T) {
 	if err := os.MkdirAll(slot, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(slot, 3); err != nil {
+	if err := stampGeneration(slot, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -663,7 +663,7 @@ func TestOverlappingDisplacedSweepsKeepTheRecoveryCopy(t *testing.T) {
 			if err := os.MkdirAll(slot, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeGeneration(slot, 3); err != nil {
+			if err := stampGeneration(slot, 3); err != nil {
 				t.Fatal(err)
 			}
 			replaced := func() (bool, string) { return false, "working_dir_replaced" }
@@ -793,7 +793,7 @@ func TestSweptTreeClassifierMatchesTheHydrateSlotRule(t *testing.T) {
 			if err := os.MkdirAll(path, 0o750); err != nil {
 				t.Fatal(err)
 			}
-			if err := writeGeneration(path, 7); err != nil {
+			if err := stampGeneration(path, 7); err != nil {
 				t.Fatal(err)
 			}
 		}, false},
@@ -1026,7 +1026,7 @@ func TestInterruptedDisplacedSweepIsNotAdvertisedAsHeld(t *testing.T) {
 		name string
 		got  []session.HeldServer
 	}{
-		{"ScanHeldServers", ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, nil)},
+		{"ScanHeldServers", ScanHeldServers(m.scratchDir, testGenerationKey, regionfsck.Checker{}, true, nil)},
 		{"HeldServers", m.HeldServers()},
 	} {
 		if len(scan.got) != 1 || scan.got[0].ServerID != s1 {
@@ -1184,9 +1184,9 @@ func TestDisplacedSweepSyncFailureLeavesTheTreeWhole(t *testing.T) {
 		t.Fatalf("renamed trees = %v (err %v), want exactly one for the boot reclaim to take", left, err)
 	}
 	got, err := os.ReadFile(filepath.Join(left[0], "world", "level.dat"))
-	if err != nil || string(got) != "x" || readGeneration(left[0]) != 7 {
+	if err != nil || string(got) != "x" || readGenerationOf(left[0], s1) != 7 {
 		t.Fatalf("%s holds level.dat %q (err %v) at generation %d, want the whole tree: %q at 7",
-			filepath.Base(left[0]), got, err, readGeneration(left[0]), "x")
+			filepath.Base(left[0]), got, err, readGenerationOf(left[0], s1), "x")
 	}
 }
 
@@ -1219,7 +1219,7 @@ func TestDisplacedTreeNotTreatedAsLiveScratch(t *testing.T) {
 
 	// A held-server scan never reports the displaced tree at all: neither under the
 	// assigned id s1 nor under its on-disk ".displaced-" + s1 name.
-	for _, h := range ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, nil) {
+	for _, h := range ScanHeldServers(m.scratchDir, testGenerationKey, regionfsck.Checker{}, true, nil) {
 		if h.ServerID == s1 || strings.HasPrefix(h.ServerID, ".displaced-") {
 			t.Fatalf("displaced tree reported as held server id %q (issue #910: must be skipped)", h.ServerID)
 		}

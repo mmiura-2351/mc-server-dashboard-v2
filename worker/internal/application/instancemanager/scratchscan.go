@@ -88,11 +88,13 @@ func isServerIDName(name string) bool {
 // hydrate does. A rewrite that fails is logged and degrades to advertising the recorded
 // generation, the same best-effort class as a fsck I/O error.
 //
-// A marker the read REFUSES — a link, a FIFO, a directory, an oversized or unparsable
-// file, any of which the server's own code can plant (issue #3336) — is read as 0 with a
-// WARN, like an absent one: the set is still advertised, at the generation that makes the
-// API hydrate it, and the scan moves on to the next server without having followed,
-// blocked on or read through the plant (readGenerationMarker).
+// A marker the read REFUSES — a link, a FIFO, a directory, an oversized file, any of
+// which the server's own code can plant (issue #3336) — is read as 0 with a WARN, like an
+// absent one: the set is still advertised, at the generation that makes the API hydrate
+// it, and the scan moves on to the next server without having followed, blocked on or
+// read through the plant (readGenerationMarker). So is a marker that does not verify
+// under key for that server (issue #3349): one the server rewrote, copied from another
+// server's working set, or written before markers were signed.
 //
 // quiesced is the CALLER's statement that no container this Worker started can still
 // be writing into a scratch tree — the same premise the boot reclaims above require,
@@ -134,7 +136,7 @@ func isServerIDName(name string) bool {
 // an empty list (the Worker reports holding nothing). The scan does not recurse, and
 // it skips a directory whose name is not a server id (isServerIDName, issue #3395)
 // silently: HeldServers logs those once, and its list is the one the API is told.
-func ScanHeldServers(scratchDir string, regions regioncheck.Checker, quiesced bool, log *slog.Logger) []session.HeldServer {
+func ScanHeldServers(scratchDir string, key *GenerationKey, regions regioncheck.Checker, quiesced bool, log *slog.Logger) []session.HeldServer {
 	entries, err := os.ReadDir(scratchDir)
 	if err != nil {
 		return nil
@@ -158,7 +160,7 @@ func ScanHeldServers(scratchDir string, regions regioncheck.Checker, quiesced bo
 		}
 		held = append(held, session.HeldServer{
 			ServerID:   entry.Name(),
-			Generation: heldGeneration(workingDir, entry.Name(), regions, quiesced, log),
+			Generation: heldGeneration(key, workingDir, entry.Name(), regions, quiesced, log),
 		})
 	}
 	return held
@@ -189,8 +191,8 @@ var rewriteTornMarker = writeGeneration
 // generation is what the Worker can honestly say there, and the fsck resumes at the
 // next boot that can prove the premise. ScanHeldServers' doc has the full argument,
 // including why skipping the advertisement instead is worse.
-func heldGeneration(workingDir, serverID string, regions regioncheck.Checker, quiesced bool, log *slog.Logger) uint64 {
-	gen := recordedGeneration(workingDir, serverID, log)
+func heldGeneration(key *GenerationKey, workingDir, serverID string, regions regioncheck.Checker, quiesced bool, log *slog.Logger) uint64 {
+	gen := recordedGeneration(key, workingDir, serverID, log)
 	if !quiesced {
 		if log != nil {
 			log.Warn("skipping the held-set region fsck: the container orphan sweep did not "+
@@ -212,7 +214,7 @@ func heldGeneration(workingDir, serverID string, regions regioncheck.Checker, qu
 	if !report.Healthy() {
 		var rewriteErr error
 		if gen != 0 {
-			rewriteErr = rewriteTornMarker(workingDir, 0)
+			rewriteErr = rewriteTornMarker(key, workingDir, serverID, 0)
 		}
 		if log != nil {
 			first := report.Corrupt[0]
@@ -281,7 +283,7 @@ func (m *Manager) HeldServers() []session.HeldServer {
 		}
 		held = append(held, session.HeldServer{
 			ServerID:   entry.Name(),
-			Generation: recordedGeneration(workingDir, entry.Name(), m.logger),
+			Generation: recordedGeneration(m.genKey, workingDir, entry.Name(), m.logger),
 		})
 	}
 	return held
