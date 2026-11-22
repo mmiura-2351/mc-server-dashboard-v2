@@ -182,8 +182,8 @@
         "marker and PASSES it (PR #2823's 204 fresh-boot contract), while the stopped-id",
         "SNAPSHOT guard keys on the CONTENT and refuses it as it refuses",
         "working_set_emptied, there being nothing to pack (PR #2840). Every other kind",
-        "answers as under working_set_emptied: none of them reads the marker or the",
-        "content"
+        "answers as under working_set_emptied: no other kind's answer depends on the",
+        "marker or the content"
       ]
     },
     {
