@@ -38,11 +38,14 @@ next start with no extra work (hydrate reads ``current``).
 
 Delete removes both the archive and the metadata row. Ordering: the **archive is
 deleted first, the metadata row last** — so a crash between the two leaves a
-metadata row whose archive is already gone (a dangling-pointer row, harmless and
-fixable: delete is idempotent and re-running it removes the row), never a metadata
-row deleted while its archive lingers as an unreferenced orphan with no row to find
-it by. ``delete_backup`` on Storage is idempotent, so the archive delete is safe to
-retry.
+metadata row whose archive is already gone (a dangling-pointer row), never a
+metadata row deleted while its archive lingers as an unreferenced orphan with no
+row to find it by. The dangling row is fixable, not harmless: delete is idempotent
+and re-running it removes the row, but until then it is listed as a backup that
+cannot be downloaded or restored, and retention ranks it by its health like a row
+with an archive while its size is recorded (only a NULL size ranks behind, issue
+#4105), so a scheduled one can keep a slot a real backup needed. ``delete_backup``
+on Storage is idempotent, so the archive delete is safe to retry.
 """
 
 from __future__ import annotations
@@ -1001,8 +1004,9 @@ class DeleteBackup:
     """Delete a backup's archive then its metadata row (backup:delete).
 
     Archive first, metadata last (see module docstring): a crash between the two
-    leaves a metadata row whose archive is gone (harmless, re-deletable), never an
-    orphaned archive with no row to find it by. Storage delete is idempotent.
+    leaves a metadata row whose archive is gone (re-deletable, but not harmless
+    until then), never an orphaned archive with no row to find it by. Storage
+    delete is idempotent.
     """
 
     uow: UnitOfWork
@@ -1054,8 +1058,9 @@ async def _delete_archive_then_row(
     retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
     through here, each under the per-server lifecycle lock it already holds.
     The archive delete is idempotent, so a crash between the two leaves a
-    harmless re-deletable dangling row, never an orphaned archive. Both run only
-    once ``lock`` confirms the lifecycle lock is still held (issue #3927).
+    re-deletable dangling row (not harmless until then, see the module
+    docstring), never an orphaned archive. Both run only once ``lock`` confirms
+    the lifecycle lock is still held (issue #3927).
     """
 
     await lock.ensure_held()
