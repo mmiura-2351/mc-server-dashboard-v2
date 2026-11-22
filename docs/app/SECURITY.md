@@ -1095,8 +1095,8 @@ security model, and the following remain true:
   window a stopped server's final snapshot uses. What a server gains is over **its own lineage**: it can keep
   running the working set it holds where the store has moved on without it, and
   then publish that set as the newest generation. The store moves on without
-  the worker when a backup is restored, a file is edited while the server is
-  stopped, or the JAR changes — each relies on the next start hydrating — and
+  the worker when a backup is restored or a file is edited while the server is
+  stopped — each relies on the next start hydrating — and
   only if the working set outlived the stop, which it does when the final
   snapshot was refused (a server can cause that: the region check refuses a
   torn world). So, before issue #3349, a hostile plugin could make a backup

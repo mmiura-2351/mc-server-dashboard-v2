@@ -77,7 +77,9 @@ var (
 	// errKeyMalformed: something is at the key's name, but not a key — a link, a
 	// directory or a FIFO, or a file that is not generationKeySize bytes.
 	errKeyMalformed = errors.New("is not a generation key")
-	// errKeyNotCreated: there was no key, and none could be created.
+	// errKeyNotCreated: there was no key, and creating one failed. The attempt may
+	// still have left a whole key at the name — a link that failed with EEXIST, or a
+	// directory fsync that failed after the link — which the next load reads back.
 	errKeyNotCreated = errors.New("could not be created")
 )
 
@@ -108,7 +110,8 @@ func keyRemedy(err error) string {
 		return "remove the file and restart the Worker; the new key it creates costs every " +
 			"held server one hydrate"
 	case errors.Is(err, errKeyNotCreated):
-		return "there is no key and none could be created; fix the cause and restart the Worker"
+		return "creating the key failed; fix the cause and restart the Worker, which reads " +
+			"back a key the attempt left in place or creates one"
 	default:
 		return "the key could not be read; restore access to it and restart the Worker, and " +
 			"every marker signed under it verifies again"
@@ -120,6 +123,13 @@ func keyRemedy(err error) string {
 // never followed as a link. The root itself is the operator's configured path, so a
 // link to it is followed, as the edit staging's open of it does. A temp an earlier
 // creation left is removed first: only the Worker writes the scratch root.
+//
+// That rests on one Worker process per scratch root, which is the supported layout
+// (the Worker's persisted worker-id lives there too) and is not enforced. Two Workers
+// sharing one could each unlink the other's temp and publish the other's key. Every
+// such outcome is on the safe side, markers that read as 0 or an unusable key, but
+// the guarantees above, a key's name never holding a partial key among them, do not
+// hold then.
 func loadOrCreateGenerationKey(scratchDir string) ([]byte, error) {
 	if err := os.MkdirAll(scratchDir, 0o750); err != nil {
 		return nil, fmt.Errorf("%s %w: %w", generationKeyFile, errKeyNotCreated, err)

@@ -174,6 +174,35 @@ func TestAForgeryAfterASignedMarkerIsWarnedAgain(t *testing.T) {
 	}
 }
 
+// The warning is re-armed only by a marker the Worker actually published: a write that
+// is refused leaves the forged marker in place, so it must not count as a signed one.
+func TestARefusedMarkerWriteDoesNotReArmTheWarning(t *testing.T) {
+	h := &syncSlogHandler{}
+	log := slog.New(h)
+	key := LoadGenerationKey(t.TempDir(), nil)
+	dir := filepath.Join(t.TempDir(), s1)
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	plantMarker(t, dir, []byte("999"))
+
+	recordedGeneration(key, dir, s1, log)
+	if err := writeGenerationGuarded(key, dir, s1, 5, func() bool { return false }); !errors.Is(err, errWorkingDirReplaced) {
+		t.Fatalf("guarded write = %v, want errWorkingDirReplaced", err)
+	}
+	recordedGeneration(key, dir, s1, log)
+
+	warned := 0
+	for _, r := range h.snapshot() {
+		if strings.Contains(r.Message, "generation marker failed verification") {
+			warned++
+		}
+	}
+	if warned != 1 {
+		t.Fatalf("verification WARNs = %d, want 1: the refused write published nothing, so the forged marker is the same event", warned)
+	}
+}
+
 // The warned set is bounded: past maxWarnedUnverified servers the oldest is forgotten,
 // and is warned about again; a server the Worker signed a marker for leaves the set.
 func TestTheVerificationWarningsAreBoundedOldestFirst(t *testing.T) {
@@ -444,6 +473,10 @@ func describeKey(t *testing.T, path string) string {
 // neither the hydrate nor the running snapshot's stamp declares a generation, since a
 // marker the Worker cannot authenticate backs none. No server is warned about: the
 // ERROR covers them all.
+//
+// "Believes no marker" covers one a forger can compute: an HMAC under the empty key,
+// which is what an unusable key would sign with if it signed at all. It reads as 0 in
+// both scans and as the snapshot's declared base.
 func TestACorruptGenerationKeyIsNeitherBelievedNorReplaced(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -509,12 +542,26 @@ func TestACorruptGenerationKeyIsNeitherBelievedNorReplaced(t *testing.T) {
 			if res := m.Handle(context.Background(), startCmd()); !res.Success {
 				t.Fatalf("start = %+v, want success: the launch guard needs only the marker", res)
 			}
+			emptyKeyMarker := (&GenerationKey{key: []byte{}}).seal(s1, 999)
+			plantMarker(t, dir, emptyKeyMarker)
+			if gen, ok := heldGenerationOf(m, s1); !ok || gen != 0 {
+				t.Fatalf("s1 held at %d (advertised %v) under a marker MAC'd with the empty key, want 0", gen, ok)
+			}
+			if held := ScanHeldServers(m.scratchDir, key, regionfsck.Checker{}, true, nil); len(held) != 1 || held[0].Generation != 0 {
+				t.Fatalf("boot scan = %+v under a marker MAC'd with the empty key, want s1 at 0", held)
+			}
 			tr.mu.Lock()
 			tr.gen = 8
 			tr.mu.Unlock()
 			res = m.Handle(context.Background(), snapshotCmd())
 			if !res.Success || res.HeldGeneration != nil {
 				t.Fatalf("snapshot = %+v, want success declaring no generation", res)
+			}
+			tr.mu.Lock()
+			bases := append([]uint64(nil), tr.snapshotBaseGenerations...)
+			tr.mu.Unlock()
+			if len(bases) != 1 || bases[0] != 0 {
+				t.Fatalf("declared base generations = %v, want [0] under a marker MAC'd with the empty key", bases)
 			}
 			if marker, err := os.ReadFile(filepath.Join(dir, generationFile)); err != nil || string(marker) != "8" {
 				t.Fatalf("marker after the snapshot = %q, %v; want the unsigned 8 it stamped", marker, err)

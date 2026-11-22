@@ -2415,7 +2415,10 @@ The key is 32 random bytes at `<worker.scratch_dir>/.generation-key`, mode
 it shares the scratch volume's lifetime, as the markers do. The Worker creates
 it on its first boot and reads it back at every later one. It writes the key in
 full under a temporary name, fsyncs it, and links it into place, so the key's
-name never holds a partial key.
+name never holds a partial key. Each scratch root belongs to exactly one Worker
+process, which also keeps its `worker-id` there. Two Workers sharing one are
+unsupported, and nothing enforces it: they can each publish the other's key,
+which leaves markers that read as 0 or an unusable key.
 
 - **Losing the key** (a wiped or replaced file, a restored scratch volume
   without it) invalidates every marker on that Worker. The next boot creates a
@@ -2440,9 +2443,11 @@ name never holds a partial key.
   - *A key the Worker cannot read* (permissions, an I/O error): restore access
     and restart the Worker. Every marker signed under that key verifies again,
     and nothing hydrates.
-  - *No key, and none could be created* (the scratch root is not writable, or
-    the disk is full): there is no file to remove. Fix the cause and restart
-    the Worker.
+  - *The key could not be created* (the scratch root is not writable, or the
+    disk is full): fix the cause and restart the Worker. Usually there is no
+    file to remove. If the attempt got as far as publishing the key, for
+    example when only the directory fsync after the link failed, the restart
+    reads that key back.
 - **Upgrading** a Worker from a version that wrote bare-number markers
   invalidates every marker in the same way, and costs more than one hydrate per
   server for the servers that are running at the time:
@@ -2451,15 +2456,20 @@ name never holds a partial key.
     working set. On the upgrade boot every marker reads as 0, so each server is
     hydrated from its last published snapshot instead. It loses what it wrote
     since then: up to one snapshot interval of play
-    (`snapshot.default_interval_seconds`, 3600 s by default). Its re-dispatch
-    also waits out `reconciler.grace_seconds` rather than the shorter held-start
-    grace ([`CONFIGURATION.md`](CONFIGURATION.md)).
+    (`snapshot.default_interval_seconds`, 3600 s by default). It is also down
+    for longer: its re-dispatch waits out `reconciler.grace_seconds` (660 s by
+    default) rather than `reconciler.held_start_grace_seconds` (90 s), which
+    only a server held at the store's generation gets
+    ([`CONFIGURATION.md`](CONFIGURATION.md)).
   - The replaced working set is parked at `.displaced-<id>` only while that slot
     is free (oldest-wins, Section 4.6), and the server's next successful
     snapshot reclaims it. It is a short-lived recovery copy, not a backup.
   - To avoid the loss, stop every server before upgrading the Worker. A stop
     publishes the server's final snapshot and removes its scratch, so nothing
-    is held when the new Worker boots. Alternatively, take an on-demand backup
+    is held when the new Worker boots. That holds only when the final snapshot
+    publishes: a refused one keeps the working set (Section 4.6), and the
+    upgrade then hydrates over it. So check that no `<id>` directory is left in
+    the scratch root before upgrading. Alternatively, take an on-demand backup
     of each running server just before the upgrade: for a running server it
     publishes a quiesced snapshot first (Section 3.3).
   - Rolling the Worker back to a version from before this change costs the

@@ -1209,10 +1209,17 @@ for any new code is in place before the worker starts emitting it.
 >   snapshot interval (`snapshot.default_interval_seconds`, 3600 s by default).
 >   The replaced working set is parked at `.displaced-<id>` only while that slot
 >   is free, and the server's next successful snapshot reclaims it.
-> - **To avoid it**, stop every server on the Worker before upgrading it: a stop
->   publishes the server's final snapshot, so nothing unpublished is held. Or
->   take an on-demand backup of each running server just before; for a running
->   server it publishes a quiesced snapshot first.
+> - **Running servers are down for about 11 minutes.** None of them is held at
+>   the store's generation any more, so each is re-dispatched only after
+>   `reconciler.grace_seconds` (660 s by default), not after the 90 s
+>   `reconciler.held_start_grace_seconds` a held server gets.
+> - **To avoid both**, stop every server on the Worker before upgrading it: a
+>   stop publishes the server's final snapshot, so nothing unpublished is held.
+>   That holds only when the final snapshot publishes; a refused one keeps the
+>   working set, and the upgrade then hydrates over it, so check that no `<id>`
+>   directory is left in `worker.scratch_dir` first. Or take an on-demand backup
+>   of each running server just before; for a running server it publishes a
+>   quiesced snapshot first.
 > - **A rollback costs the same again.** A Worker from before #3349 reads a
 >   signed marker as no generation, so stop the servers before rolling back
 >   too.
