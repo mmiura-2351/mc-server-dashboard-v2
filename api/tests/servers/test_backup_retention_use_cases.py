@@ -441,8 +441,9 @@ def _unsized(backup: Backup) -> Backup:
 
 async def test_prune_sizes_null_size_rows_with_no_unit_of_work_open() -> None:
     # The size probe is a storage HEAD; the prune makes it with its unit of work
-    # closed, as the listing does, so a hanging HEAD keeps no pool connection
-    # checked out. It writes the size in a short unit of work of its own.
+    # closed, as the listing does, so a hanging HEAD holds no session. Only the
+    # lifecycle lock's own connection stays held across it. The size is written
+    # in a short unit of work of its own.
     uow = SessionTrackingUnitOfWork()
     store = _SessionObservingStore(uow)
     env = _Env(store=store, uow=uow)
