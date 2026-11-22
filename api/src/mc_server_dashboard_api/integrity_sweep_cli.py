@@ -47,6 +47,16 @@ The marker is checked before the pass and again before each deletion.
     cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
         --delete-dangling [--apply] [--server <server-uuid>]
 
+The marker check does not catch three cases, in which a HEAD answers NotFound
+for an archive that exists while the marker names this installation (issue
+#4158): a subtree below the fs root that goes missing while the root's marker
+still reads, such as a mount or a symlink of its own under ``communities/``; a
+store that is away for a row's HEAD and back for the marker read; and a store
+that carries this installation's marker but is not the API's, such as the old fs
+root after a move to the object backend, which needs a configuration other than
+the API's. The row is then deleted and its archive kept. Review the dry run's
+list before ``--apply``.
+
 Its exit status keeps the meanings above: 0 when the pass completed; 1 when it
 completed but skipped a row the store could not answer for (an outage, a
 timeout), or when ``--apply`` stopped because the store owner marker could not

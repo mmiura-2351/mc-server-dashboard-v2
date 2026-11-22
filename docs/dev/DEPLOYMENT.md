@@ -590,6 +590,11 @@ no archive bytes and does not run the integrity sweep.
 - **A busy row is skipped.** When another lifecycle operation holds the server
   past the lock's wait budget, such as a backup delete in flight or a restore,
   the row is listed as skipped. Re-run to check it.
+- **`--apply` deletes the row only.** It sends the store no archive delete. A
+  row that is truly dangling has no archive to delete. If the store answered
+  "not found" for an archive it still holds, the archive stays in the store
+  with no row: no listing shows it, and the server's delete reclaims it
+  (issue #4106 tracks a cleaner for such archives).
 - **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
 - **`--apply` checks the store first.** It refuses with exit 2 unless the store
   owner marker names this database's installation (STORAGE.md Section 4.3). A
@@ -600,10 +605,32 @@ no archive bytes and does not run the integrity sweep.
   bucket goes, the command stops with exit 2 and the same refusal. The rows it
   deleted before stay deleted; each is in the log and the audit trail. Fix the
   store, then re-run.
+- **A marker that cannot be read stops `--apply`.** When the store fails on the
+  marker read, before the pass or before a deletion, the command stops with
+  exit 1 and one line naming the error, and deletes nothing more. Re-run it
+  once the store is healthy.
 
 The other exit statuses are the command's usual ones: 3 when the database failed
 or a lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
 safe.
+
+**What the marker check does not catch.** In three cases a HEAD can answer "not
+found" for an archive that exists while the marker still names this database's
+installation. `--apply` then deletes the row and keeps the archive:
+
+- **A subtree below the fs root goes missing.** The marker sits at the root
+  only. If `communities/`, or a directory below it, is a mount or a symlink of
+  its own and it drops, the HEADs under it answer "not found" while the marker
+  still reads.
+- **The store flaps.** A store that is away for a row's HEAD and back for the
+  marker read passes the check.
+- **The store is not the API's, but carries its marker.** Examples are the old
+  fs root after a move to the object backend, or a stale copy of the root. This
+  needs a configuration other than the API's; `docker compose exec api` runs the
+  command with the API's own.
+
+The dry run is the safeguard against all three: review its list before you
+apply, as below.
 
 **Worked example: the #4086 rows.** While a store's disk was full (2026-10-14
 to 10-15), one server's backup schedule kept recording rows it could not archive.
@@ -633,21 +660,29 @@ server's backup list, and retention no longer counts them.
 the retention prune sends a HEAD for each `scheduled` row whose size is unknown.
 If that HEAD keeps failing with anything other than "not found", such as an S3
 `403 AccessDenied` or an fs `EACCES`, the server's prune fails on every run, and
-its scheduled backups are no longer pruned. Each run logs this WARNING:
+its scheduled backups are no longer pruned. Each run logs this WARNING, which
+names the backup whose HEAD failed:
 
 ```text
-retention prune of server <server-id> stopped before selecting anything: a NULL-size scheduled backup could not be sized (<error type>: <error>), and the ranking needs its size. The next run retries.
+retention prune of server <server-id> stopped before selecting anything: NULL-size scheduled backup <backup-id> (storage_ref <storage-ref>) could not be sized (<error type>: <error>), and the ranking needs its size. The next run retries.
 ```
 
-`--delete-dangling` cannot clear such a row: it lists the row as skipped and
-exits 1. To find the rows the prune sends a HEAD for (`mcsd` is the
+The prune stops at the first HEAD that fails, so other rows of the server may
+fail too once that one is dealt with. `--delete-dangling` cannot clear such a
+row: it lists the row as skipped and exits 1. To find every row the prune sends
+a HEAD for, with the community id its archive's location needs (`mcsd` is the
 `POSTGRES_USER` and `POSTGRES_DB` of `.env`):
 
 ```sh
-docker compose exec db psql -U mcsd -d mcsd -c "SELECT id, storage_ref, created_at
-  FROM backup WHERE server_id = '<server-id>' AND source = 'scheduled'
-  AND size_bytes IS NULL"
+docker compose exec db psql -U mcsd -d mcsd -c "SELECT b.id, b.storage_ref,
+  b.created_at, s.community_id FROM backup b JOIN server s ON s.id = b.server_id
+  WHERE b.server_id = '<server-id>' AND b.source = 'scheduled'
+  AND b.size_bytes IS NULL"
 ```
+
+A row's archive is
+`communities/<community-id>/servers/<server-id>/backups/<storage_ref>.tar.gz`:
+that key in the bucket, or that path under the fs root.
 
 Then do one of the following:
 
