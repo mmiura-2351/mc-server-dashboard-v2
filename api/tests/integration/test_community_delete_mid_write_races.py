@@ -24,9 +24,11 @@ deletion cannot commit before the grant's INSERT. It is pinned at the adapter.
 
 Each race pauses the deletion after its DELETE, lets the write run on another
 connection until it blocks on a lock, then resumes the deletion. The opposite
-order -- the write holding its locks first -- is not tested: a write that takes
-no lock of the ceiling commits first and is cascaded away, and one that does
-can deadlock with the deletion, which PostgreSQL resolves by aborting one side
+order -- the write holding its locks first -- is not tested, because it reaches
+no not-found: a member add, a role creation conferring nothing and a role
+assignment commit first and are cascaded away, while a role or grant creation
+holding the ceiling's locks waits for the community row the deletion holds and
+deadlocks with it, which PostgreSQL resolves by aborting one side
 (``permission_ceiling.py``).
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped

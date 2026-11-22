@@ -74,7 +74,13 @@ class MemberUserNotFoundError(CommunityError):
 
 
 class CommunityNotFoundError(CommunityError):
-    """The targeted community does not exist (read/update/delete on a missing id)."""
+    """The targeted community does not exist (read/update/delete on a missing id).
+
+    Also raised by a write in a community deleted after the route's gate admitted
+    the caller (issue #2967): a member add, role creation or grant creation whose
+    INSERT fails its foreign key onto ``community``, or a conferral whose ceiling
+    finds the actor's membership gone with the community.
+    """
 
 
 class CommunityHasServersError(CommunityError):
