@@ -8,7 +8,8 @@ abandoned the pending future (issue #891) — a failure, canonically a
 and wait out the reconciler grace, it hands the (server, worker, outcome, failure
 detail) to this Port so the held (stopped, stopped, assigned) row is released
 immediately and the Worker's own account of the failure reaches the release log
-(#2766).
+(#2766). The result's code crosses too, so a late refusal that keeps the Worker
+(``BUSY`` or ``UNAVAILABLE``) holds the row instead (issue #3697).
 
 The servicer depends on the fleet-domain Port; this adapter fulfils it against the
 ``StopServer`` use case's guarded clear, building a fresh use case per call from

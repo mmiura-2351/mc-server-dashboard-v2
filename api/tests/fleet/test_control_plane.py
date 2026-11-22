@@ -838,6 +838,36 @@ async def test_late_failed_snapshot_without_a_message_falls_back_to_the_code() -
     ]
 
 
+@pytest.mark.parametrize(
+    ("wire", "code"),
+    [
+        (pb.COMMAND_ERROR_CODE_BUSY, CommandResultCode.BUSY),
+        (pb.COMMAND_ERROR_CODE_UNAVAILABLE, CommandResultCode.UNAVAILABLE),
+    ],
+)
+async def test_late_refused_snapshot_hands_the_sink_its_code(
+    wire: pb.CommandErrorCode.ValueType, code: CommandResultCode
+) -> None:
+    # Issue #3697: a late BUSY or UNAVAILABLE keeps the held assignment, so the
+    # sink must be told which refusal it was, not only that the snapshot failed.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")
+    await state.resolve(
+        "cmd-1",
+        owner,
+        pb.CommandResult(
+            success=False,
+            error=pb.CommandError(code=wire, message="a leftover may still run"),
+        ),
+    )
+
+    assert sink.calls == [(_SERVER, owner.value, code, "a leftover may still run")]
+
+
 async def test_late_snapshot_from_non_owning_worker_is_ignored() -> None:
     # The late snapshot result is forged by a DIFFERENT worker than the one the
     # snapshot was dispatched to. The #789 ownership guard drops it: the sink is

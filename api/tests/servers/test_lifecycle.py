@@ -40,6 +40,9 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
     StartServer,
     StopServer,
 )
+from mc_server_dashboard_api.servers.application.stop_convergence import (
+    StopConvergenceGuard,
+)
 from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
     StopDispatchRefusals,
 )
@@ -8342,6 +8345,61 @@ async def test_a_retry_that_publishes_releases_the_row_and_clears_the_refusal(
     assert result.assigned_worker_id is None
     assert result.final_snapshot_refusal is None
     assert result.awaiting_hydrate is False
+
+
+@pytest.mark.parametrize("code", list(_REFUSALS), ids=lambda c: c.value)
+async def test_a_late_refused_final_snapshot_holds_the_row(
+    code: CommandStatus, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The late result of an abandoned final snapshot (a dispatch timeout, or a
+    # cancelled caller) is a refusal: the row stays held as on an answer in time.
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_held(community, server_id, worker, refusal=None))
+    unrecorded = UnrecordedStops()
+
+    with caplog.at_level(logging.INFO):
+        await StopServer(
+            uow=uow,
+            control_plane=FakeControlPlane(),
+            clock=FakeClock(_NOW),
+            unrecorded_stops=unrecorded,
+        ).clear_assignment_after_late_snapshot(
+            server_id=ServerId(server_id),
+            worker_id=WorkerId(worker),
+            outcome=_refused(code),
+        )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.final_snapshot_refusal is _REFUSALS[code]
+    assert unrecorded.recorded_at(ServerId(server_id)) == _NOW
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert not [r for r in caplog.records if "released worker" in r.getMessage()]
+
+
+async def test_a_late_refusal_left_unapplied_records_nothing() -> None:
+    # Another final snapshot of the server is outstanding, so the late result is
+    # dropped (issue #3491), and it marks nothing: the refusal it carries is not
+    # the answer the row is waiting on (the #4066 review's question).
+    community, server_id, worker = _ids()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_held(community, server_id, worker, refusal=None))
+
+    await StopServer(
+        uow=uow,
+        control_plane=FakeControlPlane(),
+        clock=FakeClock(_NOW),
+        stop_convergence=StopConvergenceGuard(outstanding=lambda _: True),
+    ).clear_assignment_after_late_snapshot(
+        server_id=ServerId(server_id),
+        worker_id=WorkerId(worker),
+        outcome=_refused(CommandStatus.BUSY),
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.final_snapshot_refusal is None
 
 
 async def test_an_operator_stop_of_a_held_row_whose_worker_is_gone_releases_it() -> (

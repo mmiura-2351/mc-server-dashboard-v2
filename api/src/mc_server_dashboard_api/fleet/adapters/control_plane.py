@@ -424,6 +424,8 @@ class ControlPlaneState:
         The Worker's failure detail rides along with the outcome (issue #2766): it
         is the only text that names why the snapshot failed, and this is the seam
         where it would otherwise be dropped, leaving the consumer to guess a cause.
+        So does the result's code: a late ``BUSY`` or ``UNAVAILABLE`` keeps the
+        held assignment rather than releasing it (issue #3697).
 
         The record is kept, no longer outstanding, until the release is written
         (issue #4023). A write that fails because the database is down leaves it

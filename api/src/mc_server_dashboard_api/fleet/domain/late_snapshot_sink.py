@@ -55,7 +55,10 @@ class LateSnapshotResultSink(abc.ABC):
         landed; the clear is the same release the on-time success would have run),
         any other for a failure, which leaves publication unconfirmed and means a
         later cross-worker re-placement may lose progression since the last
-        periodic snapshot (#845/#847), logged loud.
+        periodic snapshot (#845/#847), logged loud. A late ``BUSY`` or
+        ``UNAVAILABLE`` releases nothing: the Worker refused the snapshot and still
+        holds the working set it owes, so the row stays held and records the
+        refusal (issue #3697).
 
         ``message`` is the Worker's failure detail, the only text that names WHY the
         snapshot failed (a misconfigured data-plane URL, an auth error, a storage

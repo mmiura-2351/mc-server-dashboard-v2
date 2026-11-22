@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -179,3 +180,36 @@ async def test_a_release_that_fails_to_be_written_is_recorded_for_the_reconciler
         )
 
     assert unrecorded.recorded_at(ServerId(server_id)) == _NOW
+
+
+@pytest.mark.parametrize(
+    ("code", "refusal"),
+    [
+        (CommandResultCode.BUSY, FinalSnapshotRefusal.BUSY),
+        (CommandResultCode.UNAVAILABLE, FinalSnapshotRefusal.UNAVAILABLE),
+    ],
+)
+async def test_a_late_refusal_reaches_the_use_case_and_holds_the_row(
+    monkeypatch: pytest.MonkeyPatch,
+    code: CommandResultCode,
+    refusal: FinalSnapshotRefusal,
+) -> None:
+    # Issue #3697: the result's code crosses the seam, so a late BUSY or
+    # UNAVAILABLE keeps the row assigned and records the refusal.
+    server_id, worker_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_held_server(server_id, worker_id))
+    monkeypatch.setattr(
+        sink_module, "SqlAlchemyUnitOfWork", lambda _factory, _events: uow
+    )
+
+    await _sink().clear_held_assignment_on_late_snapshot(
+        server_id=str(server_id),
+        worker_id=str(worker_id),
+        code=code,
+        message="a leftover container may still run",
+    )
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker_id)
+    assert stored.final_snapshot_refusal is refusal

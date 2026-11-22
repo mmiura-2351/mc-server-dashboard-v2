@@ -3297,8 +3297,20 @@ class StopServer:
         under the same stopped intent, as released, and announces and logs the
         release that attempt could not. That log line says the server was found
         already released, since another flow may have made the release.
+
+        A late refusal that keeps the Worker (``BUSY`` or ``UNAVAILABLE``, issue
+        #3697) releases nothing: the row is held exactly as on a refusal answered
+        in time, records the refusal, and the refusal is recorded for the
+        reconciler, whose stale-stop arm retries the snapshot on the short grace.
+        This and ``_final_snapshot`` are the only writers of the recorded refusal,
+        both under the stop-convergence claim, so a late refusal never marks a
+        newer hold: while another final snapshot of the server is outstanding the
+        result is dropped above, and a newer one's answer arrives on the same
+        Worker stream behind this result, or not at all once that stream ends.
         """
 
+        refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(outcome.status)
+        answered_at = self.clock.now()
         # The late result says the upload settled. If the write fails, record it for
         # the reconciler (issue #3441): only an outage's failure is retried (issue
         # #3614), and only while the Worker's session lasts.
@@ -3328,10 +3340,32 @@ class StopServer:
                     if server.assigned_worker_id is None
                     else ""
                 )
-                cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
-                    server_id, worker_id, retry=retry
-                )
+                if refusal is not None:
+                    await self.uow.servers.set_final_snapshot_refusal(
+                        server_id, worker_id, refusal
+                    )
+                    cleared = False
+                else:
+                    cleared = (
+                        await self.uow.servers.clear_assignment_after_final_snapshot(
+                            server_id, worker_id, retry=retry
+                        )
+                    )
                 await self.uow.commit()
+        if refusal is not None:
+            # Answered, so nothing of the snapshot is in flight.
+            self.unrecorded_stops.record(server_id, at=answered_at)
+            _LOG.warning(
+                "LATE final snapshot for server %s was refused %s by worker %s: %s. "
+                "The worker still holds the working set this snapshot owes, so the "
+                "server stays assigned to it, and the snapshot is retried "
+                "(issue #3697)",
+                server_id.value,
+                outcome.status.value,
+                worker_id.value,
+                outcome.message or outcome.status.value,
+            )
+            return
         if not cleared:
             return
         if outcome.success:
