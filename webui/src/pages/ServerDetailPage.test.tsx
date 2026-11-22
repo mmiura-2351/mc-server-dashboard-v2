@@ -24,6 +24,7 @@ import {
 import { ApiError } from "../api/client.ts";
 import { MAX_CONSOLE_LINE_BYTES } from "../api/limits.ts";
 import { setAccessToken } from "../auth/tokenStore.ts";
+import { Modal } from "../components/Modal.tsx";
 import { ToastProvider } from "../components/Toast.tsx";
 import {
   getLanguage,
@@ -839,6 +840,33 @@ describe("ServerDetailPage lifecycle controls", () => {
     expect(
       screen.queryByRole("menuitem", { name: t("serverDetail.stopForce") }),
     ).not.toBeInTheDocument();
+  });
+
+  // Escape under an open dialog closes the dialog, not the menu (#3920). No
+  // tab opens a dialog over the menu without the click that closes it any more
+  // (the Files drop is held whenever Stop shows, #4003), so one is mounted
+  // beside the page.
+  it("leaves an Escape to a dialog opened over the stop menu", async () => {
+    mockApi.get.mockResolvedValue(server({ observed_state: "running" }));
+    renderPage();
+
+    await screen.findByText("survival");
+    fireEvent.click(screen.getByRole("button", { name: /Stop/ }));
+    const onClose = vi.fn();
+    render(
+      <Modal open title="over the menu" onClose={onClose}>
+        body
+      </Modal>,
+    );
+    const dialog = screen.getByRole("dialog");
+    await waitFor(() => expect(dialog).toHaveFocus());
+
+    fireEvent.keyDown(dialog, { key: "Escape" });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("menuitem", { name: t("serverDetail.stopForce") }),
+    ).toBeInTheDocument();
   });
 
   // An Escape that cancels an IME conversion is the IME's (#3993).
