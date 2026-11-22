@@ -105,16 +105,21 @@ func loggedSettleBudget(t *testing.T, records []slog.Record, caller string) (tim
 
 // The stop flush runs under the driver's flush budget (defaultFlushTimeout, 90 s),
 // which also pays for the dial, save-off and save-all before the settle starts. Its
-// settle may use what that budget has left, less flushSettleMargin, and must give
-// up before the context does: a fixed 60 s cap wasted the rest of a slow disk's
-// save time, and a cap equal to the time left would be cut by the context.
+// settle may use what that budget has left, less a 5 s margin, never below zero,
+// and must give up before the context does: a fixed 60 s cap wasted the rest of a
+// slow disk's save time, and a cap equal to the time left would be cut by the
+// context.
 func TestStopFlushSettleCapIsTheTimeItsContextHasLeft(t *testing.T) {
-	for _, left := range []time.Duration{85 * time.Second, 10 * time.Second} {
-		t.Run(left.String(), func(t *testing.T) {
+	for _, tc := range []struct{ left, want time.Duration }{
+		{85 * time.Second, 80 * time.Second},
+		{10 * time.Second, 5 * time.Second},
+		{3 * time.Second, 0}, // less than the margin left: no budget, one poll
+	} {
+		t.Run(tc.left.String(), func(t *testing.T) {
 			h := &syncSlogHandler{}
 			m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithLogger(slog.New(h))
 			clk, _ := onSettleClock(m, never)
-			ctx := clockDeadline{Context: context.Background(), deadline: clk.Now().Add(left)}
+			ctx := clockDeadline{Context: context.Background(), deadline: clk.Now().Add(tc.left)}
 
 			if m.flushBeforeStopWithDriver(ctx, s1, "container", "") {
 				t.Fatal("flush = true for a world that never settled")
@@ -124,13 +129,39 @@ func TestStopFlushSettleCapIsTheTimeItsContextHasLeft(t *testing.T) {
 			if !ok {
 				t.Fatal("no stop flush settle timeout WARN")
 			}
-			if want := left - flushSettleMargin; budget != want {
-				t.Fatalf("settle budget = %v with %v left, want %v (the time left less the margin)", budget, left, want)
+			if budget != tc.want {
+				t.Fatalf("settle budget = %v with %v left, want %v (the time left less the margin)", budget, tc.left, tc.want)
 			}
 			if gaveUp := clk.Now(); gaveUp.After(ctx.deadline) {
 				t.Fatalf("settle gave up %v past its context's deadline", gaveUp.Sub(ctx.deadline))
 			}
 		})
+	}
+}
+
+// A flush context with no deadline has no time left to fit, so the settle takes
+// settleBudget and still ends. The driver always gives the flush a deadline; a
+// test or another driver may not.
+func TestStopFlushSettleWithoutADeadlineTakesTheSettleBudget(t *testing.T) {
+	h := &syncSlogHandler{}
+	m := newManager(t, &fakeDriver{}, &fakeControl{reply: "ok"}).WithLogger(slog.New(h))
+	clk, _ := onSettleClock(m, never)
+	m.settleBudget = 42 * time.Second
+	start := clk.Now()
+
+	if m.flushBeforeStopWithDriver(context.Background(), s1, "container", "") {
+		t.Fatal("flush = true for a world that never settled")
+	}
+
+	budget, ok := loggedSettleBudget(t, h.snapshot(), settleForStop)
+	if !ok {
+		t.Fatal("no stop flush settle timeout WARN")
+	}
+	if budget != 42*time.Second {
+		t.Fatalf("settle budget = %v with no deadline, want settleBudget (42s)", budget)
+	}
+	if waited := clk.Now().Sub(start); waited < 42*time.Second {
+		t.Fatalf("gave up after %v, want the whole settleBudget waited", waited)
 	}
 }
 

@@ -1412,13 +1412,16 @@ const defaultFsckRetryDelay = 2 * time.Second
 // every defaultSettlePollInterval, and the save is considered settled once two
 // consecutive scans observe identical (mtime, size) for every region file. The
 // wait gives up after snapshotSettleCap and the snapshot is refused
-// quiesce_unavailable (the next tick retries). The cap is 180 s (issue #3503): a
-// save on a slow disk took 85-143 s (#3436), and a fast disk still settles in
-// seconds, since the wait ends once the writes stop. Inside the snapshot command
-// budget (control.snapshot_timeout_seconds=600) it leaves about 326 s for the
-// fsck, pack and upload after the RCON round trips (about 94 s worst case).
-// While it waits, auto-save is off and the snapshot holds the server's lane and
-// one of the Worker's command slots. Tests shrink both (the cap through
+// quiesce_unavailable (the next tick retries). The cap is 180 s, the owner's
+// decision on issue #3503: a shutdown save on a slow disk took 85-143 s (#3436),
+// but no running server's save has been measured against it there. A fast disk
+// still settles in seconds, since the wait ends once the writes stop. The
+// quiesce's RCON calls, the settle, the fsck, the pack and the upload all run
+// under the snapshot command's one deadline (snapshotContext), so none of them
+// can run past it; a save that uses the whole cap leaves at most 420 s of the
+// API's 600 s default (control.snapshot_timeout_seconds) for the rest. While it
+// waits, auto-save is off and the snapshot holds the server's lane and one of
+// the Worker's command slots. Tests shrink both (the cap through
 // Manager.settleBudget).
 const (
 	defaultSettlePollInterval = 2 * time.Second
@@ -1428,9 +1431,11 @@ const (
 // flushSettleMargin is how much of the stop flush's context its settle-wait leaves
 // unused (issue #3503). The wait checks its budget only after a poll and a scan, so
 // it can end up to one defaultSettlePollInterval and a scan past it; the margin
-// covers that, so the settle gives up, and says so, before the context ends under
-// it. Under the driver's 90 s flush budget the settle gets up to 85 s, less what
-// the RCON round trips took.
+// covers that for a scan of up to about 3 s, so the settle gives up, and says so,
+// before the context ends under it. A longer scan can end the wait up to its own
+// length past the context; the flush then still reports whether the world
+// settled. Under the driver's 90 s flush budget the settle gets up to 85 s, less
+// what the RCON round trips took.
 const flushSettleMargin = 5 * time.Second
 
 // handleSnapshot packs the server's working dir and uploads it. For a running
@@ -2573,12 +2578,12 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 // region writes have stopped. It gives up (false) once budget has passed on the
 // manager's clock, so a world that never settles refuses the periodic snapshot
 // (quiesce_unavailable) instead of waiting unbounded, and returns false on ctx
-// cancellation. A scan I/O error is
-// treated as "not yet settled" and retried within the budget rather than aborting,
-// and so is a scan that met an entry swapped under it (errSettleUncertain): only
-// two consecutive complete scans can settle. The budget-exhausted WARN counts the
-// uncertain scans, so a refusal caused by entries changing under the scan says so,
-// and it is prefixed with caller, the operation that ran the wait (issue #3445).
+// cancellation. A scan I/O error is treated as "not yet settled" and retried
+// within the budget rather than aborting, and so is a scan that met an entry
+// swapped under it (errSettleUncertain): only two consecutive complete scans
+// can settle. The budget-exhausted WARN counts the uncertain scans, so a refusal
+// caused by entries changing under the scan says so, and it is prefixed with
+// caller, the operation that ran the wait (issue #3445).
 func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workingDir string, budget time.Duration) bool {
 	deadline := m.clock.Now().Add(budget)
 	uncertain := 0
