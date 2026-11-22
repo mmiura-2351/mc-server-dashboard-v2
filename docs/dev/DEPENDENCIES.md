@@ -200,6 +200,15 @@ Version-update grouping and PR rules:
   upstream migration notes.
 - Open PRs are capped at 5 per ecosystem.
 
+**TypeScript majors are held for the OpenAPI codegen tool:** the
+`/webui/tools/openapi` entry ignores `typescript` semver-major updates.
+`openapi-typescript` uses the classic TypeScript compiler API and declares
+`peer typescript@^5.x`, so the tool stays on TypeScript 5 while the app runs
+TypeScript 7 (#1900), and a major bump can neither install nor run (#4090).
+Upstream is frozen in maintenance mode, security fixes included
+(openapi-ts/openapi-typescript#2874), so the hold stays until the generator is
+replaced. Minor and patch updates still arrive.
+
 All Dependabot PRs carry the `dependencies` label and use the
 `chore(deps):` commit-message prefix.
 
