@@ -400,6 +400,20 @@ def test_remove_last_owner_returns_409() -> None:
     assert resp.json()["reason"] == "last_owner"
 
 
+def test_remove_member_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    # The removal waited for the community's deletion (#4021).
+    url = f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}"
+    gate = _client(_app(member=False, allow=True, remove_uc=_FakeUseCase())).delete(url)
+    app = _app(
+        member=True,
+        allow=True,
+        remove_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).delete(url)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
+
+
 # --- assign / unassign role -------------------------------------------------
 
 
@@ -501,6 +515,22 @@ def test_unassign_last_owner_returns_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "last_owner"
+
+
+def test_unassign_role_in_a_concurrently_deleted_community_gets_the_gate_404() -> None:
+    # The unassignment waited for the community's deletion (#4021).
+    url = f"/api/communities/{uuid.uuid4()}/members/{uuid.uuid4()}/roles/{uuid.uuid4()}"
+    gate = _client(_app(member=False, allow=True, unassign_uc=_FakeUseCase())).delete(
+        url
+    )
+    app = _app(
+        member=True,
+        allow=True,
+        unassign_uc=_FakeUseCase(error=CommunityNotFoundError("x")),
+    )
+    resp = _client(app).delete(url)
+    assert resp.status_code == 404
+    assert resp.json() == gate.json()
 
 
 def test_unassign_role_non_member_gets_404() -> None:

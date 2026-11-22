@@ -25,6 +25,7 @@ from mc_server_dashboard_api.community.application.manage_role import (
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Community, Role
 from mc_server_dashboard_api.community.domain.errors import (
+    CommunityNotFoundError,
     PresetRoleNotEditableError,
     RoleNotFoundError,
     UnknownPermissionError,
@@ -52,8 +53,8 @@ class _FakeClock(Clock):
 
 
 def _seed_community(uow: FakeAuthzUnitOfWork, community_id: CommunityId) -> None:
-    # For a non-member actor whose ceiling is read: with no community the
-    # ceiling reports it gone (issue #2967) instead of coming back empty.
+    # A role write holds its community first, and reports a missing one gone
+    # (issues #2967, #4021).
     uow.communities.seed(
         Community(
             id=community_id,
@@ -180,6 +181,7 @@ async def test_update_role_rename_keeps_a_revocation_committed_after_its_read() 
     uow = FakeAuthzUnitOfWork()
     uow.roles = _RevokeOnReadRoleRepository(Permission("server:delete"))
     community = CommunityId.new()
+    _seed_community(uow, community)
     role_id = _seed_custom_role(
         uow,
         community,
@@ -225,12 +227,29 @@ async def test_update_role_rejects_unknown_permission() -> None:
         )
 
 
+async def test_update_role_rename_in_a_deleted_community_is_not_found() -> None:
+    # A rename holds its community first, and a deletion took it (#4021).
+    uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    role_id = _seed_custom_role(uow, community)
+    with pytest.raises(CommunityNotFoundError):
+        await UpdateRole(uow=uow, clock=_FakeClock())(
+            community_id=community,
+            role_id=role_id,
+            actor_id=UserId(uuid.uuid4()),
+            name="X",
+        )
+    assert uow.roles.by_id[role_id].name == RoleName("Editor")
+
+
 async def test_update_role_in_other_community_is_not_found() -> None:
     uow = FakeAuthzUnitOfWork()
     role_id = _seed_custom_role(uow, CommunityId.new())
+    other = CommunityId.new()
+    _seed_community(uow, other)
     with pytest.raises(RoleNotFoundError):
         await UpdateRole(uow=uow, clock=_FakeClock())(
-            community_id=CommunityId.new(),
+            community_id=other,
             role_id=role_id,
             actor_id=UserId(uuid.uuid4()),
             name="X",

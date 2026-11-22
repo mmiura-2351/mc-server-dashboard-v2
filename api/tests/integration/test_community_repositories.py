@@ -585,6 +585,35 @@ async def test_lock_role_ids_returns_the_requested_assigned_role_ids(
     assert none_requested == []
 
 
+async def test_lock_by_ids_locks_no_role_of_another_community(
+    engine: AsyncEngine,
+) -> None:
+    # The permission ceiling's role pass names the community, so a role a request
+    # named in another community is neither returned nor locked, shared or as the
+    # update target (issue #4027).
+    factory = create_session_factory(engine)
+    community, stranger = _community(), _community("strangers")
+    shared, target = _role(community.id, "Editor"), _role(community.id, "Viewer")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(community)
+        await uow.communities.add(stranger)
+        await uow.roles.add(shared)
+        await uow.roles.add(target)
+        await uow.commit()
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert (
+            await uow.roles.lock_by_ids(stranger.id, [shared.id], for_update=target.id)
+            == []
+        )
+        async with engine.connect() as other:
+            lockable = await other.execute(
+                text("SELECT id FROM role WHERE id IN (:a, :b) FOR UPDATE SKIP LOCKED"),
+                {"a": shared.id.value, "b": target.id.value},
+            )
+            assert set(lockable.scalars().all()) == {shared.id.value, target.id.value}
+
+
 async def test_update_role_persists_name_and_permissions(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     community = _community()

@@ -116,6 +116,9 @@ class FakeCommunityRepository(CommunityRepository):
             for c in page
         ]
 
+    async def hold(self, community_id: CommunityId) -> bool:
+        return community_id in self.by_id
+
     async def update(self, community: Community) -> None:
         # Mirror the adapter's ``UPDATE community ... WHERE id = :id``: a missing
         # id matches no row, so nothing is written and no row appears -- keying
@@ -294,11 +297,19 @@ class FakeRoleRepository(RoleRepository):
         return self._copy(role)
 
     async def lock_by_ids(
-        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+        self,
+        community_id: CommunityId,
+        role_ids: Sequence[RoleId],
+        *,
+        for_update: RoleId | None = None,
     ) -> list[Role]:
         # In-memory equivalent: no concurrent transaction exists to wait for.
         ids = {*role_ids, *([] if for_update is None else [for_update])}
-        return [self._copy(self.by_id[rid]) for rid in ids if rid in self.by_id]
+        return [
+            self._copy(self.by_id[rid])
+            for rid in ids
+            if rid in self.by_id and self.by_id[rid].community_id == community_id
+        ]
 
     async def update(
         self,
@@ -552,6 +563,16 @@ class FakeAuthzUnitOfWork(UnitOfWork):
             created_at=_NOW,
         )
         self.memberships.seed(membership)
+        # A membership's community exists, as its foreign key requires.
+        if community_id not in self.communities.by_id:
+            self.communities.seed(
+                Community(
+                    id=community_id,
+                    name=CommunityName(f"community-{community_id.value}"),
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
         return membership
 
 

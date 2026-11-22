@@ -66,6 +66,17 @@ class CommunityRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def hold(self, community_id: CommunityId) -> bool:
+        """Hold the community against deletion until commit; return whether it exists.
+
+        For a write that locks rows a community deletion cascades to (#4021): the
+        deletion waits for this transaction, and a community one deleted first
+        is reported absent. The row is key-share locked, so holders do not wait
+        for each other; a rename does, its UPDATE changing the unique name, as
+        it already did for a membership or role INSERT's foreign-key check.
+        """
+
+    @abc.abstractmethod
     async def update(self, community: Community) -> None:
         """Persist mutable fields of ``community`` (M1: its name, FR-COMM-1).
 
@@ -119,9 +130,9 @@ class MembershipRepository(abc.ABC):
     ) -> Membership | None:
         """Return :meth:`get_by_user_and_community`, locked for removal until commit.
 
-        A member removal takes this before any other lock (#3241), so it queues
-        behind a transaction holding the membership instead of deadlocking with
-        it over the rows below the membership.
+        A member removal takes this right after holding the community (#3241,
+        #4021), so it queues behind a transaction holding the membership instead
+        of deadlocking with it over the rows below the membership.
         """
 
     @abc.abstractmethod
@@ -217,9 +228,16 @@ class RoleRepository(abc.ABC):
 
     @abc.abstractmethod
     async def lock_by_ids(
-        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+        self,
+        community_id: CommunityId,
+        role_ids: Sequence[RoleId],
+        *,
+        for_update: RoleId | None = None,
     ) -> list[Role]:
         """Lock the roles of ``role_ids`` and ``for_update``; return those that exist.
+
+        Only roles of ``community_id`` are locked and returned; a role of another
+        community is neither (issue #4027).
 
         ``for_update`` is locked as :meth:`lock_by_id` does, every other role
         share-locked: a concurrent edit or deletion of it waits for this

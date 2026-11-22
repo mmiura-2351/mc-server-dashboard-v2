@@ -126,10 +126,13 @@ async def test_create_grant_rejects_resource_in_another_community() -> None:
 
 async def test_create_grant_rejects_non_member_target() -> None:
     uow = FakeAuthzUnitOfWork()
+    community = CommunityId.new()
+    actor = UserId(uuid.uuid4())
+    uow.add_role(actor, community, {Permission("server:start")})
     with pytest.raises(GrantTargetNotMemberError):
         await CreateGrant(uow=uow, clock=_FakeClock())(
-            community_id=CommunityId.new(),
-            actor_id=UserId(uuid.uuid4()),
+            community_id=community,
+            actor_id=actor,
             user_id=UserId(uuid.uuid4()),
             resource_type="server",
             resource_id=uuid.uuid4(),

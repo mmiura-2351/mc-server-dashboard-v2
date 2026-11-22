@@ -33,7 +33,11 @@ from mc_server_dashboard_api.community.application.manage_role import (
     UpdateRole,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
-from mc_server_dashboard_api.community.domain.entities import Community, Role
+from mc_server_dashboard_api.community.domain.entities import (
+    Community,
+    Membership,
+    Role,
+)
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityNotFoundError,
     PermissionCeilingExceededError,
@@ -45,6 +49,7 @@ from mc_server_dashboard_api.community.domain.permissions import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
     CommunityName,
+    MembershipId,
     Permission,
     RoleId,
     RoleName,
@@ -416,11 +421,25 @@ async def _update_role_by(
     )
 
 
+def _seed_recipient(uow: FakeAuthzUnitOfWork, community: CommunityId) -> UserId:
+    # Its membership alone, not its community, which the deleted-community case
+    # leaves absent.
+    recipient = UserId(uuid.uuid4())
+    uow.memberships.seed(
+        Membership(
+            id=MembershipId.new(),
+            user_id=recipient,
+            community_id=community,
+            created_at=_NOW,
+        )
+    )
+    return recipient
+
+
 async def _assign_role_by(
     uow: FakeAuthzUnitOfWork, community: CommunityId, actor: UserId
 ) -> None:
-    recipient = UserId(uuid.uuid4())
-    uow._membership_for(recipient, community)
+    recipient = _seed_recipient(uow, community)
     role = _custom_role(community, {_START})
     uow.roles.seed(role)
     await AssignRole(uow=uow)(
@@ -431,8 +450,7 @@ async def _assign_role_by(
 async def _create_grant_by(
     uow: FakeAuthzUnitOfWork, community: CommunityId, actor: UserId
 ) -> None:
-    recipient = UserId(uuid.uuid4())
-    uow._membership_for(recipient, community)
+    recipient = _seed_recipient(uow, community)
     resource_id = uuid.uuid4()
     uow.add_resource(community, "server", resource_id)
     await CreateGrant(uow=uow, clock=_FakeClock())(
