@@ -44,6 +44,7 @@ from mc_server_dashboard_api.core.adapters.database import create_session_factor
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
+from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
 from mc_server_dashboard_api.fleet.domain.real_time_events import (
     EventStream,
     EventSubscription,
@@ -1072,7 +1073,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
     await sink.clear_held_assignment_on_late_snapshot(
         server_id=str(server.id.value),
         worker_id=str(worker),
-        succeeded=True,
+        code=CommandResultCode.OK,
         message=None,
     )
 

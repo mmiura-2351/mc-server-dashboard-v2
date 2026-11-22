@@ -459,7 +459,7 @@ class ControlPlaneState:
             await self._late_snapshot_sink.clear_held_assignment_on_late_snapshot(
                 server_id=server_id,
                 worker_id=worker_id.value,
-                succeeded=result.success,
+                code=_to_result(result).code,
                 message=_failure_detail(result),
                 retry=retry,
             )

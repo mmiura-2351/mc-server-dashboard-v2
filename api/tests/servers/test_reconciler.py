@@ -1369,7 +1369,9 @@ async def test_failed_late_snapshot_release_converges_on_the_short_grace() -> No
             clock=clock,
             unrecorded_stops=unrecorded,
         ).clear_assignment_after_late_snapshot(
-            server_id=server.id, worker_id=_WORKER, succeeded=True, message=None
+            server_id=server.id,
+            worker_id=_WORKER,
+            outcome=CommandOutcome(status=CommandStatus.OK),
         )
     repo.down = set()
     assert repo.by_id[server.id].assigned_worker_id == _WORKER

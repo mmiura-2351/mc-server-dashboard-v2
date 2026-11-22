@@ -763,18 +763,18 @@ class _RecordingLateSnapshotSink(LateSnapshotResultSink):
     """Records late-snapshot clear calls for assertions (issue #891)."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, bool, str | None]] = []
+        self.calls: list[tuple[str, str, CommandResultCode, str | None]] = []
 
     async def clear_held_assignment_on_late_snapshot(
         self,
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
-        self.calls.append((server_id, worker_id, succeeded, message))
+        self.calls.append((server_id, worker_id, code, message))
 
 
 _SERVER = "44444444-4444-4444-4444-444444444444"
@@ -815,7 +815,9 @@ async def test_late_failed_snapshot_forwards_the_worker_message() -> None:
         ),
     )
 
-    assert sink.calls == [(_SERVER, owner.value, False, detail)]
+    assert sink.calls == [
+        (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, detail)
+    ]
 
 
 async def test_late_failed_snapshot_without_a_message_falls_back_to_the_code() -> None:
@@ -831,7 +833,9 @@ async def test_late_failed_snapshot_without_a_message_falls_back_to_the_code() -
     state.discard_pending("cmd-1")
     await state.resolve("cmd-1", owner, _failed_transfer_result())
 
-    assert sink.calls == [(_SERVER, owner.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
 
 async def test_late_snapshot_from_non_owning_worker_is_ignored() -> None:
@@ -850,13 +854,15 @@ async def test_late_snapshot_from_non_owning_worker_is_ignored() -> None:
 
     # The owning worker's later report still clears it.
     await state.resolve("cmd-1", owner, _failed_transfer_result())
-    assert sink.calls == [(_SERVER, owner.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
 
 async def test_late_successful_snapshot_clears_held_assignment() -> None:
     # A late SUCCESS (the publish landed but the response was slow) clears too: the
     # snapshot exists, so the held assignment is released now rather than left to
-    # the stale-stop arm. ``succeeded=True`` distinguishes it from the failed case.
+    # the stale-stop arm. ``code=OK`` distinguishes it from the failed case.
     sink = _RecordingLateSnapshotSink()
     state = ControlPlaneState(late_snapshot_sink=sink)
     owner = WorkerId(_WORKER)
@@ -865,7 +871,7 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
     state.discard_pending("cmd-1")
     await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
 
-    assert sink.calls == [(_SERVER, owner.value, True, None)]
+    assert sink.calls == [(_SERVER, owner.value, CommandResultCode.OK, None)]
 
 
 async def test_unmatched_non_snapshot_result_is_dropped() -> None:
@@ -995,7 +1001,14 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
 
         # Step 3b: the FINAL snapshot's own late result clears the held assignment.
         await harness.state.resolve(final_cmd, worker, _failed_transfer_result())
-        assert sink.calls == [(_SERVER, worker.value, False, "transfer_failed")]
+        assert sink.calls == [
+            (
+                _SERVER,
+                worker.value,
+                CommandResultCode.TRANSFER_FAILED,
+                "transfer_failed",
+            )
+        ]
 
         await call.done_writing()
     finally:
@@ -1032,7 +1045,9 @@ async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None
 
     # The owning worker's late result clears the held assignment via the sink.
     await state.resolve(command_id, worker, _failed_transfer_result())
-    assert sink.calls == [(_SERVER, worker.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, worker.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
 
 async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> None:
@@ -1164,14 +1179,14 @@ class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
             server_id=server_id,
             worker_id=worker_id,
-            succeeded=succeeded,
+            code=code,
             message=message,
         )
         raise ConnectionRefusedError("connect call failed")
@@ -1213,14 +1228,14 @@ class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
             server_id=server_id,
             worker_id=worker_id,
-            succeeded=succeeded,
+            code=code,
             message=message,
         )
         self._state.open_session(self._owner, 2)
@@ -1451,12 +1466,14 @@ async def test_resolve_on_cancelled_future_fires_late_snapshot_sink() -> None:
     future.cancel()
     await state.resolve("cmd-1", owner, _failed_transfer_result())
 
-    assert sink.calls == [(_SERVER, owner.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
 
 async def test_resolve_on_cancelled_future_with_success_result() -> None:
     """Same cancel-to-discard window with a SUCCESS result: the sink sees
-    succeeded=True (issue #1996)."""
+    code=OK (issue #1996)."""
 
     sink = _RecordingLateSnapshotSink()
     state = ControlPlaneState(late_snapshot_sink=sink)
@@ -1466,7 +1483,7 @@ async def test_resolve_on_cancelled_future_with_success_result() -> None:
     future.cancel()
     await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
 
-    assert sink.calls == [(_SERVER, owner.value, True, None)]
+    assert sink.calls == [(_SERVER, owner.value, CommandResultCode.OK, None)]
 
 
 async def test_dispatch_cancel_resolve_before_discard_fires_sink() -> None:
@@ -1493,7 +1510,9 @@ async def test_dispatch_cancel_resolve_before_discard_fires_sink() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert sink.calls == [(_SERVER, worker.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, worker.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
 
 async def test_resolve_cancelled_periodic_snapshot_does_not_fire_sink() -> None:
@@ -1523,11 +1542,15 @@ async def test_discard_pending_after_cancelled_resolve_finds_nothing() -> None:
     future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     future.cancel()
     await state.resolve("cmd-1", owner, _failed_transfer_result())
-    assert sink.calls == [(_SERVER, owner.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
     # discard_pending after resolve already consumed the entry — no double-fire.
     state.discard_pending("cmd-1")
-    assert sink.calls == [(_SERVER, owner.value, False, "transfer_failed")]
+    assert sink.calls == [
+        (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
+    ]
 
 
 async def test_skipped_stale_final_snapshot_drops_late_record() -> None:
@@ -1829,7 +1852,7 @@ async def test_a_final_snapshot_is_never_stamped_and_runs_late() -> None:
         await harness.state.resolve(
             final_msg.api_command.command_id, worker, pb.CommandResult(success=True)
         )
-        assert sink.calls == [(_SERVER, worker.value, True, None)]
+        assert sink.calls == [(_SERVER, worker.value, CommandResultCode.OK, None)]
         assert not harness.state.final_snapshot_outstanding(_SERVER)
         await call.done_writing()
     finally:

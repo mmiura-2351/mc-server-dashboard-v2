@@ -3090,8 +3090,7 @@ class StopServer:
         *,
         server_id: ServerId,
         worker_id: WorkerId,
-        succeeded: bool,
-        message: str | None,
+        outcome: CommandOutcome,
         retry: bool = False,
     ) -> None:
         """``_clear_assignment_after_late_snapshot``, unless anything is in flight.
@@ -3120,8 +3119,7 @@ class StopServer:
             await self._clear_assignment_after_late_snapshot(
                 server_id=server_id,
                 worker_id=worker_id,
-                succeeded=succeeded,
-                message=message,
+                outcome=outcome,
                 retry=retry,
             )
 
@@ -3130,8 +3128,7 @@ class StopServer:
         *,
         server_id: ServerId,
         worker_id: WorkerId,
-        succeeded: bool,
-        message: str | None,
+        outcome: CommandOutcome,
         retry: bool,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (issue #891).
@@ -3171,11 +3168,12 @@ class StopServer:
         no publication receipt; an operator can inspect authoritative Storage's
         current snapshot to establish what progression it contains before recovery.
 
-        ``message`` is the Worker's own account of that failure, logged verbatim
-        beside the release. The cause is whatever it says — a data-plane URL the
-        Worker cannot reach (#2595), an auth error, a storage outage — and NOT the
-        transfer bound this line used to assert for every late failure, which sent
-        the operator after a cause nobody observed (issue #2766).
+        The outcome's ``message`` is the Worker's own account of that failure,
+        logged verbatim beside the release. The cause is whatever it says — a
+        data-plane URL the Worker cannot reach (#2595), an auth error, a storage
+        outage — and NOT the transfer bound this line used to assert for every late
+        failure, which sent the operator after a cause nobody observed (issue
+        #2766).
 
         ``retry`` marks the servicer's retry of a result whose earlier attempt
         failed (issue #4062). That attempt may have committed the release with
@@ -3220,7 +3218,7 @@ class StopServer:
                 await self.uow.commit()
         if not cleared:
             return
-        if succeeded:
+        if outcome.success:
             _LOG.info(
                 "released worker %s for server %s on a LATE successful final "
                 "snapshot: the publish landed but its result arrived after the "
@@ -3244,7 +3242,7 @@ class StopServer:
                 "arm (#891)%s",
                 worker_id.value,
                 server_id.value,
-                message,
+                outcome.message or outcome.status.value,
                 found_released,
             )
 

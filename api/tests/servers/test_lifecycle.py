@@ -3149,8 +3149,9 @@ async def test_late_failed_snapshot_clears_held_assignment() -> None:
     ).clear_assignment_after_late_snapshot(
         server_id=ServerId(server_id),
         worker_id=WorkerId(worker),
-        succeeded=False,
-        message="transfer_failed",
+        outcome=CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED, message="transfer_failed"
+        ),
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
@@ -3186,8 +3187,9 @@ async def test_late_failed_snapshot_logs_the_worker_message(
         ).clear_assignment_after_late_snapshot(
             server_id=ServerId(server_id),
             worker_id=WorkerId(worker),
-            succeeded=False,
-            message=detail,
+            outcome=CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message=detail
+            ),
         )
 
     assert any(detail in record.getMessage() for record in caplog.records)
@@ -3219,8 +3221,10 @@ async def test_late_failed_snapshot_logs_publication_as_unconfirmed(
         ).clear_assignment_after_late_snapshot(
             server_id=ServerId(server_id),
             worker_id=WorkerId(worker),
-            succeeded=False,
-            message="storage backend returned 503",
+            outcome=CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED,
+                message="storage backend returned 503",
+            ),
         )
 
     assert any(
@@ -3258,8 +3262,10 @@ async def test_late_failed_snapshot_does_not_assert_an_unobserved_cause(
         ).clear_assignment_after_late_snapshot(
             server_id=ServerId(server_id),
             worker_id=WorkerId(worker),
-            succeeded=False,
-            message="storage backend returned 503",
+            outcome=CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED,
+                message="storage backend returned 503",
+            ),
         )
 
     assert not any("transfer bound" in record.getMessage() for record in caplog.records)
@@ -3286,8 +3292,7 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
     ).clear_assignment_after_late_snapshot(
         server_id=ServerId(server_id),
         worker_id=WorkerId(worker),
-        succeeded=True,
-        message=None,
+        outcome=CommandOutcome(status=CommandStatus.OK),
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id is None
@@ -3317,8 +3322,7 @@ async def test_late_snapshot_clears_held_crashed_release() -> None:
     ).clear_assignment_after_late_snapshot(
         server_id=ServerId(server_id),
         worker_id=WorkerId(worker),
-        succeeded=True,
-        message=None,
+        outcome=CommandOutcome(status=CommandStatus.OK),
     )
 
     stored = uow.servers.by_id[ServerId(server_id)]
@@ -3350,8 +3354,9 @@ async def test_late_snapshot_from_non_owning_worker_does_not_clear() -> None:
     ).clear_assignment_after_late_snapshot(
         server_id=ServerId(server_id),
         worker_id=WorkerId(other_worker),
-        succeeded=False,
-        message="transfer_failed",
+        outcome=CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED, message="transfer_failed"
+        ),
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)
@@ -3378,8 +3383,9 @@ async def test_late_snapshot_on_replaced_row_does_not_clear() -> None:
     ).clear_assignment_after_late_snapshot(
         server_id=ServerId(server_id),
         worker_id=WorkerId(worker),
-        succeeded=False,
-        message="transfer_failed",
+        outcome=CommandOutcome(
+            status=CommandStatus.TRANSFER_FAILED, message="transfer_failed"
+        ),
     )
 
     assert uow.servers.by_id[ServerId(server_id)].assigned_worker_id == WorkerId(worker)

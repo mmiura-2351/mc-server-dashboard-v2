@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import abc
 
+from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
+
 
 class LateSnapshotResultSink(abc.ABC):
     """Port: release a held assignment on a late final-snapshot result."""
@@ -34,7 +36,7 @@ class LateSnapshotResultSink(abc.ABC):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
@@ -49,11 +51,11 @@ class LateSnapshotResultSink(abc.ABC):
         guard, enforced by the guarded UPDATE), and a row a racing start re-placed
         is left untouched.
 
-        ``succeeded`` is the result's outcome: ``False`` for any failure, which
-        leaves publication unconfirmed and means a later cross-worker re-placement
-        may lose progression since the last periodic snapshot (#845/#847), logged
-        loud. ``True`` is a late SUCCESS (the publish landed; the clear is the same
-        release the on-time success would have run).
+        ``code`` is the result's code: ``OK`` for a late SUCCESS (the publish
+        landed; the clear is the same release the on-time success would have run),
+        any other for a failure, which leaves publication unconfirmed and means a
+        later cross-worker re-placement may lose progression since the last
+        periodic snapshot (#845/#847), logged loud.
 
         ``message`` is the Worker's failure detail, the only text that names WHY the
         snapshot failed (a misconfigured data-plane URL, an auth error, a storage

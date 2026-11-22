@@ -24,6 +24,7 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
     LateSnapshotResultSink,
 )
@@ -37,7 +38,11 @@ from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
 from mc_server_dashboard_api.servers.domain.clock import Clock
-from mc_server_dashboard_api.servers.domain.control_plane import ControlPlane
+from mc_server_dashboard_api.servers.domain.control_plane import (
+    CommandOutcome,
+    CommandStatus,
+    ControlPlane,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId, WorkerId
 
 _LOG = logging.getLogger(__name__)
@@ -102,7 +107,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         *,
         server_id: str,
         worker_id: str,
-        succeeded: bool,
+        code: CommandResultCode,
         message: str | None,
         retry: bool = False,
     ) -> None:
@@ -120,7 +125,9 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         await stop_server.clear_assignment_after_late_snapshot(
             server_id=ServerId(parsed),
             worker_id=WorkerId(parsed_worker),
-            succeeded=succeeded,
-            message=message,
+            # The two enums mirror the same wire codes, value for value.
+            outcome=CommandOutcome(
+                status=CommandStatus(code.value), message=message or ""
+            ),
             retry=retry,
         )
