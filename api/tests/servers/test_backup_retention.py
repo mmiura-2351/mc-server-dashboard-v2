@@ -6,7 +6,8 @@ construction and on the JSON round-trip) and the pure selection function
 keep-N keeps the newest N, and the tiered form keeps the newest backup per UTC
 calendar day / ISO week / calendar month over the configured windows. Healthy
 rows are chosen as keepers first (issue #1864): a quarantined row keeps only a
-slot or bucket no other row is left to fill.
+slot or bucket no other row is left to fill. A row with no recorded size, whose
+archive may be missing, ranks with the quarantined rows (issue #4105).
 """
 
 from __future__ import annotations
@@ -40,13 +41,14 @@ def _backup(
     *,
     source: BackupSource = BackupSource.SCHEDULED,
     health: BackupHealth = BackupHealth.HEALTHY,
+    size_bytes: int | None = 1024,
     backup_id: BackupId | None = None,
 ) -> Backup:
     return Backup(
         id=backup_id or BackupId.new(),
         server_id=_SERVER,
         storage_ref=f"ref-{uuid.uuid4()}",
-        size_bytes=None,
+        size_bytes=size_bytes,
         source=source,
         health=health,
         created_by=None,
@@ -526,3 +528,118 @@ def test_non_scheduled_rows_are_never_pruned_whatever_their_health(
         policy, [other_source, quarantined_scheduled, healthy_scheduled], _NOW
     )
     assert pruned == [quarantined_scheduled]
+
+
+# --- rows with no recorded size (issue #4105) --------------------------------
+#
+# A row is recorded with its size once its archive exists (issue #4086), so a
+# NULL size marks a legacy row: one left dangling with no archive, or one from
+# before sizes were recorded. Such a row ranks behind every row with a size,
+# with the quarantined rows, whatever its health: it keeps only a slot or bucket
+# no sized non-quarantined row is left to fill, and never displaces one.
+
+
+@pytest.mark.parametrize("tier", list(_SINGLE_SLOT_POLICIES))
+@pytest.mark.parametrize(
+    "health", [BackupHealth.HEALTHY, BackupHealth.UNKNOWN, BackupHealth.UNREADABLE]
+)
+def test_null_size_row_yields_its_slot_to_an_older_sized_row(
+    tier: str, health: BackupHealth
+) -> None:
+    dangling = _backup(_NOW, health=health, size_bytes=None)
+    sized = _backup(_NOW - dt.timedelta(hours=2))
+    pruned = backups_to_prune(_SINGLE_SLOT_POLICIES[tier], [dangling, sized], _NOW)
+    assert pruned == [dangling]
+
+
+@pytest.mark.parametrize(
+    ("keep_last", "pruned_names"),
+    [
+        (1, ["dangling_newest", "dangling", "sized_older"]),
+        (2, ["dangling_newest", "dangling"]),
+        # Only two sized rows for three slots: the newest dangling row takes
+        # the third, so keep-N still keeps as many rows as it would by age.
+        (3, ["dangling"]),
+    ],
+)
+def test_keep_n_never_prunes_a_sized_row_while_a_null_size_row_is_kept(
+    keep_last: int, pruned_names: list[str]
+) -> None:
+    # The newest rows are dangling ones, stamped healthy as the #4086 leak left
+    # them and unreadable as the sweep marks a missing archive. By age alone
+    # they would hold the slots and the prune would delete the sized rows.
+    rows = {
+        "dangling_newest": _backup(_NOW, size_bytes=None),
+        "dangling": _backup(
+            _NOW - dt.timedelta(hours=1),
+            health=BackupHealth.UNREADABLE,
+            size_bytes=None,
+        ),
+        "sized": _backup(_NOW - dt.timedelta(hours=2)),
+        "sized_older": _backup(_NOW - dt.timedelta(hours=3)),
+    }
+    pruned = backups_to_prune(
+        RetentionPolicy.from_fields(keep_last=keep_last), list(rows.values()), _NOW
+    )
+    assert pruned == [rows[name] for name in pruned_names]
+
+
+def test_tiered_bucket_keeps_its_sized_row_and_a_null_size_row_fills_its_own() -> None:
+    # Today's newer dangling row yields the day to the sized row beside it.
+    # Yesterday holds only a dangling row, so it keeps that bucket, while a
+    # sized row outside every window is still pruned.
+    policy = RetentionPolicy.from_fields(daily=2)
+    dangling_today = _backup(_NOW, size_bytes=None)
+    sized_today = _backup(_NOW - dt.timedelta(hours=2))
+    dangling_yesterday = _backup(
+        dt.datetime(2026, 7, 9, 12, 0, tzinfo=dt.timezone.utc), size_bytes=None
+    )
+    sized_outside = _backup(dt.datetime(2026, 7, 7, 12, 0, tzinfo=dt.timezone.utc))
+    pruned = backups_to_prune(
+        policy,
+        [dangling_today, sized_today, dangling_yesterday, sized_outside],
+        _NOW,
+    )
+    assert pruned == [dangling_today, sized_outside]
+
+
+@pytest.mark.parametrize(
+    ("policy", "pruned_indexes"),
+    [
+        (RetentionPolicy.from_fields(keep_last=2), [2]),
+        (RetentionPolicy.from_fields(daily=1, weekly=1, monthly=2), [1]),
+    ],
+    ids=["keep_last", "tiered"],
+)
+def test_all_null_size_rows_keep_what_health_blind_retention_keeps(
+    policy: RetentionPolicy, pruned_indexes: list[int]
+) -> None:
+    # With no sized row to prefer, every slot and bucket goes to the newest
+    # row that fits it, exactly as when health is ignored: the quarantined
+    # newest row ranks with the healthy one, not behind it.
+    rows = [
+        _backup(_NOW, health=BackupHealth.QUARANTINED, size_bytes=None),
+        _backup(
+            dt.datetime(2026, 7, 9, 12, 0, tzinfo=dt.timezone.utc), size_bytes=None
+        ),
+        _backup(
+            dt.datetime(2026, 6, 15, 12, 0, tzinfo=dt.timezone.utc),
+            health=BackupHealth.UNREADABLE,
+            size_bytes=None,
+        ),
+    ]
+    pruned = backups_to_prune(policy, rows, _NOW)
+    assert pruned == [rows[i] for i in pruned_indexes]
+
+
+def test_null_size_and_quarantined_rows_rank_together_newest_first() -> None:
+    # A sized quarantined row and a NULL-size row share the group behind the
+    # sized non-quarantined rows, so the newer of the two keeps the slot.
+    policy = RetentionPolicy.from_fields(keep_last=1)
+    quarantined = _backup(_NOW, health=BackupHealth.QUARANTINED)
+    dangling = _backup(_NOW - dt.timedelta(hours=1), size_bytes=None)
+    assert backups_to_prune(policy, [quarantined, dangling], _NOW) == [dangling]
+
+    dangling = _backup(_NOW, size_bytes=None)
+    quarantined = _backup(_NOW - dt.timedelta(hours=1), health=BackupHealth.QUARANTINED)
+    assert backups_to_prune(policy, [dangling, quarantined], _NOW) == [quarantined]
