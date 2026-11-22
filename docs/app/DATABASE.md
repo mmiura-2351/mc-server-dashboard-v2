@@ -1128,6 +1128,29 @@ concurrent server creation: the creation's INSERT holds the `community` row
 is then refused, or commits first and the creation fails as "community not
 found".
 
+**A Community deletion and a concurrent write in that Community wait for each
+other at the `community` row** (issue #4021). The deletion's `DELETE` locks
+that row before any row it cascades to. A write that locks one of those rows
+and then takes another lock holds the `community` row `FOR KEY SHARE` first:
+role creation and update through the permission ceiling, role assignment, grant
+creation, member removal and role unassignment. That is step 1 of the lock
+order in `community/application/permission_ceiling.py`. Whichever of the two
+locks the row first, the other waits for it, so they cannot deadlock, whatever
+order the cascades run in. The schema does not fix that order: a row's
+cascades run in the order of their trigger names, which embed OIDs.
+
+- **The deletion first.** The write waits for the deletion and then answers
+  404 `not_found`, the answer the route's gate gives a non-member (issue
+  #2967). A member addition, a role creation and a grant creation answer this
+  way, as do the other writes listed above. A member addition, or a role
+  creation that confers nothing, locks no row of the Community before its
+  `INSERT`. It meets the deletion at the `INSERT`'s foreign key onto
+  `community` instead, with the same answer.
+- **The write first.** The deletion waits for the write to commit, then
+  cascades the new row away. A grant names a server of the Community, so the
+  deletion that waited for a grant creation is then refused 409
+  `community_has_servers`.
+
 Also distinct, **deleting a single server** (without deleting its Community)
 removes the `resource_grant` rows that point at it, `ON DELETE CASCADE` through
 `resource_id` (Section 6).

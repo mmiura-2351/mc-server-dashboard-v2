@@ -35,6 +35,7 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.community.application.permission_ceiling import (
     enforce_permission_ceiling,
+    hold_community,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import ResourceGrant
@@ -106,9 +107,11 @@ class CreateGrant:
             # grant's foreign-key check waits for the deleted user row.
             if not await self.uow.users.lock_and_check_exists(user_id):
                 raise GrantTargetNotMemberError(str(user_id.value))
-            # Then the recipient's membership (the grant's parent) and the
-            # actor's (the ceiling's) before any other lock: the ceiling's lock
-            # order (#3241), so a member removal cannot deadlock with this.
+            # Then the community, then the recipient's membership (the grant's
+            # parent) and the actor's (the ceiling's) before any other lock:
+            # the ceiling's lock order (#3241), so neither a member removal
+            # nor a community deletion can deadlock with this (#4021).
+            await hold_community(self.uow, community_id)
             held = await self.uow.memberships.hold_for_users(
                 community_id, [user_id, actor_id]
             )

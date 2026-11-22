@@ -66,6 +66,16 @@ class CommunityRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def hold(self, community_id: CommunityId) -> bool:
+        """Hold the community against deletion until commit; return whether it exists.
+
+        For a write that locks rows a community deletion cascades to (#4021): the
+        deletion waits for this transaction, and a community one deleted first
+        is reported absent. The row is key-share locked, so a rename does not
+        wait for it.
+        """
+
+    @abc.abstractmethod
     async def update(self, community: Community) -> None:
         """Persist mutable fields of ``community`` (M1: its name, FR-COMM-1).
 

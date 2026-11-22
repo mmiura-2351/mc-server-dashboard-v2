@@ -116,6 +116,9 @@ class FakeCommunityRepository(CommunityRepository):
             for c in page
         ]
 
+    async def hold(self, community_id: CommunityId) -> bool:
+        return community_id in self.by_id
+
     async def update(self, community: Community) -> None:
         # Mirror the adapter's ``UPDATE community ... WHERE id = :id``: a missing
         # id matches no row, so nothing is written and no row appears -- keying
@@ -552,6 +555,16 @@ class FakeAuthzUnitOfWork(UnitOfWork):
             created_at=_NOW,
         )
         self.memberships.seed(membership)
+        # A membership's community exists, as its foreign key requires.
+        if community_id not in self.communities.by_id:
+            self.communities.seed(
+                Community(
+                    id=community_id,
+                    name=CommunityName(f"community-{community_id.value}"),
+                    created_at=_NOW,
+                    updated_at=_NOW,
+                )
+            )
         return membership
 
 

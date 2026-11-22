@@ -188,6 +188,14 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
         result = await self._session.execute(stmt)
         return {cid: count for cid, count in result.all()}
 
+    async def hold(self, community_id: CommunityId) -> bool:
+        stmt = (
+            select(CommunityModel.id)
+            .where(CommunityModel.id == community_id.value)
+            .with_for_update(read=True, key_share=True)
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def update(self, community: Community) -> None:
         stmt = (
             update(CommunityModel)

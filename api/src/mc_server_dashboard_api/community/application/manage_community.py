@@ -79,7 +79,10 @@ class DeleteCommunity:
     and then refuses it; a DELETE that ran first makes the INSERT wait and then
     fail as "community not found". This transaction's locks are those of the
     DELETE statement alone -- the community row, then the rows it cascades to --
-    as before, so it stays outside the lock order in ``permission_ceiling``.
+    which is the lock order in ``permission_ceiling``: every write of this
+    context that locks one of those rows and then another holds the community
+    row first, so the two wait for each other there instead of deadlocking
+    (issue #4021).
     """
 
     uow: UnitOfWork

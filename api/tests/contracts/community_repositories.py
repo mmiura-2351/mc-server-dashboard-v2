@@ -276,6 +276,23 @@ class CommunityRepositoryContract:
                 await transaction.repository.update(renamed)
                 await transaction.commit()
 
+    async def test_hold_reports_whether_the_community_exists(
+        self, community_repository_harness: RepositoryHarness[CommunityRepository]
+    ) -> None:
+        community = _community()
+        async with community_repository_harness.open() as transaction:
+            await transaction.repository.add(community)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            assert await transaction.repository.hold(community.id) is True
+            assert await transaction.repository.hold(CommunityId.new()) is False
+            await transaction.repository.delete(community.id)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            assert await transaction.repository.hold(community.id) is False
+
 
 class MembershipRepositoryContract:
     """Observable contract promised by :class:`MembershipRepository`."""
