@@ -986,3 +986,52 @@ async def test_the_walk_of_a_300_level_tree_holds_at_most_130_descriptors(
 
     assert 0 < max(held) - before <= 130
     assert _open_descriptors() == before
+
+
+async def _object_doors(tmp_path: Path, files: dict[str, bytes]) -> _Doors:
+    """Doors over the object backend, its working set published as ``files``."""
+
+    harness = build_harness("object", tmp_path)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    await harness.publish(StorageCommunityId(community), StorageServerId(server), files)
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community, server, running=False))
+    return _Doors(
+        community=CommunityId(community),
+        server=ServerId(server),
+        store=StorageFileStoreAdapter(storage=harness.storage),
+        uow=uow,
+    )
+
+
+async def test_a_name_below_the_depth_cut_is_not_measured_for_its_length(
+    tmp_path: Path,
+) -> None:
+    # On object only, as fs cannot hold these paths. A 4,090-byte file 130
+    # components deep: below ``d``, it is past the level (128) at which the
+    # measure stops, so ``d`` moved 9 bytes longer is admitted although the file
+    # is moved to 4,099 bytes (review r4). The directory holding it is already
+    # past the depth bound, which a move that does not deepen it may keep.
+    deep = "d/" + ("L" * 200 + "/") * 19 + "x/" * 109 + "f" * 51
+    assert len(deep.encode()) == 4090 and len(deep.split("/")) == 130
+    doors = await _object_doors(tmp_path, {deep: b"deep"})
+
+    await doors.rename("d", "d" * 10)
+
+    assert await doors.read("d" * 10 + deep[1:]) == b"deep"
+
+
+async def test_the_names_directly_below_a_moved_directory_are_measured(
+    tmp_path: Path,
+) -> None:
+    # On object only, as fs cannot hold these paths. A level-129 directory of
+    # 4,038 bytes holding a 50-byte file, moved 9 bytes longer beside itself:
+    # however deep the directory, the measure takes in at least the names
+    # directly in it, so the file moved to 4,098 bytes is refused (review r4).
+    source = "/".join(["L" * 200] * 19 + ["x"] * 110)
+    assert len(source.encode()) == 4038 and len(source.split("/")) == 129
+    doors = await _object_doors(tmp_path, {source + "/" + "f" * 50: b"x"})
+
+    destination = source[:-1] + "x" * 10
+    assert await _refusal(doors.rename(source, destination)) == "path_too_long"
+    assert await doors.read(source + "/" + "f" * 50) == b"x"
