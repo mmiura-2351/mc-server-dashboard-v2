@@ -162,6 +162,9 @@ class _AdvancingClock(Clock):
 
         self._next = at
 
+    def monotonic(self) -> float:
+        return 0.0
+
 
 class _StoreGeneration(StoreGenerationReader):
     """A store generation a scenario can move, shared by every seam that reads it."""

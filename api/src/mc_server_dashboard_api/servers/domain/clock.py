@@ -19,3 +19,12 @@ class Clock(abc.ABC):
     @abc.abstractmethod
     def now(self) -> dt.datetime:
         """Return the current time as a timezone-aware UTC datetime."""
+
+    @abc.abstractmethod
+    def monotonic(self) -> float:
+        """Return seconds on a clock that never steps, to measure a duration with.
+
+        Only the difference between two readings means anything. A start measures
+        what its wait for the Worker's uploads left of the hydrate budget on it
+        (issue #3950), so a wall-clock step cannot shorten or lengthen the hydrate.
+        """

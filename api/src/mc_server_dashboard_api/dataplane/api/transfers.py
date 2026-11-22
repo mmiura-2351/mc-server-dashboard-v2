@@ -595,9 +595,18 @@ async def publish_snapshot(
                 # stale-scratch case where committing would clobber
                 # another Worker's newer authoritative copy. When the
                 # SAME Worker (or an unknown publisher) produced current,
-                # the lag is a lost publish-response and the publish is
-                # allowed to self-heal (issue #847 bug 3). Nothing was
-                # staged yet, so a refused ``current/`` is untouched.
+                # the publish is allowed (issue #847 bug 3). For the same
+                # Worker that is safe while its scratch descends from the
+                # tree it published current from, which holds unless a
+                # hydrate of an older generation replaced the scratch since
+                # (issue #3950). The lags that reach it: a lost publish
+                # response, whose scratch is the tree it published; and its
+                # own upload committed after its command ended, which a
+                # start's hydrate of this Worker waits for, so the hydrate
+                # serves it. A restore or an at-rest edit never does: they
+                # stamp an API publisher. What stays uncovered is in
+                # CONTROL_PLANE.md Section 5. Nothing was staged yet, so a
+                # refused ``current/`` is untouched.
                 current_publisher = await storage.current_publisher(*scope)
                 if (
                     current_publisher is not None

@@ -465,6 +465,15 @@ class ControlPlane(abc.ABC):
         """
 
     @abc.abstractmethod
+    def command_expiry_margin_seconds(self) -> float:
+        """How much of an awaited command's budget the Worker never gets (#3305).
+
+        A command handed no more than this is dropped unsent, so a start whose
+        wait for the Worker's uploads leaves its hydrate no more than this has
+        used the whole budget (issue #3950).
+        """
+
+    @abc.abstractmethod
     async def snapshot(
         self,
         *,

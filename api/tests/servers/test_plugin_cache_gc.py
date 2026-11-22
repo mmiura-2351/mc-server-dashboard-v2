@@ -54,6 +54,9 @@ class _FixedClock(Clock):
     def now(self) -> dt.datetime:
         return self._now
 
+    def monotonic(self) -> float:
+        return 0.0
+
 
 class _FakeReferences(LivePluginCacheReferences):
     def __init__(self, keys: set[str]) -> None:

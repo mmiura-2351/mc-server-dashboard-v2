@@ -19,6 +19,7 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.fleet.domain.control_plane import EXPIRY_MARGIN_SECONDS
 from mc_server_dashboard_api.servers.adapters.file_store import _rel_path
 from mc_server_dashboard_api.servers.application.stop_intents import StopIntentCounter
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -751,14 +752,27 @@ class FakeFileStore(FileStore):
 
 
 class FakeClock(Clock):
+    """A clock that moves only when told to.
+
+    Its monotonic reading moves only by :meth:`advance_monotonic`, never by
+    :meth:`set`, as the wall clock can step while the monotonic clock does not.
+    """
+
     def __init__(self, now: dt.datetime) -> None:
         self._now = now
+        self._monotonic = 0.0
 
     def set(self, now: dt.datetime) -> None:
         self._now = now
 
     def now(self) -> dt.datetime:
         return self._now
+
+    def advance_monotonic(self, seconds: float) -> None:
+        self._monotonic += seconds
+
+    def monotonic(self) -> float:
+        return self._monotonic
 
 
 def _observe(
@@ -2218,6 +2232,9 @@ class FakeControlPlane(ControlPlane):
 
     def hydrate_timeout_seconds(self) -> float:
         return self._hydrate_timeout_seconds
+
+    def command_expiry_margin_seconds(self) -> float:
+        return EXPIRY_MARGIN_SECONDS
 
     async def snapshot(
         self,

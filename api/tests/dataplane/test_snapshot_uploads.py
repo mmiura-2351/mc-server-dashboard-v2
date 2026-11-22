@@ -101,6 +101,33 @@ async def test_a_wait_outlasts_every_upload_of_its_worker() -> None:
     await asyncio.gather(*tasks)
 
 
+async def test_a_wait_outlasts_an_upload_that_arrives_as_the_last_one_leaves() -> None:
+    # The last upload leaves, and another from the same Worker arrives before the
+    # woken wait runs again: the wait checks again, and waits for that one too.
+    uploads = SnapshotUploads()
+    first, second = asyncio.Event(), asyncio.Event()
+
+    async def _uploads() -> None:
+        async with uploads.track(_SERVER, _WORKER_A):
+            await first.wait()
+        # Nothing awaits between the first leaving and the second arriving.
+        async with uploads.track(_SERVER, _WORKER_A):
+            await second.wait()
+
+    task = asyncio.create_task(_uploads())
+    await _turns()
+    wait = asyncio.create_task(uploads.settled(_SERVER, _WORKER_A, timeout=30))
+    await _turns()
+    first.set()
+    await _turns()
+    assert not wait.done()
+
+    second.set()
+
+    assert await wait
+    await task
+
+
 async def test_a_wait_does_not_wait_for_another_workers_or_servers_uploads() -> None:
     uploads = SnapshotUploads()
 

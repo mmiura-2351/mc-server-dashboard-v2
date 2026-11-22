@@ -881,9 +881,10 @@ async def test_the_working_set_replay_compares_the_count_its_start_read() -> Non
             community_id=world.community, server_id=world.server_id
         )
 
-    # The refused start, the stop and its release, the newer start, then the
-    # replay's hydrate. The replay sends no start.
-    assert world.kinds() == ["start", "stop", "snapshot", "start", "hydrate"]
+    # The refused start, the stop and its release, then the newer start. The
+    # replay's re-read after its wait for the Worker's uploads (issue #3950)
+    # finds the count moved, so it sends neither a hydrate nor a start.
+    assert world.kinds() == ["start", "stop", "snapshot", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -959,9 +960,10 @@ async def test_a_placement_reads_the_counter_before_its_own_commit() -> None:
             community_id=world.community, server_id=world.server_id
         )
 
-    # The release takes no snapshot, as above. The placement always hydrates; it
-    # then sends nothing.
-    assert world.kinds() == ["stop", "hydrate", "start", "hydrate"]
+    # The release takes no snapshot, as above. The placement would hydrate, but
+    # its re-read after the wait for the Worker's uploads (issue #3950) finds the
+    # count moved, so it sends nothing.
+    assert world.kinds() == ["stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 

@@ -14,6 +14,7 @@ import pytest
 from mc_server_dashboard_api.config import ControlSettings
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    EXPIRY_MARGIN_SECONDS,
     Command,
     CommandResult,
     CommandResultCode,
@@ -173,6 +174,34 @@ async def test_a_hydrate_handed_what_is_left_of_its_budget_dispatches_with_it() 
 
     assert adapter.hydrate_timeout_seconds() == 600
     assert fleet.last_timeout_override == 150
+
+
+def test_an_adapter_built_without_a_hydrate_budget_has_none_to_give() -> None:
+    # The late-snapshot sink's and the snapshot cadence's adapters never hydrate,
+    # so they are built without a budget; asking one for it is a wiring error
+    # (issue #3950), not a start that waits no time at all.
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused here
+        control_plane=_CapturingFleetControlPlane(),
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+    )
+
+    with pytest.raises(RuntimeError, match="without a hydrate budget"):
+        adapter.hydrate_timeout_seconds()
+
+
+def test_the_command_expiry_margin_is_the_fleets() -> None:
+    # A start whose wait leaves the hydrate no more than this sends none: the
+    # fleet would drop it unsent (issue #3950).
+    adapter = FleetControlPlaneAdapter(
+        registry=None,  # type: ignore[arg-type]  # unused here
+        control_plane=_CapturingFleetControlPlane(),
+        data_plane_base_url="https://api.example/",
+        worker_credential="shhh",
+    )
+
+    assert adapter.command_expiry_margin_seconds() == EXPIRY_MARGIN_SECONDS
 
 
 async def test_snapshot_carries_the_snapshot_timeout_override() -> None:

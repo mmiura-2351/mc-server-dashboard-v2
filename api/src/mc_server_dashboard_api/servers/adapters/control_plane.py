@@ -20,6 +20,7 @@ from dataclasses import replace
 from typing import assert_never
 
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    EXPIRY_MARGIN_SECONDS,
     CommandResult,
     CommandResultCode,
     CommandTimedOutError,
@@ -419,6 +420,9 @@ class FleetControlPlaneAdapter(ControlPlane):
         if self._hydrate_timeout_seconds is None:
             raise RuntimeError("this control plane was built without a hydrate budget")
         return self._hydrate_timeout_seconds
+
+    def command_expiry_margin_seconds(self) -> float:
+        return EXPIRY_MARGIN_SECONDS
 
     async def snapshot(
         self,

@@ -150,6 +150,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     NoEligibleWorkerError,
     ServerError,
     ServerNotRunningError,
+    SnapshotUploadInFlightError,
 )
 from mc_server_dashboard_api.servers.domain.next_run_calculator import NextRunCalculator
 from mc_server_dashboard_api.servers.domain.notifier import ServerNotifier
@@ -305,6 +306,10 @@ def _failure_detail(exc: ServerError) -> str:
         return "backup too large"
     if isinstance(exc, BackupStorageUnavailableError):
         return "storage unavailable"
+    if isinstance(exc, SnapshotUploadInFlightError):
+        # A start whose wait for the Worker's uploads used the hydrate budget
+        # (issue #3950), named as the HTTP start answers it.
+        return "upload_in_flight"
     return "action failed"
 
 
@@ -472,7 +477,8 @@ class ExecuteScheduleAction:
         is reached, an unreachable Worker, a lost answer (a timeout or a
         disconnect) or a ``BUSY`` refusal leaves the intent and assignment
         standing, and so does a hydrate refused ``BUSY``, ``UNAVAILABLE`` or
-        ``EXPIRED`` (issue #3890). The reconciler re-sends the start once the
+        ``EXPIRED`` (issue #3890), and a wait for the Worker's uploads that used
+        the hydrate budget (issue #3950). The reconciler re-sends the start once the
         assigned Worker is connected (it skips the row while that Worker is gone).
         The row tells these apart.
 

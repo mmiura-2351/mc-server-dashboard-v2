@@ -58,6 +58,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    LifecycleTransitionConflictError,
     SnapshotUploadInFlightError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -282,14 +283,19 @@ def _start(
     )
 
 
-async def _stop(uow: FakeUnitOfWork, cp: FakeControlPlane, server: Server) -> None:
+async def _stop(
+    uow: FakeUnitOfWork,
+    cp: FakeControlPlane,
+    server: Server,
+    *,
+    at: dt.datetime = _NOW - dt.timedelta(seconds=30),
+) -> None:
     """Stop the server; its final snapshot answers at A's deadline, releasing A.
 
-    The stop runs before the start, so its writes are stamped earlier.
+    By default the stop runs before the start, so its writes are stamped earlier.
     """
 
-    stopped_at = _NOW - dt.timedelta(seconds=30)
-    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(stopped_at))(
+    await StopServer(uow=uow, control_plane=cp, clock=FakeClock(at))(
         community_id=server.community_id, server_id=server.id
     )
     assert uow.servers.by_id[server.id].assigned_worker_id is None
@@ -335,14 +341,15 @@ async def _upload_meets_start(
     start: Callable[[], Coroutine[Any, Any, object]],
     before_start: Callable[[], Awaitable[None]] = _nothing,
     release_on_wait: bool = True,
+    on_wait: Callable[[], Awaitable[None]] = _nothing,
     give_up: bool = False,
 ) -> tuple[Response, BaseException | None]:
     """Run Worker A's upload into ``start``; return A's answer and what it raised.
 
     A's body is staged, and then ``before_start`` and ``start`` run. A's commit is
     held until the start has begun to wait for it (unless ``release_on_wait`` is
-    off) or has finished. With ``give_up``, A goes away there instead of
-    committing, as a Worker whose request ends mid-body.
+    off) or has finished, and then ``on_wait`` runs. With ``give_up``, A goes away
+    there instead of committing, as a Worker whose request ends mid-body.
     """
 
     _bind(app, storage, uow, uploads)
@@ -390,6 +397,7 @@ async def _upload_meets_start(
             await asyncio.wait(gates, return_when=asyncio.FIRST_COMPLETED)
             for gate in gates - {started}:
                 gate.cancel()
+            await on_wait()
             release.set()
             resp = await upload
             try:
@@ -669,7 +677,8 @@ def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
     # wait shares with the hydrate. The start sends no hydrate and keeps the
     # server on A, observed unknown, which the reconciler retries. Once the
     # commit has landed, that retry hydrates A with it, without placing the
-    # server again.
+    # server again. The budget is just over the command expiry margin, within
+    # which no hydrate is ever sent.
     storage = make_storage(tmp_path)
     server = _server(
         desired=DesiredState.RUNNING, observed=ObservedState.RUNNING, on_a=True
@@ -683,7 +692,7 @@ def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
         place_to=_WORKER_A,
         held={(_WORKER_A, server.id): 1},
         outcomes={"snapshot": _DEADLINE},
-        hydrate_timeout_seconds=0.05,
+        hydrate_timeout_seconds=1.5,
     )
     uploads = _WatchedUploads()
 
@@ -724,6 +733,61 @@ def test_a_start_whose_wait_runs_out_keeps_its_worker_and_is_retried_there(
     assert _kinds(cp) == ["stop", "snapshot", "hydrate", "start"]
     assert cp.served == [3]
     assert cp.reserved == [(_WORKER_A, server.id)]
+
+
+# 14 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
+@pytest.mark.timeout(14 * 10 + 30)
+@_BACKENDS
+def test_a_start_whose_intent_a_stop_withdrew_during_the_wait_sends_no_hydrate(
+    tmp_path: Path, shared_app: FastAPI, make_storage: Callable[[Path], Storage]
+) -> None:
+    # The first test's start, but an operator stops the server while the start
+    # waits for A's late commit: the stop commits and releases the row before the
+    # commit lands. The start is no longer anybody's, so once the wait ends it
+    # answers the conflict and sends A no hydrate, rather than transferring the
+    # world to a Worker that no longer holds the server.
+    storage = make_storage(tmp_path)
+    server = _server(
+        desired=DesiredState.RUNNING, observed=ObservedState.RUNNING, on_a=True
+    )
+    asyncio.run(_publish(storage, server, b"a-g1"))
+    asyncio.run(_publish(storage, server, b"a-g2"))
+    uow = FakeUnitOfWork()
+    uow.servers.seed(server)
+    cp = _WorkerServesHydrates(
+        storage,
+        place_to=_WORKER_A,
+        held={(_WORKER_A, server.id): 1},
+        outcomes={"snapshot": _DEADLINE},
+    )
+    uploads = _WatchedUploads()
+
+    resp, error = asyncio.run(
+        _upload_meets_start(
+            shared_app,
+            storage,
+            uow,
+            uploads,
+            server,
+            base=1,
+            before_start=lambda: _stop(uow, cp, server),
+            start=lambda: _start(uow, cp, storage, uploads)(
+                community_id=server.community_id, server_id=server.id
+            ),
+            on_wait=lambda: _stop(uow, cp, server, at=_NOW + dt.timedelta(seconds=30)),
+        )
+    )
+
+    assert isinstance(error, LifecycleTransitionConflictError)
+    assert "hydrate" not in _kinds(cp)
+    assert cp.served == []
+    row = uow.servers.by_id[server.id]
+    assert (row.desired_state, row.assigned_worker_id) == (
+        DesiredState.STOPPED,
+        None,
+    )
+    assert resp.status_code == 204
+    assert asyncio.run(_live(storage, server)) == (3, b"packed-by-a")
 
 
 # 12 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).

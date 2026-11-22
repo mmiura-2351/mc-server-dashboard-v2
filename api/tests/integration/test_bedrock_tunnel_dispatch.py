@@ -104,6 +104,9 @@ class _AdvancingClock(Clock):
         self._next = current + dt.timedelta(seconds=1)
         return current
 
+    def monotonic(self) -> float:
+        return 0.0
+
 
 @pytest.fixture
 async def engine() -> AsyncIterator[AsyncEngine]:

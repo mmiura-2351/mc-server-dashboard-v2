@@ -2246,10 +2246,11 @@ async def test_start_compensation_skips_decrement_when_revert_loses_race() -> No
         async def get_by_id(self, server_id: ServerId) -> Server | None:
             loaded = await super().get_by_id(server_id)
             self._reads += 1
-            # Reads: 1 = start's load, 2 = compensation's load. On the
-            # compensation read, simulate the concurrent stop having already
-            # reverted the stored row.
-            if self._reads == 2:
+            # Reads: 1 = the start's load, 2 = the re-read after the wait for
+            # the Worker's uploads (issue #3950), 3 = the re-read before the
+            # send. Right after that one, simulate the concurrent stop having
+            # reverted the stored row, so the compensation's load sees it.
+            if self._reads == 3:
                 stored = self.by_id[server_id]
                 stored.desired_state = DesiredState.STOPPED
                 stored.assigned_worker_id = None
