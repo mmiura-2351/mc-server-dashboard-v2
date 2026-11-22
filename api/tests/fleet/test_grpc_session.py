@@ -2776,11 +2776,10 @@ async def test_a_held_report_is_lost_when_its_session_ends(
 async def test_only_failures_that_are_not_an_outage_count_toward_the_cap() -> None:
     # An outage's failures are held and never count toward #807's cap, however
     # many there are. Any other failure is dropped at once, without a retry, and
-    # counts: one more than the cap of them ends the session.
-    sink = _OutageSink(
-        failures={_SERVER_A: _MAX_CONSECUTIVE_HANDLER_FAILURES + 1},
-        broken=frozenset({_SERVER_B}),
-    )
+    # counts: one more than the cap of them ends the session. The outage outlasts
+    # enough doublings that only a capped backoff retries it in time.
+    outage = 12
+    sink = _OutageSink(failures={_SERVER_A: outage}, broken=frozenset({_SERVER_B}))
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),
@@ -2804,7 +2803,7 @@ async def test_only_failures_that_are_not_an_outage_count_toward_the_cap() -> No
 
         assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
         assert sink.attempts == {
-            _SERVER_A: _MAX_CONSECUTIVE_HANDLER_FAILURES + 2,
+            _SERVER_A: outage + 1,
             _SERVER_B: _MAX_CONSECUTIVE_HANDLER_FAILURES + 1,
         }
         assert h.registry.list_workers()[0].status is WorkerStatus.OFFLINE
