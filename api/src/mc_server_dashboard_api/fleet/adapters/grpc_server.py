@@ -157,7 +157,8 @@ _FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
 # write. A read cancelled on a stalled connection returns once SQLAlchemy has given
 # that connection 2 s to close, so the answer leaves within 12 s. The teardown of a
 # refused registration bounds its mark-unknown write by the same value (issue
-# #4091); that cancel can abandon the write, which is skipped (see ``_teardown``).
+# #4091). That cancel does abandon a write: the teardown logs it as skipped, though
+# a commit already sent may still land, its status frames unpublished.
 _REGISTRATION_DATABASE_TIMEOUT_SECONDS = 10.0
 
 # Backpressure limit on the queue between the inbound reader task and the
