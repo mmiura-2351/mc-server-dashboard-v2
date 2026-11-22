@@ -1590,19 +1590,6 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		if ok, code, msg := m.reserve(cmd.ServerID, legNone); !ok {
 			return fail(cmd.CommandID, code, msg)
 		}
-		// The reservation rules out only the processes the Worker tracks; a start the
-		// daemon did not answer may have left its container running against the set
-		// (issue #3672). Packing a set it is writing is a mixed capture, so the
-		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
-		// the driver cannot rule one out. It does not end the container: the
-		// snapshot is no precondition of the start that does, and what it packed
-		// would be that container's shutdown save. A guard error the command's own
-		// cancellation caused is UNAVAILABLE too, as in handleHydrate: nothing was
-		// ruled out, and the answer reaches no caller.
-		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
-			m.release(cmd.ServerID)
-			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
-		}
 		release = func() { m.release(cmd.ServerID) }
 	}
 	// One deadline bounds the whole command (issue #3511, snapshotContext). The body
@@ -1619,6 +1606,21 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	}
 	cmdCtx, cancel := newContext(ctx, running)
 	defer cancel()
+	if !running {
+		// The reservation rules out only the processes the Worker tracks; a start the
+		// daemon did not answer may have left its container running against the set
+		// (issue #3672). Packing a set it is writing is a mixed capture, so the
+		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
+		// the driver cannot rule one out. It does not end the container: the
+		// snapshot is no precondition of the start that does, and what it packed
+		// would be that container's shutdown save. A guard error the command's own
+		// cancellation caused is UNAVAILABLE too, as in handleHydrate: nothing was
+		// ruled out, and the answer reaches no caller.
+		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
+			release()
+			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
+		}
+	}
 	att := newSnapshotAttempt(func() {
 		release()
 		if hook := m.snapshotReleased; hook != nil {
