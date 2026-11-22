@@ -1083,6 +1083,15 @@ class PruneScheduledBackups:
     uploaded / event rows are never candidates. A server without a policy (or,
     defensively, with a malformed persisted one) is a no-op.
 
+    Before the selection ranks them, the scheduled rows with a NULL
+    ``size_bytes`` are sized the way the listing sizes them
+    (:func:`_backfill_null_sizes`, issue #4107), with no unit of work open, and
+    their sizes recorded: a legacy row whose archive exists then ranks as the
+    sized row it is. A row whose archive the store reports missing stays NULL.
+    Any other store failure stops the prune before it selects or deletes
+    anything, with a WARNING, rather than rank on partial information; the next
+    run retries.
+
     Runs under the same per-server :class:`LifecycleLock` that
     :class:`RestoreBackup` / :class:`DeleteBackup` hold, so a backup can never
     be deleted while a restore of it is in flight; each deletion reuses the
@@ -1121,7 +1130,23 @@ class PruneScheduledBackups:
                     server_id.value,
                 )
                 return []
-            pruned = backups_to_prune(policy, rows, self.clock.now())
+            scheduled = [b for b in rows if b.source is BackupSource.SCHEDULED]
+            try:
+                scheduled = await _backfill_null_sizes(
+                    self.uow, self.backup_store, community_id, server_id, scheduled
+                )
+            except Exception as exc:
+                _LOG.warning(
+                    "retention prune of server %s stopped before selecting "
+                    "anything: a NULL-size scheduled backup could not be sized "
+                    "(%s: %s), and the ranking needs its size. The next run "
+                    "retries.",
+                    server_id.value,
+                    type(exc).__name__,
+                    exc,
+                )
+                raise
+            pruned = backups_to_prune(policy, scheduled, self.clock.now())
             for backup in pruned:
                 await _delete_archive_then_row(
                     self.uow,
@@ -1555,14 +1580,15 @@ async def _backfill_null_sizes(
 ) -> list[Backup]:
     """Compute + persist ``size_bytes`` for legacy NULL rows whose archive exists.
 
-    The lazy backfill on read (issue #661). Only NULL-size rows trigger a store
-    call, and the persisted value makes it one-time per row. The caller has
-    closed its unit of work: each store call is a HEAD that can take as long as
-    the store's timeouts allow, so none runs with a session open, which would
-    keep a pool connection checked out for that long (issue #4107). The sizes are
-    then written in a short unit of work of their own, opened only when there is
-    one to write. The returned ``rows`` carry any computed size so the
-    listing/total reflect it immediately.
+    The lazy backfill on read (issue #661), which the retention prune also runs
+    before it ranks (issue #4107). Only NULL-size rows trigger a store call, and
+    the persisted value makes it one-time per row. The caller has closed its unit
+    of work: each store call is a HEAD that can take as long as the store's
+    timeouts allow, so none runs with a session open, which would keep a pool
+    connection checked out for that long (issue #4107). The sizes are then
+    written in a short unit of work of their own, opened only when there is one
+    to write. The returned ``rows`` carry any computed size so the listing/total
+    reflect it immediately.
 
     **Only a missing archive is tolerated** (``BackupNotFoundError``, a row left
     dangling before creates wrote the archive first, issue #4086): its NULL size

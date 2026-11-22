@@ -11,7 +11,9 @@ failure never fails the policy write that triggered it.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -35,6 +37,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
+    BackupStorageUnavailableError,
     InvalidRetentionPolicyError,
     LifecycleLockLostError,
     ServerNotFoundError,
@@ -53,6 +56,7 @@ from tests.servers.fakes import (
     FakeClock,
     FakeLifecycleLock,
     FakeUnitOfWork,
+    SessionTrackingUnitOfWork,
 )
 
 _NOW = dt.datetime(2026, 7, 10, 12, 0, tzinfo=dt.timezone.utc)
@@ -96,8 +100,13 @@ def _backup(
 
 
 class _Env:
-    def __init__(self, *, store: FakeBackupArchiveStore | None = None) -> None:
-        self.uow = FakeUnitOfWork()
+    def __init__(
+        self,
+        *,
+        store: FakeBackupArchiveStore | None = None,
+        uow: FakeUnitOfWork | None = None,
+    ) -> None:
+        self.uow = uow or FakeUnitOfWork()
         self.store = store or FakeBackupArchiveStore()
         self.audit = RecordingAuditRecorder()
         self.lock = FakeLifecycleLock()
@@ -404,3 +413,137 @@ async def test_prune_confirms_the_lock_before_each_deletion_and_stops_once_lost(
     deletion = env.events.index((env.server.id, "delete-archive"))
     assert env.events[deletion - 1] == (env.server.id, "check")
     assert env.events[-2:] == [(env.server.id, "check"), (env.server.id, "release")]
+
+
+# --- PruneScheduledBackups: sizing NULL-size rows before ranking (issue #4107) --
+
+
+class _SessionObservingStore(FakeBackupArchiveStore):
+    """Records, at each size probe, whether a unit-of-work block is open."""
+
+    def __init__(self, uow: SessionTrackingUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+        self.open_at_size: list[bool] = []
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        self.open_at_size.append(self._uow.open)
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+def _unsized(backup: Backup) -> Backup:
+    return replace(backup, size_bytes=None)
+
+
+async def test_prune_sizes_null_size_rows_with_no_unit_of_work_open() -> None:
+    # The size probe is a storage HEAD; the prune makes it with its unit of work
+    # closed, as the listing does, so a hanging HEAD keeps no pool connection
+    # checked out. It writes the size in a short unit of work of its own.
+    uow = SessionTrackingUnitOfWork()
+    store = _SessionObservingStore(uow)
+    env = _Env(store=store, uow=uow)
+    await env.seed_retention({"keep_last": 1})
+    legacy = _unsized(_backup(env.server.id, _NOW))
+    env.seed_backup(legacy)
+
+    await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert store.open_at_size == [False]
+    persisted = env.uow.backups.by_id[legacy.id]
+    assert persisted.size_bytes == 10
+
+
+async def test_prune_ranks_a_sized_legacy_row_by_its_health() -> None:
+    # A legacy scheduled row that has an archive but no recorded size is sized
+    # before the ranking, so it competes for the slot as the healthy backup it
+    # is: the newest row keeps keep_last=1 and the older one is pruned.
+    env = _Env()
+    await env.seed_retention({"keep_last": 1})
+    legacy = _unsized(_backup(env.server.id, _NOW))
+    older = _backup(env.server.id, _NOW - dt.timedelta(days=1))
+    for backup in (legacy, older):
+        env.seed_backup(backup)
+
+    pruned = await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert [b.id for b in pruned] == [older.id]
+    assert env.uow.backups.by_id[legacy.id].size_bytes == 10
+
+
+async def test_prune_leaves_a_row_with_no_archive_unsized() -> None:
+    # A HEAD that answers NotFound leaves the row NULL: nothing is written for
+    # it, and the prune goes on to rank the rows.
+    env = _Env()
+    await env.seed_retention({"keep_last": 2})
+    dangling = _unsized(_backup(env.server.id, _NOW))
+    env.seed_backup(dangling)
+    env.store.archives.discard(dangling.storage_ref)
+
+    pruned = await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert pruned == []
+    assert env.store.size_calls == [dangling.storage_ref]
+    assert env.uow.backups.by_id[dangling.id].size_bytes is None
+    assert env.uow.commits == 0
+
+
+async def test_a_store_error_while_sizing_fails_the_prune_before_any_deletion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Ranking a row the store could not size would rank it on partial
+    # information, so the prune stops before it selects or deletes anything,
+    # and says so at WARNING; the next run retries.
+    env = _Env()
+    await env.seed_retention({"keep_last": 1})
+    legacy = _unsized(_backup(env.server.id, _NOW))
+    for backup in (
+        legacy,
+        _backup(env.server.id, _NOW - dt.timedelta(days=1)),
+        _backup(env.server.id, _NOW - dt.timedelta(days=2)),
+    ):
+        env.seed_backup(backup)
+    env.store.size_error = BackupStorageUnavailableError(str(env.server.id.value))
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(BackupStorageUnavailableError):
+            await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert env.store.deleted == []
+    assert len(env.uow.backups.by_id) == 3
+    assert env.audit.events == []
+    assert env.uow.backups.by_id[legacy.id].size_bytes is None
+    warned = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and str(env.server.id.value) in r.getMessage()
+    ]
+    assert warned
+
+
+async def test_prune_without_policy_sizes_nothing() -> None:
+    # The policy is checked before any HEAD: a server without retention costs
+    # the store nothing.
+    env = _Env()
+    env.seed_backup(_unsized(_backup(env.server.id, _NOW)))
+
+    await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert env.store.size_calls == []
+
+
+async def test_prune_sizes_only_scheduled_rows() -> None:
+    # Only scheduled rows are ranked, so only they are sized: a NULL-size manual
+    # row the store cannot size does not stop the prune.
+    env = _Env()
+    await env.seed_retention({"keep_last": 1})
+    manual = _unsized(_backup(env.server.id, _NOW, source=BackupSource.MANUAL))
+    env.seed_backup(manual)
+    env.seed_backup(_backup(env.server.id, _NOW))
+
+    await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert env.store.size_calls == []
