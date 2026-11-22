@@ -354,7 +354,8 @@ class ControlPlaneState:
         """Resolve the future waiting on ``command_id`` with ``result``.
 
         ``received_at`` is the instant the servicer read ``result`` off the
-        stream (issue #4117); the future carries it with the result.
+        stream (issue #4117); the future carries it with the result, and so does
+        a late final-snapshot result on its way to the sink.
 
         A result for an unknown/already-resolved command is ignored, so a late
         or duplicate ``CommandResult`` never crashes the inbound loop — except a
@@ -380,7 +381,7 @@ class ControlPlaneState:
             # late final-snapshot result for a dispatch that timed out or was
             # cancelled (#891/#901).
             await self._clear_on_late_snapshot(
-                command_id, worker_id, result, retry=retry
+                command_id, worker_id, result, received_at=received_at, retry=retry
             )
             return
         owning_worker, future, _ = entry
@@ -405,7 +406,7 @@ class ControlPlaneState:
         if future.cancelled() and snapshot is not None:
             self._late_snapshots[command_id] = snapshot
             await self._clear_on_late_snapshot(
-                command_id, worker_id, result, retry=retry
+                command_id, worker_id, result, received_at=received_at, retry=retry
             )
 
     async def _clear_on_late_snapshot(
@@ -414,6 +415,7 @@ class ControlPlaneState:
         worker_id: WorkerId,
         result: pb.CommandResult,
         *,
+        received_at: dt.datetime,
         retry: bool,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (#891).
@@ -476,6 +478,7 @@ class ControlPlaneState:
                 worker_id=worker_id.value,
                 code=_to_result(result).code,
                 message=_failure_detail(result),
+                received_at=received_at,
                 retry=retry,
             )
         except Exception as exc:

@@ -475,6 +475,7 @@ class _Sink(LateSnapshotResultSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         await _stop_server(
@@ -483,7 +484,9 @@ class _Sink(LateSnapshotResultSink):
             server_id=ServerId(uuid.UUID(server_id)),
             worker_id=WorkerId(uuid.UUID(worker_id)),
             outcome=CommandOutcome(
-                status=CommandStatus(code.value), message=message or ""
+                status=CommandStatus(code.value),
+                message=message or "",
+                answered_at=received_at,
             ),
             retry=retry,
         )

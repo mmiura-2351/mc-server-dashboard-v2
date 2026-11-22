@@ -20,6 +20,7 @@ never reach into fleet (import-linter); only this edge module bridges the two.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import uuid
 
@@ -110,6 +111,7 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         parsed = _parse_id(server_id, kind="server_id")
@@ -126,6 +128,10 @@ class ServersLateSnapshotResultSink(LateSnapshotResultSink):
         await stop_server.clear_assignment_after_late_snapshot(
             server_id=ServerId(parsed),
             worker_id=WorkerId(parsed_worker),
-            outcome=CommandOutcome(status=_STATUS_BY_CODE[code], message=message or ""),
+            outcome=CommandOutcome(
+                status=_STATUS_BY_CODE[code],
+                message=message or "",
+                answered_at=received_at,
+            ),
             retry=retry,
         )

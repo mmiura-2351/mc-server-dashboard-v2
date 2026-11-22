@@ -458,6 +458,7 @@ async def test_a_retry_that_makes_the_release_publishes_one_frame(
         worker_id=_WORKER_ID,
         code=CommandResultCode.OK,
         message=None,
+        received_at=world.clock.now(),
         retry=True,
     )
 
@@ -493,6 +494,7 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
         worker_id=_WORKER_ID,
         code=CommandResultCode.TRANSFER_FAILED,
         message="upload aborted by transfer bound",
+        received_at=world.clock.now(),
         retry=True,
     )
 
@@ -527,6 +529,7 @@ async def _late_refusal(
         worker_id=_WORKER_ID,
         code=CommandResultCode.BUSY,
         message="a leftover container may still run",
+        received_at=_T0,
         retry=retry,
     )
 

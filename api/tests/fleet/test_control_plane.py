@@ -768,6 +768,8 @@ class _RecordingLateSnapshotSink(LateSnapshotResultSink):
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, CommandResultCode, str | None]] = []
+        # The instant each call says the result was read (issue #4117).
+        self.received: list[dt.datetime] = []
 
     async def clear_held_assignment_on_late_snapshot(
         self,
@@ -776,9 +778,11 @@ class _RecordingLateSnapshotSink(LateSnapshotResultSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         self.calls.append((server_id, worker_id, code, message))
+        self.received.append(received_at)
 
 
 _SERVER = "44444444-4444-4444-4444-444444444444"
@@ -908,6 +912,30 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
     await state.resolve("cmd-1", owner, pb.CommandResult(success=True), received_at=_T0)
 
     assert sink.calls == [(_SERVER, owner.value, CommandResultCode.OK, None)]
+
+
+@pytest.mark.parametrize("abandoned", ["timed-out", "cancelled"])
+async def test_a_late_snapshot_result_reaches_the_sink_with_the_instant_it_was_read(
+    abandoned: str,
+) -> None:
+    # The sink records a refusal, or a release it fails to write, for the
+    # reconciler with the instant the result was read, not handled (issue
+    # #4117). Both ways a final snapshot is abandoned hand it on.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    if abandoned == "timed-out":
+        state.discard_pending("cmd-1")
+    else:
+        future.cancel()
+    read_at = _T0 + dt.timedelta(seconds=1)
+
+    await state.resolve(
+        "cmd-1", owner, pb.CommandResult(success=True), received_at=read_at
+    )
+
+    assert sink.received == [read_at]
 
 
 async def test_unmatched_non_snapshot_result_is_dropped() -> None:
@@ -1223,6 +1251,7 @@ class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
@@ -1230,6 +1259,7 @@ class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
             worker_id=worker_id,
             code=code,
             message=message,
+            received_at=received_at,
         )
         raise ConnectionRefusedError("connect call failed")
 
@@ -1272,6 +1302,7 @@ class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
@@ -1279,6 +1310,7 @@ class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
             worker_id=worker_id,
             code=code,
             message=message,
+            received_at=received_at,
         )
         self._state.open_session(self._owner, 2)
         if self._error is not None:

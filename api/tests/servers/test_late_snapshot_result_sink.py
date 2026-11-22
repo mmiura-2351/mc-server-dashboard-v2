@@ -50,6 +50,9 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from tests.servers.fakes import FakeClock, FakeControlPlane, FakeUnitOfWork
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+# The instant the late result was read, before the sink's clock reads ``_NOW``
+# (issue #4117).
+_READ_AT = _NOW - dt.timedelta(seconds=1)
 _UUID = "22222222-2222-2222-2222-222222222222"
 
 
@@ -99,6 +102,7 @@ async def test_clear_logs_on_non_uuid_server_id(
             worker_id=_UUID,
             code=CommandResultCode.TRANSFER_FAILED,
             message="transfer_failed",
+            received_at=_READ_AT,
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
@@ -112,6 +116,7 @@ async def test_clear_logs_on_non_uuid_worker_id(
             worker_id="worker-1",
             code=CommandResultCode.OK,
             message=None,
+            received_at=_READ_AT,
         )
     assert any(record.levelno == logging.ERROR for record in caplog.records)
 
@@ -144,6 +149,7 @@ async def test_clear_carries_the_worker_message_into_the_release_warning(
             worker_id=str(worker_id),
             code=CommandResultCode.TRANSFER_FAILED,
             message=detail,
+            received_at=_READ_AT,
         )
 
     assert any(
@@ -177,9 +183,11 @@ async def test_a_release_that_fails_to_be_written_is_recorded_for_the_reconciler
             worker_id=str(worker_id),
             code=CommandResultCode.OK,
             message=None,
+            received_at=_READ_AT,
         )
 
-    assert unrecorded.recorded_at(ServerId(server_id)) == _NOW
+    # Recorded as the result was read, not as the sink handled it (issue #4117).
+    assert unrecorded.recorded_at(ServerId(server_id)) == _READ_AT
 
 
 @pytest.mark.parametrize(
@@ -203,13 +211,17 @@ async def test_a_late_refusal_reaches_the_use_case_and_holds_the_row(
         sink_module, "SqlAlchemyUnitOfWork", lambda _factory, _events: uow
     )
 
-    await _sink().clear_held_assignment_on_late_snapshot(
+    unrecorded = UnrecordedStops()
+
+    await _sink(unrecorded).clear_held_assignment_on_late_snapshot(
         server_id=str(server_id),
         worker_id=str(worker_id),
         code=code,
         message="a leftover container may still run",
+        received_at=_READ_AT,
     )
 
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id == WorkerId(worker_id)
     assert stored.final_snapshot_refusal is refusal
+    assert unrecorded.recorded_at(ServerId(server_id)) == _READ_AT

@@ -1104,6 +1104,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
         worker_id=str(worker),
         code=CommandResultCode.OK,
         message=None,
+        received_at=world.clock.now(),
     )
 
     assert [event.payload for event in await _received(watching)] == [_RELEASED]

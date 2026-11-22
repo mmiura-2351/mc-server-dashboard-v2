@@ -3575,12 +3575,19 @@ async def test_a_held_report_tells_the_sink_its_retries_are_retries() -> None:
 
 class _OutageLateSnapshotSink(LateSnapshotResultSink):
     """Fails the first clear with an outage, then records each server it clears,
-    and whether each clear was told it retries an earlier attempt."""
+    and whether each clear was told it retries an earlier attempt, and when the
+    result was read.
 
-    def __init__(self) -> None:
+    With ``clock``, each attempt moves that clock a second on, so a stamp taken
+    at a later attempt differs from the one taken as the result was read.
+    """
+
+    def __init__(self, clock: FakeClock | None = None) -> None:
+        self._clock = clock
         self.attempts = 0
         self.cleared: list[str] = []
         self.retries: list[bool] = []
+        self.received: list[dt.datetime] = []
 
     async def clear_held_assignment_on_late_snapshot(
         self,
@@ -3589,10 +3596,14 @@ class _OutageLateSnapshotSink(LateSnapshotResultSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         self.attempts += 1
         self.retries.append(retry)
+        self.received.append(received_at)
+        if self._clock is not None:
+            self._clock.set(self._clock.now() + dt.timedelta(seconds=1))
         if self.attempts == 1:
             raise _OUTAGE("connect call failed")
         self.cleared.append(server_id)
@@ -3659,6 +3670,37 @@ async def test_a_held_late_final_snapshot_result_tells_the_sink_its_retry_is_one
         await _wait_until(lambda: sink.cleared, "the held release was not applied")
 
         assert sink.retries == [False, True]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_late_final_snapshot_results_retry_keeps_its_receipt_stamp() -> (
+    None
+):
+    # The retry is the same result, read once (issue #4117): the reconciler's
+    # record of its refusal, or of a release it fails to write, must not move
+    # past a report read after it.
+    clock = FakeClock(_T0)
+    sink = _OutageLateSnapshotSink(clock)
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        clock,
+        control_plane=state,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        state.register_pending(
+            "snapshot-1", WorkerId(_WORKER_ID), snapshot_server_id=_SERVER_A
+        )
+        state.discard_pending("snapshot-1")
+        await call.write(_command_result_message("snapshot-1"))
+        await _wait_until(lambda: sink.cleared, "the held release was not applied")
+
+        assert sink.received == [_T0, _T0]
         await call.done_writing()
     finally:
         await h.stop()
