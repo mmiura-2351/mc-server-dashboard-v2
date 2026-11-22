@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from mc_server_dashboard_api.community.application.permission_ceiling import (
     check_permission_ceiling,
+    hold_community,
     lock_actor_ceiling,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
@@ -174,9 +175,12 @@ class RemoveMember:
 
     async def __call__(self, *, community_id: CommunityId, user_id: UserId) -> None:
         async with self.uow:
-            # Locked before the last-owner guard's locks and the cascade's, the
-            # permission ceiling's lock order (#3241): a conferral holding this
-            # membership makes the removal wait here, holding nothing else.
+            # The community row, then the membership, before the last-owner
+            # guard's locks and the cascade's: the permission ceiling's lock
+            # order (#3241, #4021). A community deletion makes the removal wait
+            # at the first, and a conferral holding the membership at the
+            # second; neither waits for anything the removal holds by then.
+            await hold_community(self.uow, community_id)
             membership = await self.uow.memberships.lock_by_user_and_community(
                 user_id, community_id
             )
@@ -269,10 +273,12 @@ class AssignRole:
             # this commit and then refuses an Owner.
             if not await self.uow.users.lock_and_check_exists(user_id):
                 raise MembershipNotFoundError(str(user_id.value))
-            # The recipient's membership (the assignment's parent) and the
-            # actor's (the ceiling's) are held first, and the assigned role is
-            # share-locked in the ceiling's role pass, so the set checked is the
-            # set conferred: the ceiling's lock order (#3241).
+            # The community (#4021), then the recipient's membership (the
+            # assignment's parent) and the actor's (the ceiling's) are held
+            # first, and the assigned role is share-locked in the ceiling's role
+            # pass, so the set checked is the set conferred: the ceiling's lock
+            # order (#3241).
+            await hold_community(self.uow, community_id)
             held = await self.uow.memberships.hold_for_users(
                 community_id, [user_id, actor_id]
             )
@@ -286,9 +292,12 @@ class AssignRole:
                 community_id=community_id,
                 roles_to_share=[role_id],
             )
-            # Re-reads the role the ceiling's pass already holds.
-            role = next(iter(await self.uow.roles.lock_by_ids([role_id])), None)
-            if role is None or role.community_id != community_id:
+            # Re-reads the role the ceiling's pass already holds; a role of
+            # another community neither locks nor returns (#4027).
+            role = next(
+                iter(await self.uow.roles.lock_by_ids(community_id, [role_id])), None
+            )
+            if role is None:
                 raise RoleNotFoundError(str(role_id.value))
 
             check_permission_ceiling(ceiling, role.permissions)
@@ -315,6 +324,9 @@ class UnassignRole:
         self, *, community_id: CommunityId, user_id: UserId, role_id: RoleId
     ) -> None:
         async with self.uow:
+            # Before the last-owner guard's locks, so a community deletion and
+            # this unassignment wait for each other here (#4021).
+            await hold_community(self.uow, community_id)
             membership = await self.uow.memberships.get_by_user_and_community(
                 user_id, community_id
             )

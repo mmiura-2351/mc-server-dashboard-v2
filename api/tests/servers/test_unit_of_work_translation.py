@@ -28,12 +28,6 @@ layer above the use case).
 A write with nothing left to insert violates nothing, so ``save`` re-reads the
 group and raises the same not-found itself (issue #2613).
 
-Two player edits on one group that interleave are a third shape: neither caller
-duplicated anything and neither row vanished, but ``save``'s delete-then-insert
-means the loser re-inserts a pair the winner just committed
-(``uq_group_player_group_uuid`` -> :class:`GroupPlayerEditConflictError`, a
-retryable 409, issue #2613).
-
 The call sites share the translation (adapters/integrity.py): the UnitOfWork's
 ``commit`` (an INSERT racer flushes at commit) and the server / schedule /
 group repositories' ``update`` / ``add`` / ``save`` (an UPDATE racer violates at
@@ -77,7 +71,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommunityNotFoundError,
     GroupNameAlreadyExistsError,
     GroupNotFoundError,
-    GroupPlayerEditConflictError,
     PluginAlreadyExistsError,
     PortAlreadyTakenError,
     ResourcePackInUseError,
@@ -471,17 +464,6 @@ async def test_group_save_reraises_unknown_violation_untranslated() -> None:
     session = _FakeSaveSession(_integrity_error("uq_some_other_constraint"))
     repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
     with pytest.raises(IntegrityError):
-        await repo.save(_group_with_player())
-
-
-async def test_group_save_translates_interleaved_player_edit_at_flush() -> None:
-    # issue #2613: two player edits on one group interleaved, so the loser's
-    # re-inserted (group_id, player_uuid) pair collides with the winner's
-    # committed row. Neither caller duplicated anything, so it is a retryable
-    # conflict (409) rather than a raw IntegrityError (500).
-    session = _FakeSaveSession(_integrity_error("uq_group_player_group_uuid"))
-    repo = SqlAlchemyGroupRepository(session)  # type: ignore[arg-type]
-    with pytest.raises(GroupPlayerEditConflictError):
         await repo.save(_group_with_player())
 
 

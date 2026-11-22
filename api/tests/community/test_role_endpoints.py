@@ -21,7 +21,7 @@ from mc_server_dashboard_api.community.application.manage_role import (
     UpdateRole,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
-from mc_server_dashboard_api.community.domain.entities import Role
+from mc_server_dashboard_api.community.domain.entities import Community, Role
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityNotFoundError,
     PermissionCeilingExceededError,
@@ -37,6 +37,7 @@ from mc_server_dashboard_api.community.domain.permission_checker import (
 from mc_server_dashboard_api.community.domain.value_objects import (
     AuthUser,
     CommunityId,
+    CommunityName,
     Permission,
     ResourceRef,
     RoleId,
@@ -324,6 +325,11 @@ def test_create_role_refuses_a_name_the_rule_refuses(name: str) -> None:
 def test_update_role_refuses_a_name_the_rule_refuses(name: str) -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
+    uow.communities.seed(
+        Community(
+            id=community, name=CommunityName("guild"), created_at=_NOW, updated_at=_NOW
+        )
+    )
     role = _role(community)
     uow.roles.by_id[role.id] = role
     app = _app(member=True, allow=True)

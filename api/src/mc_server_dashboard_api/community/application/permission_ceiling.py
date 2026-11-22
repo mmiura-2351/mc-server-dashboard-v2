@@ -23,42 +23,58 @@ Lock order, the same for every transaction that locks through here:
    the recipient's membership first would deadlock with the deletion: the
    deletion's cascade waits for that membership, and the grant's foreign-key
    check waits for the user row the deletion is deleting;
-1. memberships: the actor's, and the recipient's a role assignment or grant
+1. the community row (``FOR KEY SHARE``, :func:`hold_community`; issue #4021),
+   held by every write that locks a row a community deletion cascades to and
+   can then wait for another: a role creation or update, a role assignment, a
+   grant creation, a member removal and a role unassignment take it before
+   their first other lock of this context, and :func:`lock_actor_ceiling`
+   expects it held. A rename is one: its UPDATE locks the role row, and its new
+   name's unique entry can then wait for a deletion that deleted a role of that
+   name;
+2. memberships: the actor's, and the recipient's a role assignment or grant
    creation inserts its row under (``FOR KEY SHARE``, one statement in
-   ascending id order, taken by the use case before anything else but step 0);
-2. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
-3. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
+   ascending id order, taken by the use case before anything else but steps 0
+   and 1);
+3. the grant's resource (``FOR KEY SHARE``, grant creation's existence check);
+4. role rows, one at a time in ascending id order (``FOR SHARE``; the role whose
    permissions an update replaces ``FOR UPDATE``, in its place in the order);
-4. the actor's ``membership_role`` rows of the roles locked in step 3 only
+5. the actor's ``membership_role`` rows of the roles locked in step 4 only
    (``FOR SHARE``; one added since names a role never locked, and is skipped);
-5. the actor's grant on the resource (``FOR SHARE``).
+6. the actor's grant on the resource (``FOR SHARE``).
 
 Each row is taken at its final strength in one pass, so two actors editing each
 other's roles cannot deadlock, and the inserting write's foreign-key checks find
 their parents (the memberships, the server, the assigned role) already held.
 Against the deleters:
 
-- a member removal locks the membership first (``FOR UPDATE``), then its
-  last-owner guard locks the Owner assignments, then its cascade the
-  membership's assignments and grants -- the order above;
-- a role deletion locks the role, then its cascade the assignments;
+- a member removal holds the community row, then locks the membership
+  (``FOR UPDATE``), then its last-owner guard locks the Owner assignments, then
+  its cascade the membership's assignments and grants -- the order above;
+- a role deletion locks the role, then its cascade the assignments, in one
+  statement;
 - a server deletion locks the server, then its cascade the grants;
-- a role unassignment locks only assignments (the Owner ones first, under the
-  last-owner guard);
+- a role unassignment holds the community row, then locks only assignments (the
+  Owner ones first, under the last-owner guard);
 - an account deletion takes the account write lock (exclusive) right after its
   ``user`` row locks and before any other, and its cascade then locks the
   account's memberships, their assignments and its grants -- the order above.
   A deletion waiting at step 0 holds only ``user`` rows
-  (``FOR NO KEY UPDATE``), which no transaction of this context waits for.
+  (``FOR NO KEY UPDATE``), which no transaction of this context waits for;
+- a community deletion's DELETE locks the community row, then the rows it
+  cascades to (issue #4021): every table here, and it is refused while the
+  community holds a server (issue #3218) only once it has cascaded to the
+  rest. The schema does not fix the order of those cascades -- a row's run in
+  the order of their trigger names, which embed OIDs -- so a write that locks
+  one of those rows and can then wait for another holds the community row first
+  (step 1). Whichever of the two locks it first, the other waits there holding
+  nothing the first needs. A role deletion takes no such hold: a deletion
+  deletes every role before any assignment, so it never holds an assignment
+  the role deletion waits for while it waits for the role.
 
-A community deletion cascades through every one of these tables (never to a
-server: it is refused while the community holds one, issue #3218) and is not
-ordered with these; a deadlock there is detected by PostgreSQL and aborts one
-side. A ceiling read after the deletion committed, or while it was in flight
-(the membership lock waits for it), finds the actor's membership gone; the
-community is then checked, and a community that is gone raises
-:class:`CommunityNotFoundError` instead of an empty ceiling (issue #2967) -- the
-answer of a write that meets the deletion at its foreign key onto ``community``
+A write that waited for the deletion, or began after it committed, finds the
+community gone at step 1 and raises :class:`CommunityNotFoundError` (issue
+#2967). So does a member addition, whose INSERT is its only lock of this
+context: it meets the deletion at its foreign key onto ``community``
 (``adapters/integrity.py``).
 """
 
@@ -80,6 +96,17 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 
 
+async def hold_community(uow: UnitOfWork, community_id: CommunityId) -> None:
+    """Hold the community against its deletion until the transaction ends.
+
+    Step 1 of the lock order. Raises :class:`CommunityNotFoundError` when the
+    community is gone: a deletion committed first, or committed while this
+    waited for it.
+    """
+    if not await uow.communities.hold(community_id):
+        raise CommunityNotFoundError(str(community_id.value))
+
+
 async def lock_actor_ceiling(
     uow: UnitOfWork,
     *,
@@ -99,23 +126,25 @@ async def lock_actor_ceiling(
     ``role_to_update`` is locked ``FOR UPDATE``, and ``roles_to_share`` share-
     locked, in the same ordered pass as the actor's roles, for a write that
     depends on those roles' current state; they count toward the ceiling only
-    if the actor holds them. A caller that also inserts under a recipient's
-    membership holds both memberships first (lock order step 1); the actor's
-    is then already held here.
+    if the actor holds them.
 
-    Raises :class:`CommunityNotFoundError` when the actor has no membership
-    because the community itself is gone (issue #2967); an actor who is merely
-    not a member of a community that exists gets the empty ceiling.
+    The caller holds the community first (lock order step 1), so an actor
+    without a membership is not a member of a community that exists, and gets
+    the empty ceiling. A caller that also inserts under a recipient's membership
+    holds both memberships first too (step 2); the actor's is then already held
+    here. Nothing here checks the hold: a new caller takes it, and adds its write
+    to ``_NOT_FOUND_WRITES`` in
+    ``tests/integration/test_community_delete_mid_write_races.py``. Without the
+    hold, a deleted community gives it the empty ceiling and a ceiling refusal
+    instead of the not-found, and the deadlock with the deletion returns.
     """
     memberships = await uow.memberships.hold_for_users(community_id, [actor_id])
     membership = memberships[0] if memberships else None
-    if membership is None and await uow.communities.get_by_id(community_id) is None:
-        raise CommunityNotFoundError(str(community_id.value))
     role_ids = (
         [] if membership is None else await uow.memberships.list_role_ids(membership.id)
     )
     roles = await uow.roles.lock_by_ids(
-        [*role_ids, *roles_to_share], for_update=role_to_update
+        community_id, [*role_ids, *roles_to_share], for_update=role_to_update
     )
     ceiling: set[Permission] = set()
     if membership is not None:
@@ -162,10 +191,10 @@ async def enforce_permission_ceiling(
 ) -> None:
     """Raise if ``conferred`` contains permissions the actor lacks.
 
-    Locks the ceiling's sources as :func:`lock_actor_ceiling` does, so the write
-    that follows in the same transaction commits only on authority the actor
-    still holds. Raises :class:`PermissionCeilingExceededError` listing the
-    exceeded codes.
+    Locks the ceiling's sources as :func:`lock_actor_ceiling` does, the caller
+    holding the community first, so the write that follows in the same
+    transaction commits only on authority the actor still holds. Raises
+    :class:`PermissionCeilingExceededError` listing the exceeded codes.
     """
     if not conferred:
         return

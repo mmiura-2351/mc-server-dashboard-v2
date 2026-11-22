@@ -741,11 +741,21 @@ file from the then-current union before it decides whether to hydrate:
   no snapshot publishes over the regenerated file. A start that finds the
   assignment still held by that snapshot is refused at once with 409
   `transition_conflict`, so it cannot go on to launch once the hold is released.
-- A change to a group itself (player add/remove, delete) locks the group row
-  before it writes anything and before it lists the attached servers, so a
-  concurrent attach either is in that list or waits for the change; no attached
-  server is left without a row. Taking the lock before the player rows are
-  written keeps a player edit and a group delete on one lock order.
+- A change to a group itself (rename, player add/remove, delete) locks the group
+  row before it reads the group, writes anything or lists the attached servers,
+  so a concurrent attach either is in that list or waits for the change; no
+  attached server is left without a row. Taking the lock before the player rows
+  are written keeps a player edit and a group delete on one lock order, and
+  reading under it means a change behind another sees what that one committed:
+  an edit keeps the earlier edit, and a second delete finds the group gone. The
+  lock matches the group's community as well, so a request naming another
+  community's group locks nothing.
+- Recording the row locks the server row (`FOR KEY SHARE`, in id order). That
+  holds off the server's deletion, an observed-state write (it locks the row
+  `FOR UPDATE`) and a change of a unique column such as the slug, but not a plain
+  update such as a `desired_state` or assignment change. A detach and a group
+  delete record their rows before they remove any `server_group` row, the order
+  a server deletion takes: the server row, then its attachments.
 - The write advances the working-set generation like any at-rest edit, so a
   Worker still holding the previous run's scratch hydrates instead of booting the
   pre-change file ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1).
@@ -1117,6 +1127,34 @@ concurrent server creation: the creation's INSERT holds the `community` row
 `FOR KEY SHARE` until it commits, so a Community deletion either waits for it and
 is then refused, or commits first and the creation fails as "community not
 found".
+
+**A Community deletion and a concurrent write in that Community wait for each
+other at the `community` row** (issue #4021). The deletion's `DELETE` locks
+that row before any row it cascades to. A write that locks one of those rows
+and can then wait for another holds the `community` row `FOR KEY SHARE` first:
+role creation, role update (a rename too), role assignment, grant creation,
+member removal and role unassignment. A rename counts because its `UPDATE`
+locks the role row and its new name's unique entry can then wait for a
+deletion that deleted a role of that name. That is step 1 of the lock order in
+`community/application/permission_ceiling.py`. Whichever of the two locks the
+row first, the other waits for it, so these writes cannot deadlock with the
+deletion, whatever order the cascades run in. The schema does not fix that
+order: a row's cascades run in the order of their trigger names, which embed
+OIDs. A role deletion takes no hold: a deletion deletes every role before any
+role assignment, so the two cannot wait for each other. A deletion or rename
+waiting for the row does not stop later writes from taking it, so a steady
+overlap of writes can delay it, as their foreign-key checks already could.
+
+- **The deletion first.** The write waits for the deletion and then answers
+  404 `not_found`, the answer the route's gate gives a non-member (issue
+  #2967). A member addition, a role creation and a grant creation answer this
+  way, as do the other writes listed above. A member addition locks no row of
+  the Community before its `INSERT`. It meets the deletion at the `INSERT`'s
+  foreign key onto `community` instead, with the same answer.
+- **The write first.** The deletion waits for the write to commit, then
+  cascades the new row away. A grant names a server of the Community, so the
+  deletion that waited for a grant creation is then refused 409
+  `community_has_servers`.
 
 Also distinct, **deleting a single server** (without deleting its Community)
 removes the `resource_grant` rows that point at it, `ON DELETE CASCADE` through

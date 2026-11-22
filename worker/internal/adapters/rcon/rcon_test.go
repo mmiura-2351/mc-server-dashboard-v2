@@ -585,10 +585,11 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 	defaultExecuteTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { defaultExecuteTimeout = prev })
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	ln := &closingListener{Listener: raw}
 	fs := &fakeServer{
 		ln:               ln,
 		password:         "secret",
@@ -600,8 +601,10 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 	go fs.serve()
 
 	// Cleanups run LIFO: register wg.Wait first so ln.Close (registered after)
-	// runs before it. A hung Dial would otherwise block wg.Wait forever with no
-	// unblock; closing the listener first lets a regression fail cleanly.
+	// runs before it. A hung Dial would otherwise block wg.Wait forever. Closing
+	// the listener alone does not unblock it, because the connection the server
+	// accepted stays open; ln.Close closes that connection too, so the blocked
+	// read in Dial ends and a regression fails at the guard below.
 	var wg sync.WaitGroup
 	t.Cleanup(func() { wg.Wait() })
 	t.Cleanup(func() { _ = ln.Close() })
@@ -622,6 +625,33 @@ func TestDialDefaultDeadlineUnblocksSilentAuthServer(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Dial hung past the default deadline against a silent-auth server")
 	}
+}
+
+// closingListener is a net.Listener whose Close also closes every connection it
+// accepted. Closing a plain listener leaves its accepted connections open.
+type closingListener struct {
+	net.Listener
+	mu       sync.Mutex
+	accepted []net.Conn
+}
+
+func (l *closingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.mu.Lock()
+		l.accepted = append(l.accepted, conn)
+		l.mu.Unlock()
+	}
+	return conn, err
+}
+
+func (l *closingListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, conn := range l.accepted {
+		_ = conn.Close()
+	}
+	return l.Listener.Close()
 }
 
 // After a round trip fails mid-stream, the connection is poisoned: a subsequent

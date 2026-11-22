@@ -765,7 +765,7 @@ func (m *Manager) Close() {
 	//
 	// THE LEDGER IS READ TWICE, and the second read is why. A stop dispatched before
 	// the shutdown began has its own RCON dial between the command and its save-off —
-	// a TCP connect plus an AUTH handshake, up to rcon's 30 s ceiling — so it can open
+	// a TCP connect and an AUTH handshake, up to rcon's 30 s ceiling each — so it can open
 	// a bracket long after the first read, and its lane is one Close never joins
 	// (#3168): the Worker would exit under a survivor with auto-save off. The second
 	// read happens after the join, when nothing Close joins is left to arm anything,

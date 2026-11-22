@@ -276,6 +276,23 @@ class CommunityRepositoryContract:
                 await transaction.repository.update(renamed)
                 await transaction.commit()
 
+    async def test_hold_reports_whether_the_community_exists(
+        self, community_repository_harness: RepositoryHarness[CommunityRepository]
+    ) -> None:
+        community = _community()
+        async with community_repository_harness.open() as transaction:
+            await transaction.repository.add(community)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            assert await transaction.repository.hold(community.id) is True
+            assert await transaction.repository.hold(CommunityId.new()) is False
+            await transaction.repository.delete(community.id)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            assert await transaction.repository.hold(community.id) is False
+
 
 class MembershipRepositoryContract:
     """Observable contract promised by :class:`MembershipRepository`."""
@@ -479,8 +496,14 @@ class RoleRepositoryContract:
             await transaction.commit()
 
         async with role_repository_harness.open() as transaction:
-            locked = await transaction.repository.lock_by_id(role.id)
-            missing = await transaction.repository.lock_by_id(RoleId.new())
+            community_id = role_repository_harness.community_id
+            locked = await transaction.repository.lock_by_id(community_id, role.id)
+            missing = await transaction.repository.lock_by_id(
+                community_id, RoleId.new()
+            )
+            foreign = await transaction.repository.lock_by_id(
+                role_repository_harness.other_community_id, role.id
+            )
             assert locked is not None
             locked.permissions.add(Permission("server:delete"))
             await transaction.commit()
@@ -490,6 +513,7 @@ class RoleRepositoryContract:
 
         assert locked.name == RoleName("Editor")
         assert missing is None
+        assert foreign is None
         assert reloaded is not None
         assert reloaded.permissions == {Permission("server:read")}
 
@@ -504,14 +528,21 @@ class RoleRepositoryContract:
             await transaction.commit()
 
         async with role_repository_harness.open() as transaction:
+            community_id = role_repository_harness.community_id
             locked = await transaction.repository.lock_by_ids(
-                [shared.id, RoleId.new()], for_update=target.id
+                community_id, [shared.id, RoleId.new()], for_update=target.id
             )
-            empty = await transaction.repository.lock_by_ids([])
+            empty = await transaction.repository.lock_by_ids(community_id, [])
+            foreign = await transaction.repository.lock_by_ids(
+                role_repository_harness.other_community_id,
+                [shared.id],
+                for_update=target.id,
+            )
             await transaction.commit()
 
         assert {role.id for role in locked} == {shared.id, target.id}
         assert empty == []
+        assert foreign == []
 
     async def test_update_writes_only_the_supplied_columns_and_returns_the_row(
         self, role_repository_harness: RoleRepositoryHarness

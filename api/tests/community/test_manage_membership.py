@@ -223,6 +223,18 @@ async def test_remove_non_member_raises_not_found() -> None:
         )
 
 
+async def test_remove_member_of_a_deleted_community_raises_community_not_found() -> (
+    None
+):
+    # The removal holds the community first, and a deletion took it (#4021).
+    uow = FakeAuthzUnitOfWork()
+    with pytest.raises(CommunityNotFoundError):
+        await RemoveMember(uow=uow)(
+            community_id=CommunityId.new(), user_id=UserId(uuid.uuid4())
+        )
+    assert uow.commits == 0
+
+
 async def test_remove_last_owner_is_rejected() -> None:
     uow = FakeAuthzUnitOfWork()
     community = _seed_community(uow)
@@ -477,6 +489,20 @@ async def test_unassign_role_detaches_role() -> None:
 
     assert await uow.memberships.list_role_ids(membership.id) == []
     assert uow.commits == 1
+
+
+async def test_unassign_role_in_a_deleted_community_raises_community_not_found() -> (
+    None
+):
+    # The unassignment holds the community first, and a deletion took it (#4021).
+    uow = FakeAuthzUnitOfWork()
+    with pytest.raises(CommunityNotFoundError):
+        await UnassignRole(uow=uow)(
+            community_id=CommunityId.new(),
+            user_id=UserId(uuid.uuid4()),
+            role_id=RoleId.new(),
+        )
+    assert uow.commits == 0
 
 
 async def test_unassign_last_owner_is_rejected() -> None:

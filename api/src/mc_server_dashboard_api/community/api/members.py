@@ -199,6 +199,8 @@ async def remove_member(
         await use_case(community_id=CommunityId(community_id), user_id=UserId(user_id))
     except MembershipNotFoundError as exc:
         raise _not_found() from exc
+    except CommunityNotFoundError as exc:
+        raise _not_found() from exc
     except LastOwnerRemovalError as exc:
         raise problem(status.HTTP_409_CONFLICT, "last_owner") from exc
     await recorder.record(
@@ -278,6 +280,8 @@ async def unassign_role(
     except MembershipNotFoundError as exc:
         raise _not_found() from exc
     except RoleNotFoundError as exc:
+        raise _not_found() from exc
+    except CommunityNotFoundError as exc:
         raise _not_found() from exc
     except LastOwnerRemovalError as exc:
         raise problem(status.HTTP_409_CONFLICT, "last_owner") from exc

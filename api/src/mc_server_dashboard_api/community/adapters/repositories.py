@@ -188,6 +188,14 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
         result = await self._session.execute(stmt)
         return {cid: count for cid, count in result.all()}
 
+    async def hold(self, community_id: CommunityId) -> bool:
+        stmt = (
+            select(CommunityModel.id)
+            .where(CommunityModel.id == community_id.value)
+            .with_for_update(read=True, key_share=True)
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def update(self, community: Community) -> None:
         stmt = (
             update(CommunityModel)
@@ -430,12 +438,19 @@ class SqlAlchemyRoleRepository(RoleRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_role(row) for row in rows]
 
-    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+    async def lock_by_id(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> Role | None:
         # populate_existing so the locked read, not an identity-map copy an
         # earlier read in this transaction left alive, is what the caller sees.
+        # The community is matched in the statement (it never changes), so
+        # another community's role is not locked.
         stmt = (
             select(RoleModel)
-            .where(RoleModel.id == role_id.value)
+            .where(
+                RoleModel.id == role_id.value,
+                RoleModel.community_id == community_id.value,
+            )
             .with_for_update()
             .execution_options(populate_existing=True)
         )
@@ -443,7 +458,11 @@ class SqlAlchemyRoleRepository(RoleRepository):
         return _to_role(row) if row is not None else None
 
     async def lock_by_ids(
-        self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
+        self,
+        community_id: CommunityId,
+        role_ids: Sequence[RoleId],
+        *,
+        for_update: RoleId | None = None,
     ) -> list[Role]:
         ids = {role_id.value for role_id in role_ids}
         if for_update is not None:
@@ -451,11 +470,16 @@ class SqlAlchemyRoleRepository(RoleRepository):
         roles = []
         # One statement per row, in ascending id order: a single statement takes
         # one lock strength for all its rows, and a share lock upgraded later can
-        # deadlock with another transaction holding the same share lock.
+        # deadlock with another transaction holding the same share lock. The
+        # community is matched in the statement (it never changes), so another
+        # community's role is not locked.
         for role_id in sorted(ids):
             stmt = (
                 select(RoleModel)
-                .where(RoleModel.id == role_id)
+                .where(
+                    RoleModel.id == role_id,
+                    RoleModel.community_id == community_id.value,
+                )
                 .with_for_update(read=for_update is None or role_id != for_update.value)
                 .execution_options(populate_existing=True)
             )

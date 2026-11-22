@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.community.application.permission_ceiling import (
     check_permission_ceiling,
     enforce_permission_ceiling,
+    hold_community,
     lock_actor_ceiling,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
@@ -114,6 +115,9 @@ class CreateRole:
             is_preset=False,
         )
         async with self.uow:
+            # The community before the ceiling's locks: the ceiling's lock order
+            # (#4021).
+            await hold_community(self.uow, community_id)
             await enforce_permission_ceiling(
                 self.uow,
                 actor_id=actor_id,
@@ -148,14 +152,21 @@ class UpdateRole:
         permissions: set[Permission] | None = None,
     ) -> Role:
         async with self.uow:
+            # The community first, the ceiling's lock order (#4021), by a rename
+            # too: its UPDATE locks the role row, and the new name can then wait
+            # for a community deletion that deleted a role of that name, whose
+            # cascade would reach the renamed role only after.
+            await hold_community(self.uow, community_id)
             # The ceiling below is evaluated against the set this write replaces,
             # so a permission edit reads the role under a row lock (#3215):
             # against an unlocked read, a permission removed concurrently would
             # not count as newly conferred and could come back unchecked. The
             # actor's own authority is locked too (#3241), in one pass with the
             # role so the locks follow the ceiling's global order; lock_by_id
-            # then re-reads the role that pass already holds. A rename writes
-            # only the name, so its read needs no lock.
+            # then re-reads the role that pass already holds. A role of another
+            # community neither of them locks, and lock_by_id finds none, so two
+            # edits naming each other's community's role cannot deadlock
+            # (#4027). A rename writes only the name, so its read needs no lock.
             ceiling: set[Permission] = set()
             if permissions is None:
                 role = await self.uow.roles.get_by_id(role_id)
@@ -166,7 +177,7 @@ class UpdateRole:
                     community_id=community_id,
                     role_to_update=role_id,
                 )
-                role = await self.uow.roles.lock_by_id(role_id)
+                role = await self.uow.roles.lock_by_id(community_id, role_id)
             if role is None or role.community_id != community_id:
                 raise RoleNotFoundError(str(role_id.value))
             if role.is_preset:
