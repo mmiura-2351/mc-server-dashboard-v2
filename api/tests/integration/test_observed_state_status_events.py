@@ -968,7 +968,8 @@ async def test_unit_of_work_without_the_bus_refuses_to_commit_an_intent_write(
 #
 # Every write that places or releases a server publishes the assignment it
 # left, after its commit, so a client never gates on a released Worker. A
-# release changes nothing else, so its frame carries the assignment alone.
+# release changes nothing else but the final-snapshot refusal it clears (#4054),
+# so its frame carries those two alone.
 
 
 async def test_reconciler_placement_publishes_the_assignment_alone(
@@ -1079,7 +1080,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
     world.assert_published_after_commit()
 
 
-async def test_release_under_an_unchanged_state_publishes_the_assignment_alone(
+async def test_release_under_an_unchanged_state_publishes_the_release_alone(
     world: _World,
 ) -> None:
     """An unassigning write that repeats the state still announces the release."""

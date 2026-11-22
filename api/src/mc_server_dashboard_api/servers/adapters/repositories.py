@@ -468,7 +468,8 @@ class SqlAlchemyServerRepository(ServerRepository):
         carries a ``detail`` or ``reason``: the frame would tell a subscriber
         nothing it does not hold. That keeps the bulk invalidations quiet for
         rows they do not change, while a Worker report that explains itself is
-        always relayed. A release of such a row stages the assignment alone.
+        always relayed. A release of such a row stages the release alone: the
+        assignment and the refusal it clears.
 
         The same UPDATE stores the last crash (issue #3281): ``reason`` and
         ``detail`` when ``observed_state`` is ``crashed``, NULL for every other
