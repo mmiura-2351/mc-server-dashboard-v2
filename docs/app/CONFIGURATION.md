@@ -517,14 +517,16 @@ released, a `start` answers `409`, and a delete or a write to the server's files
 `409 server_assigned`. A holder of `server:stop` can instead release the server
 without the snapshot ([`WEBUI_SPEC.md`](../ui/WEBUI_SPEC.md) Section 2.3). The
 hold outlasts an API restart, after which the first retry waits the full
-`grace_seconds`. If the Worker disconnects, the server waits a full
-`grace_seconds` from the drop like any held server: a Worker back within it gets
-the snapshot retried, and past it the server is released without the snapshot.
-One exception remains (issue #4111): a `stop` of the held server while its
-Worker is not connected releases it at once, without the snapshot and without
-the grace, as it does any server of a disconnected Worker ("A Worker that never
-reconnects" below). It is audited as a plain `server:stop`, and nothing retries
-the snapshot when the Worker comes back.
+`grace_seconds`. A retry that times out or meets a session end keeps the
+server and the recorded refusal alike (issue #4111): only a release clears
+`final_snapshot_refusal`, and a later refusal rewrites it. If the Worker
+disconnects, the server waits a full `grace_seconds` from the drop like any held
+server: a Worker back within it gets the snapshot retried, and past it the
+server is released without the snapshot. A `stop` of the held server while its
+Worker is not connected releases nothing and changes nothing (issue #4111): it
+answers `503 worker_unavailable` with `worker_state: "not_connected"` and a
+`detail` naming the three ways out, the Worker's return, that full grace, and
+the release without the snapshot.
 
 **A Worker that never reconnects.** When a Worker disconnects, the API marks its
 servers `observed=unknown`, except a crashed one, which stays `crashed`, and keeps
@@ -554,7 +556,10 @@ for the server once that Worker no longer owns it (issue #3809).
    an API restart, from no earlier than the new process's start; see the
    `reconciler.grace_seconds` row below), or at
    once by a second `stop` (for a stopped intent whose Worker is disconnected,
-   `stopped_intent_action` selects `clear_stale_assignment`).
+   `stopped_intent_action` selects `clear_stale_assignment`). A server held by
+   a refused final snapshot (`final_snapshot_refusal` set, above) is the
+   exception: a second `stop` answers `503` and keeps it, and the release
+   without the snapshot frees it at once instead (issue #4111).
 2. **Start it.** The start places the server on another Worker (placement
    offers only online ones, `InMemoryWorkerRegistry.candidates_for_placement`)
    and starts it from the last published snapshot, hydrating it unless that

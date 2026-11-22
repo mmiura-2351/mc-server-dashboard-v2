@@ -1225,7 +1225,8 @@ for any new code is in place before the worker starts emitting it.
 >     guard has none to compare. Past the grace, the server is released without
 >     the snapshot, and its next start hydrates from the store, losing what the
 >     snapshot owed. A `stop` of that server while the Worker is down releases
->     it at once, without the snapshot (issue #4111). See
+>     nothing: it answers `503 worker_unavailable` and the server stays held
+>     (issue #4111). See
 >     [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md) Section 5.6.
 >   - One that fails any other way, such as the region check's
 >     `TRANSFER_FAILED`, releases the server and keeps the working set, and the

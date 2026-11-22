@@ -12,7 +12,9 @@ It releases nothing else. A row held for another reason (a snapshot not
 answered yet, a session that ended, a disconnected Worker's grace) records no
 refusal and may still get its snapshot, so it is refused. So is a row whose
 stop convergence or final snapshot is in flight: releasing under an upload that
-may still publish is the #847 race.
+may still publish is the #847 race. A refused row whose retry was then left
+unanswered keeps its refusal, and stays releasable once nothing is in flight
+(issue #4111): that retry did not settle the snapshot it is held for.
 
 It touches only the database (PM ruling 3(a) on #3697) and sends the Worker no
 command. What it leaves behind:

@@ -861,8 +861,9 @@ Notes:
   `409 final_snapshot_refused` when the Worker refuses again. A retry that
   publishes releases the server and clears
   the refusal. One that times out or meets a session end keeps the server and
-  clears the refusal, since the latest answer is not a refusal; a later
-  refusal sets it again. Every other answer to a final snapshot releases the
+  the refusal (issue #4111): the snapshot the server is held for is still
+  owed, so only a release clears the refusal, and a later refusal rewrites
+  it. Every other answer to a final snapshot releases the
   server as before. While the server is held, a start is
   `409 transition_conflict`, and a delete and every at-rest write are
   `409 server_assigned` (WEBUI_SPEC.md Section 2.3), so the store generation
@@ -870,12 +871,12 @@ Notes:
   only the short grace is lost, and the first retry after the restart waits
   the full grace. A Worker that disconnects and stays away a full grace from
   the drop loses the hold, and the server is released without the snapshot
-  (Section 4.4). One exception remains (issue #4111): a stop of the held
-  server while its Worker is not connected releases it at once, without the
-  snapshot and without the grace, as it does any server of a disconnected
-  Worker. It is audited as a plain `server:stop`, and nothing retries the
-  snapshot when the Worker comes back. A holder of `server:stop` can release
-  it at once (next note).
+  (Section 4.4). A stop of the held server while its Worker is not connected
+  releases nothing and changes nothing: it answers `503 worker_unavailable`
+  (`worker_state: "not_connected"`), with a `detail` naming what does release
+  the server (issue #4111). That is the Worker's return, whose retry takes the
+  snapshot, the full grace above, or the release without the snapshot (next
+  note).
 - **Releasing a held server without its final snapshot sends no command.** A
   stop holds its Worker until the final snapshot settles. When the Worker
   refuses that snapshot `BUSY` or `UNAVAILABLE`, the server records the refusal
@@ -889,9 +890,11 @@ Notes:
   that may still publish is never released under (issue #847). It releases
   only a server still `desired=stopped`, at rest, assigned and holding a
   refusal, and answers any other `409 invalid_transition`. A server held for
-  another reason (a snapshot not answered yet, a session that ended, a
-  disconnected Worker's grace) may still get its snapshot. A refusal held
-  through its Worker's disconnect reads `unknown` and stays releasable. The
+  another reason, with no refusal recorded (a snapshot not answered yet, a
+  session that ended, a disconnected Worker's grace), may still get its
+  snapshot. A refusal held through its Worker's disconnect reads `unknown` and
+  stays releasable, as does one whose retry was left unanswered, which keeps
+  the refusal (issue #4111). The
   write is the stale-assignment release, guarded on the Worker and on the
   `observed_at` it read, so a report that lands meanwhile keeps the server
   held (`409 transition_conflict`). It clears the assignment, the refusal and
