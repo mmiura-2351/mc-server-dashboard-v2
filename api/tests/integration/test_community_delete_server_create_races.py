@@ -60,7 +60,7 @@ from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
 )
-from tests.integration.races import await_settled, race_database
+from tests.integration.races import SETTLE_TIMEOUT, await_settled, race_database
 from tests.servers.fakes import FakeClock, FakeFileStore, FakeVersionValidator
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -130,17 +130,28 @@ class _ServersUnitOfWork(ServersUnitOfWork):
 
 
 class _PausingCommunityRepository(SqlAlchemyCommunityRepository):
-    def __init__(self, session: AsyncSession, pause: _Pause) -> None:
+    def __init__(self, session: AsyncSession, pause: _Pause, after: str) -> None:
         super().__init__(session)
         self._pause = pause
+        self._after = after
+
+    async def lock(self, community_id: CommunityId) -> bool:
+        locked = await super().lock(community_id)
+        if self._after == "lock":
+            await self._pause.hold()
+        return locked
 
     async def delete(self, community_id: CommunityId) -> None:
         await super().delete(community_id)
-        await self._pause.hold()
+        if self._after == "delete":
+            await self._pause.hold()
 
 
 class _CommunityUnitOfWork(CommunityUnitOfWork):
-    """Community unit of work that reports its pid and can pause after DELETE."""
+    """Community unit of work that reports its pid and can pause.
+
+    The pause sits after the community's ``lock`` or, by default, its DELETE.
+    """
 
     def __init__(
         self,
@@ -148,10 +159,12 @@ class _CommunityUnitOfWork(CommunityUnitOfWork):
         *,
         pid: asyncio.Future[int] | None = None,
         pause: _Pause | None = None,
+        pause_after: str = "delete",
     ) -> None:
         super().__init__(session_factory)
         self._pid = pid
         self._pause = pause
+        self._pause_after = pause_after
 
     async def __aenter__(self) -> _CommunityUnitOfWork:
         await super().__aenter__()
@@ -159,7 +172,9 @@ class _CommunityUnitOfWork(CommunityUnitOfWork):
         if self._pid is not None:
             await _report_pid(self._session, self._pid)
         if self._pause is not None:
-            self.communities = _PausingCommunityRepository(self._session, self._pause)
+            self.communities = _PausingCommunityRepository(
+                self._session, self._pause, self._pause_after
+            )
         return self
 
 
@@ -274,3 +289,87 @@ async def test_server_creation_racing_an_uncommitted_deletion_reports_not_found(
     assert isinstance(created, CommunityNotFoundError)
     assert await _count(engine, "community") == 0
     assert await _count(engine, "server") == 0
+
+
+async def test_server_creation_waits_for_a_deletion_holding_the_community_row(
+    engine: AsyncEngine,
+) -> None:
+    # The deletion locks the community row before it checks for servers, and a
+    # creation's INSERT takes that row FOR KEY SHARE for its foreign key, which
+    # the lock conflicts with: no creation commits between the check and the
+    # DELETE (issue #4033).
+    factory = create_session_factory(engine)
+    community_id = await _seed_community(factory)
+
+    pause = _Pause()
+    deletion = asyncio.create_task(
+        DeleteCommunity(
+            uow=_CommunityUnitOfWork(factory, pause=pause, pause_after="lock")
+        )(community_id=community_id)
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    creation: asyncio.Task[Server] = asyncio.create_task(
+        _create_server(_ServersUnitOfWork(factory, pid=pid), community_id)
+    )
+
+    deleted, created = await _race(engine, pause, deletion, creation, pid)
+
+    assert deleted is None
+    assert isinstance(created, CommunityNotFoundError)
+    assert await _count(engine, "community") == 0
+    assert await _count(engine, "server") == 0
+
+
+async def test_deletion_waiting_for_a_server_creation_is_refused_before_it_cascades(
+    engine: AsyncEngine,
+) -> None:
+    # The deletion waits for the creation at the community row and checks for
+    # servers only once it holds the row, so it sees the new server and is
+    # refused before its DELETE runs (issue #4033). A check before the wait
+    # misses the uncommitted server; the DELETE then cascades, and only the
+    # foreign key refuses it, after it has waited for the rows of the cascade.
+    # A third transaction holds one of them, a role of the community.
+    factory = create_session_factory(engine)
+    community_id = await _seed_community(factory)
+    role_id = uuid.uuid4()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO role "
+                "(id, community_id, name, permissions, is_preset, "
+                "created_at, updated_at) VALUES "
+                "(:id, :cid, 'Builders', '{}', false, now(), now())"
+            ),
+            {"id": role_id, "cid": community_id.value},
+        )
+
+    pause = _Pause()
+    creation: asyncio.Task[Server] = asyncio.create_task(
+        _create_server(_ServersUnitOfWork(factory, pause=pause), community_id)
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        DeleteCommunity(uow=_CommunityUnitOfWork(factory, pid=pid))(
+            community_id=community_id
+        )
+    )
+    await await_settled(engine, deletion, lambda: pid.result() if pid.done() else None)
+    assert not deletion.done()
+
+    async with engine.connect() as holder:
+        await holder.execute(
+            text("SELECT 1 FROM role WHERE id = :id FOR KEY SHARE"), {"id": role_id}
+        )
+        pause.resume.set()
+        created = await creation
+        finished, _ = await asyncio.wait({deletion}, timeout=SETTLE_TIMEOUT)
+        assert deletion in finished, "the deletion waited for a row of its cascade"
+
+    assert isinstance(created, Server)
+    assert isinstance(deletion.exception(), CommunityHasServersError)
+    assert await _count(engine, "community") == 1
+    assert await _count(engine, "server") == 1
+    assert await _count(engine, "role") == 1

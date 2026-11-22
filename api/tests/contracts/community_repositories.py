@@ -293,6 +293,23 @@ class CommunityRepositoryContract:
         async with community_repository_harness.open() as transaction:
             assert await transaction.repository.hold(community.id) is False
 
+    async def test_lock_reports_whether_the_community_exists(
+        self, community_repository_harness: RepositoryHarness[CommunityRepository]
+    ) -> None:
+        community = _community()
+        async with community_repository_harness.open() as transaction:
+            await transaction.repository.add(community)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            assert await transaction.repository.lock(community.id) is True
+            assert await transaction.repository.lock(CommunityId.new()) is False
+            await transaction.repository.delete(community.id)
+            await transaction.commit()
+
+        async with community_repository_harness.open() as transaction:
+            assert await transaction.repository.lock(community.id) is False
+
 
 class MembershipRepositoryContract:
     """Observable contract promised by :class:`MembershipRepository`."""
@@ -631,6 +648,21 @@ class RoleRepositoryContract:
                 )
                 await transaction.commit()
 
+    async def test_delete_reports_whether_it_deleted_the_role(
+        self, role_repository_harness: RoleRepositoryHarness
+    ) -> None:
+        role = _role(role_repository_harness, "Editor")
+        async with role_repository_harness.open() as transaction:
+            await transaction.repository.add(role)
+            await transaction.commit()
+
+        async with role_repository_harness.open() as transaction:
+            assert await transaction.repository.delete(role.id) is True
+            await transaction.commit()
+        async with role_repository_harness.open() as transaction:
+            assert await transaction.repository.delete(role.id) is False
+            assert await transaction.repository.get_by_id(role.id) is None
+
 
 class ResourceGrantRepositoryContract:
     """Observable contract promised by :class:`ResourceGrantRepository`."""
@@ -750,3 +782,18 @@ class ResourceGrantRepositoryContract:
             async with resource_grant_repository_harness.open() as transaction:
                 await transaction.repository.add(duplicate)
                 await transaction.commit()
+
+    async def test_delete_reports_whether_it_deleted_the_grant(
+        self, resource_grant_repository_harness: ResourceGrantRepositoryHarness
+    ) -> None:
+        grant = _grant(resource_grant_repository_harness)
+        async with resource_grant_repository_harness.open() as transaction:
+            await transaction.repository.add(grant)
+            await transaction.commit()
+
+        async with resource_grant_repository_harness.open() as transaction:
+            assert await transaction.repository.delete(grant.id) is True
+            await transaction.commit()
+        async with resource_grant_repository_harness.open() as transaction:
+            assert await transaction.repository.delete(grant.id) is False
+            assert await transaction.repository.get_by_id(grant.id) is None

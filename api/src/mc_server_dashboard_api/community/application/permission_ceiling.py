@@ -60,16 +60,18 @@ Against the deleters:
   account's memberships, their assignments and its grants -- the order above.
   A deletion waiting at step 0 holds only ``user`` rows
   (``FOR NO KEY UPDATE``), which no transaction of this context waits for;
-- a community deletion's DELETE locks the community row, then the rows it
-  cascades to (issue #4021): every table here, and it is refused while the
-  community holds a server (issue #3218) only once it has cascaded to the
-  rest. The schema does not fix the order of those cascades -- a row's run in
-  the order of their trigger names, which embed OIDs -- so a write that locks
-  one of those rows and can then wait for another holds the community row first
-  (step 1). Whichever of the two locks it first, the other waits there holding
-  nothing the first needs. A role deletion takes no such hold: a deletion
-  deletes every role before any assignment, so it never holds an assignment
-  the role deletion waits for while it waits for the role.
+- a community deletion locks the community row (``FOR UPDATE``, the lock its
+  DELETE takes) and, while the community holds a server, is refused before its
+  DELETE runs (issues #3218, #4033). The DELETE then locks the rows it
+  cascades to (issue #4021): every table here, though no grant, which names a
+  server of the community. The schema does not fix the order of those
+  cascades -- a row's run in the order of their trigger names, which embed
+  OIDs -- so a write that locks one of those rows and can then wait for another
+  holds the community row first (step 1). Whichever of the two locks it first,
+  the other waits there holding nothing the first needs. A role deletion takes
+  no such hold: a deletion deletes every role before any assignment, so it
+  never holds an assignment the role deletion waits for while it waits for the
+  role.
 
 A write that waited for the deletion, or began after it committed, finds the
 community gone at step 1 and raises :class:`CommunityNotFoundError` (issue

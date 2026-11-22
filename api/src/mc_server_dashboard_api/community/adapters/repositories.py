@@ -196,6 +196,22 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
         )
         return (await self._session.execute(stmt)).first() is not None
 
+    async def lock(self, community_id: CommunityId) -> bool:
+        stmt = (
+            select(CommunityModel.id)
+            .where(CommunityModel.id == community_id.value)
+            .with_for_update()
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
+    async def has_servers(self, community_id: CommunityId) -> bool:
+        stmt = (
+            select(ServerModel.id)
+            .where(ServerModel.community_id == community_id.value)
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).first() is not None
+
     async def update(self, community: Community) -> None:
         stmt = (
             update(CommunityModel)
@@ -227,10 +243,11 @@ class SqlAlchemyCommunityRepository(CommunityRepository):
             await self._session.execute(stmt)
         except IntegrityError as exc:
             # fk_server_community_id_community is ON DELETE RESTRICT: PostgreSQL
-            # refuses this statement while a server references the community,
-            # including one a concurrent creation committed while this DELETE
-            # waited for the community row (issue #3218). The enclosing
-            # UnitOfWork rolls back, so nothing the statement cascaded to is lost.
+            # refuses this statement while a server references the community
+            # (issue #3218). DeleteCommunity refuses that before this statement,
+            # under the community lock (#4033), so this is the backstop. The
+            # enclosing UnitOfWork rolls back, so nothing the statement cascaded
+            # to is lost.
             translate_integrity_error(exc)
             raise
 
@@ -534,9 +551,10 @@ class SqlAlchemyRoleRepository(RoleRepository):
             raise RoleNotFoundError(str(role_id.value))
         return _to_role(row)
 
-    async def delete(self, role_id: RoleId) -> None:
+    async def delete(self, role_id: RoleId) -> bool:
         stmt = delete(RoleModel).where(RoleModel.id == role_id.value)
-        await self._session.execute(stmt)
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount == 1
 
 
 class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
@@ -612,6 +630,7 @@ class SqlAlchemyResourceGrantRepository(ResourceGrantRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_resource_grant(row) for row in rows]
 
-    async def delete(self, grant_id: ResourceGrantId) -> None:
+    async def delete(self, grant_id: ResourceGrantId) -> bool:
         stmt = delete(ResourceGrantModel).where(ResourceGrantModel.id == grant_id.value)
-        await self._session.execute(stmt)
+        result = await self._session.execute(stmt)
+        return cast("CursorResult[Any]", result).rowcount == 1

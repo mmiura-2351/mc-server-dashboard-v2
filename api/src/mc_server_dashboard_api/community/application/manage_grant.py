@@ -153,7 +153,11 @@ class CreateGrant:
 
 @dataclass(frozen=True)
 class RevokeGrant:
-    """Revoke a resource grant by id, scoped to this community (grant:manage)."""
+    """Revoke a resource grant by id, scoped to this community (grant:manage).
+
+    A grant a concurrent revocation or cascade removed while the DELETE waited
+    for it is reported as not-found (issue #4033).
+    """
 
     uow: UnitOfWork
 
@@ -164,5 +168,6 @@ class RevokeGrant:
             grant = await self.uow.resource_grants.get_by_id(grant_id)
             if grant is None or grant.community_id != community_id:
                 raise ResourceGrantNotFoundError(str(grant_id.value))
-            await self.uow.resource_grants.delete(grant_id)
+            if not await self.uow.resource_grants.delete(grant_id):
+                raise ResourceGrantNotFoundError(str(grant_id.value))
             await self.uow.commit()

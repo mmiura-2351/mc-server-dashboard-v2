@@ -25,6 +25,7 @@ from mc_server_dashboard_api.community.domain.clock import Clock
 from mc_server_dashboard_api.community.domain.entities import Community, Membership
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
+    CommunityHasServersError,
     CommunityNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
@@ -117,6 +118,16 @@ async def test_delete_missing_raises_not_found() -> None:
     uow = FakeAuthzUnitOfWork()
     with pytest.raises(CommunityNotFoundError):
         await DeleteCommunity(uow=uow)(community_id=CommunityId(uuid.uuid4()))
+
+
+async def test_delete_refuses_a_community_holding_a_server() -> None:
+    uow = FakeAuthzUnitOfWork()
+    community = _seed_community(uow)
+    uow.communities.server_counts[community.id] = 1
+    with pytest.raises(CommunityHasServersError):
+        await DeleteCommunity(uow=uow)(community_id=community.id)
+    assert community.id in uow.communities.by_id
+    assert uow.commits == 0
 
 
 async def test_list_my_communities_scopes_to_member() -> None:

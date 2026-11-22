@@ -119,6 +119,12 @@ class FakeCommunityRepository(CommunityRepository):
     async def hold(self, community_id: CommunityId) -> bool:
         return community_id in self.by_id
 
+    async def lock(self, community_id: CommunityId) -> bool:
+        return community_id in self.by_id
+
+    async def has_servers(self, community_id: CommunityId) -> bool:
+        return self.server_counts.get(community_id, 0) > 0
+
     async def update(self, community: Community) -> None:
         # Mirror the adapter's ``UPDATE community ... WHERE id = :id``: a missing
         # id matches no row, so nothing is written and no row appears -- keying
@@ -342,8 +348,8 @@ class FakeRoleRepository(RoleRepository):
         self.by_id[role_id] = written
         return self._copy(written)
 
-    async def delete(self, role_id: RoleId) -> None:
-        self.by_id.pop(role_id, None)
+    async def delete(self, role_id: RoleId) -> bool:
+        return self.by_id.pop(role_id, None) is not None
 
 
 class FakeResourceGrantRepository(ResourceGrantRepository):
@@ -413,8 +419,8 @@ class FakeResourceGrantRepository(ResourceGrantRepository):
             and (user_id is None or g.user_id == user_id)
         ]
 
-    async def delete(self, grant_id: ResourceGrantId) -> None:
-        self.by_id.pop(grant_id, None)
+    async def delete(self, grant_id: ResourceGrantId) -> bool:
+        return self.by_id.pop(grant_id, None) is not None
 
 
 class FakeResourceExistenceChecker(ResourceExistenceChecker):

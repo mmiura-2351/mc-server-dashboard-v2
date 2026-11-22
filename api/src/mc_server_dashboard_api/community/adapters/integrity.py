@@ -55,11 +55,13 @@ violates inside the unit of work's ``commit`` wrap.
 **A third is mapped in its DELETE direction: the servers of a community**
 (migration 0042, issue #3218). ``fk_server_community_id_community`` is
 ``ON DELETE RESTRICT``, so PostgreSQL refuses the community DELETE while a
-``server`` row references the community, and that refusal *is* the rule that a
-community's servers are deleted first: it surfaces as
-:class:`CommunityHasServersError` (409). It is refused at the DELETE statement,
-before any commit, so ``SqlAlchemyCommunityRepository.delete`` translates at its
-own execute site. The same constraint fires in the other direction on a server
+``server`` row references the community: the rule that a community's servers
+are deleted first, surfacing as :class:`CommunityHasServersError` (409).
+``DeleteCommunity`` refuses such a community before its DELETE, under the
+community lock (issue #4033), so this mapping is the backstop. It is refused at
+the DELETE statement, before any commit, so
+``SqlAlchemyCommunityRepository.delete`` translates at its own execute site.
+The same constraint fires in the other direction on a server
 INSERT whose community is gone; that statement belongs to the servers context,
 which maps it to its own not-found in ``servers/adapters/integrity.py``. No
 statement of this context inserts a server, so the entry here has one meaning.
