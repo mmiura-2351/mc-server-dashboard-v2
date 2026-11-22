@@ -22,6 +22,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -88,6 +89,11 @@ class Server:
     # is set, the Worker's scratch may be older than the store, so nothing
     # publishes a snapshot from it.
     awaiting_hydrate: bool = False
+    # Why the assigned Worker refused the stop's final snapshot (issue #4054),
+    # or ``None``. The repository writes it only while the row is
+    # ``desired_state=stopped`` and still assigned to that Worker, and clears it
+    # with the assignment, so it is ``None`` on every unassigned row.
+    final_snapshot_refusal: FinalSnapshotRefusal | None = None
 
     def observe(self, state: ObservedState, at: dt.datetime) -> None:
         """Reflect an observed-state write that landed (issues #292, #3281).

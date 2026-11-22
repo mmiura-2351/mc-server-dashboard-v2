@@ -4368,6 +4368,8 @@ export interface components {
             crash_reason: string | null;
             /** Desired State */
             desired_state: string;
+            /** Final Snapshot Refusal */
+            final_snapshot_refusal?: string | null;
             /** Game Port */
             game_port: number | null;
             /** Id */

@@ -142,7 +142,9 @@ rollback, a restore, a plugin or resource-pack change, a PATCH that is not
 safe-keys-only — and a manual backup, an export and its grant are
 `409 server_assigned`, with a `detail` that says to wait for the release and try
 again (#3998). Reads are served. A scheduled backup waits for the release by
-itself.
+itself. The server read's `final_snapshot_refusal` says when the Worker has
+refused that final snapshot (`busy` / `unavailable`) rather than not answered
+yet (#4054).
 
 **Request body limits.** Every route reads at most a fixed amount of request
 body and answers a larger one **413**, by `Content-Length` before reading
@@ -316,6 +318,9 @@ Bedrock join is verified on Paper only, BEDROCK.md Section 1),
 reason and the Worker's detail, both null unless the server is crashed;
 DATABASE.md Section 7), `crash_not_restarted` (whether the reconciler leaves
 that crash alone, false under a stopped intent; CONFIGURATION.md Section 5.6),
+`final_snapshot_refusal` (`busy` / `unavailable`: why the assigned Worker
+refused the stop's final snapshot, null otherwise; DATABASE.md Section 7. No
+stop is held on a refusal yet, issue #4056, so it reads null),
 `backup_retention` (the scheduled-backup retention policy; null while
 unconfigured).
 
@@ -361,8 +366,8 @@ Global resource pack library (not community-scoped) and per-server assignment.
 
 | Path | Notes |
 |---|---|
-| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, or `{assigned_worker_id}` for a placement or release, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted}` (see below). |
-| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted}]}` with `server_id: null` (see below). |
+| `WS /communities/{cid}/servers/{sid}/events?streams=status,log,metrics,notification` | Typed frames `{stream, ts, payload}`. `status`: `{state, detail, reason}` for an observed transition (`reason`: the crash reason the Worker classified — `forge_install_failed` / `forge_install_out_of_memory` / `forge_install_java_incompatible` — or `""`; CONTROL_PLANE.md Section 6), `{desired_state}` for a change of the server's intent, `{assigned_worker_id}` for a placement or release, or `{final_snapshot_refusal}` for a refusal of a stop's final snapshot recorded or cleared, each carried by the frame of the write that changed it (see below) · `log`: `{line, stream}` · `metrics`: `{cpu_millis, memory_bytes, player_count}` · `notification`: `{kind, title, detail}` (operator notice) · `gap`: client fell behind (always delivered) · `snapshot`: `{state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}` (see below). |
+| `WS /communities/{cid}/events` | Community-wide **status + notification** firehose; frames carry `server_id`. `snapshot`: `{servers: [{server_id, state, desired_state, assigned_worker_id, crash_reason, crash_detail, crash_not_restarted, final_snapshot_refusal}]}` with `server_id: null` (see below). |
 
 Missed frames are never replayed (delivery is best-effort), so a connection
 that carries status opens with a **`snapshot`** frame and gets a fresh one
@@ -371,9 +376,10 @@ such check (a gap that dropped only other streams cost no status and is not
 followed by one; neither is a gap whose status losses happened while the
 previous gap was being delivered, since that gap's snapshot already covers
 them): the persisted observed and desired states, the assigned Worker
-(`assigned_worker_id`, `null` when none) and the last crash (`crash_reason` and
+(`assigned_worker_id`, `null` when none), the last crash (`crash_reason` and
 `crash_detail`, both `null` unless the server is crashed, and
-`crash_not_restarted`) of the stream's scope, read together from each server's row — the server for the per-server stream (only when `status` is among the
+`crash_not_restarted`) and the final-snapshot refusal
+(`final_snapshot_refusal`, `null` when none) of the stream's scope, read together from each server's row — the server for the per-server stream (only when `status` is among the
 subscribed streams), every server of the community for the community stream.
 Its `ts` is the time the snapshot was read. Its `crash_reason` and `crash_detail`
 are the stored `reason` and `detail` of the crashed `status` frame. The live
@@ -413,12 +419,21 @@ revert (in the frame of their `desired_state`), the reconciler's placement of a
 desired-running server and its undo when the launch never reached the Worker,
 and every release of a stopped server: after its final snapshot, on a late
 final-snapshot result, and the reconciler's recovery of a stop left holding
-its Worker. A release changes nothing else, so its frame is
-`{assigned_worker_id: null}` alone, except where the same write converges the
+its Worker. A release also clears the final-snapshot refusal and changes
+nothing else, so its frame is `{assigned_worker_id: null,
+final_snapshot_refusal: null}`, except where the same write converges the
 observed state (a stop left `stopping`, released as `unknown`). Deleting a
 server changes no assignment: the API refuses it while a Worker is assigned.
 A write that changes neither the intent nor the assignment (a restart)
 publishes nothing.
+
+Every change of a server's final-snapshot refusal while a stop still holds its
+Worker publishes a `status` frame `{final_snapshot_refusal}` too, after the
+write that made it commits: `busy` or `unavailable` when that Worker refused
+the stop's final snapshot, `null` when a later attempt was not refused (#4054).
+The same refusal recorded again publishes nothing. Nothing records a refusal
+yet: holding the Worker on one is issue #4056, so until then the field reads
+`null` wherever it appears.
 
 A client applies each `status` frame by setting the fields it carries, so
 another tab's dashboard offers the actions of the current intent without a

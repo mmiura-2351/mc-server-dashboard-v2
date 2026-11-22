@@ -69,6 +69,7 @@ from mc_server_dashboard_api.servers.domain.errors import ServerNotFoundError
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     WorkerId,
 )
@@ -106,6 +107,7 @@ class _FakeServer:
     crash_reason: CrashReason | None = None
     crash_detail: str | None = None
     not_restarted: bool = False
+    final_snapshot_refusal: FinalSnapshotRefusal | None = None
 
     def crash_not_restarted(self) -> bool:
         return self.not_restarted
@@ -116,9 +118,9 @@ class _FakeReadServer:
 
     ``found`` decides the ownership check (cross-community -> not found); a found
     server reports ``state`` as its observed state, ``desired`` as its desired
-    state, ``assigned`` as its Worker and ``crash`` as its last crash's reason
-    and detail, which the on-subscribe snapshot frame carries (#1795, #3428,
-    #3818, #3281).
+    state, ``assigned`` as its Worker, ``crash`` as its last crash's reason
+    and detail and ``refusal`` as its final-snapshot refusal, which the
+    on-subscribe snapshot frame carries (#1795, #3428, #3818, #3281, #4054).
     """
 
     def __init__(
@@ -130,6 +132,7 @@ class _FakeReadServer:
         assigned: WorkerId | None = None,
         crash: tuple[CrashReason | None, str | None] = (None, None),
         not_restarted: bool = False,
+        refusal: FinalSnapshotRefusal | None = None,
     ) -> None:
         self._found = found
         self.state = state
@@ -137,6 +140,7 @@ class _FakeReadServer:
         self.assigned = assigned
         self.crash = crash
         self.not_restarted = not_restarted
+        self.refusal = refusal
 
     async def __call__(self, **_kwargs: object) -> object:
         if not self._found:
@@ -148,6 +152,7 @@ class _FakeReadServer:
             crash_reason=self.crash[0],
             crash_detail=self.crash[1],
             not_restarted=self.not_restarted,
+            final_snapshot_refusal=self.refusal,
         )
 
 
@@ -404,6 +409,7 @@ def test_slow_consumer_receives_a_gap_frame_then_a_fresh_snapshot() -> None:
         "crash_reason": None,
         "crash_detail": None,
         "crash_not_restarted": False,
+        "final_snapshot_refusal": None,
     }
     assert third["payload"] == {"state": "3"}
 
@@ -545,10 +551,10 @@ def _await_subscribers(bus: InProcessRealTimeEvents, server: str, count: int) ->
 
 
 def test_status_subscription_opens_with_a_snapshot_of_the_states_and_worker() -> None:
-    # The desired state (#3428), the assigned Worker (#3818) and the last
-    # crash (#3281) ride the snapshot beside the observed state, so a client
-    # that missed an intent change, a release or the crash's own frame
-    # converges on it too.
+    # The desired state (#3428), the assigned Worker (#3818), the last crash
+    # (#3281) and the final-snapshot refusal (#4054) ride the snapshot beside
+    # the observed state, so a client that missed an intent change, a release,
+    # the crash's own frame or the refusal's converges on it too.
     bus = InProcessRealTimeEvents()
     community, server, worker = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     read_server = _FakeReadServer(
@@ -558,6 +564,7 @@ def test_status_subscription_opens_with_a_snapshot_of_the_states_and_worker() ->
         assigned=WorkerId(worker),
         crash=(CrashReason.FORGE_INSTALL_OUT_OF_MEMORY, "installer ran out of memory"),
         not_restarted=True,
+        refusal=FinalSnapshotRefusal.UNAVAILABLE,
     )
     app = _app(bus=bus, read_server=read_server)
     client = _client(app)
@@ -571,6 +578,7 @@ def test_status_subscription_opens_with_a_snapshot_of_the_states_and_worker() ->
         "crash_reason": "forge_install_out_of_memory",
         "crash_detail": "installer ran out of memory",
         "crash_not_restarted": True,
+        "final_snapshot_refusal": "unavailable",
     }
     assert frame["ts"].endswith("Z")
 
@@ -587,7 +595,7 @@ def test_snapshot_wire_text_is_the_compact_frame_shape() -> None:
         f'{{"stream":"snapshot","ts":"{ts}",'
         '"payload":{"state":"running","desired_state":"running",'
         '"assigned_worker_id":null,"crash_reason":null,"crash_detail":null,'
-        '"crash_not_restarted":false}}'
+        '"crash_not_restarted":false,"final_snapshot_refusal":null}}'
     )
 
 

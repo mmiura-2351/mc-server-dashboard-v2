@@ -166,6 +166,19 @@ class CrashReason(enum.Enum):
     FORGE_INSTALL_JAVA_INCOMPATIBLE = "forge_install_java_incompatible"
 
 
+class FinalSnapshotRefusal(enum.Enum):
+    """Why the assigned Worker refused a stop's final snapshot (issue #4054).
+
+    The two refusals that keep the Worker assigned (#3697, the owner decision
+    on #3701): the control-plane ``BUSY`` and ``UNAVAILABLE``. Stored on a
+    stopped row still assigned to that Worker, and cleared with the assignment
+    (DATABASE.md Section 7 CHECK enum).
+    """
+
+    BUSY = "busy"
+    UNAVAILABLE = "unavailable"
+
+
 # The crash reasons the reconciler does not restart (issue #3281): the ones the
 # Worker reports at once instead of retrying the install, because the next
 # attempt fails the same way (CONTROL_PLANE.md Section 6). The same memory limit

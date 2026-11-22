@@ -42,6 +42,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -79,6 +80,11 @@ def _to_server(row: ServerModel) -> Server:
         ),
         crash_detail=row.crash_detail,
         awaiting_hydrate=row.awaiting_hydrate,
+        final_snapshot_refusal=(
+            None
+            if row.final_snapshot_refusal is None
+            else FinalSnapshotRefusal(row.final_snapshot_refusal)
+        ),
     )
 
 
@@ -175,6 +181,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ),
                 crash_detail=server.crash_detail,
                 awaiting_hydrate=server.awaiting_hydrate,
+                final_snapshot_refusal=(
+                    None
+                    if server.final_snapshot_refusal is None
+                    else server.final_snapshot_refusal.value
+                ),
             )
         )
 
@@ -304,6 +315,8 @@ class SqlAlchemyServerRepository(ServerRepository):
             # transition built from a stale read cannot restore a mark a hydrate
             # has cleared since.
             values["awaiting_hydrate"] = server.assigned_worker_id is not None
+            # A refusal is about the assignment it was answered under (#4054).
+            values["final_snapshot_refusal"] = None
         stmt = (
             update(ServerModel)
             .where(
@@ -337,6 +350,8 @@ class SqlAlchemyServerRepository(ServerRepository):
                 if server.assigned_worker_id is None
                 else str(server.assigned_worker_id.value)
             )
+            if server.assigned_worker_id is None:
+                payload["final_snapshot_refusal"] = None
         if applied and payload:
             self._staged_status_events.append(
                 (
@@ -363,6 +378,7 @@ class SqlAlchemyServerRepository(ServerRepository):
         # start can re-place under the unassigned-only CAS (issue #206).
         if unassign:
             values["assigned_worker_id"] = None
+            values["final_snapshot_refusal"] = None
         # A release owes no hydrate, and a running instance's working set is the
         # one its snapshots will capture, whatever the store holds (issue #3890).
         # The write is stamped when it lands, so one residue is accepted (r2 review,
@@ -437,7 +453,8 @@ class SqlAlchemyServerRepository(ServerRepository):
         stages a status event, published by whoever commits the session
         (:func:`publish_status_events`). ``values`` are further columns set in
         the same UPDATE; a release among them (``assigned_worker_id``) rides the
-        row's frame too (issue #3818). Returns the number of rows written.
+        row's frame too (issue #3818), with the refusal it clears (issue #4054).
+        Returns the number of rows written.
 
         The rows are locked and read first because the previous state and
         assignment decide whether there is anything to announce, and an UPDATE
@@ -504,6 +521,7 @@ class SqlAlchemyServerRepository(ServerRepository):
             released = "assigned_worker_id" in (values or {})
             if released and row.assigned_worker_id is not None:
                 payload["assigned_worker_id"] = None
+                payload["final_snapshot_refusal"] = None
             if not payload:
                 continue
             self._staged_status_events.append(
@@ -554,7 +572,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ServerModel.desired_state == DesiredState.STOPPED.value,
                 ServerModel.assigned_worker_id == worker_id.value,
             )
-            .values(assigned_worker_id=None, awaiting_hydrate=False)
+            .values(
+                assigned_worker_id=None,
+                awaiting_hydrate=False,
+                final_snapshot_refusal=None,
+            )
         )
         result = await self._session.execute(stmt)
         cleared = cast("CursorResult[Any]", result).rowcount == 1
@@ -580,7 +602,11 @@ class SqlAlchemyServerRepository(ServerRepository):
                 ServerModel.assigned_worker_id == worker_id.value,
                 ServerModel.observed_at.is_not_distinct_from(observed_at),
             )
-            .values(assigned_worker_id=None, awaiting_hydrate=False)
+            .values(
+                assigned_worker_id=None,
+                awaiting_hydrate=False,
+                final_snapshot_refusal=None,
+            )
         )
         result = await self._session.execute(stmt)
         cleared = cast("CursorResult[Any]", result).rowcount == 1
@@ -619,11 +645,45 @@ class SqlAlchemyServerRepository(ServerRepository):
         result = await self._session.execute(stmt)
         return cast("CursorResult[Any]", result).rowcount == 1
 
+    async def set_final_snapshot_refusal(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal | None,
+    ) -> bool:
+        # A release's guard (issue #847): only a stop still holding worker_id
+        # takes its answer. Only a change is written and announced.
+        value = None if refusal is None else refusal.value
+        stmt = (
+            update(ServerModel)
+            .where(
+                ServerModel.id == server_id.value,
+                ServerModel.desired_state == DesiredState.STOPPED.value,
+                ServerModel.assigned_worker_id == worker_id.value,
+                ServerModel.final_snapshot_refusal.is_distinct_from(value),
+            )
+            .values(final_snapshot_refusal=value)
+        )
+        result = await self._session.execute(stmt)
+        changed = cast("CursorResult[Any]", result).rowcount == 1
+        if changed:
+            self._staged_status_events.append(
+                (
+                    str(server_id.value),
+                    RealTimeEvent(
+                        stream=EventStream.STATUS,
+                        payload={"final_snapshot_refusal": value},
+                    ),
+                )
+            )
+        return changed
+
     def _stage_release(self, server_id: ServerId) -> None:
         """Stage the frame of a release that ends a stop (issue #3818).
 
         The guard matched a row still assigned, so live subscribers learn the
-        server is free to start again. The release changes nothing else.
+        server is free to start again. The release changes nothing else but the
+        refusal it clears with the assignment (issue #4054).
         """
 
         self._staged_status_events.append(
@@ -631,7 +691,10 @@ class SqlAlchemyServerRepository(ServerRepository):
                 str(server_id.value),
                 RealTimeEvent(
                     stream=EventStream.STATUS,
-                    payload={"assigned_worker_id": None},
+                    payload={
+                        "assigned_worker_id": None,
+                        "final_snapshot_refusal": None,
+                    },
                 ),
             )
         )
