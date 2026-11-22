@@ -99,8 +99,9 @@ const MaxStopDuration = defaultFlushTimeout + defaultStopCap + stopDeadlineGrace
 // defaultFlushTimeout bounds the pre-stop flush (#1007): the RCON save-off /
 // save-all plus the settle-wait that drives the live world's dirty chunks to
 // disk before the container is terminated. The manager's settle-wait takes what
-// the RCON round trips leave of it, less a 5 s margin (issue #3503), and it is the
-// whole bound when the flush's RCON hangs. The flush runs to completion before the
+// the RCON round trips leave of it, less a 5 s margin (issue #3503). A hung RCON
+// peer fails each RCON leg at rcon's 30 s per-leg ceiling (issue #4031), and this
+// budget still caps the flush as a whole. The flush runs to completion before the
 // stop escalation's own deadline starts (Stop), so this budget is additive to
 // stopDeadline rather than carved out of it (issue #2622). Tests shrink it.
 const defaultFlushTimeout = 90 * time.Second
@@ -3236,13 +3237,14 @@ func isTerminal(s execution.ServerState) bool {
 var rconPhaseCap = 30 * time.Second
 
 // rconStopDeadline gives the RCON phase its own sub-budget within the detached
-// stopCtx. stopCtx carries the whole escalation deadline, so rcon's own 30s
-// fallback never fires there; a pathological peer could otherwise drag the
-// exchange to just under the full budget and leave the docker Stop/Kill waits
-// near-zero grace (the #703-adjacent shape, issue #832). Cap the phase at
-// min(rconPhaseCap, remaining/3): the /3 reserves the bulk of the remaining
-// budget for the escalation steps that follow, and the cap keeps the phase short
-// on a large budget.
+// stopCtx. stopCtx carries the whole escalation deadline, and rcon's own 30 s
+// ceiling bounds each leg of the exchange (the connect, the AUTH handshake and
+// the stop round trip) rather than the exchange as a whole; a pathological peer
+// could otherwise drag the exchange through all three and, on a short budget,
+// leave the docker Stop/Kill waits near-zero grace (the #703-adjacent shape,
+// issue #832). Cap the phase at min(rconPhaseCap, remaining/3): the /3 reserves
+// the bulk of the remaining budget for the escalation steps that follow, and the
+// cap keeps the phase short on a large budget.
 func rconStopDeadline(ctx context.Context) time.Time {
 	phase := rconPhaseCap
 	if deadline, ok := ctx.Deadline(); ok {

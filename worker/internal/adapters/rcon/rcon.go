@@ -40,15 +40,19 @@ const maxBodyLen = 4096 + 16
 // id = -1).
 var ErrAuthFailed = errors.New("rcon: authentication failed")
 
-// defaultExecuteTimeout bounds a single Execute round trip when the caller's
-// ctx carries no deadline. In practice RCON replies are sub-second; 30s is a
-// generous ceiling that still guarantees a hung server (one that accepts the
-// TCP connect but never replies) cannot wedge the call — and thus the lane or a
-// global concurrency slot — forever. A var (not a const) so tests can shrink it.
-//
-// The same ceiling bounds the dial+authenticate handshake (Dial): a peer that
-// TCP-accepts but never sends an AUTH_RESPONSE would otherwise block the read
-// forever on a deadline-less lane ctx — the same wedge shape one step earlier.
+// defaultExecuteTimeout is the per-leg ceiling: the TCP connect, the AUTH
+// handshake and each Execute round trip are each bounded by it, or by the time
+// the caller's ctx has left when that is shorter, whatever deadline ctx carries
+// (issue #4031). The server sends a command's reply once the command has
+// finished on its server thread, not once the disk writes it started are done:
+// a plain save-all queues its region writes and answers before they land, which
+// is why the quiesce and the stop flush wait for the save to settle afterwards.
+// A reply is therefore normally sub-second, and one that takes longer than 30s
+// means the server thread is stalled, not that the disk is slow. The ceiling
+// makes such a server, or one that accepts the TCP connect but never replies,
+// fail one leg within 30s rather than wedge the call — and thus the lane or a
+// global concurrency slot — for the whole of a long context, or forever on one
+// with no deadline. A var (not a const) so tests can shrink it.
 var defaultExecuteTimeout = 30 * time.Second
 
 // maxResponseSize bounds the total reassembled response body. A misbehaving
@@ -74,21 +78,27 @@ type Client struct {
 }
 
 // Dial opens an RCON connection to addr and authenticates with password. It
-// returns ErrAuthFailed on a rejected password. Both the TCP connect and the
-// handshake honour ctx's deadline and fall back to defaultExecuteTimeout when
-// ctx carries none: a peer that never completes the SYN handshake (firewalled or
+// returns ErrAuthFailed on a rejected password. The TCP connect and the
+// handshake are each bounded by defaultExecuteTimeout, or by ctx's deadline when
+// that comes sooner: a peer that never completes the SYN handshake (firewalled or
 // gone) cannot ride the OS's ~2-minute SYN timeout, and one that accepts the
-// connect but never sends an AUTH_RESPONSE cannot wedge the read forever. It
-// returns ctx.Err() when ctx cancellation caused the failure.
+// connect but never sends an AUTH_RESPONSE cannot hold the read past the ceiling.
+// It returns ctx.Err() when ctx cancellation caused the failure.
 func Dial(ctx context.Context, addr, password string) (*Client, error) {
-	// DialContext honours ctx's deadline; set Timeout as the fallback bound for a
-	// deadline-less ctx so the connect cannot hang on the OS SYN timeout.
+	// DialContext ends the connect at ctx's deadline or at Timeout, whichever comes
+	// first, so the connect cannot hang on the OS SYN timeout.
 	d := net.Dialer{Timeout: defaultExecuteTimeout}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("rcon: dial %s: %w", addr, err)
 	}
+	return NewClient(ctx, conn, addr, password)
+}
 
+// NewClient authenticates with password over conn, an open connection to addr,
+// and returns the Client that owns conn; Redial dials addr again. The handshake
+// is bounded as Dial's is. It closes conn when the handshake fails.
+func NewClient(ctx context.Context, conn net.Conn, addr, password string) (*Client, error) {
 	c := &Client{conn: conn, nextID: 1, addr: addr, password: password}
 	if err := c.withDeadline(ctx, func() error { return c.authenticate(password) }); err != nil {
 		_ = conn.Close()
@@ -120,9 +130,9 @@ func (c *Client) Redial(ctx context.Context) (execution.ServerControl, error) {
 // proves the server has consumed the command and is back at its next read, so
 // the marker can only ever arrive alone.
 //
-// It honours ctx's deadline for the round trip, and falls back to
-// defaultExecuteTimeout when ctx carries none, so a server that accepts the
-// connection but never replies cannot block the call forever. It returns
+// The round trip is bounded by defaultExecuteTimeout, or by ctx's deadline when
+// that comes sooner, so a server that accepts the connection but never replies
+// fails the call within the ceiling. It returns
 // ctx.Err() when ctx cancellation caused the failure, execution.ErrConnBroken
 // when the connection was poisoned by a prior failed round trip, and
 // execution.ErrCommandDropped when the server closed the connection before
@@ -194,18 +204,19 @@ func isConnClosed(err error) bool {
 	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET)
 }
 
-// withDeadline runs fn while a per-call deadline (ctx's, or defaultExecuteTimeout
-// when ctx carries none) is set on the connection, so a hung read cannot block
-// forever. A watcher goroutine honours ctx cancellation: on ctx.Done() it sets
+// withDeadline runs fn, one leg, while a deadline is set on the connection:
+// defaultExecuteTimeout from now, or ctx's deadline when that comes sooner (issue
+// #4031), so a hung read fails within the ceiling whatever deadline ctx carries.
+// A watcher goroutine honours ctx cancellation: on ctx.Done() it sets
 // an immediate connection deadline, the standard net.Conn idiom for unblocking
 // an in-flight read from another goroutine. The watcher is closed and waited for
 // before returning so it never touches the connection after fn returns. When ctx
 // cancellation caused fn to fail, it returns ctx.Err() in place of the opaque
 // i/o timeout.
 func (c *Client) withDeadline(ctx context.Context, fn func() error) error {
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(defaultExecuteTimeout)
+	deadline := time.Now().Add(defaultExecuteTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
 	}
 	_ = c.conn.SetDeadline(deadline)
 	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
