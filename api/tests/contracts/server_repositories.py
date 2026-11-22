@@ -1329,7 +1329,9 @@ class ServerRepositoryContract:
         assert row is not None
         assert (row.assigned_worker_id, row.final_snapshot_refusal) == (None, None)
 
-    @pytest.mark.parametrize("write", ["running-report", "disconnect"])
+    @pytest.mark.parametrize(
+        "write", ["running-report", "disconnect", "lifecycle-keeps-worker"]
+    )
     async def test_a_write_that_keeps_the_worker_keeps_the_final_snapshot_refusal(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
@@ -1350,6 +1352,17 @@ class ServerRepositoryContract:
             if write == "running-report":
                 assert await tx.repository.record_observed_state(
                     item.id, ObservedState.RUNNING, _LATER, expected_worker=worker
+                )
+            elif write == "lifecycle-keeps-worker":
+                # Built from a read that predates the refusal: a write that keeps
+                # the assignment leaves the row's refusal as it is.
+                kept = deepcopy(item)
+                kept.final_snapshot_refusal = None
+                kept.updated_at = _LATER
+                assert await tx.repository.update_lifecycle(
+                    kept,
+                    expected_from=DesiredState.STOPPED,
+                    expected_assigned_worker_id=worker,
                 )
             else:
                 await tx.repository.mark_worker_servers_unknown(worker, _LATER)
