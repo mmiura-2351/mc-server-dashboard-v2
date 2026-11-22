@@ -341,6 +341,9 @@ from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
 )
+from mc_server_dashboard_api.servers.application.release_held_server import (
+    ReleaseHeldServer,
+)
 from mc_server_dashboard_api.servers.application.resource_packs import (
     AssignResourcePack,
     DeleteResourcePack,
@@ -2190,6 +2193,10 @@ def get_stop_server(
         stop_convergence=request.app.state.stop_convergence,
         stop_intents=request.app.state.stop_intents,
     )
+
+
+def get_release_held_server(request: Request) -> ReleaseHeldServer:
+    raise NotImplementedError
 
 
 def get_restart_server(
