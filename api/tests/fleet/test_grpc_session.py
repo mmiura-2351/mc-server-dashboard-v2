@@ -2137,6 +2137,96 @@ async def test_the_rebuild_and_the_held_lookup_answer_within_one_deadline(
 
 
 # ---------------------------------------------------------------------------
+# The teardown write of a refused registration (issue #4091)
+# ---------------------------------------------------------------------------
+
+_SKIPPED_MARK = (
+    "the database did not answer the refused registration's mark-unknown "
+    "within 0.2s; skipping it"
+)
+
+
+class _UnansweredMarkSink(_StalledRegistrationSink):
+    """A database that answers neither the registration's rebuild nor the
+    teardown's mark-unknown."""
+
+    def __init__(self) -> None:
+        super().__init__(rebuild=True, lookup=False)
+
+    async def mark_worker_servers_unknown(self, *, worker_id: str) -> None:
+        await asyncio.Event().wait()
+
+
+async def test_a_refused_registrations_mark_unknown_is_skipped_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_UnansweredMarkSink(),
+    )
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        await call.write(_register_message())
+        code = await asyncio.wait_for(call.code(), timeout=5)
+        await _wait_until(
+            lambda: _disconnect_logs(caplog), "the teardown did not finish"
+        )
+    finally:
+        await h.stop()
+
+    assert code is grpc.StatusCode.UNAVAILABLE
+    assert [
+        (r.levelno, getattr(r, "worker_id", None))
+        for r in _logged(caplog, _SKIPPED_MARK)
+    ] == [(logging.WARNING, _WORKER_ID)]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert len(_disconnect_logs(caplog)) == 1
+
+
+async def test_a_closed_sessions_mark_unknown_outlasting_the_deadline_still_lands(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Only a refused registration's write is bounded: the Worker of a session
+    # that ended may never come back, and a skipped write would leave its
+    # servers reading as they last reported (FR-WRK-4).
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _REGISTRATION_DEADLINE_SECONDS,
+    )
+    sink = _BlockingUnknownSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.done_writing()
+        await asyncio.wait_for(sink.entered.wait(), timeout=5)
+        await asyncio.sleep(_REGISTRATION_DEADLINE_SECONDS * 3)
+        sink.release.set()
+        await _wait_until(
+            lambda: _disconnect_logs(caplog), "the teardown did not finish"
+        )
+    finally:
+        sink.release.set()
+        await h.stop()
+
+    assert sink.unknown_for == [_WORKER_ID]
+    assert _logged(caplog, _SKIPPED_MARK) == []
+
+
+# ---------------------------------------------------------------------------
 # Heartbeat fast-path (issue #1698)
 # ---------------------------------------------------------------------------
 

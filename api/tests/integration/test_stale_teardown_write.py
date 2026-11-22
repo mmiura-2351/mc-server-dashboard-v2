@@ -31,7 +31,6 @@ from mc_server_dashboard_api.core.adapters.database import (
     create_engine,
     create_session_factory,
 )
-from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
@@ -63,7 +62,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 _WORKER = uuid.UUID("22222222-2222-2222-2222-222222222222")
-_DEADLINE_SECONDS = 0.2
 _ANSWER_GUARD_SECONDS = 10.0
 
 
@@ -71,8 +69,10 @@ class _StallableTeardownSink(FakeServerStateSink):
     """Registers and reports through the real sink, and writes each teardown's
     mark-unknown through one whose database the test can stall.
 
-    With ``refuse_first``, the first registration's rebuild never answers, so
-    that registration is refused at its deadline.
+    With ``refuse_first``, the first registration's rebuild fails, so that
+    registration is refused. It is not refused at its deadline: the teardown of
+    a refused registration writes under that deadline too (issue #4091), and
+    this write has to outlast the next session's report.
     """
 
     def __init__(
@@ -94,7 +94,7 @@ class _StallableTeardownSink(FakeServerStateSink):
     async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
         if self._refuse_first:
             self._refuse_first = False
-            await asyncio.Event().wait()
+            raise RuntimeError("the rebuild failed")
         return await self._real.running_assignment_ids(worker_id=worker_id)
 
     async def record_observed_state(
@@ -162,7 +162,6 @@ async def _stallable_teardowns(
 @pytest.mark.parametrize("ending", ["closed", "refused"])
 async def test_a_teardown_write_landing_after_the_next_sessions_report_keeps_it(
     world: _World,  # noqa: F811
-    monkeypatch: pytest.MonkeyPatch,
     ending: str,
 ) -> None:
     server = await world.server("survival", worker=_WORKER)
@@ -183,17 +182,9 @@ async def test_a_teardown_write_landing_after_the_next_sessions_report_keeps_it(
             )
             await old.done_writing()
         else:
-            # Only the refused registration runs under the short deadline: the
-            # next one rebuilds from the real database.
-            with monkeypatch.context() as patch:
-                patch.setattr(
-                    grpc_server,
-                    "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
-                    _DEADLINE_SECONDS,
-                )
-                old = stub.Session(metadata=_auth(_CREDENTIAL))
-                await old.write(_register_message())
-                code = await asyncio.wait_for(old.code(), timeout=_ANSWER_GUARD_SECONDS)
+            old = stub.Session(metadata=_auth(_CREDENTIAL))
+            await old.write(_register_message())
+            code = await asyncio.wait_for(old.code(), timeout=_ANSWER_GUARD_SECONDS)
             assert code is grpc.StatusCode.UNAVAILABLE
         await asyncio.wait_for(sink.marking.wait(), timeout=_ANSWER_GUARD_SECONDS)
         reports = len(sink.applied)
