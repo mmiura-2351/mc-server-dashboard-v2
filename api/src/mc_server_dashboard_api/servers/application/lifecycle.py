@@ -3034,8 +3034,8 @@ class StopServer:
         """
 
         # The late result says the upload settled. If the write fails, record it for
-        # the reconciler (issue #3441): only an outage's failure is retried, and only
-        # while the Worker's session lasts (issue #4023).
+        # the reconciler (issue #3441): only an outage's failure is retried (issue
+        # #3614), and only while the Worker's session lasts.
         with self._recording_unwritten_stop(server_id):
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)

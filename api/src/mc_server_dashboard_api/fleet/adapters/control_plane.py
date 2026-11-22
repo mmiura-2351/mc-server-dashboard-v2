@@ -389,8 +389,9 @@ class ControlPlaneState:
         """Release a held assignment on a late final-snapshot result (#891).
 
         Acts only when ``command_id`` is a snapshot whose dispatch timed out or
-        was cancelled (its record survives in ``_late_snapshots``); any other
-        unmatched result is dropped, as before. The #789 ownership guard: the
+        was cancelled (its record survives in ``_late_snapshots``, or in
+        ``_clearing_snapshots`` for a held retry); any other unmatched result is
+        dropped, as before. The #789 ownership guard: the
         reporting worker must be the worker the snapshot was dispatched to — a
         report from any other worker
         leaves the record in place and is ignored, so a forged late result cannot
