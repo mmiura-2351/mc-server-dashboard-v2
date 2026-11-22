@@ -9,10 +9,15 @@ import socketserver
 import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
+from typing import Any
 
 import asyncpg
 import sqlalchemy.exc
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
+from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.pool import QueuePool
+
+from mc_server_dashboard_api.core.adapters.database import create_engine
 
 
 class RecordingSleep:
@@ -187,3 +192,23 @@ def silent_database() -> Iterator[str]:
     finally:
         server.shutdown()
         server.server_close()
+
+
+class RecordingEngines:
+    """Stands in for ``create_engine`` where a command builds its own engines: it
+    builds each one and keeps it, so a test can read what each was given."""
+
+    def __init__(self) -> None:
+        self.engines: list[AsyncEngine] = []
+
+    def __call__(self, url: str, **kwargs: Any) -> AsyncEngine:
+        engine = create_engine(url, **kwargs)
+        self.engines.append(engine)
+        return engine
+
+    def pool_timeouts(self) -> list[float]:
+        """Each engine's wait for a free connection (issue #4051), in order."""
+
+        pools = [engine.pool for engine in self.engines]
+        assert all(isinstance(pool, QueuePool) for pool in pools)
+        return [pool.timeout() for pool in pools if isinstance(pool, QueuePool)]

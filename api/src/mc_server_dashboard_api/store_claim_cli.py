@@ -55,6 +55,7 @@ async def run(settings: Settings) -> str | None:
         settings.database.url,
         pool_size=1,
         max_overflow=0,
+        pool_timeout=settings.database.pool_timeout_seconds,
         connect_timeout=settings.database.connect_timeout_seconds,
         statement_timeout=settings.database.statement_timeout_seconds,
     )

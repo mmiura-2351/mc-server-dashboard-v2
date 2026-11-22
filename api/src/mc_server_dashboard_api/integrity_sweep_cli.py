@@ -89,13 +89,15 @@ def _engine(
     asyncpg raises a refused connect as the raw ``OSError`` a store read can also
     raise, so ``main`` could not tell a database outage from a disk fault by type
     (issue #3942). Both of the sweep's engines are built here, held to the
-    configured connect and statement bounds (issue #4042).
+    configured connect and statement bounds (issue #4042) and pool wait (issue
+    #4051).
     """
 
     engine = create_engine(
         database.url,
         pool_size=pool_size,
         max_overflow=max_overflow,
+        pool_timeout=database.pool_timeout_seconds,
         connect_timeout=database.connect_timeout_seconds,
         statement_timeout=database.statement_timeout_seconds,
     )
