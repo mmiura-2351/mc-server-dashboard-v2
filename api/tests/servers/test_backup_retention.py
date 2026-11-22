@@ -7,8 +7,8 @@ keep-N keeps the newest N, and the tiered form keeps the newest backup per UTC
 calendar day / ISO week / calendar month over the configured windows. Healthy
 rows are chosen as keepers first (issue #1864): a quarantined row keeps only a
 slot or bucket no sized non-quarantined row is left to fill. A row with no
-recorded size, whose archive may be missing, ranks with the quarantined rows
-(issue #4105).
+recorded size, whose archive may be missing, ranks behind every sized row, a
+quarantined one included (issue #4105).
 """
 
 from __future__ import annotations
@@ -535,10 +535,11 @@ def test_non_scheduled_rows_are_never_pruned_whatever_their_health(
 # --- rows with no recorded size (issue #4105) --------------------------------
 #
 # A row is recorded with its size once its archive exists (issue #4086), so a
-# NULL size marks a legacy row: one left dangling with no archive, or one from
-# before sizes were recorded. Such a row ranks behind every row with a size,
-# with the quarantined rows, whatever its health: it keeps only a slot or bucket
-# no sized non-quarantined row is left to fill, and never displaces one.
+# NULL size marks a legacy row: one left dangling with no archive, or one whose
+# size was never recorded. Such a row ranks behind every row with a size, a
+# quarantined one included, whatever its own health: it keeps only a slot or
+# bucket no sized row is left to fill, and never displaces one. Among NULL-size
+# rows, age alone decides.
 
 
 @pytest.mark.parametrize("tier", list(_SINGLE_SLOT_POLICIES))
@@ -564,7 +565,7 @@ def test_null_size_row_yields_its_slot_to_an_older_sized_row(
         (3, ["dangling"]),
     ],
 )
-def test_keep_n_never_prunes_a_sized_row_while_a_null_size_row_is_kept(
+def test_keep_n_gives_null_size_rows_only_the_slots_sized_rows_leave(
     keep_last: int, pruned_names: list[str]
 ) -> None:
     # The newest rows are dangling ones, stamped healthy as the #4086 leak left
@@ -634,14 +635,51 @@ def test_all_null_size_rows_keep_what_health_blind_retention_keeps(
     assert pruned == [rows[i] for i in pruned_indexes]
 
 
-def test_null_size_and_quarantined_rows_rank_together_newest_first() -> None:
-    # A sized quarantined row and a NULL-size row share the group behind the
-    # sized non-quarantined rows, so the newer of the two keeps the slot.
-    policy = RetentionPolicy.from_fields(keep_last=1)
-    quarantined = _backup(_NOW, health=BackupHealth.QUARANTINED)
-    dangling = _backup(_NOW - dt.timedelta(hours=1), size_bytes=None)
-    assert backups_to_prune(policy, [quarantined, dangling], _NOW) == [dangling]
+@pytest.mark.parametrize("tier", list(_SINGLE_SLOT_POLICIES))
+@pytest.mark.parametrize(
+    "health",
+    [
+        BackupHealth.HEALTHY,
+        BackupHealth.UNKNOWN,
+        BackupHealth.UNREADABLE,
+        BackupHealth.QUARANTINED,
+    ],
+)
+def test_sized_quarantined_row_keeps_its_slot_over_a_newer_null_size_row(
+    tier: str, health: BackupHealth
+) -> None:
+    # A quarantined row holds a corrupt world, but its archive exists and can
+    # still be force-restored. A NULL-size row may have no archive at all, so
+    # it yields the slot or bucket however new it is and whatever its health.
+    null_size = _backup(_NOW, health=health, size_bytes=None)
+    quarantined = _backup(_NOW - dt.timedelta(hours=2), health=BackupHealth.QUARANTINED)
+    pruned = backups_to_prune(
+        _SINGLE_SLOT_POLICIES[tier], [null_size, quarantined], _NOW
+    )
+    assert pruned == [null_size]
 
-    dangling = _backup(_NOW, size_bytes=None)
-    quarantined = _backup(_NOW - dt.timedelta(hours=1), health=BackupHealth.QUARANTINED)
-    assert backups_to_prune(policy, [dangling, quarantined], _NOW) == [quarantined]
+
+@pytest.mark.parametrize(
+    ("keep_last", "pruned_names"),
+    [
+        (1, ["null_size", "quarantined"]),
+        (2, ["null_size"]),
+        (3, []),
+    ],
+)
+def test_keep_n_fills_sized_rows_then_quarantined_rows_then_null_size_rows(
+    keep_last: int, pruned_names: list[str]
+) -> None:
+    # Newest to oldest: a NULL-size row, a sized quarantined row, a sized
+    # healthy row. The slots fill in the reverse order, by rank, not by age.
+    rows = {
+        "null_size": _backup(_NOW, size_bytes=None),
+        "quarantined": _backup(
+            _NOW - dt.timedelta(hours=1), health=BackupHealth.QUARANTINED
+        ),
+        "healthy": _backup(_NOW - dt.timedelta(hours=2)),
+    }
+    pruned = backups_to_prune(
+        RetentionPolicy.from_fields(keep_last=keep_last), list(rows.values()), _NOW
+    )
+    assert pruned == [rows[name] for name in pruned_names]
