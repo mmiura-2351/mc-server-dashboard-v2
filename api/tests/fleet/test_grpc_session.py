@@ -1964,14 +1964,6 @@ _LIMITS_PATH = (
 )
 
 
-def _grpc_server_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    return [
-        r.getMessage()
-        for r in caplog.records
-        if r.name == _GRPC_SERVER_LOGGER and r.levelno >= logging.WARNING
-    ]
-
-
 class _StalledRegistrationSink(FakeServerStateSink):
     """A database that does not answer the registration's rebuild, or its
     held-server lookup."""
@@ -2001,35 +1993,58 @@ def test_the_registration_deadline_is_a_third_of_the_workers_wait_for_its_ack() 
     )
 
 
+class _StatusAtAbortContext(_FakeContext):
+    """Also records the Worker's status in ``registry`` as the abort is sent."""
+
+    def __init__(
+        self, metadata: list[tuple[str, str]], registry: InMemoryWorkerRegistry
+    ) -> None:
+        super().__init__(metadata)
+        self._registry = registry
+        self.status_at_abort: WorkerStatus | None = None
+
+    async def abort(self, code: grpc.StatusCode, details: str = "") -> None:
+        self.status_at_abort = self._registry.list_workers()[0].status
+        await super().abort(code, details)
+
+
 async def test_a_rebuild_the_database_does_not_answer_refuses_the_registration(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    async def _requests() -> AsyncIterator[pb.WorkerMessage]:
+        yield _register_message()
+
     monkeypatch.setattr(
         grpc_server,
         "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
         _REGISTRATION_DEADLINE_SECONDS,
     )
-    h = _Harness(
-        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
-        FakeClock(_T0),
+    registry = InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT)
+    control_plane = ControlPlaneState()
+    servicer = WorkerSessionServicer(
+        registry=registry,
+        clock=FakeClock(_T0),
+        worker_credential=_CREDENTIAL,
+        heartbeat_timeout=_TIMEOUT,
+        transfer_deadline=_TRANSFER_DEADLINE,
+        control_plane=control_plane,
         state_sink=_StalledRegistrationSink(rebuild=True, lookup=False),
+        real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
     )
-    try:
-        stub = await h.start()
-        call = stub.Session(metadata=_auth(_CREDENTIAL))
-        await call.write(_register_message())
-        code = await asyncio.wait_for(call.code(), timeout=5)
-        details = await call.details()
-        candidates = h.registry.candidates_for_placement()
-        outbound = h.control_plane.outbound_for(WorkerId(_WORKER_ID))
-    finally:
-        await h.stop()
+    context = _StatusAtAbortContext(_auth(_CREDENTIAL), registry)
 
-    assert code is grpc.StatusCode.UNAVAILABLE
-    assert details == "the database did not answer the registration in time"
-    assert candidates == []
-    assert outbound is None
-    assert _grpc_server_warnings(caplog) == [
+    with pytest.raises(_Aborted):
+        await asyncio.wait_for(anext(servicer.Session(_requests(), context)), 5)
+
+    assert context.aborted == (
+        grpc.StatusCode.UNAVAILABLE,
+        "the database did not answer the registration in time",
+    )
+    # Offline before the Worker hears the refusal, so never placeable meanwhile.
+    assert context.status_at_abort is WorkerStatus.OFFLINE
+    assert control_plane.outbound_for(WorkerId(_WORKER_ID)) is None
+    assert _warnings(caplog) == [
         "the database did not answer the assignment rebuild within 0.2s; "
         "refusing the registration"
     ]
@@ -2060,7 +2075,7 @@ async def test_a_held_lookup_the_database_does_not_answer_still_acks_in_time(
 
     assert list(response.register_ack.unknown_held_server_ids) == []
     assert [candidate.load for candidate in candidates] == [1]
-    assert _grpc_server_warnings(caplog) == [
+    assert _warnings(caplog) == [
         "failed to compute unknown held servers; sending empty list"
     ]
 
