@@ -4377,10 +4377,10 @@ def _back_after_a_drop(registry: InMemoryWorkerRegistry) -> None:
 
 
 def _lapsed(registry: InMemoryWorkerRegistry) -> None:
-    # Its heartbeats lapsed long ago, and the watchdog has not ended it yet.
-    registry.register(
-        make_worker(worker_id=str(_GONE.value), at=_NOW - dt.timedelta(hours=1))
-    )
+    # Its heartbeats lapsed after the server's last report, and the watchdog
+    # has not ended its session yet.
+    at = _NOW - dt.timedelta(seconds=_HEARTBEAT_TIMEOUT + 1)
+    registry.register(make_worker(worker_id=str(_GONE.value), at=at))
 
 
 def _never_registered(registry: InMemoryWorkerRegistry) -> None:
