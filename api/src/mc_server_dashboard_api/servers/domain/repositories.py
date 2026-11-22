@@ -407,10 +407,10 @@ class ServerRepository(abc.ABC):
         """Return each Worker assigned a server observed neither unknown nor crashed.
 
         The servers whose state :meth:`mark_worker_servers_unknown` changes. The
-        reconciler marks them for a Worker gone past its grace (issue #4130),
-        and only those: the write restamps every row it locks, and a stamp
-        that kept moving would hold back the release of the Worker's servers
-        under a stopped intent, which waits a grace from it.
+        reconciler makes that write for a Worker whose session ended a grace
+        ago (issue #4130), and only for one listed here: once its servers all
+        read ``unknown`` or ``crashed``, the write has nothing left to change
+        and is not made again on every tick.
         """
 
     @abc.abstractmethod

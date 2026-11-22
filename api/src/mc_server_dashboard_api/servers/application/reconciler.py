@@ -516,8 +516,8 @@ class RunReconcilerTick:
     held_start_grace_seconds: int
     refused_stop_grace_seconds: int
     restart_timeout_seconds: int
-    # How long a Worker must have read not connected before the tick marks its
-    # servers unknown itself (issue #4130, :meth:`_mark_gone_workers_unknown`).
+    # How long after a Worker's session ended the tick marks its servers unknown
+    # itself (issue #4130, :meth:`_mark_gone_workers_unknown`).
     heartbeat_timeout_seconds: int
     backoff_base_seconds: int
     backoff_max_seconds: int
