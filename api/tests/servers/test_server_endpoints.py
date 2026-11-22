@@ -82,6 +82,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PortOutOfRangeError,
     PortRangeExhaustedError,
     RetiredConfigKeyError,
+    ServerAssignedError,
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -780,6 +781,31 @@ def test_update_while_running_is_409() -> None:
     assert resp.json()["reason"] == "server_not_stopped"
 
 
+_SERVER_ASSIGNED_DETAIL = (
+    "The server is still assigned to a Worker. Wait for it to be released, then "
+    "try again."
+)
+
+
+def test_update_of_a_server_a_worker_still_holds_is_409_server_assigned() -> None:
+    # At rest, but the stop still holds its Worker for the final snapshot, which
+    # would publish over the server.properties rewrite (issue #3998).
+    app = _app(
+        member=True,
+        allow=True,
+        update=_FakeUseCase(error=ServerAssignedError("x")),
+    )
+    client = _client(app)
+    resp = client.patch(
+        f"/api/communities/{uuid.uuid4()}/servers/{uuid.uuid4()}",
+        json={"name": "creative"},
+    )
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["reason"] == "server_assigned"
+    assert body["detail"] == _SERVER_ASSIGNED_DETAIL
+
+
 def test_update_snapshot_interval_below_floor_is_422() -> None:
     app = _app(
         member=True,
@@ -1360,10 +1386,8 @@ def test_delete_of_a_server_a_worker_still_holds_is_409_server_assigned() -> Non
     assert resp.status_code == 409
     body = resp.json()
     assert body["reason"] == "server_assigned"
-    assert body["detail"] == (
-        "The server is still assigned to a Worker. Stop the server and wait for "
-        "it to be released before deleting it."
-    )
+    # The same detail every door answers: neutral, not specific to delete (#3998).
+    assert body["detail"] == _SERVER_ASSIGNED_DETAIL
     assert store.pruned == []
     assert server.id in uow.servers.by_id
 

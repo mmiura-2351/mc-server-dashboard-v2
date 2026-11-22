@@ -236,15 +236,17 @@ class LifecycleLockLostError(ServerError):
 
 
 class ServerAssignedError(ServerError):
-    """A delete found the at-rest server still assigned to a Worker.
+    """The server is at rest but still assigned to a Worker.
 
     A stop holds its Worker until the final snapshot settles and the server is
-    released, and a late snapshot upload may still commit until then (#1704), so
-    ``DeleteServer`` refuses the row. Unlike :class:`ServerBusyError` this does not
-    clear by itself within seconds: the server stays assigned until that release,
-    which can wait for the reconciler (issue #3852). The edge maps it to 409
-    ``server_assigned``, whose detail says to stop the server and wait for the
-    release.
+    released, and that snapshot may still publish over the store until then
+    (#1704, #3998). So ``DeleteServer`` and every at-rest write to the working set
+    refuse the row (:meth:`Server.not_quiescent_error`), and so do a manual backup
+    and an export, whose archive would lack the snapshot. Unlike
+    :class:`ServerBusyError` this does not clear by itself within seconds: the
+    server stays assigned until that release, which can wait for the reconciler
+    (issue #3852). The edge maps it to 409 ``server_assigned``, whose detail says
+    to wait for the release and try again.
     """
 
 

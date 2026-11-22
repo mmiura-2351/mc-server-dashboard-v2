@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import pathlib
 import re
 import uuid
@@ -10,6 +11,10 @@ import uuid
 import pytest
 
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import (
+    ServerAssignedError,
+    ServerFilesUnsettledError,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     NOT_RESTARTED_CRASH_REASONS,
     CommunityId,
@@ -19,6 +24,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -64,6 +70,64 @@ def test_at_rest_when_desired_stopped_and_observed_stopped_unknown_or_crashed(
 )
 def test_not_at_rest_otherwise(desired: DesiredState, observed: ObservedState) -> None:
     assert not _server(desired=desired, observed=observed).is_at_rest()
+
+
+_AT_REST_OBSERVED = (
+    ObservedState.STOPPED,
+    ObservedState.UNKNOWN,
+    ObservedState.CRASHED,
+)
+
+
+@pytest.mark.parametrize(
+    "desired,observed,assigned",
+    list(itertools.product(DesiredState, ObservedState, [False, True])),
+)
+def test_quiescent_only_at_rest_and_unassigned(
+    desired: DesiredState, observed: ObservedState, assigned: bool
+) -> None:
+    # Issue #3998: a stop keeps its Worker assigned until the final snapshot
+    # settles, and that snapshot publishes over the store, so a server is quiescent
+    # (nothing can publish over it) only once it is at rest AND released.
+    server = _server(desired=desired, observed=observed)
+    if assigned:
+        server.assigned_worker_id = WorkerId(uuid.uuid4())
+
+    expected = (
+        desired is DesiredState.STOPPED
+        and observed in _AT_REST_OBSERVED
+        and not assigned
+    )
+    assert server.is_quiescent() is expected
+
+
+@pytest.mark.parametrize("observed", _AT_REST_OBSERVED)
+def test_a_door_refuses_an_assigned_server_at_rest_as_assigned(
+    observed: ObservedState,
+) -> None:
+    server = _server(desired=DesiredState.STOPPED, observed=observed)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+
+    error = server.not_quiescent_error(ServerFilesUnsettledError)
+
+    assert type(error) is ServerAssignedError
+    assert str(error) == str(server.id.value)
+
+
+@pytest.mark.parametrize("assigned", [False, True])
+def test_a_door_refuses_a_server_not_at_rest_with_its_own_error(
+    assigned: bool,
+) -> None:
+    # The door's own not-at-rest error comes first: a running server is refused
+    # as unsettled whether or not it is assigned.
+    server = _server(desired=DesiredState.RUNNING, observed=ObservedState.RUNNING)
+    if assigned:
+        server.assigned_worker_id = WorkerId(uuid.uuid4())
+
+    error = server.not_quiescent_error(ServerFilesUnsettledError)
+
+    assert type(error) is ServerFilesUnsettledError
+    assert str(error) == str(server.id.value)
 
 
 _EARLIER = _NOW - dt.timedelta(minutes=1)

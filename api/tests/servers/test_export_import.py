@@ -39,6 +39,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
     EXPORT_METADATA_FILENAME,
     ExportServer,
     ImportServer,
+    ResolveServerExport,
 )
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
@@ -50,6 +51,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidServerNameError,
     LifecycleLockLostError,
     PortAlreadyTakenError,
+    ServerAssignedError,
     ServerFilesUnsettledError,
     UnreadableArchiveError,
     WorkingSetSeedFailedError,
@@ -68,6 +70,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerId,
     ServerName,
     ServerType,
+    WorkerId,
 )
 from tests.servers.executor_starvation import (
     IN_FLIGHT,
@@ -211,6 +214,36 @@ async def test_export_running_is_unsettled() -> None:
         await use_case(
             community_id=CommunityId(community), server_id=ServerId(server_id)
         )
+
+
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+@pytest.mark.parametrize("door", ["export", "resolve"])
+async def test_export_refuses_a_server_a_worker_still_holds(
+    door: str, observed: ObservedState
+) -> None:
+    # A stop holds its Worker until the final snapshot settles (issue #3998): an
+    # export of ``current`` in that window would lack the snapshot still in
+    # flight. The download grant's pre-flight answers what the export would.
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    held = _server(community_id=community, server_id=server_id)
+    held.observed_state = observed
+    held.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(held)
+    store = FakeFileStore()
+    store.files["world/level.dat"] = b"w"
+
+    with pytest.raises(ServerAssignedError):
+        if door == "export":
+            await ExportServer(uow=uow, clock=FakeClock(_NOW), file_store=store)(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
+        else:
+            await ResolveServerExport(uow=uow)(
+                community_id=CommunityId(community), server_id=ServerId(server_id)
+            )
 
 
 # --- round-trip ------------------------------------------------------------

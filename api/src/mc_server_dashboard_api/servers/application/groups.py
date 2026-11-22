@@ -466,11 +466,12 @@ async def _sync_server_file(
 ) -> None:
     """Regenerate one server's ops.json / whitelist.json from its attached groups.
 
-    Only at-rest servers are written (issue #276 posture a): a running/unsettled
-    server is skipped here, and the regeneration its change recorded as owed is
-    made by the server's next start (:func:`regenerate_pending_group_files`,
-    issue #3223). The file is the union-merge of every attached group of
-    ``kind``, ordered by uuid.
+    Only quiescent servers are written (issue #276 posture a): a running/unsettled
+    server is skipped here, and so is one at rest that a stop still holds for its
+    final snapshot, which would publish over the write (issue #3998). The
+    regeneration its change recorded as owed is made by the server's next start
+    (:func:`regenerate_pending_group_files`, issue #3223). The file is the
+    union-merge of every attached group of ``kind``, ordered by uuid.
 
     A successful write leaves the mark standing: the start is the one place that
     clears it, and it writes nothing when it finds the file already current.
@@ -485,9 +486,9 @@ async def _sync_server_file(
             server = await uow.servers.get_by_id(server_id)
             if server is None or server.community_id != community_id:
                 return
-            at_rest = server.is_at_rest()
+            quiescent = server.is_quiescent()
             groups = await uow.groups.list_groups_for_server_kind(server_id, kind)
-        if not at_rest:
+        if not quiescent:
             return
         players = merge_players(groups)
         # The at-rest write relies on the lifecycle lock (issue #3927).

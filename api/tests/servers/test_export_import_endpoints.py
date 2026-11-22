@@ -84,6 +84,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidExportMetadataError,
     InvalidFilePathError,
     PortAlreadyTakenError,
+    ServerAssignedError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
     ServerNotFoundError,
@@ -400,6 +401,36 @@ def test_export_running_is_409_and_audits_denied() -> None:
     resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+    assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
+    assert recorder.events[0].outcome is Outcome.DENIED
+
+
+@pytest.mark.parametrize("route", ["export", "download-grant"])
+def test_export_of_a_server_a_worker_still_holds_is_409_and_audits_denied(
+    route: str,
+) -> None:
+    # An export of ``current`` while the stop still holds its Worker would lack
+    # the final snapshot in flight (issue #3998).
+    recorder = RecordingAuditRecorder()
+    error = ServerAssignedError("x")
+    if route == "export":
+        app = _app(
+            member=True, allow=True, export=_FakeExport(error=error), recorder=recorder
+        )
+    else:
+        app = _app(
+            member=True,
+            allow=True,
+            resolve_export=_FakeResolveExport(error=error),
+            recorder=recorder,
+        )
+    client = _client(app)
+    if route == "export":
+        resp = client.get(_export_url(uuid.uuid4(), uuid.uuid4()), headers=_bearer())
+    else:
+        resp = _mint(client, uuid.uuid4(), uuid.uuid4())
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
     assert [e.operation for e in recorder.events] == [ops.SERVER_EXPORT]
     assert recorder.events[0].outcome is Outcome.DENIED
 

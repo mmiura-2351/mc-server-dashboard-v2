@@ -57,6 +57,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     PluginCacheStorageUnavailableError,
     PortAlreadyTakenError,
     PortRangeExhaustedError,
+    ServerAssignedError,
     ServerFilesUnsettledError,
     UnsupportedPluginServerTypeError,
 )
@@ -384,6 +385,27 @@ def test_install_from_catalog_unsettled_is_409() -> None:
     )
     assert resp.status_code == 409
     assert resp.json()["reason"] == "server_unsettled"
+
+
+def test_install_from_catalog_on_a_server_a_worker_still_holds_is_409() -> None:
+    # At rest, but the stop still holds its Worker for the final snapshot, which
+    # would publish over the install (issue #3998).
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        install=_FakeUseCase(error=ServerAssignedError("x")),
+        recorder=recorder,
+    )
+    client = _client(app)
+    resp = client.post(
+        _url(uuid.uuid4(), uuid.uuid4(), "/install"),
+        json={"project_id": "proj-1", "version_id": "ver-1"},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
+    assert [e.operation for e in recorder.events] == [ops.PLUGIN_INSTALL]
+    assert recorder.events[0].outcome is Outcome.DENIED
 
 
 def test_install_from_catalog_that_lost_the_lifecycle_lock_is_audited() -> None:

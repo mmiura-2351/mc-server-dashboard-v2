@@ -226,8 +226,8 @@ class ResolveServerExport:
     async def __call__(self, *, community_id: CommunityId, server_id: ServerId) -> None:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
-        if not server.is_at_rest():
-            raise ServerFilesUnsettledError(str(server_id.value))
+        if not server.is_quiescent():
+            raise server.not_quiescent_error(ServerFilesUnsettledError)
 
 
 @dataclass(frozen=True)
@@ -267,8 +267,8 @@ class ExportServer:
         async with self.uow:
             server = await _load(self.uow, community_id, server_id)
             plugins = await self.uow.plugins.list_for_server(server_id)
-        if not server.is_at_rest():
-            raise ServerFilesUnsettledError(str(server_id.value))
+        if not server.is_quiescent():
+            raise server.not_quiescent_error(ServerFilesUnsettledError)
 
         metadata = {
             "format": EXPORT_FORMAT_VERSION,

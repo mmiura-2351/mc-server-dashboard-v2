@@ -123,6 +123,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidRetentionPolicyError,
     LifecycleLockLostError,
     PluginReconcileIncompleteError,
+    ServerAssignedError,
     ServerBusyError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -656,6 +657,35 @@ def test_restore_running_is_409() -> None:
     assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
     assert recorder.events[0].outcome is Outcome.DENIED
     assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+def test_a_server_a_worker_still_holds_is_409_server_assigned_on_restore() -> None:
+    # At rest, but the stop still holds its Worker for the final snapshot, which
+    # would publish over the restore (issue #3998).
+    use_case = _FakeUseCase(error=ServerAssignedError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, restore=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), f"/{uuid.uuid4()}/restore"))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_RESTORE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_BACKUP
+
+
+def test_a_server_a_worker_still_holds_is_409_server_assigned_on_create() -> None:
+    # An archive taken now would lack the final snapshot still in flight.
+    use_case = _FakeUseCase(error=ServerAssignedError("x"))
+    recorder = RecordingAuditRecorder()
+    app = _app(member=True, allow=True, create=use_case, recorder=recorder)
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4()))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "server_assigned"
+    assert [e.operation for e in recorder.events] == [ops.BACKUP_CREATE]
+    assert recorder.events[0].outcome is Outcome.DENIED
+    assert recorder.events[0].target_type == ops.TARGET_SERVER
 
 
 def test_restore_unknown_backup_is_404() -> None:

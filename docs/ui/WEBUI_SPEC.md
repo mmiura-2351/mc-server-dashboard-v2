@@ -134,6 +134,16 @@ Platform axis (flag-driven, not assignable to roles): `worker:manage`,
 | GET / PATCH / DELETE | `…/{sid}/schedules/{scid}` | Read / edit (partial; action immutable) / delete a schedule. |
 | GET | `…/{sid}/schedules/{scid}/runs` | Execution history newest-first (`schedule:read`). |
 
+**A stopped server a Worker still holds.** A stop keeps its Worker assigned
+until the final snapshot settles, and that snapshot then replaces the
+authoritative copy (REQUIREMENTS.md Section 6.9). Until the server is released,
+every write to its working set — a file write, upload, rename, delete, mkdir or
+rollback, a restore, a plugin or resource-pack change, a PATCH that is not
+safe-keys-only — and a manual backup, an export and its grant are
+`409 server_assigned`, with a `detail` that says to wait for the release and try
+again (#3998). Reads are served. A scheduled backup waits for the release by
+itself.
+
 **Request body limits.** Every route reads at most a fixed amount of request
 body and answers a larger one **413**, by `Content-Length` before reading
 anything and by streamed size otherwise — so a body is never buffered, parsed or

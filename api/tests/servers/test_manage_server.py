@@ -1548,6 +1548,54 @@ async def test_update_rejects_while_running() -> None:
     assert uow.commits == 0
 
 
+@pytest.mark.parametrize(
+    "observed", [ObservedState.STOPPED, ObservedState.CRASHED, ObservedState.UNKNOWN]
+)
+@pytest.mark.parametrize(
+    "edit",
+    [{"name": "creative"}, {"game_port": 25570}, {"config": {"motd": "changed"}}],
+    ids=["name", "game-port", "unsafe-config"],
+)
+async def test_update_refuses_a_server_a_worker_still_holds(
+    edit: dict[str, Any], observed: ObservedState
+) -> None:
+    # A stop holds its Worker until the final snapshot settles, and that snapshot
+    # publishes over the store (issue #3998): a server.properties rewrite in the
+    # window would be overwritten, leaving the row disagreeing with the file.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community, observed=observed, game_port=25566)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(server)
+    store = FakeFileStore()
+    store.files["server.properties"] = b"motd=hi\nserver-port=25566\n"
+
+    with pytest.raises(ServerAssignedError):
+        await _updater(uow, file_store=store)(
+            community_id=community, server_id=server.id, **edit
+        )
+
+    assert uow.commits == 0
+    assert store.writes == []
+    assert store.files == {"server.properties": b"motd=hi\nserver-port=25566\n"}
+
+
+async def test_update_safe_key_only_succeeds_while_a_worker_still_holds_it() -> None:
+    # A safe-only edit writes no file, so the held assignment does not gate it.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    server = _server(community_id=community)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    uow.servers.seed(server)
+    updated = await _updater(uow, min_interval_seconds=300)(
+        community_id=community,
+        server_id=server.id,
+        config={"motd": "hi", "snapshot_interval_seconds": 600},
+    )
+    assert updated.config["snapshot_interval_seconds"] == 600
+    assert uow.commits == 1
+
+
 async def test_update_safe_key_only_succeeds_while_running() -> None:
     # The snapshot-cadence knob (snapshot_interval_seconds) is operationally
     # safe: a change touching only it bypasses the at-rest gate (issue #115). The

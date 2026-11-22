@@ -430,8 +430,8 @@ class InstallFromCatalog:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-                if not server.is_at_rest():
-                    raise ServerFilesUnsettledError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerFilesUnsettledError)
 
                 self.file_store.validate_rel_path(rel_path)
 
@@ -721,8 +721,8 @@ class UpdatePlugin:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 server = await _load(self.uow, community_id, server_id)
-                if not server.is_at_rest():
-                    raise ServerFilesUnsettledError(str(server_id.value))
+                if not server.is_quiescent():
+                    raise server.not_quiescent_error(ServerFilesUnsettledError)
 
                 self.file_store.validate_rel_path(new_clean_path)
 
