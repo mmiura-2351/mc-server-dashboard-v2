@@ -292,11 +292,12 @@ class AssignRole:
                 community_id=community_id,
                 roles_to_share=[role_id],
             )
-            # Re-reads the role the ceiling's pass already holds.
+            # Re-reads the role the ceiling's pass already holds; a role of
+            # another community neither locks nor returns (#4027).
             role = next(
                 iter(await self.uow.roles.lock_by_ids(community_id, [role_id])), None
             )
-            if role is None or role.community_id != community_id:
+            if role is None:
                 raise RoleNotFoundError(str(role_id.value))
 
             check_permission_ceiling(ceiling, role.permissions)

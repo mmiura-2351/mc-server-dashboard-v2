@@ -132,7 +132,11 @@ async def lock_actor_ceiling(
     without a membership is not a member of a community that exists, and gets
     the empty ceiling. A caller that also inserts under a recipient's membership
     holds both memberships first too (step 2); the actor's is then already held
-    here.
+    here. Nothing here checks the hold: a new caller takes it, and adds its write
+    to ``_NOT_FOUND_WRITES`` in
+    ``tests/integration/test_community_delete_mid_write_races.py``. Without the
+    hold, a deleted community gives it the empty ceiling and a ceiling refusal
+    instead of the not-found, and the deadlock with the deletion returns.
     """
     memberships = await uow.memberships.hold_for_users(community_id, [actor_id])
     membership = memberships[0] if memberships else None

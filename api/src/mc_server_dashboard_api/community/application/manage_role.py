@@ -163,8 +163,10 @@ class UpdateRole:
             # not count as newly conferred and could come back unchecked. The
             # actor's own authority is locked too (#3241), in one pass with the
             # role so the locks follow the ceiling's global order; lock_by_id
-            # then re-reads the role that pass already holds. A rename writes
-            # only the name, so its read needs no lock.
+            # then re-reads the role that pass already holds. A role of another
+            # community neither of them locks, and lock_by_id finds none, so two
+            # edits naming each other's community's role cannot deadlock
+            # (#4027). A rename writes only the name, so its read needs no lock.
             ceiling: set[Permission] = set()
             if permissions is None:
                 role = await self.uow.roles.get_by_id(role_id)
