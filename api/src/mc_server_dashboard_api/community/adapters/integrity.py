@@ -64,24 +64,45 @@ INSERT whose community is gone; that statement belongs to the servers context,
 which maps it to its own not-found in ``servers/adapters/integrity.py``. No
 statement of this context inserts a server, so the entry here has one meaning.
 
+**Three more are mapped: the community of a membership, a role and a resource
+grant** (migration 0004, issue #2967). ``fk_membership_community_id_community``,
+``fk_role_community_id_community`` and
+``fk_resource_grant_community_id_community`` are violated when the community is
+deleted after the route's gate admitted the caller as a member and before the
+write commits. They surface as :class:`CommunityNotFoundError`, which the routes
+answer with the gate's own non-member 404: the caller was a member a moment
+earlier and already knew the community existed, so the 404 reveals nothing, and
+it is what the gate answers them from then on. None of the three use cases
+pre-reads the community, so no earlier read answers instead. The rows are staged
+via ``session.add`` and nothing flushes them before the commit, so each
+violation surfaces inside the unit of work's ``commit`` wrap -- these FKs are
+not DEFERRABLE, so the wrap has to be around whichever statement flushes the
+staged row (issue #2612). The membership and role keys are reached by
+``AddMember`` and by a ``CreateRole`` that confers nothing (the ceiling, which
+would hold the actor's membership first, is then not consulted). The grant's is
+not reachable through ``CreateGrant``: it holds the recipient's membership from
+before its INSERT, so the deletion's cascade waits for it, and the grant either
+commits first or the two deadlock. It is mapped all the same, so that the three
+writes answer alike: an INSERT run after the deletion is checked against this
+key before its membership key, and fails on it. A write that holds the actor's
+membership before its INSERT meets the deletion there instead, and
+``lock_actor_ceiling`` raises the same error when it finds the membership gone
+with its community.
+
 **The other foreign keys are deliberately absent, and their absence is not a
-claim that they are unreachable.** Every FK in migration 0004 --
-``fk_role_community_id_community``, ``fk_membership_user_id_user``,
-``fk_membership_community_id_community``,
+claim that they are unreachable.** The rest of migration 0004 --
+``fk_membership_user_id_user``,
 ``fk_membership_role_membership_id_membership``,
-``fk_membership_role_role_id_role``, ``fk_resource_grant_user_id_user``,
-``fk_resource_grant_community_id_community`` -- plus the composite
-``pk_membership_role`` is violable only by a *concurrent delete* of the parent
-row, or for the PK a concurrent double assignment: they are all
+``fk_membership_role_role_id_role``, ``fk_resource_grant_user_id_user`` -- plus
+the composite ``pk_membership_role`` is violable only by a *concurrent delete*
+of the parent row, or for the PK a concurrent double assignment: they are all
 ``ON DELETE CASCADE``, every use case pre-reads what it writes to, and
 ``AssignRole`` pre-checks the assignment for idempotence. Translating one means
-deciding a typed error *and* an HTTP status for "the community / user /
-membership vanished mid-write", which none of these routes maps today -- a
-decision per constraint rather than a map entry, and a different defect from the
-deterministic one above. Note also that a map entry alone would not be enough:
-these FKs are not DEFERRABLE, so each violation surfaces at whichever statement
-ends up flushing the staged row, and that statement has to be inside a wrap for
-the entry to be reached at all (issue #2612).
+deciding a typed error *and* an HTTP status for "the user / membership vanished
+mid-write", which none of these routes maps today -- a decision per constraint
+rather than a map entry, and a different defect from the deterministic one
+above. A map entry alone would not be enough either, for the reason given above
+(issue #2612).
 
 The two ``user`` keys among them are not left to a concurrent account deletion
 either: every write that inserts under them first checks the user under its
@@ -97,6 +118,7 @@ from sqlalchemy.exc import IntegrityError
 from mc_server_dashboard_api.community.domain.errors import (
     CommunityAlreadyExistsError,
     CommunityHasServersError,
+    CommunityNotFoundError,
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
     MembershipAlreadyExistsError,
@@ -113,6 +135,13 @@ _GRANT_MEMBERSHIP_CONSTRAINTS = frozenset(
 )
 _GRANT_RESOURCE_CONSTRAINTS = frozenset({"fk_resource_grant_resource_id_server"})
 _COMMUNITY_SERVERS_CONSTRAINTS = frozenset({"fk_server_community_id_community"})
+_COMMUNITY_MISSING_CONSTRAINTS = frozenset(
+    {
+        "fk_membership_community_id_community",
+        "fk_role_community_id_community",
+        "fk_resource_grant_community_id_community",
+    }
+)
 
 
 def translate_integrity_error(exc: IntegrityError) -> None:
@@ -136,6 +165,8 @@ def translate_integrity_error(exc: IntegrityError) -> None:
         raise GrantResourceNotFoundError(str(constraint)) from exc
     if constraint in _COMMUNITY_SERVERS_CONSTRAINTS:
         raise CommunityHasServersError(str(constraint)) from exc
+    if constraint in _COMMUNITY_MISSING_CONSTRAINTS:
+        raise CommunityNotFoundError(str(constraint)) from exc
 
 
 def _constraint_name(exc: IntegrityError) -> str | None:

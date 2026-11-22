@@ -23,7 +23,7 @@ from mc_server_dashboard_api.community.application.manage_role import (
     UpdateRole,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
-from mc_server_dashboard_api.community.domain.entities import Role
+from mc_server_dashboard_api.community.domain.entities import Community, Role
 from mc_server_dashboard_api.community.domain.errors import (
     PresetRoleNotEditableError,
     RoleNotFoundError,
@@ -35,6 +35,7 @@ from mc_server_dashboard_api.community.domain.permissions import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
+    CommunityName,
     Permission,
     RoleId,
     RoleName,
@@ -48,6 +49,19 @@ _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 class _FakeClock(Clock):
     def now(self) -> dt.datetime:
         return _NOW
+
+
+def _seed_community(uow: FakeAuthzUnitOfWork, community_id: CommunityId) -> None:
+    # For a non-member actor whose ceiling is read: with no community the
+    # ceiling reports it gone (issue #2967) instead of coming back empty.
+    uow.communities.seed(
+        Community(
+            id=community_id,
+            name=CommunityName("guild"),
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
 
 
 def _seed_owner_role(uow: FakeAuthzUnitOfWork, community_id: CommunityId) -> RoleId:
@@ -186,6 +200,7 @@ async def test_update_role_rename_keeps_a_revocation_committed_after_its_read() 
 async def test_update_role_rejects_editing_the_preset_owner_role() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
+    _seed_community(uow, community)
     owner_id = _seed_owner_role(uow, community)
     with pytest.raises(PresetRoleNotEditableError):
         await UpdateRole(uow=uow, clock=_FakeClock())(
@@ -199,6 +214,7 @@ async def test_update_role_rejects_editing_the_preset_owner_role() -> None:
 async def test_update_role_rejects_unknown_permission() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()
+    _seed_community(uow, community)
     role_id = _seed_custom_role(uow, community)
     with pytest.raises(UnknownPermissionError):
         await UpdateRole(uow=uow, clock=_FakeClock())(
