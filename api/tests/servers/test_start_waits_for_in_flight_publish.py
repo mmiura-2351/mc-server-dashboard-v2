@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from mc_server_dashboard_api.dataplane.api.transfers import _assignment_fence
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.dependencies import WorkerAssignment
 from mc_server_dashboard_api.servers.adapters.store_generation import (
     StorageGenerationReader,
@@ -214,7 +215,9 @@ def _start(uow: FakeUnitOfWork, cp: FakeControlPlane, storage: Storage) -> Start
         control_plane=cp,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
-        store_generation=StorageGenerationReader(storage=storage),
+        store_generation=StorageGenerationReader(
+            storage=storage, uploads=SnapshotUploads()
+        ),
         file_store=FakeFileStore(seed_eula=True),
     )
 

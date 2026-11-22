@@ -19,6 +19,7 @@ from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
+from mc_server_dashboard_api.fleet.domain.control_plane import EXPIRY_MARGIN_SECONDS
 from mc_server_dashboard_api.servers.adapters.file_store import _rel_path
 from mc_server_dashboard_api.servers.application.stop_intents import StopIntentCounter
 from mc_server_dashboard_api.servers.domain.backup import (
@@ -207,6 +208,16 @@ class FakeStoreGenerationReader(StoreGenerationReader):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
         return self._generation
+
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        return True
 
 
 class FakeVersionValidator(VersionValidator):
@@ -741,14 +752,27 @@ class FakeFileStore(FileStore):
 
 
 class FakeClock(Clock):
+    """A clock that moves only when told to.
+
+    Its monotonic reading moves only by :meth:`advance_monotonic`, never by
+    :meth:`set`, as the wall clock can step while the monotonic clock does not.
+    """
+
     def __init__(self, now: dt.datetime) -> None:
         self._now = now
+        self._monotonic = 0.0
 
     def set(self, now: dt.datetime) -> None:
         self._now = now
 
     def now(self) -> dt.datetime:
         return self._now
+
+    def advance_monotonic(self, seconds: float) -> None:
+        self._monotonic += seconds
+
+    def monotonic(self) -> float:
+        return self._monotonic
 
 
 def _observe(
@@ -2045,8 +2069,13 @@ class FakeControlPlane(ControlPlane):
         connected: dict[WorkerId, bool] | None = None,
         held: dict[tuple[WorkerId, ServerId], int] | None = None,
         offline_since: dict[WorkerId, dt.datetime] | None = None,
+        hydrate_timeout_seconds: float = 600.0,
     ) -> None:
         self._place_to = place_to
+        # The start's hydrate budget, and the timeout each hydrate was handed out
+        # of it (issue #3950): ``None`` is the whole budget.
+        self._hydrate_timeout_seconds = hydrate_timeout_seconds
+        self.hydrate_timeouts: list[float | None] = []
         self._outcome = outcome or CommandOutcome(status=CommandStatus.OK)
         # Per-kind overrides let a test fail one dispatch (e.g. start) while another
         # succeeds (e.g. hydrate); kinds absent here fall back to ``outcome``.
@@ -2191,9 +2220,21 @@ class FakeControlPlane(ControlPlane):
         return await self._record("command", worker_id, server_id)
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
+        self.hydrate_timeouts.append(timeout_seconds)
         return await self._record("hydrate", worker_id, server_id)
+
+    def hydrate_timeout_seconds(self) -> float:
+        return self._hydrate_timeout_seconds
+
+    def command_expiry_margin_seconds(self) -> float:
+        return EXPIRY_MARGIN_SECONDS
 
     async def snapshot(
         self,
@@ -2269,7 +2310,12 @@ class PlacementSequenceControlPlane(FakeControlPlane):
         return chosen
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         outcome = await super().hydrate(
             worker_id=worker_id, community_id=community_id, server_id=server_id

@@ -226,6 +226,12 @@ const SPECIFIC_409_MESSAGE: Record<string, TranslationKey> = {
 // Stop and restart keep the state-changed treatment: neither leaves a pending
 // intent a retry collides with this way.
 //
+// `upload_in_flight` is start-only too (issue #3950): the start did not
+// hydrate its Worker because a snapshot upload of the server from that Worker
+// was still in flight. StartServer keeps desired=running and the assignment,
+// as after a refused hydrate, and the reconciler retries the start there. The
+// start IS pending, so it gets the start-pending message.
+//
 // `server_busy` is start-only and never commits an intent, so it is
 // verb-independent throughout.
 //
@@ -259,6 +265,9 @@ const VERB_SPECIFIC_409_MESSAGE: Record<
   },
   invalid_transition: {
     start: "dashboard.lifecycle.startAlreadyRunning",
+  },
+  upload_in_flight: {
+    start: "dashboard.lifecycle.startPending",
   },
   server_not_running: {
     restart: "dashboard.lifecycle.restartPending",

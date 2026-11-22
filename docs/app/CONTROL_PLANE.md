@@ -848,6 +848,88 @@ Notes:
   the assignment. The mark is stored with the server, so it also covers a start
   whose API process stopped between the commit and the hydrate, and a start
   cancelled while a hydrate it sent was refused.
+- **A start hydrates a Worker only after that Worker's uploads of the server
+  have landed.** A Worker's snapshot command can end before the API's commit
+  of its upload does: the Worker's transfer deadline (Section 5.2) or a Worker
+  restart ends the command while the API holds the whole body and goes on
+  committing it. The Worker's marker still reads the generation before, so the
+  next start hydrates it. Served before that commit, the hydrate would run the
+  Worker on the older generation, and the commit would then publish a world
+  that run does not contain (issue #3950). So before a start sends a hydrate,
+  it waits for every snapshot upload of the server from that Worker that the
+  data plane still has in flight, being received or committed. The hydrate
+  then serves what they publish.
+  - The data plane counts a publish that names its Worker (`X-Worker-Id`) from
+    the moment its request arrives, before it waits for a transfer slot or
+    reads anything it decides on, until it has committed or been refused
+    (STORAGE.md Section 8). Each API process counts its own uploads, as it
+    holds its own storage locks.
+  - Only that Worker's uploads are waited for. While this Worker is assigned,
+    the commit-time assignment fence refuses another Worker's; if the start
+    then gives the server back, such an upload lands as it would have anyway.
+  - A start that skips the hydrate does not wait: its Worker runs on the tree
+    such an upload packed, or a newer one.
+  - The wait comes after the start's placement commit and holds nothing: no
+    lifecycle lock, database session or storage lock. In practice it lasts as
+    long as a commit: an upload whose Worker went away mid-body aborts at the
+    API's next read of it, or after 120 s without a byte if the connection
+    stays open, while one whose whole body arrived commits whatever became of
+    the request. An upload stays counted for as long as its handler runs, and
+    nothing bounds a commit as a whole, so a commit that never returns (a
+    storage hang) holds back every start that hydrates that Worker until the
+    API restarts. Each start attempt is still bounded by the deadline below.
+  - The wait and the hydrate share one deadline:
+    `control.hydrate_timeout_seconds` from the moment the wait begins,
+    measured on the monotonic clock. The hydrate is dispatched with what the
+    wait left of it, and one that then runs out of time fails as any hydrate
+    timeout does. A start's hydrate phase therefore takes no longer than it
+    did, and the reconciler grace floor (CONFIGURATION.md Section 5.1, note 3)
+    holds unchanged.
+  - When the wait ends or runs out, the start re-reads the row and compares
+    the stop-intent count, as it does just before it sends `StartServer` (see
+    "A stop intent committed during a start wins", above). If a stop committed
+    during the wait, or the row now names another Worker, the start answers
+    `409 transition_conflict` and sends nothing, so no hydrate goes to a
+    Worker that may no longer hold the server.
+  - A wait that leaves the hydrate no more than the command expiry margin
+    (Expiry, below) sends the Worker nothing, since a command handed that
+    little is dropped unsent. The server stays `desired=running` on that
+    Worker with `observed=unknown`, as after a refused hydrate (the note
+    before last), and the reconciler re-sends the start there without placing
+    the server again. A user start answers `409 upload_in_flight`; the
+    reconciler counts it toward the backoff.
+  - Not covered: a publish that names no Worker, which cannot be told apart
+    from any Worker's; and a proxy in front of the data plane that buffers a
+    whole request before forwarding it, or keeps forwarding it after the
+    Worker has gone. Such a body can reach the API after the Worker's command
+    ended and after a start's wait passed, so request bodies must stream to
+    the API ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md), "The data-plane
+    URL for a cross-host worker").
+  - Not covered either: an upload from the Worker that reaches the data plane
+    only after a `redispatch_start`'s wait has passed, and before its hydrate
+    is served. A start that places the server marks the row
+    `awaiting_hydrate`, which refuses such an upload, but a
+    `redispatch_start` does not mark it, so the upload would commit after the
+    hydrate read the older generation. Marking the row there too is issue
+    #4024. Until then, three things keep the case out, and a change to any of
+    them must be read against it:
+    - A request whose Worker has gone cannot register late and still stage a
+      body: on the shipped uvicorn (h11), the handler's first read of a
+      request whose connection has closed answers a disconnect, even with
+      body bytes buffered.
+    - A snapshot of a stopped server holds the Worker's reservation of the
+      server until its upload ends, even after the command has answered, so
+      the Worker refuses the hydrate `BUSY` meanwhile.
+    - A snapshot of a running server holds no reservation. While the instance
+      runs, the Worker refuses the hydrate `INVALID_STATE`. Once it has
+      exited, only the Worker's per-server lane and the reconciler grace keep
+      the upload ahead of the hydrate: a `redispatch_start` that hydrates
+      waits the full `reconciler.grace_seconds` (660 s by default), and the
+      Worker's transfer deadline, the larger of the hydrate and snapshot
+      budgets plus 60 s (Section 5.2), is also 660 s by default. That is no
+      slack, and the grace floor (CONFIGURATION.md Section 5.1, note 3) does
+      not require the grace to exceed the transfer deadline: its stock value
+      is 630 s.
 - **Expiry.** `ApiCommand.expires_after` is how long the Worker may hold a
   command before it starts executing it. It is measured from when the Worker
   received the command, so the two hosts' clocks never meet. The API stamps it

@@ -155,6 +155,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerPropertiesMissingError,
     SlugAlreadyTakenError,
     SlugExhaustedError,
+    SnapshotUploadInFlightError,
     UnknownServerTypeError,
     UnreadableArchiveError,
     UnsupportedEditionError,
@@ -1470,6 +1471,11 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     # ``server_busy`` (issue #876), the same retry-able conflict the gated routes
     # surface. Only start takes the lock, so stop/restart never raise this.
     ServerBusyError: (Outcome.DENIED, "server_busy"),
+    # StartServer did not hydrate its Worker while that Worker's snapshot upload
+    # of the server was still in flight (issue #3950). The start keeps its intent
+    # and the Worker, and the reconciler retries it there: a start that is
+    # pending, as after a refused hydrate.
+    SnapshotUploadInFlightError: (Outcome.DENIED, "upload_in_flight"),
     # The start lost that lock before its flip (issue #3927): nothing started,
     # and the retry takes the lock afresh.
     LifecycleLockLostError: (Outcome.ERROR, "lifecycle_lock_lost"),

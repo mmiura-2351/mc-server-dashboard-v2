@@ -162,6 +162,9 @@ class _AdvancingClock(Clock):
 
         self._next = at
 
+    def monotonic(self) -> float:
+        return 0.0
+
 
 class _StoreGeneration(StoreGenerationReader):
     """A store generation a scenario can move, shared by every seam that reads it."""
@@ -173,6 +176,16 @@ class _StoreGeneration(StoreGenerationReader):
         self, *, community_id: CommunityId, server_id: ServerId
     ) -> int:
         return self.generation
+
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        return True
 
 
 class _PublishingControlPlane(FakeControlPlane):

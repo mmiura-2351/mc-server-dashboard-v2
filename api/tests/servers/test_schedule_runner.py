@@ -173,6 +173,7 @@ def _env(
     control_plane: FakeControlPlane | None = None,
     backup_store: FakeBackupArchiveStore | None = None,
     clock: FakeClock | None = None,
+    store_generation: FakeStoreGenerationReader | None = None,
     history_cap: int = 50,
     backup_retry_delay: dt.timedelta = dt.timedelta(minutes=30),
     warning_grace: dt.timedelta = WARNING_GRACE_FLOOR,
@@ -191,7 +192,7 @@ def _env(
                 control_plane=cp,
                 clock=the_clock,
                 jar_provisioner=FakeJarProvisioner(),
-                store_generation=FakeStoreGenerationReader(),
+                store_generation=store_generation or FakeStoreGenerationReader(),
                 # An accepted EULA, so a scheduled start reaches its dispatch.
                 file_store=FakeFileStore(seed_eula=True),
             ),
@@ -1672,6 +1673,49 @@ async def test_a_start_the_worker_answered_busy_is_unknown() -> None:
     assert env.uow.servers.by_id[server.id].desired_state is DesiredState.RUNNING
     assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
     assert _run_details(env, schedule) == ["worker_busy"]
+
+
+class _UploadsStayInFlight(FakeStoreGenerationReader):
+    """A store whose Worker's uploads are still in flight when the wait runs out."""
+
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        return False
+
+
+async def test_a_start_whose_wait_for_the_workers_uploads_ran_out_is_unknown() -> None:
+    # No hydrate was sent, but StartServer keeps the intent and the Worker, and
+    # the reconciler retries the start there once the upload has landed (issue
+    # #3950). The run names why.
+    env = _env(
+        control_plane=FakeControlPlane(place_to=_WORKER),
+        store_generation=_UploadsStayInFlight(),
+    )
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.START,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    await env.runner.tick()
+
+    row = env.uow.servers.by_id[server.id]
+    assert (row.desired_state, row.assigned_worker_id) == (
+        DesiredState.RUNNING,
+        _WORKER,
+    )
+    assert env.control_plane.dispatched == []
+    assert _runs(env, schedule) == [ScheduleRunOutcome.UNKNOWN]
+    assert _run_details(env, schedule) == ["upload_in_flight"]
 
 
 @pytest.mark.parametrize(

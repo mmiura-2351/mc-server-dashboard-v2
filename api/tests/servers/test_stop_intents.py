@@ -48,6 +48,7 @@ from starlette.requests import Request
 
 from mc_server_dashboard_api.dependencies import (
     get_set_worker_drain,
+    get_snapshot_uploads,
     get_start_server,
     get_stop_server,
 )
@@ -68,6 +69,9 @@ from mc_server_dashboard_api.fleet.application.set_worker_drain import (
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId as FleetWorkerId
 from mc_server_dashboard_api.servers.adapters.control_plane import (
     FleetControlPlaneAdapter,
+)
+from mc_server_dashboard_api.servers.adapters.store_generation import (
+    StorageGenerationReader,
 )
 from mc_server_dashboard_api.servers.application.lifecycle import (
     RestartServer,
@@ -386,7 +390,12 @@ class _Worker(FakeControlPlane):
         self.load.append("drop")
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         outcome = await super().hydrate(
             worker_id=worker_id, community_id=community_id, server_id=server_id
@@ -872,9 +881,10 @@ async def test_the_working_set_replay_compares_the_count_its_start_read() -> Non
             community_id=world.community, server_id=world.server_id
         )
 
-    # The refused start, the stop and its release, the newer start, then the
-    # replay's hydrate. The replay sends no start.
-    assert world.kinds() == ["start", "stop", "snapshot", "start", "hydrate"]
+    # The refused start, the stop and its release, then the newer start. The
+    # replay's re-read after its wait for the Worker's uploads (issue #3950)
+    # finds the count moved, so it sends neither a hydrate nor a start.
+    assert world.kinds() == ["start", "stop", "snapshot", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -950,9 +960,10 @@ async def test_a_placement_reads_the_counter_before_its_own_commit() -> None:
             community_id=world.community, server_id=world.server_id
         )
 
-    # The release takes no snapshot, as above. The placement always hydrates; it
-    # then sends nothing.
-    assert world.kinds() == ["stop", "hydrate", "start", "hydrate"]
+    # The release takes no snapshot, as above. The placement would hydrate, but
+    # its re-read after the wait for the Worker's uploads (issue #3950) finds the
+    # count moved, so it sends nothing.
+    assert world.kinds() == ["stop", "hydrate", "start"]
     assert world.stored() == (DesiredState.RUNNING, world.worker)
     assert world.cp.live == {world.server_id}
 
@@ -2484,6 +2495,9 @@ async def test_the_http_start_stop_and_drain_share_the_app_counter() -> None:
 
     assert start.stop_intents is app.state.stop_intents
     assert start.start_intent_lock is app.state.start_intent_lock
+    # The start waits for uploads in the count the data plane keeps (issue #3950).
+    assert isinstance(start.store_generation, StorageGenerationReader)
+    assert start.store_generation.uploads is get_snapshot_uploads(request)
     assert stop.stop_intents is app.state.stop_intents
     assert isinstance(drain.stopper, ServersAssignedServerStopper)
     assert drain.stopper.stop_servers.stop_intents is app.state.stop_intents

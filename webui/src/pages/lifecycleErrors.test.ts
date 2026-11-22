@@ -155,6 +155,16 @@ describe("lifecycleErrorMessage", () => {
     );
   });
 
+  // A start that did not hydrate its Worker while that Worker's upload of the
+  // server was in flight keeps desired_state=running and its Worker, and the
+  // reconciler retries it (issue #3950): the start is pending.
+  it("maps a 409 upload_in_flight on start to the start-pending message", () => {
+    const error = new ApiError(409, { reason: "upload_in_flight" });
+    expect(lifecycleErrorMessage(error, "start")).toBe(
+      "dashboard.lifecycle.startPending",
+    );
+  });
+
   // server_busy is start-only and never commits an intent, so the verb never
   // changes its message (issue #2435).
   it("keeps the busy message for a 409 server_busy on start", () => {

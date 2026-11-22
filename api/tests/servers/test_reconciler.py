@@ -676,6 +676,16 @@ class _BumpingStoreGenerationReader(StoreGenerationReader):
         self.calls += 1
         return self._first if self.calls == 1 else self._bumped
 
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        return True
+
 
 async def test_held_redispatch_start_carries_grace_generation_over_a_bump() -> None:
     # TOCTOU pin (issue #2482): the reconciler grants the SHORT held-start grace on a
@@ -1556,6 +1566,7 @@ async def test_server_placed_after_registration_gets_the_short_held_grace() -> N
         control_plane=fleet,
         data_plane_base_url="http://data-plane.test",
         worker_credential="test-credential",
+        hydrate_timeout_seconds=600,
     )
     uow = FakeUnitOfWork()
     aged = _NOW - dt.timedelta(seconds=_HELD_GRACE + 1)
@@ -1834,7 +1845,12 @@ class _StopLandsDuringHydrate(FakeControlPlane):
         self._uow = uow
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         self._uow.servers.by_id[server_id].desired_state = DesiredState.STOPPED
         return await super().hydrate(

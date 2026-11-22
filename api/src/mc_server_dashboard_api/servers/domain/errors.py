@@ -199,6 +199,17 @@ class LifecycleTransitionConflictError(ServerError):
     """
 
 
+class SnapshotUploadInFlightError(ServerError):
+    """A start did not hydrate its Worker: an upload from it was in flight.
+
+    Before a start hydrates a Worker, it waits for that Worker's snapshot uploads
+    of the server still being received or committed (issue #3950). One still was
+    when the wait ran out, so nothing was sent to the Worker. The start keeps the
+    server on that Worker and its running intent, and the reconciler retries it
+    there; nothing is placed again. The edge maps it to 409 ``upload_in_flight``.
+    """
+
+
 class ServerBusyError(ServerError):
     """A gated operation could not acquire the per-server lifecycle lock in time.
 

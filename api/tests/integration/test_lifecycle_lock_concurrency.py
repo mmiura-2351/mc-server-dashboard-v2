@@ -96,6 +96,9 @@ class _FixedClock(Clock):
     def now(self) -> dt.datetime:
         return _NOW
 
+    def monotonic(self) -> float:
+        return 0.0
+
 
 class _BlockingBackupStore(FakeBackupArchiveStore):
     """A backup store whose ``restore`` parks until the test releases it.

@@ -123,6 +123,7 @@ def _registry_backed_control_plane(registry: object) -> FleetControlPlaneAdapter
         control_plane=_OkFleetControlPlane(),
         data_plane_base_url="http://data-plane.test",
         worker_credential="test-credential",
+        hydrate_timeout_seconds=600,
     )
 
 
@@ -1488,7 +1489,12 @@ class _ReportsDuringTheHydrate(FakeControlPlane):
         self._answered = answered
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         self._clock.set(self._reported)
         await self._uow.servers.record_observed_state(
@@ -1745,7 +1751,12 @@ class _HydrateNeverAnswers(FakeControlPlane):
         self.hydrating = asyncio.Event()
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         self.hydrating.set()
         await asyncio.Event().wait()
@@ -2235,10 +2246,11 @@ async def test_start_compensation_skips_decrement_when_revert_loses_race() -> No
         async def get_by_id(self, server_id: ServerId) -> Server | None:
             loaded = await super().get_by_id(server_id)
             self._reads += 1
-            # Reads: 1 = start's load, 2 = compensation's load. On the
-            # compensation read, simulate the concurrent stop having already
-            # reverted the stored row.
-            if self._reads == 2:
+            # Reads: 1 = the start's load, 2 = the re-read after the wait for
+            # the Worker's uploads (issue #3950), 3 = the re-read before the
+            # send. Right after that one, simulate the concurrent stop having
+            # reverted the stored row, so the compensation's load sees it.
+            if self._reads == 3:
                 stored = self.by_id[server_id]
                 stored.desired_state = DesiredState.STOPPED
                 stored.assigned_worker_id = None
@@ -5231,7 +5243,12 @@ class _ReleasedWhileHydrating(FakeControlPlane):
         self._answer = answer
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         await super().hydrate(
             worker_id=worker_id, community_id=community_id, server_id=server_id
@@ -5668,7 +5685,12 @@ class _HydrateRunsHookControlPlane(FakeControlPlane):
         self._during_hydrate = during_hydrate
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         self._during_hydrate()
         return await super().hydrate(
@@ -6014,7 +6036,12 @@ class _LaneWorker(FakeControlPlane):
         self.live: set[ServerId] = set()
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         async with self._lane:
             self.hydrating.set()
