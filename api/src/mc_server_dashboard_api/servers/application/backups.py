@@ -1137,8 +1137,8 @@ class PruneScheduledBackups:
                 return []
             scheduled = [b for b in rows if b.source is BackupSource.SCHEDULED]
             try:
-                scheduled = await _backfill_null_sizes(
-                    self.uow, self.backup_store, community_id, server_id, scheduled
+                sizes = await _probe_null_sizes(
+                    self.backup_store, community_id, server_id, scheduled
                 )
             except Exception as exc:
                 _LOG.warning(
@@ -1151,6 +1151,7 @@ class PruneScheduledBackups:
                     exc,
                 )
                 raise
+            await _record_sizes(self.uow, sizes)
             pruned = backups_to_prune(policy, scheduled, self.clock.now())
             for backup in pruned:
                 await _delete_archive_then_row(
@@ -1745,15 +1746,15 @@ async def _backfill_null_sizes(
 ) -> list[Backup]:
     """Compute + persist ``size_bytes`` for legacy NULL rows whose archive exists.
 
-    The lazy backfill on read (issue #661), which the retention prune also runs
-    before it ranks (issue #4107). Only NULL-size rows trigger a store call, and
-    the persisted value makes it one-time per row. The caller has closed its unit
-    of work: each store call is a HEAD that can take as long as the store's
-    timeouts allow, so none runs with a session open, which would keep a pool
-    connection checked out for that long (issue #4107). The sizes are then
-    written in a short unit of work of their own, opened only when there is one
-    to write. The returned ``rows`` carry any computed size so the listing/total
-    reflect it immediately.
+    The lazy backfill on read (issue #661), whose two halves the retention prune
+    also runs before it ranks (issue #4107). Only NULL-size rows trigger a store
+    call, and the persisted value makes it one-time per row. The caller has
+    closed its unit of work: each store call is a HEAD that can take as long as
+    the store's timeouts allow, so none runs with a session open, which would
+    keep a pool connection checked out for that long (issue #4107). The sizes
+    are then written in a short unit of work of their own, opened only when
+    there is one to write. The returned ``rows`` carry any computed size so the
+    listing/total reflect it immediately.
 
     **Only a missing archive is tolerated** (``BackupNotFoundError``, a row left
     dangling before creates wrote the archive first, issue #4086): its NULL size

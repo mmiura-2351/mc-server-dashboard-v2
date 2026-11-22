@@ -52,6 +52,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeBackupArchiveStore,
     FakeClock,
     FakeLifecycleLock,
@@ -524,6 +525,28 @@ async def test_a_store_error_while_sizing_fails_the_prune_before_any_deletion(
         if r.levelno == logging.WARNING and str(env.server.id.value) in r.getMessage()
     ]
     assert warned
+
+
+async def test_a_database_failure_writing_a_size_is_not_logged_as_unsized(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The HEAD answered; the size write failed. That is a database failure, so
+    # it fails the prune without the WARNING that blames the sizing.
+    env = _Env()
+    await env.seed_retention({"keep_last": 1})
+    env.seed_backup(_unsized(_backup(env.server.id, _NOW)))
+
+    async def _down(_backup_id: BackupId, _size_bytes: int) -> None:
+        raise DatabaseOutageError("the database is down")
+
+    monkeypatch.setattr(env.uow.backups, "update_size", _down)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(DatabaseOutageError):
+            await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
+
+    assert env.store.deleted == []
+    assert not [r for r in caplog.records if "could not be sized" in r.getMessage()]
 
 
 async def test_prune_without_policy_sizes_nothing() -> None:
