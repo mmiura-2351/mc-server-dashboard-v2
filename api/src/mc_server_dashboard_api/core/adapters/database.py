@@ -94,6 +94,7 @@ def create_engine(
     *,
     pool_size: int | None = None,
     max_overflow: int | None = None,
+    pool_timeout: float | None = None,
     connect_timeout: float | None = None,
     statement_timeout: float | None = None,
 ) -> AsyncEngine:
@@ -101,7 +102,10 @@ def create_engine(
 
     ``pool_size`` and ``max_overflow`` are forwarded to SQLAlchemy's
     ``create_async_engine`` when supplied; when omitted SQLAlchemy's own
-    defaults (5 / 10) apply (issue #884).
+    defaults (5 / 10) apply (issue #884). ``pool_timeout`` bounds a checkout's
+    wait for a connection while all of them are in use, in seconds (issue
+    #4051); omitted, SQLAlchemy's 30 s applies. A wait that runs out raises
+    SQLAlchemy's ``TimeoutError``.
 
     ``connect_timeout`` bounds a new connection, its authentication included,
     and ``statement_timeout`` each exchange with the server on a connection, in
@@ -122,6 +126,8 @@ def create_engine(
         kwargs["pool_size"] = pool_size
     if max_overflow is not None:
         kwargs["max_overflow"] = max_overflow
+    if pool_timeout is not None:
+        kwargs["pool_timeout"] = pool_timeout
     connect_args: dict[str, float] = {}
     if connect_timeout is not None:
         connect_args["timeout"] = connect_timeout
@@ -225,15 +231,16 @@ def is_transient_database_error(exc: BaseException) -> bool:
 
 
 def is_database_timeout(exc: BaseException) -> bool:
-    """Whether ``exc`` is the database not answering within an engine's bound.
+    """Whether ``exc`` is one of an engine's bounds running out.
 
-    A statement's or a checkout's is :class:`DatabaseTimeoutError`; a connect's,
-    on an engine passed to :func:`translate_connect_outages`, is the
-    :class:`DatabaseConnectError` over the driver's ``TimeoutError`` (issue
-    #4042).
+    The database not answering within a statement's or a checkout's bound is
+    :class:`DatabaseTimeoutError`; within a connect's, on an engine passed to
+    :func:`translate_connect_outages`, the :class:`DatabaseConnectError` over the
+    driver's ``TimeoutError`` (issue #4042). A pool that hands out no connection
+    within ``pool_timeout`` raises SQLAlchemy's ``TimeoutError`` (issue #4051).
     """
 
-    return isinstance(exc, DatabaseTimeoutError) or (
+    return isinstance(exc, DatabaseTimeoutError | sqlalchemy.exc.TimeoutError) or (
         isinstance(exc, DatabaseConnectError)
         and isinstance(exc.__cause__, TimeoutError)
     )

@@ -527,9 +527,12 @@ after the retry failed as if the database were down, the error is the message's
 own, and the message is dropped. A retry that ran out the connect or statement
 bound is the exception, and the message stays held (issue #4042): a database
 stalled on its disk answers the probe, which only reads, while its writes time
-out. A failure of any other kind drops the message too. When more than five
-drops follow one another, the API ends the session. A held message's failures do
-not count toward them; a drop after the Worker closed the stream does.
+out. So is a retry that waited out `database.pool_timeout_seconds` for a
+connection (issue #4051): other work holds the pool, since no message takes more
+than one connection at a time. A failure of any other kind drops the message
+too. When more than five drops follow one another, the API ends the session. A
+held message's failures do not count toward them; a drop after the Worker closed
+the stream does.
 
 Log lines and metrics wait in the same queue, except while a message is held
 (issue #4028). As the hold starts, the API drops the ones already queued, which

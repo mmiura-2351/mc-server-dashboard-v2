@@ -233,10 +233,11 @@ def _connect_error(cause: Exception) -> DatabaseConnectError:
             False,
             id="connect-refused",
         ),
+        # The pool's wait for a free connection (issue #4051).
+        pytest.param(sqlalchemy.exc.TimeoutError("pool"), True, id="pool-bound"),
         # Only the engine's own bound is the database's: a bare one may be a
         # store's or a Worker's.
         pytest.param(TimeoutError(), False, id="bare-timeout"),
-        pytest.param(sqlalchemy.exc.TimeoutError("pool"), False, id="pool-timeout"),
     ],
 )
 def test_a_database_timeout_is_the_engines_bound_running_out(

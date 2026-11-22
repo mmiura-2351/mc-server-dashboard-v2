@@ -913,7 +913,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     # means the database went down again, not that the error
                     # is the message's own. A timeout is never its own: a
                     # database stalled on its disk answers a ping, which only
-                    # reads, while its writes time out (issue #4042).
+                    # reads, while its writes time out (issue #4042). Nor is
+                    # a wait for a connection: other work holds the pool, as
+                    # no handler takes more than one connection at a time
+                    # (issue #4051).
                     if (
                         not is_database_timeout(exc)
                         and answered_before

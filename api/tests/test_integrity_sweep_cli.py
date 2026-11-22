@@ -37,7 +37,12 @@ from mc_server_dashboard_api.servers.domain.errors import (
     LifecycleLockLostError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
-from tests.core.fakes import black_hole_database, first_failure, silent_database
+from tests.core.fakes import (
+    RecordingEngines,
+    black_hole_database,
+    first_failure,
+    silent_database,
+)
 
 _EMPTY = SweepSummary(
     servers_scanned=0,
@@ -500,3 +505,24 @@ async def test_the_sweep_holds_a_database_that_stopped_answering_to_its_bounds(
 
     assert elapsed < 2.0
     assert is_transient_database_error(error) is True
+
+
+async def test_the_sweep_bounds_each_engines_wait_for_a_free_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both of the sweep's engines, its lock's included, wait the configured bound
+    for a free connection, not SQLAlchemy's 30 s (issue #4051)."""
+
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+    monkeypatch.setenv(
+        "MCD_API_DATABASE__URL", "postgresql+asyncpg://u:p@127.0.0.1:5/none"
+    )
+    monkeypatch.setenv("MCD_API_DATABASE__POOL_TIMEOUT_SECONDS", "0.2")
+    engines = RecordingEngines()
+    monkeypatch.setattr(integrity_sweep_cli, "create_engine", engines)
+
+    with pytest.raises(DatabaseConnectError):
+        await integrity_sweep_cli.run(load_settings(config_file=None), server_id=None)
+
+    assert engines.pool_timeouts() == [0.2, 0.2]

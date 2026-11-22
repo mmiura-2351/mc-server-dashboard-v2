@@ -334,6 +334,10 @@ class DatabaseSettings(_Section):
     # change until an operator explicitly tunes them.
     pool_size: int = Field(default=5, gt=0)
     max_overflow: int = Field(default=10, ge=0)
+    # How long a checkout waits for a connection while all of them are in use
+    # (issue #4051). Explicit so an exhausted pool fails as an outage within a
+    # known ceiling, rather than after SQLAlchemy's 30 s default.
+    pool_timeout_seconds: float = Field(default=10.0, gt=0)
     # The driver's bounds on a database that hangs rather than refuses (issue
     # #4042): a new connection, its authentication included, and each exchange
     # with the server on one. Explicit so a hang fails as an outage within a known
