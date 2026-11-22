@@ -4455,3 +4455,141 @@ async def test_without_a_hold_log_lines_queue_in_order_and_back_pressure_the_rea
         await call.done_writing()
     finally:
         await h.stop()
+
+
+# ---------------------------------------------------------------------------
+# Stamping a report as it is read (issue #4118)
+# ---------------------------------------------------------------------------
+
+_SERVER_C = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+
+class _StampSink(_OutageSink):
+    """Records each write's stamp, as (server, state, observed_at), as it starts.
+
+    With ``clock``, each write moves that clock a second on, so a stamp taken
+    at a later attempt differs from the one taken as the report was read.
+    """
+
+    def __init__(self, clock: FakeClock | None = None, **outage: Any) -> None:
+        super().__init__(**outage)
+        self._clock = clock
+        self.stamps: list[tuple[str, str, dt.datetime | None]] = []
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        self.stamps.append((server_id, state, frame.get("observed_at")))
+        if self._clock is not None:
+            self._clock.set(self._clock.now() + dt.timedelta(seconds=1))
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+async def test_a_superseded_sessions_report_in_flight_keeps_its_receipt_stamp() -> None:
+    # A report already being written when the Worker re-registers is not
+    # checked again, and can land after the newer session's report. It was
+    # stamped as it was read, before the newer session registered, so the
+    # newer report's later stamp keeps it whichever lands first.
+    gate = asyncio.Event()
+    sink = _StampSink(gate=gate)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        stub = await h.start()
+        old = await _registered(stub)
+        await old.write(_status_message(_SERVER_A, pb.SERVER_STATE_STARTING))
+        await _wait_until(lambda: sink.stamps, "the old report's write did not start")
+        later = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(later)
+        new = await _registered(stub)
+        await new.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: len(sink.stamps) == 2, "the new report's write did not start"
+        )
+        gate.set()
+        await _wait_until(lambda: len(sink.observed) == 2, "the reports not applied")
+
+        assert sink.stamps == [
+            (_SERVER_A, "starting", _T0),
+            (_SERVER_A, "running", later),
+        ]
+        await new.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_reports_retries_keep_its_receipt_stamp() -> None:
+    # A retry is the same report, read once. Stamped anew, a retry landing
+    # after a newer write would overwrite it with the older state.
+    clock = FakeClock(_T0)
+    sink = _StampSink(clock, errors={_SERVER_A: [_OUTAGE] * 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        clock,
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(lambda: sink.observed, "the held report was not applied")
+
+        assert sink.stamps == [(_SERVER_A, "running", _T0)] * 3
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_report_waiting_to_be_handled_keeps_its_receipt_stamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Behind a slow write, B waits in the queue, and C, read once the queue is
+    # full, waits for room in it. Each is stamped as it was read, not as it is
+    # queued or handled.
+    monkeypatch.setattr(grpc_server, "_INBOUND_QUEUE_MAXSIZE", 1)
+    read: list[str] = []
+    drop = grpc_server._Hold.drop
+
+    def _noting_drop(hold: Any, message: pb.WorkerMessage) -> bool:
+        read.append(message.event.server_id)
+        return drop(hold, message)
+
+    monkeypatch.setattr(grpc_server._Hold, "drop", _noting_drop)
+    gate = asyncio.Event()
+    sink = _StampSink(gate=gate)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(lambda: sink.stamps, "A's write did not start")
+        queued = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(queued)
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_RUNNING))
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, queued)
+        blocked = _T0 + dt.timedelta(seconds=2)
+        h.clock.set(blocked)
+        await call.write(_status_message(_SERVER_C, pb.SERVER_STATE_RUNNING))
+        await _wait_until(lambda: read[-1:] == [_SERVER_C], "C was not read")
+        h.clock.set(_T0 + dt.timedelta(seconds=3))
+        gate.set()
+        await _wait_until(lambda: len(sink.observed) == 3, "the reports not applied")
+
+        assert [(server, stamp) for server, _, stamp in sink.stamps] == [
+            (_SERVER_A, _T0),
+            (_SERVER_B, queued),
+            (_SERVER_C, blocked),
+        ]
+        await call.done_writing()
+    finally:
+        await h.stop()

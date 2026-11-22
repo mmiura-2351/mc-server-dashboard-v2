@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.adapters.server_state_sink import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
     ServerId,
+    WorkerId,
 )
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeClock as FleetFakeClock
@@ -119,42 +120,66 @@ class _Sink(FakeServerStateSink):
         self.marked.set()
 
 
-class _ReadGate:
-    """Holds the next server read, once it has answered, until released."""
+class _Gate:
+    """Holds the next call that passes it, until released."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def __init__(self) -> None:
         self.armed = False
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
-        read = SqlAlchemyServerRepository.get_by_id
 
-        async def _gated(repo: SqlAlchemyServerRepository, server_id: ServerId) -> Any:
-            server = await read(repo, server_id)
-            if self.armed:
-                self.armed = False
-                self.reached.set()
-                await self.release.wait()
-            return server
-
-        monkeypatch.setattr(SqlAlchemyServerRepository, "get_by_id", _gated)
+    async def hold(self) -> None:
+        if self.armed:
+            self.armed = False
+            self.reached.set()
+            await self.release.wait()
 
 
-async def _supersede_an_attempt_in_flight(
+def _gate_reads_and_marks(monkeypatch: pytest.MonkeyPatch) -> tuple[_Gate, _Gate]:
+    """Gates a server read once it has answered, and a mark-unknown once its
+    stamp is taken."""
+
+    read_gate, mark_gate = _Gate(), _Gate()
+    read = SqlAlchemyServerRepository.get_by_id
+    mark = SqlAlchemyServerRepository.mark_worker_servers_unknown
+
+    async def _read(repo: SqlAlchemyServerRepository, server_id: ServerId) -> Any:
+        server = await read(repo, server_id)
+        await read_gate.hold()
+        return server
+
+    async def _mark(
+        repo: SqlAlchemyServerRepository, worker_id: WorkerId, observed_at: dt.datetime
+    ) -> None:
+        await mark_gate.hold()
+        await mark(repo, worker_id, observed_at)
+
+    monkeypatch.setattr(SqlAlchemyServerRepository, "get_by_id", _read)
+    monkeypatch.setattr(
+        SqlAlchemyServerRepository, "mark_worker_servers_unknown", _mark
+    )
+    return read_gate, mark_gate
+
+
+async def _supersede_a_report_in_flight(
     world: _World,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     *,
-    refused: bool,
+    ending: str,
 ) -> tuple[InMemoryWorkerRegistry, ObservedState]:
     """The old session's report is read, then held while the Worker comes back.
 
-    The newer session reports ``running``; or, ``refused``, its registration is
-    refused and its teardown marks the server ``unknown``. The old session's
-    report then lands. Returns the registry and the server's state after it.
+    ``reported``: the newer session reports ``running``, then the old report
+    lands. ``marked``: the newer registration is refused, its teardown marks
+    the server ``unknown``, then the old report lands. ``stamped``: the same,
+    except that the old report lands after the teardown has stamped its write
+    and before that write. Returns the registry, and the server's state once
+    both writes have landed.
     """
 
     server = await world.server("survival", worker=_WORKER)
     server_id = str(server.id.value)
-    gate = _ReadGate(monkeypatch)
+    read_gate, mark_gate = _gate_reads_and_marks(monkeypatch)
     sink = _Sink(world.sink())
     clock = _WorldFleetClock(world)
     registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
@@ -162,41 +187,49 @@ async def _supersede_an_attempt_in_flight(
     try:
         stub = await h.start()
         old = await _registered(stub)
-        gate.armed = True
-        stale = pb.SERVER_STATE_RUNNING if refused else pb.SERVER_STATE_STARTING
+        read_gate.armed = True
+        stale = pb.SERVER_STATE_RUNNING
+        if ending == "reported":
+            stale = pb.SERVER_STATE_STARTING
         await old.write(_status_message(server_id, stale))
-        await asyncio.wait_for(gate.reached.wait(), timeout=_ANSWER_GUARD_SECONDS)
+        await asyncio.wait_for(read_gate.reached.wait(), timeout=_ANSWER_GUARD_SECONDS)
 
-        if refused:
-            sink.refuse_next = True
-            new = stub.Session(metadata=_auth(_CREDENTIAL))
-            await new.write(_register_message())
-            code = await asyncio.wait_for(new.code(), timeout=_ANSWER_GUARD_SECONDS)
-            assert code is grpc.StatusCode.UNAVAILABLE
-            await asyncio.wait_for(sink.marked.wait(), timeout=_ANSWER_GUARD_SECONDS)
-        else:
+        if ending == "reported":
             new = await _registered(stub)
             await new.write(_status_message(server_id, pb.SERVER_STATE_RUNNING))
             await _wait_until(
                 lambda: sink.applied == [True], "the new session's report not applied"
             )
+        else:
+            mark_gate.armed = ending == "stamped"
+            sink.refuse_next = True
+            new = stub.Session(metadata=_auth(_CREDENTIAL))
+            await new.write(_register_message())
+            teardown = mark_gate.reached if ending == "stamped" else sink.marked
+            await asyncio.wait_for(teardown.wait(), timeout=_ANSWER_GUARD_SECONDS)
 
         # The old stream closes cleanly, so nothing cancels its attempt.
         await old.done_writing()
-        gate.release.set()
+        read_gate.release.set()
         await _wait_until(
-            lambda: len(sink.applied) == (1 if refused else 2),
-            "the old session's attempt did not finish",
+            lambda: len(sink.applied) == (2 if ending == "reported" else 1),
+            "the old session's report did not land",
         )
+        mark_gate.release.set()
         await asyncio.wait_for(old.code(), timeout=_ANSWER_GUARD_SECONDS)
+        if ending != "reported":
+            await asyncio.wait_for(sink.marked.wait(), timeout=_ANSWER_GUARD_SECONDS)
+            code = await asyncio.wait_for(new.code(), timeout=_ANSWER_GUARD_SECONDS)
+            assert code is grpc.StatusCode.UNAVAILABLE
         # Read while the newer session lives: its own teardown marks unknown.
         observed = await world.observed(server)
-        if not refused:
+        if ending == "reported":
             await new.done_writing()
         assert h.servicer is not None
         await h.servicer.drain_teardowns()
     finally:
-        gate.release.set()
+        read_gate.release.set()
+        mark_gate.release.set()
         await h.stop()
     return registry, observed
 
@@ -205,24 +238,29 @@ async def test_a_superseded_sessions_late_report_leaves_the_newer_report(
     world: _World,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, observed = await _supersede_an_attempt_in_flight(
-        world, monkeypatch, refused=False
+    _, observed = await _supersede_a_report_in_flight(
+        world, monkeypatch, ending="reported"
     )
 
     assert observed is ObservedState.RUNNING
 
 
+@pytest.mark.parametrize("ending", ["marked", "stamped"])
 async def test_a_superseded_sessions_late_report_does_not_outlive_the_disconnect(
     world: _World,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    ending: str,
 ) -> None:
-    # The refused reconnect's teardown marks the server unknown before the old
-    # report lands. Landing late, the report must not set it back to running:
-    # the Worker has no session. Nor may the reconciler's backstop then select
-    # the Worker on every tick for a write that changes nothing (issue #4144).
-    registry, observed = await _supersede_an_attempt_in_flight(
-        world, monkeypatch, refused=True
+    # The Worker has no session once the refused registration's teardown has
+    # run, so its server ends unknown, whichever of the two writes lands
+    # first. Landing after the teardown's write, the old report must not set
+    # it back to running; landing between the teardown's stamp and its write,
+    # it was read before that stamp, so the write marks it. Nor does the
+    # reconciler's backstop then select the Worker on every tick for a write
+    # that changes nothing (issue #4144).
+    registry, observed = await _supersede_a_report_in_flight(
+        world, monkeypatch, ending=ending
     )
 
     assert observed is ObservedState.UNKNOWN
