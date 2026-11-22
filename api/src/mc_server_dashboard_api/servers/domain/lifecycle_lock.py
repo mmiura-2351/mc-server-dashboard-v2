@@ -1,8 +1,9 @@
 """The servers-context ``LifecycleLock`` Port: a per-server mutual-exclusion lock.
 
 Every at-rest-gated use case (RestoreBackup, the file mutations, UpdateServer,
-DeleteServer, DeleteBackup) checks ``server.is_at_rest()`` in one transaction,
-mutates Storage over seconds-to-minutes, then commits a second transaction. A
+DeleteServer, DeleteBackup) checks the server at rest, and released
+(``server.is_quiescent()``, issue #3998), in one transaction, mutates Storage
+over seconds-to-minutes, then commits a second transaction. A
 start committed in that window operates on data being mutated underneath it
 (issue #827). ``FOR UPDATE`` on the server row cannot cover that gap: the gated
 operation spans *multiple* transactions, and a row lock lives only for the one

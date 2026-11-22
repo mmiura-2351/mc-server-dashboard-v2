@@ -432,6 +432,16 @@ branch on server state. This policy is shared by 6.10 (File Management) and
 | Backup | Archive directly from the authoritative Storage copy | On-demand snapshot (worker quiesces via save-off → save-all → settle-wait) → archive (no stop required) |
 | Restore | Replace the authoritative working set | **Stop required** (hot replacement of a live working set is unsafe) |
 
+"Stopped" in the left column means stopped **and released**. A stop keeps its
+Worker assigned until the server's final snapshot settles, and that snapshot then
+replaces the authoritative copy. Until the release, every write to the
+authoritative copy (a file edit, a restore, a plugin or resource-pack change, a
+configuration edit that rewrites `server.properties`) is refused, since the
+snapshot would overwrite it, and so are a backup and an export, whose archive
+would lack that snapshot. Reads are served. The refusal is a
+`409 server_assigned`, and the operator retries once the server is released; a
+scheduled backup waits for the release by itself.
+
 ### 6.10 File Management
 
 - FR-FILE-1: Members with permission can browse, read, and edit a server's files

@@ -2406,9 +2406,16 @@ export interface paths {
          *
          *     An assignment-aware fence (issue #1703) adds a second input: the server's
          *     currently-assigned worker id. The pre-stream guard ALLOWS a stale-base publish
-         *     from a different publisher when that publisher IS the assigned worker (the wedge
-         *     case: the old worker's late final snapshot advanced the store, and the new assigned
-         *     worker's base now lags). A commit-time fence re-reads the assignment AFTER the
+         *     from a different publisher when that publisher IS the assigned worker. Its
+         *     original case, an old worker's late final snapshot advancing the store behind a
+         *     re-placed one, is closed by the fences below (issue #3544) and by the start's
+         *     settled read of the generation (issue #3552). The live case is adoption (issue
+         *     #3865): a start writes ``eula.txt`` or owed group files, stamping an
+         *     ``api-edit`` ``current``, then adopts the instance its placed worker already
+         *     runs instead of hydrating it, and that instance's base lags the sentinel. A
+         *     restore or an at-rest edit never reaches the allowance: those doors refuse a
+         *     server still assigned to a worker (``Server.is_quiescent``) and wait for the
+         *     release (issue #3998). A commit-time fence re-reads the assignment AFTER the
          *     upload stream and refuses when the publisher is NOT the currently-assigned worker
          *     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
          *     worker from wedging the new session. The commit runs the same fence again under
