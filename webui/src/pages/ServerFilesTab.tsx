@@ -69,6 +69,7 @@ import {
   fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
+  fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
 import { atRest, normalizeState } from "./serverState.ts";
 import { useFileBrowserParams } from "./urlState.ts";
@@ -2350,7 +2351,16 @@ function Viewer({
       queryClient.invalidateQueries({ queryKey: contentKey });
       setDraft(null);
     },
-    onError,
+    // A save has one message of its own (issue #3973); every other failure is
+    // the tab's to present.
+    onError: (error) => {
+      const presentation = fileSaveErrorPresentation(error);
+      if (presentation === undefined) {
+        onError(error);
+        return;
+      }
+      showToast(t(presentation.key), "error");
+    },
   });
 
   const contentState = classifyQueryResult(content);

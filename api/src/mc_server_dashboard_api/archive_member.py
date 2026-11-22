@@ -138,7 +138,9 @@ UPLOAD_HEADER_LIMITS = HeaderLimits(characters_a_member=0)
 # writes and every snapshot the Worker packs, and the 8 Mi on top takes every
 # archive the upload gates admit. The object writer's names are the snapshot's
 # object keys, so its backups are taken alike only while every key is at most
-# 4095 bytes, which nothing enforces yet (issue #3973).
+# 4095 bytes. The member-name rule holds the names the files API creates and the
+# members a backup upload admits to that (issue #3973); the snapshot ingest does
+# not check it yet (issue #3975).
 STORAGE_HEADER_LIMITS = HeaderLimits(characters_a_member=16 * 1024)
 
 

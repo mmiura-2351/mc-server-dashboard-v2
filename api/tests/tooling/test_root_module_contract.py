@@ -17,7 +17,7 @@ PACKAGE = "mc_server_dashboard_api"
 CONTRACT = "no context's domain or application imports a root-level module"
 
 # The modules the contract's comment exempts, for the reasons it gives there.
-EXEMPT = {"rfc3339", "archive_member", "gc_pass", "name_characters"}
+EXEMPT = {"rfc3339", "archive_member", "gc_pass", "name_characters", "member_name"}
 
 
 def _root_modules() -> set[str]:

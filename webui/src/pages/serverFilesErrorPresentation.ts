@@ -65,6 +65,15 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.symlinkRefused" };
         case "name_too_long":
           return { key: "files.error.nameTooLong" };
+        // The member-name rule's other refusals (issue #3973): the remedy is a
+        // shallower, shorter or other name, which the generic message would not
+        // say.
+        case "path_too_deep":
+          return { key: "files.error.pathTooDeep" };
+        case "path_too_long":
+          return { key: "files.error.pathTooLong" };
+        case "invalid_name_character":
+          return { key: "files.error.invalidNameCharacter" };
         // An upload's file name no file can carry (issue #3922): renaming the
         // file is the remedy, which the generic message would not say.
         case "invalid_filename":
@@ -106,6 +115,30 @@ export function fileOperationErrorPresentation(
       }
     default:
       return { key: "files.error.generic" };
+  }
+}
+
+/**
+ * Select the toast a failed save of an open file shows in place of the
+ * operation's, or `undefined` when it shows the operation's (issue #3973). The
+ * file exists, so a name the member-name rule refuses was created before the
+ * rule or by a running server: renaming the file is the remedy, not choosing
+ * another name.
+ */
+export function fileSaveErrorPresentation(
+  error: unknown,
+): FileErrorPresentation | undefined {
+  if (!(error instanceof ApiError) || error.status !== 422) {
+    return undefined;
+  }
+  switch (error.reason) {
+    case "path_too_deep":
+    case "name_too_long":
+    case "path_too_long":
+    case "invalid_name_character":
+      return { key: "files.error.nameNoLongerAllowed" };
+    default:
+      return undefined;
   }
 }
 

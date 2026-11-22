@@ -37,12 +37,17 @@ def is_valid_upload_filename(filename: str) -> bool:
 
     Only an upload asks: a resource pack stored before the check keeps its name,
     and every read path serves it as before.
+
+    The length is measured before the characters are scanned one by one, so a
+    name of any length costs one encode before it is refused, and what is left
+    to scan is at most 255 bytes (issue #3973). A lone surrogate is measured as
+    the three bytes ``surrogatepass`` gives it, then refused by the scan.
     """
 
     return (
         filename.strip() != ""
+        and len(filename.encode("utf-8", "surrogatepass")) <= MAX_FILENAME_BYTES
         and not any(is_refused_filename_character(c) for c in filename)
-        and len(filename.encode("utf-8")) <= MAX_FILENAME_BYTES
     )
 
 

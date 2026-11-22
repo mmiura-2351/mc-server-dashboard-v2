@@ -83,6 +83,7 @@ from mc_server_dashboard_api.servers.domain.file_store import (
     FileEntry,
     FileEntryKind,
     FileStore,
+    SubtreeExtent,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -493,6 +494,22 @@ class FakeFileStore(FileStore):
         if source not in _canonical_names(self.dirs):
             raise ServerFileNotFoundError(str(server_id.value))
         self.renamed_dirs.append((from_path, to_path))
+
+    async def subtree_extent(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        max_depth: int,
+    ) -> SubtreeExtent:
+        # Measured under the shared seam contract (tests/contracts/
+        # server_file_store.py), on the shared fake and both adapters, so this
+        # fake keeps no second copy of it: a case that grows a moved directory
+        # here uses the shared fake.
+        raise AssertionError(
+            "subtree_extent is pinned on tests.servers.fakes.FakeFileStore"
+        )
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

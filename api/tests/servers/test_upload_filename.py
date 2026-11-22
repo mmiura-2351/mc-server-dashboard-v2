@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import pytest
 
+from mc_server_dashboard_api.servers.domain import upload_filename
 from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_refused_filename_character,
     is_valid_upload_filename,
 )
 
@@ -50,3 +52,24 @@ def test_accepts_a_character_beside_them(char: str) -> None:
     # Only the noncharacters are refused, not category Cn as a whole: a code
     # point unassigned today may name something tomorrow.
     assert is_valid_upload_filename(f"a{char}b.zip")
+
+
+def test_an_over_long_name_is_refused_before_its_characters_are_scanned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The length is one encode; scanning a 1 MiB name character by character
+    # first stalled the event loop (issue #3973).
+    scanned: list[str] = []
+
+    def counting(c: str) -> bool:
+        scanned.append(c)
+        return is_refused_filename_character(c)
+
+    monkeypatch.setattr(upload_filename, "is_refused_filename_character", counting)
+
+    assert not is_valid_upload_filename("n" * (1024 * 1024))
+    assert scanned == []
+
+
+def test_a_lone_surrogate_is_refused_however_short() -> None:
+    assert not is_valid_upload_filename("a\ud800b")

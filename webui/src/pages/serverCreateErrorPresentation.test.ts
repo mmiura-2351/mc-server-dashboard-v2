@@ -82,6 +82,11 @@ describe("serverImportErrorPresentation", () => {
     ],
     // A member at the Worker's generation-marker name (issue #3433).
     [422, "reserved_name", "serverCreate.import.error.reserved_name"],
+    // A member the member-name rule refuses (issue #3973), before the row is
+    // created.
+    [422, "path_too_deep", "serverCreate.import.error.path_too_deep"],
+    [422, "name_too_long", "serverCreate.import.error.name_too_long"],
+    [422, "path_too_long", "serverCreate.import.error.path_too_long"],
     [409, "slug_taken", "serverCreate.import.error.slug_taken"],
     // Too many archive uploads at once (issue #3912): nothing was created, and
     // the remedy is to send it again shortly.

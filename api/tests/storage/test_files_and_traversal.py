@@ -10,6 +10,7 @@ streaming and whole-bytes alike — all of which depend on the fs module interna
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import errno
 import io
@@ -37,6 +38,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
     PathTraversalError,
     SymlinkRefusedError,
 )
+from mc_server_dashboard_api.storage.domain.port import SubtreeExtent
 from mc_server_dashboard_api.storage.domain.value_objects import RelPath
 from tests.storage.helpers import (
     drain,
@@ -1495,3 +1497,173 @@ async def test_make_dir_onto_a_file_is_a_conflict(tmp_path: Path) -> None:
     # The file is left intact (the refused mkdir never clobbered it).
     live = snapshot_dir(tmp_path, community, server)
     assert (live / "occupied").read_bytes() == b"X"
+
+
+async def test_subtree_extent_does_not_follow_a_symlink(tmp_path: Path) -> None:
+    """A link below the directory is a name, not a way in (issue #3973).
+
+    A link to an ancestor would make a walk that follows it endless.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"top/a/f": b"x"})
+    live = snapshot_dir(tmp_path, community, server)
+    os.symlink("..", live / "top" / "a" / "up")
+
+    assert await storage.subtree_extent(
+        community, server, RelPath("top"), max_depth=129
+    ) == (SubtreeExtent(depth=1, longest=len("a/up")))
+
+
+@pytest.mark.parametrize("replaced_by", ["nothing", "a file", "a symlink"])
+async def test_subtree_extent_leaves_out_a_directory_that_vanishes_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced_by: str
+) -> None:
+    """A directory gone, or no longer one, between its listing and its open (#3973).
+
+    It is measured as the name it was listed under, and nothing below it is, as a
+    listing leaves out a child that vanishes.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(
+        storage,
+        community,
+        server,
+        {"top/k/longer-name": b"x", "top/gone/deeper/a-longer-name": b"x"},
+    )
+    real_open = os.open
+
+    def vanishing(
+        path: str | bytes, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if dir_fd is not None and path == b"gone":
+            os.rename(b"gone", b"elsewhere", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            if replaced_by == "a file":
+                os.close(real_open(b"gone", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd))
+            elif replaced_by == "a symlink":
+                # Followed, it would add ``gone/longer-name``.
+                os.symlink(b"k", b"gone", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", vanishing)
+
+    assert await storage.subtree_extent(
+        community, server, RelPath("top"), max_depth=129
+    ) == (SubtreeExtent(depth=1, longest=len("k/longer-name")))
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+def _deep_and_wide() -> dict[str, bytes]:
+    # Ten levels deep, with a sibling directory at every level.
+    chain = "top/" + "/".join(["d"] * 10)
+    files = {f"{chain}/f": b"x"}
+    for level in range(1, 11):
+        files["top/" + "/".join(["d"] * (level - 1) + [f"s{level}", "f"])] = b"x"
+    return files
+
+
+async def test_subtree_extent_closes_every_descriptor_it_opens(tmp_path: Path) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, _deep_and_wide())
+    before = _open_descriptors()
+
+    extent = await storage.subtree_extent(
+        community, server, RelPath("top"), max_depth=129
+    )
+
+    assert extent.depth == 10
+    assert _open_descriptors() == before
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+async def test_subtree_extent_closes_its_descriptors_when_a_level_cannot_be_opened(
+    tmp_path: Path,
+) -> None:
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, _deep_and_wide())
+    locked = snapshot_dir(tmp_path, community, server) / "top/d/d/d/d"
+    before = _open_descriptors()
+    locked.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            await storage.subtree_extent(
+                community, server, RelPath("top"), max_depth=129
+            )
+    finally:
+        locked.chmod(0o755)
+
+    assert _open_descriptors() == before
+
+
+async def test_subtree_extent_cancelled_closes_its_descriptors_when_it_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The caller gets the cancellation at once; the walk's thread runs on to its
+    # end, as a cancelled listing's does, and leaves nothing open.
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, _deep_and_wide())
+    real_scandir = os.scandir
+    held: list[int] = []
+
+    def slow(path: int) -> object:
+        if isinstance(path, int):
+            held.append(_open_descriptors())
+            time.sleep(0.02)
+        return real_scandir(path)
+
+    before = _open_descriptors()
+    monkeypatch.setattr(os, "scandir", slow)
+
+    task = asyncio.create_task(
+        storage.subtree_extent(community, server, RelPath("top"), max_depth=129)
+    )
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Cancelled mid-walk, with descriptors held.
+    assert held and max(held) > before
+    for _ in range(200):
+        if _open_descriptors() == before:
+            break
+        await asyncio.sleep(0.02)
+
+    assert _open_descriptors() == before
+
+
+async def test_subtree_extent_does_not_follow_a_source_swapped_for_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The source resolved, then swapped for a link before the walk opens it."""
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(storage, community, server, {"top/f": b"x", "other/a/b/c": b"x"})
+    live = snapshot_dir(tmp_path, community, server)
+    real_open = os.open
+
+    def swapping(
+        path: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if dir_fd is None and os.path.basename(os.fspath(path)) == "top":
+            os.rename(live / "top", live / "top-before")
+            os.symlink("other", live / "top")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swapping)
+
+    with pytest.raises(NotFoundError):
+        await storage.subtree_extent(community, server, RelPath("top"), max_depth=129)
