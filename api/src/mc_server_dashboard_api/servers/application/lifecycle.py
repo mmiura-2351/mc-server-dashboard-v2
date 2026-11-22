@@ -1688,7 +1688,13 @@ class StartServer:
         start's intent holds it for its final snapshot (the count moved exactly
         once, and the row is stopped on this Worker). Any other row may carry a
         newer placement on this Worker, made after a release, whose own hydrate
-        has not landed, and its mark stays.
+        has not landed, and its mark stays. One residue: a stop's flip is visible
+        before its commit returns and it bumps, so a newer placement that a second
+        stop has just stopped can read as withdrawn once, and lose its mark.
+
+        This is best effort for a stop: the stop reads the mark for its final
+        snapshot once the Worker has answered it, which can come before the wait
+        that the stop interrupted has ended.
         """
 
         server_id = marked.id

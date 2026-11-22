@@ -666,6 +666,56 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
     assert world.cp.live == set()
 
 
+class _StopDuringTheWait(FakeStoreGenerationReader):
+    """A store whose wait for the Worker's uploads runs ``during`` first."""
+
+    def __init__(self, during: Hook) -> None:
+        super().__init__()
+        self._during = during
+
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        await self._during()
+        return True
+
+
+async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot() -> None:
+    # Issue #4024. The re-sent start marked the row before its wait for the
+    # Worker's uploads, and an operator's stop commits during the wait and is
+    # sent. The start then answers the conflict without sending its hydrate, so
+    # the Worker's working set is as it was, and the start puts the mark back.
+    # The stop, whose answer comes after that, takes the final snapshot it would
+    # have taken without the start. Had its answer come first, it would have
+    # found the mark and taken none.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    world.cp.hold_stop_answer = asyncio.Event()
+    stops: list[asyncio.Task[Server]] = []
+
+    async def stop_is_sent() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+        await world.cp.stop_sent.wait()
+
+    start = replace(
+        world.start_server(), store_generation=_StopDuringTheWait(stop_is_sent)
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await start.redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    world.cp.hold_stop_answer.set()
+    await stops[0]
+
+    assert world.kinds() == ["stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
 async def test_a_re_sent_start_reads_the_counter_before_it_finds_the_intent() -> None:
     # The re-sent start's first read finds the intent it re-sends. A stop and a
     # newer start on the same Worker can land while that read's unit of work
