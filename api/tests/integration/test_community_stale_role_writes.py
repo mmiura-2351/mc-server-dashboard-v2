@@ -103,8 +103,10 @@ class _PausingRoleRepository(SqlAlchemyRoleRepository):
         await self._pause.hold()
         return role
 
-    async def lock_by_id(self, role_id: RoleId) -> Role | None:
-        role = await super().lock_by_id(role_id)
+    async def lock_by_id(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> Role | None:
+        role = await super().lock_by_id(community_id, role_id)
         await self._pause.hold()
         return role
 

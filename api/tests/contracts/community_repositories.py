@@ -479,8 +479,14 @@ class RoleRepositoryContract:
             await transaction.commit()
 
         async with role_repository_harness.open() as transaction:
-            locked = await transaction.repository.lock_by_id(role.id)
-            missing = await transaction.repository.lock_by_id(RoleId.new())
+            community_id = role_repository_harness.community_id
+            locked = await transaction.repository.lock_by_id(community_id, role.id)
+            missing = await transaction.repository.lock_by_id(
+                community_id, RoleId.new()
+            )
+            foreign = await transaction.repository.lock_by_id(
+                role_repository_harness.other_community_id, role.id
+            )
             assert locked is not None
             locked.permissions.add(Permission("server:delete"))
             await transaction.commit()
@@ -490,6 +496,7 @@ class RoleRepositoryContract:
 
         assert locked.name == RoleName("Editor")
         assert missing is None
+        assert foreign is None
         assert reloaded is not None
         assert reloaded.permissions == {Permission("server:read")}
 

@@ -17,7 +17,14 @@ player row: a ``save`` paused right after its player-row DELETE holds off a
 delete and a second ``save`` until it commits, and one arriving behind a paused
 delete waits, then finds the group gone. The edit use cases lock the row before
 they read the group, so an edit arriving behind another reads what that one
-committed and both changes land.
+committed and both changes land; a delete does too, so a second delete finds the
+group gone. The lock matches the group's community, so a request naming another
+community locks nothing (issue #4027).
+
+The last ones pin the order a detach and a group delete share with a server
+delete (issue #4027): the server row, then its attachments. One holds the change
+right after a mark recorded again over a standing one, where nothing but the
+mark's own row lock holds the server delete off.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5).
@@ -47,10 +54,14 @@ from mc_server_dashboard_api.servers.application.groups import (
     AddPlayer,
     AttachGroup,
     DeleteGroup,
+    DetachGroup,
     RemovePlayer,
     RenameGroup,
 )
-from mc_server_dashboard_api.servers.domain.errors import GroupNotFoundError
+from mc_server_dashboard_api.servers.domain.errors import (
+    GroupAttachmentNotFoundError,
+    GroupNotFoundError,
+)
 from mc_server_dashboard_api.servers.domain.groups import (
     GroupId,
     GroupKind,
@@ -77,10 +88,13 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 class _Pause:
-    """Holds a change after it listed the attached servers, or after its save."""
+    """Holds a change right after the group repository call named ``after``.
 
-    def __init__(self, *, after_save: bool = False) -> None:
-        self.after_save = after_save
+    By default that is the listing of the attached servers.
+    """
+
+    def __init__(self, *, after: str = "list_server_ids_for_group") -> None:
+        self.after = after
         self.reached = asyncio.Event()
         self.resume = asyncio.Event()
 
@@ -88,22 +102,44 @@ class _Pause:
         self.reached.set()
         await self.resume.wait()
 
+    async def passed(self, call: str) -> None:
+        if call == self.after and not self.reached.is_set():
+            await self.hold()
+
 
 class _PausingGroupRepository(SqlAlchemyGroupRepository):
     def __init__(self, session: AsyncSession, pause: _Pause) -> None:
         super().__init__(session)
         self._pause = pause
 
+    async def get_by_id(self, group_id: GroupId) -> PlayerGroup | None:
+        group = await super().get_by_id(group_id)
+        await self._pause.passed("get_by_id")
+        return group
+
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         listed = await super().list_server_ids_for_group(group_id)
-        if not self._pause.after_save:
-            await self._pause.hold()
+        await self._pause.passed("list_server_ids_for_group")
         return listed
 
     async def save(self, group: PlayerGroup) -> None:
         await super().save(group)
-        if self._pause.after_save:
-            await self._pause.hold()
+        await self._pause.passed("save")
+
+    async def delete(self, group_id: GroupId) -> None:
+        await super().delete(group_id)
+        await self._pause.passed("delete")
+
+    async def detach(self, group_id: GroupId, server_id: ServerId) -> bool:
+        removed = await super().detach(group_id, server_id)
+        await self._pause.passed("detach")
+        return removed
+
+    async def mark_sync_pending(
+        self, server_ids: list[ServerId], kind: GroupKind
+    ) -> None:
+        await super().mark_sync_pending(server_ids, kind)
+        await self._pause.passed("mark_sync_pending")
 
 
 class _PausingUnitOfWork(ServersUnitOfWork):
@@ -219,6 +255,34 @@ class _World:
             await uow.groups.add(self.group)
             await uow.commit()
 
+    async def attach_now(self) -> None:
+        """Attach the group to the server, committed."""
+
+        async with ServersUnitOfWork(self.factory) as uow:
+            await uow.groups.attach(self.group.id, self.server_id)
+            await uow.commit()
+
+    async def mark_now(self) -> None:
+        """Record the server's mark for the group's kind, committed."""
+
+        async with ServersUnitOfWork(self.factory) as uow:
+            await uow.groups.mark_sync_pending([self.server_id], self.group.kind)
+            await uow.commit()
+
+    async def another_community(self) -> CommunityId:
+        """A second community, holding nothing."""
+
+        other = CommunityId(uuid.uuid4())
+        async with self.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO community (id, name, created_at, updated_at) "
+                    "VALUES (:id, 'strangers', now(), now())"
+                ),
+                {"id": other.value},
+            )
+        return other
+
     def attach(self, pid: asyncio.Future[int]) -> asyncio.Task[None]:
         return asyncio.create_task(
             AttachGroup(
@@ -319,7 +383,7 @@ async def test_player_removal_and_group_delete_do_not_deadlock(
     # the other holds and PostgreSQL would abort one of them as a deadlock.
     world = _World(engine)
     await world.seed()
-    pause = _Pause(after_save=True)
+    pause = _Pause(after="save")
     removal = asyncio.create_task(
         RemovePlayer(
             uow=_PausingUnitOfWork(world.factory, pause), file_store=FakeFileStore()
@@ -469,14 +533,30 @@ async def test_interleaved_player_edits_of_one_group_both_land(
 # it under. Each test holds one edit between its save and its commit.
 
 
-_Edit = Callable[[ServersUnitOfWork], Coroutine[Any, Any, PlayerGroup]]
+_Edit = Callable[[ServersUnitOfWork], Coroutine[Any, Any, object]]
 
 
-def _edit(kind: str, world: _World, *, username: str = "bob") -> _Edit:
-    """One of the group edits a request makes, to be started on a unit of work."""
+def _edit(
+    kind: str,
+    world: _World,
+    *,
+    username: str = "bob",
+    community_id: CommunityId | None = None,
+) -> _Edit:
+    """One of the group changes a request makes, to be started on a unit of work.
 
-    def start(uow: ServersUnitOfWork) -> Coroutine[Any, Any, PlayerGroup]:
-        community_id, group_id = world.community_id, world.group.id
+    ``community_id`` is the community the request's path names; by default the
+    group's own.
+    """
+
+    named = world.community_id if community_id is None else community_id
+
+    def start(uow: ServersUnitOfWork) -> Coroutine[Any, Any, object]:
+        community_id, group_id = named, world.group.id
+        if kind == "delete":
+            return DeleteGroup(uow=uow, file_store=FakeFileStore())(
+                community_id=community_id, group_id=group_id
+            )
         if kind == "rename":
             return RenameGroup(uow=uow)(
                 community_id=community_id, group_id=group_id, name="moderators"
@@ -497,7 +577,7 @@ def _edit(kind: str, world: _World, *, username: str = "bob") -> _Edit:
 
 
 async def _second_waits_for_first(world: _World, first: _Edit, second: _Edit) -> None:
-    pause = _Pause(after_save=True)
+    pause = _Pause(after="save")
     held = asyncio.create_task(first(_PausingUnitOfWork(world.factory, pause)))
     await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
     pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
@@ -578,3 +658,222 @@ async def test_an_edit_racing_a_group_delete_reports_not_found(
     await deletion
     with pytest.raises(GroupNotFoundError):
         await edit
+
+
+async def test_a_second_delete_of_a_group_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The second delete waits on the group row the first one locked, and reads
+    # the group only then: it is gone, so the second answers 404, and the route
+    # records no second GROUP_DELETE audit entry.
+    world = _World(engine)
+    await world.seed()
+    pause = _Pause()
+    first = asyncio.create_task(
+        _edit("delete", world)(_PausingUnitOfWork(world.factory, pause))
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    second = asyncio.create_task(
+        _edit("delete", world)(_PidUnitOfWork(world.factory, pid))
+    )
+    await await_settled(
+        world.engine, second, lambda: pid.result() if pid.done() else None
+    )
+    assert not second.done()
+    pause.resume.set()
+
+    await first
+    with pytest.raises(GroupNotFoundError):
+        await second
+
+
+@pytest.mark.parametrize("kind", ["rename", "add", "remove", "delete"])
+async def test_a_request_naming_another_community_locks_nothing(
+    engine: AsyncEngine, kind: str
+) -> None:
+    # The request's path names a community the group is not in. It answers 404,
+    # and until it does it holds no lock on the group: an edit from the group's
+    # own community goes through beside it.
+    world = _World(engine)
+    await world.seed()
+    stranger = await world.another_community()
+    pause = _Pause(after="get_by_id")
+    foreign = asyncio.create_task(
+        _edit(kind, world, community_id=stranger)(
+            _PausingUnitOfWork(world.factory, pause)
+        )
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    own = asyncio.create_task(
+        _edit("add", world, username="carol")(_PidUnitOfWork(world.factory, pid))
+    )
+    await await_settled(world.engine, own, lambda: pid.result() if pid.done() else None)
+    assert own.done()
+    pause.resume.set()
+
+    with pytest.raises(GroupNotFoundError):
+        await foreign
+    await own
+    assert await world.players() == ["alice", "carol"]
+
+
+# --- detach and group delete against a server delete (issue #4027) ------------
+# A server delete locks the server row, then cascades to the server's
+# attachments. A detach and a group delete remove attachments too, and they
+# lock the affected server rows -- the owed-regeneration marks -- before they
+# remove any, so the three take one order. The server delete is the statement
+# ``DeleteServer`` commits, run on its own: the use case's other steps are
+# storage work under the lifecycle lock, which a group change never takes.
+
+
+async def _delete_server(
+    world: _World, uow: ServersUnitOfWork, pause: _Pause | None = None
+) -> None:
+    async with uow:
+        await uow.servers.delete(world.server_id)
+        if pause is not None:
+            await pause.hold()
+        await uow.commit()
+
+
+def _remove_attachment(
+    kind: str, world: _World, uow: ServersUnitOfWork
+) -> Coroutine[Any, Any, None]:
+    if kind == "detach":
+        return DetachGroup(uow=uow, file_store=FakeFileStore())(
+            community_id=world.community_id,
+            group_id=world.group.id,
+            server_id=world.server_id,
+        )
+    assert kind == "delete"
+    return DeleteGroup(uow=uow, file_store=FakeFileStore())(
+        community_id=world.community_id, group_id=world.group.id
+    )
+
+
+@pytest.mark.parametrize("kind", ["detach", "delete"])
+async def test_a_server_delete_behind_a_group_change_waits_and_lands(
+    engine: AsyncEngine, kind: str
+) -> None:
+    # The group change has removed the attachment and is still open. Were it to
+    # lock the server only after that, to record its mark, the server delete
+    # would hold the server and wait on the attachment, the change would wait on
+    # the server, and PostgreSQL would abort one of the two as a deadlock (500).
+    world = _World(engine)
+    await world.seed()
+    await world.attach_now()
+    pause = _Pause(after=kind)
+    change = asyncio.create_task(
+        _remove_attachment(kind, world, _PausingUnitOfWork(world.factory, pause))
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        _delete_server(world, _PidUnitOfWork(world.factory, pid))
+    )
+    await await_settled(
+        world.engine, deletion, lambda: pid.result() if pid.done() else None
+    )
+    assert not deletion.done()
+    pause.resume.set()
+
+    # Both complete: the change commits, then the server delete it held off.
+    outcomes = await asyncio.gather(change, deletion, return_exceptions=True)
+    assert list(outcomes) == [None, None]
+    assert await world.count("server") == 0
+    assert await world.count("server_group") == 0
+
+
+@pytest.mark.parametrize("kind", ["detach", "delete"])
+async def test_a_server_delete_behind_a_marked_server_waits_and_lands(
+    engine: AsyncEngine, kind: str
+) -> None:
+    # The server already owes a regeneration, as a running server usually does,
+    # so recording the mark again updates that row: no foreign-key check locks
+    # the server, and only the mark's own row lock holds the server delete off.
+    # The change is held between its mark and the removal. Without that lock,
+    # the server delete would cascade to the attachment and wait on the mark,
+    # the change would wait on the attachment, and PostgreSQL would abort one
+    # of the two as a deadlock.
+    world = _World(engine)
+    await world.seed()
+    await world.attach_now()
+    await world.mark_now()
+    pause = _Pause(after="mark_sync_pending")
+    change = asyncio.create_task(
+        _remove_attachment(kind, world, _PausingUnitOfWork(world.factory, pause))
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        _delete_server(world, _PidUnitOfWork(world.factory, pid))
+    )
+    await await_settled(
+        world.engine, deletion, lambda: pid.result() if pid.done() else None
+    )
+    assert not deletion.done()
+    pause.resume.set()
+
+    outcomes = await asyncio.gather(change, deletion, return_exceptions=True)
+    assert list(outcomes) == [None, None]
+    assert await world.count("server") == 0
+    assert await world.count("server_group") == 0
+
+
+async def _behind_a_server_delete(world: _World, kind: str) -> asyncio.Task[None]:
+    """Run the group change behind a server delete in flight; return its task.
+
+    The server delete holds the server row and has cascaded to its attachments.
+    The change waits on it, and the server delete commits before the task is
+    handed back.
+    """
+
+    await world.attach_now()
+    pause = _Pause()
+    deletion = asyncio.create_task(
+        _delete_server(world, ServersUnitOfWork(world.factory), pause)
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    change = asyncio.create_task(
+        _remove_attachment(kind, world, _PidUnitOfWork(world.factory, pid))
+    )
+    await await_settled(
+        world.engine, change, lambda: pid.result() if pid.done() else None
+    )
+    assert not change.done()
+    pause.resume.set()
+    await deletion
+    return change
+
+
+async def test_a_detach_behind_a_server_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The detach waits on the server row before it touches the attachment, and
+    # then finds the attachment gone with the server: 404, as a detach landing
+    # a moment later gets, rather than a 204 for a detach that removed nothing.
+    world = _World(engine)
+    await world.seed()
+
+    detach = await _behind_a_server_delete(world, "detach")
+
+    with pytest.raises(GroupAttachmentNotFoundError):
+        await detach
+    assert await world.count("server_group_sync_pending") == 0
+
+
+async def test_a_group_delete_behind_a_server_delete_deletes_the_group(
+    engine: AsyncEngine,
+) -> None:
+    # The group delete waits on the server row, then skips the deleted server's
+    # mark and deletes the group.
+    world = _World(engine)
+    await world.seed()
+
+    await (await _behind_a_server_delete(world, "delete"))
+
+    assert await world.count("player_group") == 0
+    assert await world.count("server_group_sync_pending") == 0

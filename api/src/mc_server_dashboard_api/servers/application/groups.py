@@ -22,13 +22,18 @@ therefore records, in its own transaction, that each affected server's file is
 owed a regeneration (:meth:`GroupRepository.mark_sync_pending`). A change to a
 group itself holds off attaches of that group
 (:meth:`GroupRepository.lock_against_attach`), so the servers it lists are all
-the servers it affects. It takes that lock BEFORE it writes anything of the
-group: a player edit that locked the group row only after writing its player
+the servers it affects. It takes that lock BEFORE it reads or writes anything of
+the group: a player edit that locked the group row only after writing its player
 rows would deadlock with a delete, which holds the group row and waits on those
-rows to cascade. A player edit takes it before it even reads the group, and a
-rename takes :meth:`GroupRepository.lock_for_edit` there (issue #2965): the save
-writes back the whole group it read, so an edit that read it before another edit
-committed would undo that edit.
+rows to cascade; and the save writes back the whole group it read, so an edit
+that read it before another edit committed would undo that edit (issue #2965).
+A delete that read the group before the lock would delete it a second time.
+
+The mark locks each affected server row, and a change that removes attachments
+(a detach, a group delete) records it BEFORE it removes any: a server delete
+locks the server row and then cascades to the server's attachments, so a change
+that held an attachment and only then locked the server would deadlock with it
+(issue #4027).
 
 ``StartServer`` then regenerates the owed files from the *current* union before
 it decides whether to hydrate (:func:`regenerate_pending_group_files`). That
@@ -207,7 +212,7 @@ class RenameGroup:
     ) -> PlayerGroup:
         new_name = GroupName(name)
         async with self.uow:
-            await self.uow.groups.lock_for_edit(group_id)
+            await self.uow.groups.lock_against_attach(community_id, group_id)
             group = await _load_group(self.uow, community_id, group_id)
             clash = await self.uow.groups.get_by_community_kind_name(
                 community_id, group.kind, new_name
@@ -237,11 +242,11 @@ class DeleteGroup:
 
     async def __call__(self, *, community_id: CommunityId, group_id: GroupId) -> None:
         async with self.uow:
+            await self.uow.groups.lock_against_attach(community_id, group_id)
             group = await _load_group(self.uow, community_id, group_id)
-            await self.uow.groups.lock_against_attach(group_id)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
-            await self.uow.groups.delete(group_id)
             await self.uow.groups.mark_sync_pending(server_ids, group.kind)
+            await self.uow.groups.delete(group_id)
             await self.uow.commit()
         # Resync each previously-attached server (the group is now gone, so the
         # merge excludes it). Done after commit so the file reflects the persisted
@@ -275,7 +280,7 @@ class AddPlayer:
     ) -> PlayerGroup:
         player = Player(player_uuid, username)
         async with self.uow:
-            await self.uow.groups.lock_against_attach(group_id)
+            await self.uow.groups.lock_against_attach(community_id, group_id)
             group = await _load_group(self.uow, community_id, group_id)
             group.upsert_player(player)
             await self.uow.groups.save(group)
@@ -310,7 +315,7 @@ class RemovePlayer:
         player_uuid: uuid.UUID,
     ) -> PlayerGroup:
         async with self.uow:
-            await self.uow.groups.lock_against_attach(group_id)
+            await self.uow.groups.lock_against_attach(community_id, group_id)
             group = await _load_group(self.uow, community_id, group_id)
             group.remove_player(player_uuid)
             await self.uow.groups.save(group)
@@ -370,10 +375,10 @@ class DetachGroup:
         async with self.uow:
             group = await _load_group(self.uow, community_id, group_id)
             await _require_server(self.uow, community_id, server_id)
+            await self.uow.groups.mark_sync_pending([server_id], group.kind)
             removed = await self.uow.groups.detach(group_id, server_id)
             if not removed:
                 raise GroupAttachmentNotFoundError(str(group_id.value))
-            await self.uow.groups.mark_sync_pending([server_id], group.kind)
             await self.uow.commit()
         await _sync_server_file(
             self.uow,

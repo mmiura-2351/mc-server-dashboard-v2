@@ -284,10 +284,14 @@ class FakeRoleRepository(RoleRepository):
             self._copy(r) for r in self.by_id.values() if r.community_id == community_id
         ]
 
-    async def lock_by_id(self, role_id: RoleId) -> Role | None:
+    async def lock_by_id(
+        self, community_id: CommunityId, role_id: RoleId
+    ) -> Role | None:
         # In-memory equivalent: no concurrent transaction exists to wait for.
         role = self.by_id.get(role_id)
-        return None if role is None else self._copy(role)
+        if role is None or role.community_id != community_id:
+            return None
+        return self._copy(role)
 
     async def lock_by_ids(
         self, role_ids: Sequence[RoleId], *, for_update: RoleId | None = None
