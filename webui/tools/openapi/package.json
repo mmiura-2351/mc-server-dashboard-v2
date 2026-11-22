@@ -2,7 +2,7 @@
   "name": "webui-openapi-codegen",
   "private": true,
   "version": "0.0.0",
-  "description": "Isolated OpenAPI TypeScript codegen. openapi-typescript uses the classic TypeScript compiler API (ts.factory), which the native TypeScript 7 package no longer ships, so this tool stays on classic TypeScript. Standalone package with its own node_modules and lockfile — it must NOT be a webui npm workspace, otherwise its typescript would hoist onto webui's TypeScript 7.",
+  "description": "Isolated OpenAPI TypeScript codegen. openapi-typescript uses the classic TypeScript compiler API (ts.factory), which the native TypeScript 7 package no longer ships, so this tool stays on classic TypeScript. Upstream is frozen in maintenance mode (openapi-ts/openapi-typescript#2874), so no TypeScript 7 support is coming; .github/dependabot.yml holds typescript majors here. Standalone package with its own node_modules and lockfile — it must NOT be a webui npm workspace, otherwise its typescript would hoist onto webui's TypeScript 7.",
   "engines": {
     "node": ">=24",
     "npm": "11.13.0"

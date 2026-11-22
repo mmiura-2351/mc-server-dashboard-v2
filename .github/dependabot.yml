@@ -121,6 +121,13 @@ updates:
       - dependencies
     cooldown:
       default-days: 7
+    ignore:
+      # openapi-typescript uses the classic TypeScript compiler API and declares
+      # peer typescript@^5.x, so this tool stays on TypeScript 5 (#1900) and a
+      # TypeScript major can neither install nor run here (#4090). Upstream is
+      # frozen in maintenance mode (openapi-ts/openapi-typescript#2874).
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       production:
         dependency-type: production
