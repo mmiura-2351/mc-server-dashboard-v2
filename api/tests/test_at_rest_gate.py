@@ -591,6 +591,20 @@ class GatedByRaise:
         await self.file_store.make_dir(rel_path="d")
 
 
+async def _load_released(uow, server_id):
+    async with uow:
+        server = await uow.get(server_id)
+        if server.assigned_worker_id is not None:
+            raise server.not_quiescent_error(RuntimeError)
+    return server
+
+
+class GatedByErrorRaise:
+    async def __call__(self, server_id):
+        await _load_released(self.uow, server_id)
+        await self.file_store.make_dir(rel_path="d")
+
+
 def _is_settled(server):
     return server.is_quiescent()
 
@@ -839,14 +853,22 @@ if True:
         await files.delete_dir(rel_path="w")
 
 
+@hooks.after(FileStore.make_dir)
+class Hooked:
+    pass
+
+
 class Door:
     async def __call__(self, files):
         await _put(files, rel_path="a")
 """
     # Each module or class body is a door of its own: the code outside its
-    # functions, and what sits under an ``if`` or a ``try`` there.
+    # functions, what sits under an ``if`` or a ``try`` there, and the
+    # decorators and bases of the classes in it.
     assert _ungated_writes(source) == {
-        "<module>": Counter({"write_file": 1, "delete_file": 1, "delete_dir": 1}),
+        "<module>": Counter(
+            {"write_file": 1, "delete_file": 1, "delete_dir": 1, "make_dir": 1}
+        ),
         "Holder": Counter({"rename_file": 1, "make_dir": 1}),
     }
 
