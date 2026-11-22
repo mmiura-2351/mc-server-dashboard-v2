@@ -504,8 +504,10 @@ arrived. The hold ends when the message is applied, or when the session ends:
 - When the Worker closes the stream, the held message gets one last attempt,
   and so does each message queued behind it. Any failure then drops the message.
 - When a newer session replaces this one, the held message and everything still
-  queued behind it are dropped unapplied, so nothing from the old session lands
-  after the new session's reports.
+  queued behind it are dropped unapplied. Nothing from the old session lands
+  after the new session's reports, except a message already being applied when
+  the newer session registers: at most one per superseded session, tracked in
+  #4015.
 - When the heartbeats lapse or the transport drops, the held message and the
   queue behind it are lost.
 
