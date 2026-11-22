@@ -766,6 +766,32 @@ async def test_a_hold_after_a_released_one_gets_a_whole_bound() -> None:
     assert env.uow.schedules.by_id[schedule.id].next_run_at == next_run
 
 
+async def test_a_held_occurrence_an_edit_moves_on_gets_a_whole_bound() -> None:
+    env = _env()
+    server = _held_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await _tick_at(env, _NOW)  # deferred
+
+    # An edit moves the occurrence on while a stop still holds the row: the new
+    # one, due more than a bound after the first deferral, is deferred afresh.
+    later = _NOW + 2 * _DEFERRAL_BOUND
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], later
+    )
+    await _tick_at(env, later)
+
+    assert _rows(env, schedule) == []
+    assert env.uow.schedules.by_id[schedule.id].next_run_at == later
+
+
 async def test_a_held_retry_is_bounded_too_and_leaves_next_run_at(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
