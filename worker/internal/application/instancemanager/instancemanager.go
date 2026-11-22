@@ -1086,8 +1086,8 @@ type redialer interface {
 
 // snapshotContext derives the one deadline a snapshot command runs under (issue
 // #3511): the transfer deadline the API advertised in RegisterAck, measured from the
-// command's start, so the quiesce, the pre-pack fsck, the pack and the upload share
-// it. Before, it bounded only the pack and upload, and the pack ignored it, so a
+// command's start, so a stopped server's leftover guard (issue #4053), the quiesce,
+// the pre-pack fsck, the pack and the upload share it. Before, it bounded only the pack and upload, and the pack ignored it, so a
 // stuck pack or fsck held the command past it while heartbeats kept the session up.
 //
 // A running server's snapshot also owes the save-on restore, which runs detached
