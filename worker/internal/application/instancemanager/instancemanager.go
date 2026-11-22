@@ -2109,7 +2109,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 			m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
 			quiesced = false
-		} else if !m.settleWorkingSet(ctx, settleForSnapshot, serverID, workingDir) {
+		} else if !m.settleWorkingSet(ctx, settleForSnapshot, serverID, workingDir, m.settleBudget) {
 			quiesced = false
 		}
 	}
@@ -2240,7 +2240,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 			"server_id", serverID, "error", err)
 		return false
 	}
-	if !m.settleWorkingSet(ctx, settleForStop, serverID, filepath.Join(m.scratchDir, serverID)) {
+	if !m.settleWorkingSet(ctx, settleForStop, serverID, filepath.Join(m.scratchDir, serverID), m.settleBudget) {
 		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
 			"server_id", serverID)
 		return false
@@ -2548,16 +2548,17 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 // working set's region files before the fsck/copy reads them (#907). It snapshots
 // the (mtime, size) of every .mca under workingDir, re-scans every settlePollInterval,
 // and reports settled (true) once two consecutive scans are identical — the save's
-// region writes have stopped. It gives up (false) after settleBudget so a world
-// that never settles refuses the periodic snapshot (quiesce_unavailable) instead of
-// waiting unbounded, and returns false on ctx cancellation. A scan I/O error is
+// region writes have stopped. It gives up (false) once budget has passed on the
+// manager's clock, so a world that never settles refuses the periodic snapshot
+// (quiesce_unavailable) instead of waiting unbounded, and returns false on ctx
+// cancellation. A scan I/O error is
 // treated as "not yet settled" and retried within the budget rather than aborting,
 // and so is a scan that met an entry swapped under it (errSettleUncertain): only
 // two consecutive complete scans can settle. The budget-exhausted WARN counts the
 // uncertain scans, so a refusal caused by entries changing under the scan says so,
 // and it is prefixed with caller, the operation that ran the wait (issue #3445).
-func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workingDir string) bool {
-	deadline := time.Now().Add(m.settleBudget)
+func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workingDir string, budget time.Duration) bool {
+	deadline := m.clock.Now().Add(budget)
 	uncertain := 0
 	scan := func() (regionState, error) {
 		state, err := m.scanRegion(workingDir)
@@ -2577,9 +2578,9 @@ func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workin
 		if err == nil && curErr == nil && regionStateEqual(prev, cur) {
 			return true
 		}
-		if time.Now().After(deadline) {
+		if m.clock.Now().After(deadline) {
 			m.logger.Warn(caller+": working set did not settle within budget",
-				"server_id", serverID, "budget", m.settleBudget, "uncertain_scans", uncertain)
+				"server_id", serverID, "budget", budget, "uncertain_scans", uncertain)
 			return false
 		}
 		prev, err = cur, curErr

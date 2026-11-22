@@ -118,8 +118,7 @@ func appendRegion(t *testing.T, path string) func() {
 func settleFor(t *testing.T, root string, budget time.Duration, h *capturingSlogHandler) bool {
 	t.Helper()
 	m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(h))
-	m.settleBudget = budget
-	return m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root)
+	return m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root, budget)
 }
 
 func always(int) bool { return true }
@@ -420,7 +419,6 @@ func TestSettleWorkingSetNeedsTwoCompleteScans(t *testing.T) {
 	settleWrite(t, filepath.Join(root, "zz", "level.dat"), "c")
 	flipOnOpen(t, filepath.Join(root, "zz"), func(n int) bool { return n == 1 }, func() {})
 	m := newManager(t, &fakeDriver{}, nil)
-	m.settleBudget = 5 * time.Second
 	scans := 0
 	m.scanRegion = func(root string) (regionState, error) {
 		state, err := scanRegionState(root)
@@ -430,7 +428,7 @@ func TestSettleWorkingSetNeedsTwoCompleteScans(t *testing.T) {
 		return state, err
 	}
 
-	if !m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root) {
+	if !m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root, 5*time.Second) {
 		t.Fatal("settleWorkingSet = false")
 	}
 	if scans != 4 {
@@ -443,7 +441,6 @@ func TestSettleWorkingSetNeedsTwoCompleteScans(t *testing.T) {
 func TestSettleWorkingSetSettlesAfterARegionFileIsDeleted(t *testing.T) {
 	root := settleWorkingDir(t)
 	m := newManager(t, &fakeDriver{}, nil)
-	m.settleBudget = 5 * time.Second
 	scans := 0
 	m.scanRegion = func(root string) (regionState, error) {
 		state, err := scanRegionState(root)
@@ -455,7 +452,7 @@ func TestSettleWorkingSetSettlesAfterARegionFileIsDeleted(t *testing.T) {
 		return state, err
 	}
 
-	if !m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root) {
+	if !m.settleWorkingSet(context.Background(), settleForSnapshot, s1, root, 5*time.Second) {
 		t.Fatal("settleWorkingSet = false after a region file was deleted once")
 	}
 	if scans != 3 {
