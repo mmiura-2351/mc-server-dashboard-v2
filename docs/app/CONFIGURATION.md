@@ -772,18 +772,31 @@ the poll cadence; the schedules themselves are per-server rows.
 until the final snapshot settles, and an archive taken before then would lack
 that snapshot (REQUIREMENTS.md Section 6.9). A due `backup` occurrence on such a
 server is deferred: no run row, `next_run_at` stays, and each tick tries it
-again. One INFO line marks the start of the deferral. It is bounded by
-`reconciler.grace_seconds` (Section 5.6), which the grace floor (Section 5.1,
-note ³) puts above `control.snapshot_timeout_seconds`, so a hold that lasts
-longer is no final snapshot in flight. The bound is timed from the first
-deferral, not from the due instant, so a backup that is already late still gets
-the whole window. Once a deferral passes it, the occurrence is recorded as a
-`skipped` run with the detail `server_assigned`, one WARNING line is logged, and
-the schedule advances to its next occurrence, which gets a window of its own. A
-pending backup retry is deferred and bounded the same way, but its skipped run
-leaves `next_run_at` alone. An occurrence skipped this way takes a pending retry
-with it, since the retry would meet the same hold. The window is kept in memory,
-so an API restart starts it over.
+again. One INFO line marks the start of the deferral.
+
+The deferral is bounded by `reconciler.grace_seconds` (Section 5.6), because the
+row can stay held for as long as the Worker refuses the snapshot. The grace
+outlasts the stop's own final snapshot: `create_app` logs a boot `WARN` when it
+does not exceed `control.snapshot_timeout_seconds` (Section 5.1, note ³), though
+nothing enforces it. It does not outlast every snapshot. Once the grace lapses,
+the reconciler's recovery for a held row takes a final snapshot of its own and
+only then clears the assignment, from 660-720 s after the stop at the defaults
+and up to `control.snapshot_timeout_seconds` later. So a backup that comes due
+just as a stop's snapshot wedges is skipped once, at about 680 s, where a longer
+wait would have produced a late backup. That costs one visible `skipped` run and
+no data; tying the bound to the snapshot timeout as well would add more than it
+buys.
+
+The bound is timed from the first deferral, not from the due instant, so a
+backup that is already late still gets the whole window. Once a deferral passes
+it, the occurrence is recorded as a `skipped` run with the detail
+`server_assigned`, one WARNING line is logged, and the schedule advances to its
+next occurrence, which gets a window of its own. A pending backup retry is
+deferred and bounded the same way, but its skipped run leaves `next_run_at`
+alone. An occurrence skipped this way takes a pending retry with it only when
+that retry is already due, since it would meet the same hold. A retry not yet
+due stays armed and runs at its own time. The window is kept in memory, so an
+API restart starts it over.
 
 ### 5.15 Crash-recovery storage sweep
 

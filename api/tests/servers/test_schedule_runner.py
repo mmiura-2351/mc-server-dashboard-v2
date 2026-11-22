@@ -66,6 +66,7 @@ from mc_server_dashboard_api.servers.domain.schedule import (
     Schedule,
     ScheduleAction,
     ScheduleId,
+    ScheduleRun,
     ScheduleRunOutcome,
     WarningStep,
 )
@@ -666,6 +667,16 @@ def _rows(env: _Env, schedule: Schedule) -> list[tuple[ScheduleRunOutcome, str |
     ]
 
 
+def _gave_up_lines(caplog: pytest.LogCaptureFixture, schedule: Schedule) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and str(schedule.id.value) in record.getMessage()
+        and "recorded as skipped" in record.getMessage()
+    ]
+
+
 async def _tick_at(env: _Env, at: dt.datetime) -> None:
     env.clock.set(at)
     await env.runner.tick()
@@ -702,10 +713,13 @@ async def test_a_held_backup_is_deferred_up_to_the_bound_then_skipped_once(
     assert _rows(env, schedule) == []
     assert env.uow.schedules.by_id[schedule.id].next_run_at == due
     assert len(_deferred_lines(caplog, schedule)) == 1
+    assert _gave_up_lines(caplog, schedule) == []
 
     # Past it: one skipped run, and the schedule moves on to its next occurrence.
     await _tick_at(env, _NOW + elapsed)
     assert _rows(env, schedule) == [(ScheduleRunOutcome.SKIPPED, "server_assigned")]
+    assert len(_gave_up_lines(caplog, schedule)) == 1
+    assert env.runner._deferred == {}
     next_run = due + dt.timedelta(hours=1)
     assert env.uow.schedules.by_id[schedule.id].next_run_at == next_run
     assert await env.uow.backups.list_for_server(server.id) == []
@@ -738,6 +752,7 @@ async def test_a_hold_after_a_released_one_gets_a_whole_bound() -> None:
     env.uow.servers.by_id[server.id].assigned_worker_id = None
     await _tick_at(env, _NOW + _TICK)
     assert _runs(env, schedule) == [ScheduleRunOutcome.SUCCESS]
+    assert env.runner._deferred == {}
 
     # The next occurrence is due more than a bound after the first deferral, and
     # a stop holds the row again: the deferral is timed from now, not from then.
@@ -830,6 +845,102 @@ async def test_a_held_occurrence_with_a_retry_pending_is_skipped_once(
     ]
     assert env.runner._backup_retry == {}
     assert len(_deferred_lines(caplog, schedule)) == 1
+
+
+async def test_a_held_occurrence_skip_keeps_a_retry_not_yet_due() -> None:
+    # 03:00 fails and arms the retry for 03:30. 03:10 is held past the bound and
+    # skipped at about 03:21, and the hold ends at 03:25: the retry the 03:00
+    # failure is owed still runs, though the next occurrence is a day away.
+    day = dt.datetime(2026, 7, 11, tzinfo=dt.timezone.utc)
+    store = FakeBackupArchiveStore(missing=True)  # the 03:00 occurrence fails
+    env = _env(backup_store=store, clock=FakeClock(day.replace(hour=3)))
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=Cadence.from_cron("0,10 3 * * *"),
+        only_when_running=False,
+        next_run_at=day.replace(hour=3),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await env.runner.tick()
+    assert env.runner._backup_retry == {schedule.id: day.replace(hour=3, minute=30)}
+
+    env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
+    store._missing = False
+    held_at = day.replace(hour=3, minute=10)
+    await _tick_at(env, held_at)
+    await _tick_at(env, held_at + _DEFERRAL_BOUND + _TICK)
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SKIPPED,
+    ]
+    assert env.runner._backup_retry == {schedule.id: day.replace(hour=3, minute=30)}
+
+    env.uow.servers.by_id[server.id].assigned_worker_id = None  # released at 03:25
+    await _tick_at(env, day.replace(hour=3, minute=30))
+
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SKIPPED,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+    assert env.runner._backup_retry == {}
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == day.replace(day=12, hour=3)
+
+
+async def test_a_deferral_outlives_neither_its_schedule_nor_a_failed_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    env = _env()
+    server = _held_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    await _tick_at(env, _NOW)  # deferred
+
+    # The skipped run's record fails once: the deferral stands, still past the
+    # bound, and the next tick records it without opening a second window.
+    real_add = env.uow.schedule_runs.add
+    failures = [RuntimeError("database down")]
+
+    async def failing_add(run: ScheduleRun) -> None:
+        if failures:
+            raise failures.pop()
+        await real_add(run)
+
+    env.uow.schedule_runs.add = failing_add  # type: ignore[method-assign]
+    past = _NOW + _DEFERRAL_BOUND + _TICK
+    await _tick_at(env, past)
+    assert _rows(env, schedule) == []
+    await _tick_at(env, past + _TICK)
+    assert _rows(env, schedule) == [(ScheduleRunOutcome.SKIPPED, "server_assigned")]
+    assert len(_deferred_lines(caplog, schedule)) == 1
+    assert len(_gave_up_lines(caplog, schedule)) == 1
+
+    # A schedule deleted between ticks while deferred is swept from the record.
+    other = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=False,
+        next_run_at=past,
+    )
+    env.uow.schedules.seed(other)
+    await _tick_at(env, past + 2 * _TICK)
+    assert other.id in env.runner._deferred
+    del env.uow.schedules.by_id[other.id]
+    await _tick_at(env, past + 3 * _TICK)
+    assert env.runner._deferred == {}
 
 
 # --- failure path ----------------------------------------------------------

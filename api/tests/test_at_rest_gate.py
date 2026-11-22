@@ -20,6 +20,21 @@ The scan sees references, by attribute or by name as a string (``getattr``,
 ``observed_state`` itself, or that has no state gate at all, is outside it, and
 so is a write added to a read it allows. The write-site scan below covers those
 (issue #4047): it starts from the writes rather than from the predicate.
+
+The write-site scan is syntactic too, and these pass it:
+
+- a helper or gate helper named like another in its module: names resolve
+  module-wide, so ``B._check`` is taken for a refusing ``A._check``, and an
+  injected collaborator's ``self.sync(...)`` for a module function ``sync``;
+- a ``_private`` write helper that another module imports: it is judged only at
+  its callers in its own module;
+- a new caller of an allowed public writer such as
+  ``regenerate_pending_group_files``: its entry names the callers it has, and
+  nothing checks another;
+- a gate that only co-locates: one referenced after the write, or only logged,
+  still counts, and sibling closures in one function share its verdict;
+- a function defined under a module-level ``if`` or ``try``, which the scan does
+  not walk.
 """
 
 from __future__ import annotations
@@ -163,19 +178,24 @@ def test_is_at_rest_is_referenced_only_where_it_is_allowed() -> None:
 
 # --- Write sites (issue #4047) ----------------------------------------------
 #
-# Every call in ``src`` to a method that changes a server's working set sits in
-# a function that calls ``is_quiescent()`` or ``not_quiescent_error()``, or is on
-# the allowlist below. A call counts as a write when it calls one of the ports'
-# write methods on a receiver named ``*store`` or ``*storage`` (so a unit of
-# work's ``rollback`` is not one).
+# Every reference in ``src`` to a method that changes a server's working set
+# sits in a function that calls ``is_quiescent()`` or ``not_quiescent_error()``,
+# or is on the allowlist below. A write is any attribute named for one of the
+# ports' write methods, on any receiver and whether called or not (an alias, a
+# ``functools.partial``, ``asyncio.to_thread``), and the name as a string
+# (``getattr``). Only ``rollback``, which a unit of work and a session share,
+# needs a receiver named ``*store`` or ``*storage``.
 #
 # Two kinds of function are judged through others. A private helper (``_name``)
 # that its module calls is judged at its callers: its writes count as theirs, so
-# an ungated door that calls a gated door's helper fails. And a same-module
-# function that calls the gate itself, such as ``_load_quiescent_server``,
-# gates its callers. A port adapter's own write methods are its callers' to
-# gate. Calls are matched by bare name (``f(...)``, ``self.f(...)``) within one
-# module, so a public function another module calls is judged as a door.
+# an ungated door that calls a gated door's helper fails. And a private function
+# that refuses, by raising ``not_quiescent_error()`` or raising when
+# ``is_quiescent()`` is false (``_load_quiescent_server``), gates its callers; one
+# that only reads the predicate (``reconciler._is_settled``) does not. A port
+# adapter's own write methods are its callers' to gate. Calls are matched by
+# bare name (``f(...)``, ``self.f(...)``) within one module, so a public function
+# another module calls is judged as a door. The module docstring lists what the
+# scan still does not see.
 
 # Each port's abstract methods: those that change a working set, and the rest.
 # A method a port gains fails test_every_port_method_is_sorted until it is
@@ -318,6 +338,36 @@ _WRITES_ALLOWED: dict[tuple[str, str], tuple[dict[str, int], str]] = {
 }
 
 
+# A write method named like a unit of work's or a session's: it counts only on
+# a receiver named ``*store`` or ``*storage``.
+_COLLIDING = frozenset({"rollback"})
+
+
+def _receiver_name(node: ast.expr) -> str:
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return node.id if isinstance(node, ast.Name) else ""
+
+
+def _refuses(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether ``node`` raises the gate's error, or raises unless quiescent."""
+
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr == "not_quiescent_error":
+            return True
+        if (
+            isinstance(sub, ast.If)
+            and isinstance(sub.test, ast.UnaryOp)
+            and isinstance(sub.test.op, ast.Not)
+            and isinstance(sub.test.operand, ast.Call)
+            and isinstance(sub.test.operand.func, ast.Attribute)
+            and sub.test.operand.func.attr == "is_quiescent"
+            and any(isinstance(n, ast.Raise) for s in sub.body for n in ast.walk(s))
+        ):
+            return True
+    return False
+
+
 class _Unit:
     """One module-level function or method, as the write-site scan sees it."""
 
@@ -326,30 +376,32 @@ class _Unit:
     ) -> None:
         self.name = node.name
         self.implements_port = bool(bases & _PORTS) and node.name in _WRITES
+        self.refuses = _refuses(node)
         self.writes: Counter[str] = Counter()
         self.calls: set[str] = set()
         self.gated = False
         for sub in ast.walk(node):
-            if isinstance(sub, ast.Attribute) and sub.attr in _GATES:
-                self.gated = True
-            if not isinstance(sub, ast.Call):
-                continue
-            func = sub.func
-            if isinstance(func, ast.Name):
-                self.calls.add(func.id)
-            elif isinstance(func, ast.Attribute):
-                receiver = func.value
-                if isinstance(receiver, ast.Name) and receiver.id in ("self", "cls"):
-                    self.calls.add(func.attr)
-                receiver_name = (
-                    receiver.attr
-                    if isinstance(receiver, ast.Attribute)
-                    else getattr(receiver, "id", "")
-                )
-                if func.attr in _WRITES and receiver_name.endswith(
-                    ("store", "storage")
+            if isinstance(sub, ast.Attribute):
+                if sub.attr in _GATES:
+                    self.gated = True
+                if sub.attr in _WRITES and (
+                    sub.attr not in _COLLIDING
+                    or _receiver_name(sub.value).endswith(("store", "storage"))
                 ):
-                    self.writes[func.attr] += 1
+                    self.writes[sub.attr] += 1
+            elif isinstance(sub, ast.Constant):
+                if isinstance(sub.value, str) and sub.value in _WRITES:
+                    self.writes[sub.value] += 1
+            elif isinstance(sub, ast.Call):
+                func = sub.func
+                if isinstance(func, ast.Name):
+                    self.calls.add(func.id)
+                elif (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id in ("self", "cls")
+                ):
+                    self.calls.add(func.attr)
 
 
 def _units(source: str) -> dict[str, _Unit]:
@@ -379,7 +431,9 @@ def _ungated_writes(source: str) -> dict[str, Counter[str]]:
     """Each door in ``source`` that reaches a working-set write with no gate."""
 
     units = _units(source)
-    gate_helpers = {unit.name for unit in units.values() if unit.gated}
+    gate_helpers = {
+        unit.name for unit in units.values() if _is_helper(unit.name) and unit.refuses
+    }
 
     def gated(unit: _Unit) -> bool:
         return unit.gated or bool(unit.calls & gate_helpers)
@@ -446,9 +500,30 @@ class GatedByHelper:
         await self.file_store.make_dir(rel_path="d")
 
 
+def _require_quiescent(server):
+    if not server.is_quiescent():
+        raise RuntimeError
+
+
+class GatedByRaise:
+    async def __call__(self, server):
+        _require_quiescent(server)
+        await self.file_store.make_dir(rel_path="d")
+
+
+def _is_settled(server):
+    return server.is_quiescent()
+
+
+async def reseed(server, file_store):
+    _is_settled(server)
+    await file_store.write_file(rel_path="a")
+
+
 class Ungated:
     async def __call__(self, server):
         await self.uow.rollback()
+        await self.file_store.rollback(rel_path="a")
         await self.backup_store.restore(server)
         await self._publish(server)
 
@@ -460,8 +535,63 @@ class Adapter(FileStore):
     async def write_file(self, rel_path):
         await self._storage.write_file(rel_path)
 """
+    # A helper that only reads the predicate refuses nothing, so it gates no
+    # caller (reconciler._is_settled is one).
     assert _ungated_writes(source) == {
-        "Ungated.__call__": Counter({"restore": 1, "write_file": 1})
+        "reseed": Counter({"write_file": 1}),
+        "Ungated.__call__": Counter({"rollback": 1, "restore": 1, "write_file": 1}),
+    }
+
+
+def test_the_write_scan_sees_a_write_however_it_is_spelled() -> None:
+    source = """
+import asyncio
+import functools
+
+
+class LocalAlias:
+    async def __call__(self):
+        files = self.file_store
+        await files.write_file(rel_path="a")
+
+
+async def parameter(files, rel_path):
+    await files.delete_dir(rel_path=rel_path)
+
+
+class MethodAlias:
+    async def __call__(self):
+        write = self.file_store.write_file
+        await write(rel_path="a")
+
+
+class OtherNames:
+    async def __call__(self, server):
+        await self.files.write_file(rel_path="a")
+        await self._backend.restore_backup(server)
+
+
+class Computed:
+    async def __call__(self, server):
+        await self._store_for(server).write_file(rel_path="a")
+        await self.stores[0].make_dir(rel_path="d")
+
+
+class Dynamic:
+    async def __call__(self):
+        await getattr(self.file_store, "write_file")(rel_path="a")
+        await functools.partial(self.file_store.rename_file, from_path="a")()
+        await asyncio.to_thread(self.storage.rollback_file, "a")
+"""
+    assert _ungated_writes(source) == {
+        "LocalAlias.__call__": Counter({"write_file": 1}),
+        "parameter": Counter({"delete_dir": 1}),
+        "MethodAlias.__call__": Counter({"write_file": 1}),
+        "OtherNames.__call__": Counter({"write_file": 1, "restore_backup": 1}),
+        "Computed.__call__": Counter({"write_file": 1, "make_dir": 1}),
+        "Dynamic.__call__": Counter(
+            {"write_file": 1, "rename_file": 1, "rollback_file": 1}
+        ),
     }
 
 
