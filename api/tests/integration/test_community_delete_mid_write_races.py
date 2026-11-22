@@ -393,6 +393,12 @@ async def _unassign_owner_role(world: _World, uow: SqlAlchemyUnitOfWork) -> obje
     return None
 
 
+async def _delete_community_again(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
+    # A second deletion of the community: it waits at the community lock.
+    await DeleteCommunity(uow=uow)(community_id=world.community_id)
+    return None
+
+
 _NOT_FOUND_WRITES = [
     pytest.param(_add_outsider, id="add-member"),
     pytest.param(_create_empty_role, id="create-role-conferring-nothing"),
@@ -403,6 +409,7 @@ _NOT_FOUND_WRITES = [
     pytest.param(_create_grant, id="create-grant"),
     pytest.param(_remove_member, id="remove-member"),
     pytest.param(_unassign_owner_role, id="unassign-role"),
+    pytest.param(_delete_community_again, id="delete-community"),
 ]
 
 
@@ -1064,9 +1071,13 @@ async def _delete_the_server(world: _World, pid: asyncio.Future[int]) -> None:
     )
 
 
-@pytest.mark.parametrize("stalled", [False, True], ids=["prompt", "stalled"])
+@pytest.mark.parametrize(
+    ("granted", "stalled"),
+    [(True, False), (True, True), (False, False)],
+    ids=["prompt", "stalled", "no-grant"],
+)
 async def test_deletion_racing_a_server_deletion_mid_cascade_is_refused(
-    engine: AsyncEngine, stalled: bool
+    engine: AsyncEngine, granted: bool, stalled: bool
 ) -> None:
     # A server deletion locks the server, then, in the same statement, its
     # cascades: its game sessions before its grants. A deletion that cascaded
@@ -1074,11 +1085,14 @@ async def test_deletion_racing_a_server_deletion_mid_cascade_is_refused(
     # the server, which deadlocked once the server deletion reached the grant.
     # Staged with the server deletion stalled on a game session a third
     # transaction holds, and released at once or once the deletion has waited
-    # past deadlock_timeout. The deletion still sees the server, so it is
-    # refused before its DELETE and waits for nothing.
+    # past deadlock_timeout. Without a grant there was no deadlock: the deletion
+    # waited for the server deletion, then succeeded. The deletion still sees
+    # the server either way, so it is refused before its DELETE and waits for
+    # nothing.
     world = await _world(engine)
     await _add_server(world)
-    await _create_grant(world, SqlAlchemyUnitOfWork(world.factory))
+    if granted:
+        await _create_grant(world, SqlAlchemyUnitOfWork(world.factory))
     async with engine.begin() as conn:
         await conn.execute(
             text("INSERT INTO game_session (id, server_id) VALUES (:id, :server)"),
