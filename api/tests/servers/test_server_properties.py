@@ -5,6 +5,7 @@ from __future__ import annotations
 import random
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -520,6 +521,12 @@ def test_platform_managed_keys_covers_the_resource_pack_keys() -> None:
     } <= PLATFORM_MANAGED_KEYS
 
 
+def test_sync_chunk_writes_is_not_platform_managed() -> None:
+    # A new server's sync-chunk-writes=false is a default the user may change
+    # (issue #3443), not a value the platform needs in order to work.
+    assert "sync-chunk-writes" not in PLATFORM_MANAGED_KEYS
+
+
 def test_unchanged_platform_keys_report_no_change() -> None:
     current = b"server-port=25565\nrcon.password=tok\nmotd=hi\n"
     incoming = b"server-port=25565\nrcon.password=tok\nmotd=bye\n"
@@ -723,6 +730,49 @@ def test_apply_platform_properties_preserves_a_non_utf8_line() -> None:
     )
     assert b"motd=caf\xe9\n" in result
     assert b"server-port=26590\n" in result
+
+
+# --- a user's sync-chunk-writes survives platform writes (issue #3443) --------
+
+# A created server's file after its user set the seeded sync-chunk-writes back to
+# vanilla's true.
+_USER_SET_SYNC_CHUNK_WRITES = (
+    b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    b"sync-chunk-writes=true\n"
+)
+_NEW_PACK = ResourcePackProperties(
+    url="https://new/pack.zip", sha1="new-sha", require=True, prompt="new"
+)
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        pytest.param(lambda content: set_server_port(content, 26590), id="port"),
+        pytest.param(
+            lambda content: set_rcon_properties(content, password="fresh"), id="rcon"
+        ),
+        pytest.param(
+            lambda content: set_resource_pack_properties(
+                content, url="https://new/pack.zip", sha1="new-sha"
+            ),
+            id="pack-assign",
+        ),
+        pytest.param(clear_resource_pack_properties, id="pack-unassign"),
+        pytest.param(
+            lambda content: apply_platform_properties(
+                content, game_port=26590, rcon_password="fresh", resource_pack=_NEW_PACK
+            ),
+            id="re-apply",
+        ),
+    ],
+)
+def test_platform_writes_keep_a_user_set_sync_chunk_writes(
+    write: Callable[[bytes], bytes],
+) -> None:
+    assert _raw_values(write(_USER_SET_SYNC_CHUNK_WRITES), "sync-chunk-writes") == [
+        "true"
+    ]
 
 
 # --- Java Properties.load parity (issue #2811) --------------------------------

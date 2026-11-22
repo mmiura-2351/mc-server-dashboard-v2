@@ -339,7 +339,9 @@ class ImportServer:
     cleared: the freshly created server carries no assignment, so the source
     deployment's pack URL is not its to serve. If the archive has no
     ``server.properties`` at all, the composed :class:`CreateServer` already seeded
-    one with the same platform keys.
+    one with the same platform keys, and only those: it is asked for no new-server
+    defaults, so an imported server does not gain the ``sync-chunk-writes=false`` a
+    created one starts with (issue #3443).
 
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
@@ -402,6 +404,7 @@ class ImportServer:
             server_type=metadata.server_type,
             config={},
             accept_eula=False,
+            new_server_defaults=False,
         )
         await self._publish_working_set(
             community_id=community_id,

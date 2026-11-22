@@ -56,6 +56,7 @@ _RESOURCE_PACK_KEY = "resource-pack"
 _RESOURCE_PACK_SHA1_KEY = "resource-pack-sha1"
 _REQUIRE_RESOURCE_PACK_KEY = "require-resource-pack"
 _RESOURCE_PACK_PROMPT_KEY = "resource-pack-prompt"
+_SYNC_CHUNK_WRITES_KEY = "sync-chunk-writes"
 
 # The in-container RCON port the worker connects to (issue #335). It is never
 # published to the host (the container driver drops the host RCON publication,
@@ -687,6 +688,25 @@ def set_rcon_properties(content: bytes, *, password: str) -> bytes:
     if not _get_property(content, _RCON_PASSWORD_KEY):
         content = _set_property(content, _RCON_PASSWORD_KEY, password)
     return content
+
+
+def new_server_properties(*, game_port: int, rcon_password: str) -> bytes:
+    """Return the ``server.properties`` a newly created server is seeded with.
+
+    The platform half -- ``server-port=<game_port>`` (#243) and the RCON triple
+    (#335) -- then ``sync-chunk-writes=false`` (issue #3443). Vanilla's default
+    ``true`` opens region files ``O_DSYNC``, so on a host with slow synchronous
+    writes a shutdown save takes minutes (#3436). That key is a default, not a
+    platform-managed one: it is not in :data:`PLATFORM_MANAGED_KEYS`, so the
+    user's own value replaces it and no platform write touches it again. This is
+    the seed for a server that has no file yet; a file that exists is never
+    given the key, so an imported or restored server keeps what its file says.
+    """
+
+    content = set_rcon_properties(
+        set_server_port(b"", game_port), password=rcon_password
+    )
+    return _set_property(content, _SYNC_CHUNK_WRITES_KEY, "false")
 
 
 def set_resource_pack_properties(

@@ -531,9 +531,11 @@ async def test_create_rejects_unknown_version() -> None:
 
 
 # The server.properties content create seeds with port + the RCON keys (#243,
-# #335). The password is the injected fixed token, so the expectation is exact.
+# #335) + sync-chunk-writes=false (#3443). The password is the injected fixed
+# token, so the expectation is exact.
 _SEEDED_PROPERTIES = (
     b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+    b"sync-chunk-writes=false\n"
 )
 
 
@@ -621,6 +623,55 @@ async def test_create_seeds_rcon_with_random_password_by_default() -> None:
     assert props["rcon.password"] != ""
 
 
+async def test_create_seeds_sync_chunk_writes_off() -> None:
+    # A new server starts with sync-chunk-writes=false (issue #3443): vanilla's
+    # default true makes every chunk write wait for the disk, so a shutdown save
+    # on a slow-sync host takes minutes.
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=FakeUnitOfWork(),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+    )
+    seeded = file_store.files["server.properties"].decode()
+    assert "sync-chunk-writes=false" in seeded.splitlines()
+
+
+async def test_create_override_replaces_the_seeded_sync_chunk_writes() -> None:
+    # The default is not platform-managed (issue #3443): a create-time override
+    # rewrites the seeded line in place, leaving exactly one, the user's.
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=FakeUnitOfWork(),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={"sync-chunk-writes": "true"},
+    )
+    assert file_store.files["server.properties"] == (
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+        b"sync-chunk-writes=true\n"
+    )
+
+
 # --- create: config overrides written to server.properties (#1209) ---------
 
 
@@ -646,7 +697,7 @@ async def test_create_merges_config_overrides_into_seeded_properties() -> None:
     )
     expected = (
         b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
-        b"motd=Hello World\npvp=false\n"
+        b"sync-chunk-writes=false\nmotd=Hello World\npvp=false\n"
     )
     assert file_store.files["server.properties"] == expected
 
@@ -808,7 +859,8 @@ async def test_create_auto_assigns_lowest_free_port() -> None:
     assert file_store.writes == [
         (
             "server.properties",
-            b"server-port=25567\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n",
+            b"server-port=25567\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+            b"sync-chunk-writes=false\n",
         )
     ]
 
@@ -1722,6 +1774,45 @@ async def test_update_config_overrides_syncs_to_properties_file() -> None:
     assert updated.config == {"motd": "new"}
     assert file_store.files["server.properties"] == b"server-port=25565\nmotd=new\n"
     assert uow.commits == 1
+
+
+async def test_a_users_sync_chunk_writes_replaces_the_seed_and_outlives_a_re_port() -> (
+    None
+):
+    # sync-chunk-writes=false is a new server's default, not a platform-managed
+    # key (issue #3443): a user's own value replaces the seeded line, and a later
+    # platform write to the file leaves it alone.
+    uow = FakeUnitOfWork()
+    community = CommunityId(uuid.uuid4())
+    file_store = FakeFileStore()
+    server = await CreateServer(
+        uow=uow,
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=community,
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={},
+    )
+    assert b"sync-chunk-writes=false\n" in file_store.files["server.properties"]
+    update = _updater(uow, file_store=file_store)
+    await update(
+        community_id=community,
+        server_id=server.id,
+        config={"sync-chunk-writes": "true"},
+    )
+    await update(community_id=community, server_id=server.id, game_port=25570)
+    lines = file_store.files["server.properties"].decode().splitlines()
+    assert "server-port=25570" in lines
+    assert [line for line in lines if line.startswith("sync-chunk-writes")] == [
+        "sync-chunk-writes=true"
+    ]
 
 
 async def test_update_config_overrides_skips_reserved_keys_in_file() -> None:
@@ -2703,6 +2794,7 @@ async def test_update_game_port_rewrites_properties_at_rest(tmp_path: Path) -> N
     # (#335) untouched.
     expected = (
         b"server-port=25570\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+        b"sync-chunk-writes=false\n"
     )
     at_rest = await file_store.read_file(
         community_id=community, server_id=server.id, rel_path="server.properties"

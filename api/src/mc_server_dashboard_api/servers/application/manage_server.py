@@ -80,8 +80,8 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     apply_overrides,
     apply_platform_properties,
     new_rcon_password,
+    new_server_properties,
     remove_keys,
-    set_rcon_properties,
     set_server_port,
 )
 from mc_server_dashboard_api.servers.domain.slug import generate_slug, validate_slug
@@ -116,7 +116,8 @@ _EULA_ACCEPTED_CONTENT = b"eula=true\n"
 # assigned game port (issue #243) and the RCON keys (enable-rcon / rcon.port /
 # rcon.password, issue #335) into the initial working set, so the server boots on
 # its tracked port AND RCON is on out of the box (the console / graceful-stop path
-# needs it). The trailing newline matches the line format Mojang writes.
+# needs it), plus a new server's ``sync-chunk-writes=false`` default (issue #3443).
+# The trailing newline matches the line format Mojang writes.
 _PROPERTIES_REL_PATH = "server.properties"
 
 _logger = logging.getLogger(__name__)
@@ -262,6 +263,11 @@ class CreateServer:
     edge): the committed row stays in a degraded-but-repairable state (the missing
     files can be written via the files API), rather than leaking an unmapped 500.
 
+    A new server's ``server.properties`` also gets ``sync-chunk-writes=false``
+    (issue #3443), a default that the user's own value replaces. With
+    ``new_server_defaults`` false it is left out: import passes that, so an
+    imported server keeps the settings its archive carries.
+
     The RCON password is generated via the injected ``token_generator`` (default a
     ``secrets``-backed random token), kept injectable so tests are deterministic;
     the secret lives only in ``server.properties`` (the worker's canonical source),
@@ -291,6 +297,7 @@ class CreateServer:
         accept_eula: bool = False,
         game_port: int | None = None,
         slug: str | None = None,
+        new_server_defaults: bool = True,
     ) -> Server:
         # The name is refused before any other check, as an update refuses it
         # first (issue #3988).
@@ -382,6 +389,7 @@ class CreateServer:
             game_port=assigned_port,
             accept_eula=accept_eula,
             config=config,
+            new_server_defaults=new_server_defaults,
         )
         return server
 
@@ -393,6 +401,7 @@ class CreateServer:
         game_port: int,
         accept_eula: bool,
         config: dict[str, Any],
+        new_server_defaults: bool,
     ) -> None:
         """Write the create-time seed files into the server's first version.
 
@@ -403,9 +412,10 @@ class CreateServer:
         ``server.properties`` and ``eula.txt`` may both be seeded in one create.
         ``server.properties`` is always seeded with the assigned game port (#243)
         and the RCON keys (#335: ``enable-rcon=true``, ``rcon.port``, and a fresh
-        random ``rcon.password``); user-supplied server.properties overrides from
-        ``config`` are merged on top (#1209); ``eula.txt`` only when the operator
-        accepted at create (issue #198).
+        random ``rcon.password``), plus, with ``new_server_defaults``, a new
+        server's ``sync-chunk-writes=false`` (#3443); user-supplied
+        server.properties overrides from ``config`` are merged on top (#1209);
+        ``eula.txt`` only when the operator accepted at create (issue #198).
 
         A storage failure is caught and re-raised as
         :class:`WorkingSetSeedFailedError` (mapped to 503): the row is already
@@ -413,8 +423,13 @@ class CreateServer:
         server — it only signals the degraded state.
         """
 
-        properties = set_rcon_properties(
-            set_server_port(b"", game_port), password=self.token_generator()
+        password = self.token_generator()
+        properties = (
+            new_server_properties(game_port=game_port, rcon_password=password)
+            if new_server_defaults
+            else apply_platform_properties(
+                b"", game_port=game_port, rcon_password=password, resource_pack=None
+            )
         )
         overrides = _properties_overrides(config)
         if overrides:
