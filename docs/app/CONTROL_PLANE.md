@@ -358,6 +358,22 @@ staying transient so the backoff-reconnect path (Section 4.4) retries it. So the
 operator-visible signal for a Worker that will not register is the terminal
 status code.
 
+Before it acks, the API rebuilds the Worker's assignments from the database, and
+a registration whose database cannot serve that ends with `UNAVAILABLE` instead
+(issue #4050). The Worker treats that code as transient and reconnects under its
+backoff, which grows with each refusal. The rebuild ends the registration when
+it fails, or when it has not answered within 10 s. That deadline is a third of
+the 30 s the Worker waits for the ack
+([`proto/contract/control_plane_limits.json`](../../proto/contract/control_plane_limits.json)).
+The database's own statement bound (`database.statement_timeout_seconds`,
+CONFIGURATION.md Section 5.2) is longer than that wait, so without the deadline
+a stalled database would see each registration abandoned and the same stalled
+rebuild started again. Cancelling a read on a stalled connection takes up to
+2 s more, so the refusal leaves within 12 s. By then the Worker is marked
+offline, and no session for commands is open. The held-server lookup shares
+the deadline: a lookup still running at it sends the ack with an empty
+`unknown_held_server_ids`, as a failed one does.
+
 Once the API has acknowledged a registration, the Worker re-reports what it holds: a
 `StatusChange` for each live instance at its current state,
 `SERVER_STATE_UNKNOWN` for each failed-stop orphan (Section 6), and, for a server

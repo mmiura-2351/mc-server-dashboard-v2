@@ -2,6 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,6 +13,26 @@ import (
 	controlplanev1 "github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/controlplane/mcsd/controlplane/v1"
 	"github.com/mmiura-2351/mc-server-dashboard-v2/worker/internal/domain/session"
 )
+
+// TestTheRegisterAckWaitIsTheOneTheContractNames pins the wait the API sizes its
+// registration deadline against (issue #4050): it ends a registration whose
+// database work has not answered within a third of it, so the Worker hears the
+// refusal before it gives up.
+func TestTheRegisterAckWaitIsTheOneTheContractNames(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "proto", "contract", "control_plane_limits.json"))
+	if err != nil {
+		t.Fatalf("read the limits contract: %v", err)
+	}
+	var limits struct {
+		RegisterAckTimeoutSeconds int `json:"register_ack_timeout_seconds"`
+	}
+	if err := json.Unmarshal(data, &limits); err != nil {
+		t.Fatalf("parse the limits contract: %v", err)
+	}
+	if want := time.Duration(limits.RegisterAckTimeoutSeconds) * time.Second; registerAckTimeout != want {
+		t.Fatalf("registerAckTimeout = %s, the contract says %s", registerAckTimeout, want)
+	}
+}
 
 // ackStream is a WorkerService_SessionClient double whose Recv blocks until the
 // test releases it and then answers with a RegisterAck. It lets a test place the

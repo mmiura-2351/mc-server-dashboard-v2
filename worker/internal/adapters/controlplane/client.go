@@ -61,6 +61,9 @@ func MessageSizeDialOption() grpc.DialOption {
 // patience for a stuck Worker. There is no transport-timeout config knob today
 // (config.go carries none), and inventing one for an internal failsafe is not
 // warranted; it is a package var rather than a const only so tests can lower it.
+// The API ends a registration its database has not served within a third of it
+// (issue #4050), so it is pinned to proto/contract/control_plane_limits.json by a
+// test on each side.
 var registerAckTimeout = 30 * time.Second
 
 // sendStallTimeout bounds how long a single stream.Send may block before the
