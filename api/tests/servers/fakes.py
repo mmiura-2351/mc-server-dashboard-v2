@@ -145,6 +145,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -886,6 +887,7 @@ class FakeServerRepository(ServerRepository):
         self.by_id[server.id] = self._copy(server)
 
     async def add(self, server: Server) -> None:
+        self.events.append((server.id, "add-server"))
         self.by_id[server.id] = self._copy(server)
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:
@@ -1014,6 +1016,8 @@ class FakeServerRepository(ServerRepository):
             # Mirror the real adapter (issue #3890): only a write that changes the
             # assignment sets the mark, for a placement, or clears it.
             current.awaiting_hydrate = server.assigned_worker_id is not None
+            # Mirror the real adapter (issue #4054): it clears the refusal too.
+            current.final_snapshot_refusal = None
         current.assigned_worker_id = server.assigned_worker_id
         if write_config:
             current.config = deepcopy(server.config)
@@ -1053,6 +1057,7 @@ class FakeServerRepository(ServerRepository):
         _observe(server, observed_state, observed_at, detail=detail, reason=reason)
         if unassign:
             server.assigned_worker_id = None
+            server.final_snapshot_refusal = None
         # Mirror the real adapter (issue #3890): a release, or a running instance,
         # owes no hydrate.
         if unassign or observed_state is ObservedState.RUNNING:
@@ -1073,6 +1078,7 @@ class FakeServerRepository(ServerRepository):
             return False
         server.assigned_worker_id = None
         server.awaiting_hydrate = False
+        server.final_snapshot_refusal = None
         return True
 
     async def clear_stale_assignment(
@@ -1094,6 +1100,7 @@ class FakeServerRepository(ServerRepository):
             return False
         server.assigned_worker_id = None
         server.awaiting_hydrate = False
+        server.final_snapshot_refusal = None
         return True
 
     async def clear_awaiting_hydrate(
@@ -1125,6 +1132,25 @@ class FakeServerRepository(ServerRepository):
         ):
             return False
         server.awaiting_hydrate = True
+        return True
+
+    async def set_final_snapshot_refusal(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal | None,
+    ) -> bool:
+        # Mirror the real adapter's guard (issue #4054): only a stop still
+        # holding worker_id, and only a change counts.
+        server = self.by_id.get(server_id)
+        if (
+            server is None
+            or server.desired_state is not DesiredState.STOPPED
+            or server.assigned_worker_id != worker_id
+            or server.final_snapshot_refusal is refusal
+        ):
+            return False
+        server.final_snapshot_refusal = refusal
         return True
 
     async def mark_worker_servers_unknown(

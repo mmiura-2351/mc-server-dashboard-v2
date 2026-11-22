@@ -16,6 +16,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -189,6 +190,10 @@ class ServerRepository(abc.ABC):
         hydrated it yet, and to ``False`` when it releases the row. A write that
         keeps the assignment leaves the mark as the row holds it, so one built
         from a stale read cannot restore a mark a hydrate has cleared since.
+
+        A write that changes the assignment also clears
+        ``final_snapshot_refusal`` (issue #4054), whatever the entity holds, and
+        a release's frame carries the cleared value.
         """
 
     @abc.abstractmethod
@@ -229,7 +234,9 @@ class ServerRepository(abc.ABC):
         A write that lands with ``unassign``, or of ``running``, also clears
         ``awaiting_hydrate`` (issue #3890). A release owes no hydrate. A running
         instance's working set is the one its snapshots capture, whatever the
-        store holds, so a hydrate is no longer what makes them safe.
+        store holds, so a hydrate is no longer what makes them safe. A write
+        that lands with ``unassign`` also clears ``final_snapshot_refusal``
+        (issue #4054); any other write keeps it.
 
         ``detail`` and ``reason`` are the report's free text and crash reason.
         A write of ``crashed`` stores them as the server's last crash
@@ -276,7 +283,8 @@ class ServerRepository(abc.ABC):
         path. Returns ``True`` when the assignment was cleared, ``False`` when the
         guard matched no row. A clear is announced to live subscribers as a status
         event once the transaction commits (issue #3818). It clears
-        ``awaiting_hydrate`` with the assignment (issue #3890).
+        ``awaiting_hydrate`` (issue #3890) and ``final_snapshot_refusal`` (issue
+        #4054) with the assignment.
         """
 
     @abc.abstractmethod
@@ -299,8 +307,8 @@ class ServerRepository(abc.ABC):
         has landed since the read, a first one included. Returns ``True`` when
         the assignment was cleared, ``False`` when the guard matched no row. A
         clear is announced to live subscribers as a status event once the
-        transaction commits (issue #3818). It clears ``awaiting_hydrate`` with
-        the assignment (issue #3890).
+        transaction commits (issue #3818). It clears ``awaiting_hydrate`` (issue
+        #3890) and ``final_snapshot_refusal`` (issue #4054) with the assignment.
         """
 
     @abc.abstractmethod
@@ -337,6 +345,24 @@ class ServerRepository(abc.ABC):
         the caller's load: the caller re-reads the row and checks that the intent
         is still its own in the same unit of work. Returns ``True`` when the row
         changed. Not announced.
+        """
+
+    @abc.abstractmethod
+    async def set_final_snapshot_refusal(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal | None,
+    ) -> bool:
+        """Record how ``worker_id`` last answered the stop's final snapshot (#4054).
+
+        ``refusal`` is the refusal that keeps the Worker assigned, or ``None``
+        once a later attempt was not refused. The write lands only while the
+        row is ``desired_state=stopped`` and still assigned to ``worker_id``,
+        so it never marks a row a release or a start has moved on. Every
+        release clears the value with the assignment. Returns ``True`` when the
+        row changed, which is announced to live subscribers as a status event
+        once the transaction commits.
         """
 
     @abc.abstractmethod

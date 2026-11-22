@@ -62,6 +62,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
+    HeldLifecycleLock,
     LifecycleLock,
     NullLifecycleLock,
 )
@@ -263,6 +264,20 @@ class CreateServer:
     edge): the committed row stays in a degraded-but-repairable state (the missing
     files can be written via the files API), rather than leaking an unmapped 500.
 
+    The server's **lifecycle lock** is held from before the row commits until the
+    last create-time write (issue #4045). Each seed write publishes on its own, so
+    a start admitted in between would hydrate the seed as far as it had got, and
+    the rest would land under a running server. The id is minted first and the
+    lock taken on it before the row is visible to anyone, so nothing else can hold
+    it; a start racing the creation waits for it and then hydrates the whole seed,
+    or is refused ``server_busy`` once its acquire budget runs out. ``populate`` is
+    more create-time work run inside the same hold, after the seed: import passes
+    the publish of its archive and the re-creation of its plugin rows. The held
+    lock is confirmed before the row's commit and before each seed write (issue
+    #3927). A loss before the commit raises :class:`LifecycleLockLostError` with
+    no row created; a loss before a seed write is the seed failure above, as the
+    row already stands.
+
     A new server's ``server.properties`` also gets ``sync-chunk-writes=false``
     (issue #3443), a default that the user's own value replaces. With
     ``new_server_defaults`` false it is left out: import passes that, so an
@@ -284,6 +299,7 @@ class CreateServer:
     # the current behavior (no default / 1 TiB ceiling).
     default_memory_limit_mb: int | None = None
     max_memory_limit_mb: int | None = None
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -298,6 +314,8 @@ class CreateServer:
         game_port: int | None = None,
         slug: str | None = None,
         new_server_defaults: bool = True,
+        populate: Callable[[Server, HeldLifecycleLock], Awaitable[Server]]
+        | None = None,
     ) -> Server:
         # The name is refused before any other check, as an update refuses it
         # first (issue #3988).
@@ -336,61 +354,77 @@ class CreateServer:
             server_type=server_type, version=mc_version
         )
         now = self.clock.now()
-        async with self.uow:
-            # Resolve the game port inside the transaction that adds the row, so the
-            # taken-set read and the insert are consistent; the UNIQUE constraint
-            # backstops a concurrent racer (raises on commit). An explicit port is
-            # validated (range -> 422, taken -> 409); otherwise pick the lowest free.
-            taken = await self.uow.servers.list_game_ports()
-            if game_port is None:
-                assigned_port = pick_lowest_free_port(self.port_range, taken=taken)
-            else:
-                assigned_port = validate_explicit_port(
-                    game_port, self.port_range, taken=taken
+        # Mint the id and take its lifecycle lock before the row is visible, and
+        # hold it until the last create-time write (issue #4045): a start racing
+        # the creation waits for the whole working set instead of hydrating it
+        # half-written. Nothing else knows the id yet, so the lock is free.
+        server_id = ServerId.new()
+        async with self.lifecycle_lock.hold(server_id) as lock:
+            async with self.uow:
+                # Resolve the game port inside the transaction that adds the row,
+                # so the taken-set read and the insert are consistent; the UNIQUE
+                # constraint backstops a concurrent racer (raises on commit). An
+                # explicit port is validated (range -> 422, taken -> 409);
+                # otherwise pick the lowest free.
+                taken = await self.uow.servers.list_game_ports()
+                if game_port is None:
+                    assigned_port = pick_lowest_free_port(self.port_range, taken=taken)
+                else:
+                    assigned_port = validate_explicit_port(
+                        game_port, self.port_range, taken=taken
+                    )
+                # Assign the relay slug (issue #955, #981): if the caller supplied an
+                # explicit non-blank slug, validate it (422 invalid, 409 taken) and use
+                # it; otherwise auto-generate a 6-char random slug. Both paths run
+                # inside the same transaction that inserts the row so the taken-set read
+                # and insert are consistent; the UNIQUE constraint backstops a racer.
+                taken_slugs = await self.uow.servers.list_slugs()
+                explicit_slug = (
+                    slug.strip() if slug is not None and slug.strip() else None
                 )
-            # Assign the relay slug (issue #955, #981): if the caller supplied an
-            # explicit non-blank slug, validate it (422 invalid, 409 taken) and use
-            # it; otherwise auto-generate a 6-char random slug. Both paths run
-            # inside the same transaction that inserts the row so the taken-set read
-            # and insert are consistent; the UNIQUE constraint backstops a racer.
-            taken_slugs = await self.uow.servers.list_slugs()
-            explicit_slug = slug.strip() if slug is not None and slug.strip() else None
-            if explicit_slug is not None:
-                validate_slug(explicit_slug)
-                if explicit_slug in taken_slugs:
-                    raise SlugAlreadyTakenError(explicit_slug)
-                assigned_slug = explicit_slug
-            else:
-                assigned_slug = generate_slug(taken=taken_slugs)
-            server = Server(
-                id=ServerId.new(),
+                if explicit_slug is not None:
+                    validate_slug(explicit_slug)
+                    if explicit_slug in taken_slugs:
+                        raise SlugAlreadyTakenError(explicit_slug)
+                    assigned_slug = explicit_slug
+                else:
+                    assigned_slug = generate_slug(taken=taken_slugs)
+                server = Server(
+                    id=server_id,
+                    community_id=community_id,
+                    name=server_name,
+                    mc_edition=mc_edition,
+                    mc_version=mc_version,
+                    server_type=parsed_type,
+                    config=config,
+                    game_port=assigned_port,
+                    slug=assigned_slug,
+                    # A new server is at rest: the operator has not asked it to run, and
+                    # no Worker has reported on it (DATABASE.md Section 7).
+                    desired_state=DesiredState.STOPPED,
+                    observed_state=ObservedState.STOPPED,
+                    observed_at=None,
+                    assigned_worker_id=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+                await self.uow.servers.add(server)
+                # A start may take the lock once it is lost, so the row is not
+                # made visible without it (issues #3927, #4045): a loss here
+                # refuses with no row.
+                await lock.ensure_held()
+                await self.uow.commit()
+            await self._seed_initial_working_set(
                 community_id=community_id,
-                name=server_name,
-                mc_edition=mc_edition,
-                mc_version=mc_version,
-                server_type=parsed_type,
-                config=config,
+                server_id=server.id,
                 game_port=assigned_port,
-                slug=assigned_slug,
-                # A new server is at rest: the operator has not asked it to run, and
-                # no Worker has reported on it (DATABASE.md Section 7).
-                desired_state=DesiredState.STOPPED,
-                observed_state=ObservedState.STOPPED,
-                observed_at=None,
-                assigned_worker_id=None,
-                created_at=now,
-                updated_at=now,
+                accept_eula=accept_eula,
+                config=config,
+                new_server_defaults=new_server_defaults,
+                lock=lock,
             )
-            await self.uow.servers.add(server)
-            await self.uow.commit()
-        await self._seed_initial_working_set(
-            community_id=community_id,
-            server_id=server.id,
-            game_port=assigned_port,
-            accept_eula=accept_eula,
-            config=config,
-            new_server_defaults=new_server_defaults,
-        )
+            if populate is not None:
+                server = await populate(server, lock)
         return server
 
     async def _seed_initial_working_set(
@@ -402,6 +436,7 @@ class CreateServer:
         accept_eula: bool,
         config: dict[str, Any],
         new_server_defaults: bool,
+        lock: HeldLifecycleLock,
     ) -> None:
         """Write the create-time seed files into the server's first version.
 
@@ -417,10 +452,10 @@ class CreateServer:
         server.properties overrides from ``config`` are merged on top (#1209);
         ``eula.txt`` only when the operator accepted at create (issue #198).
 
-        A storage failure is caught and re-raised as
-        :class:`WorkingSetSeedFailedError` (mapped to 503): the row is already
-        committed and is repairable via the files API, so this never rolls back the
-        server — it only signals the degraded state.
+        A storage failure, or a lifecycle lock ``lock`` lost before the writes, is
+        caught and re-raised as :class:`WorkingSetSeedFailedError` (mapped to
+        503): the row is already committed and is repairable via the files API, so
+        this never rolls back the server — it only signals the degraded state.
         """
 
         password = self.token_generator()
@@ -441,6 +476,9 @@ class CreateServer:
             seeds.append((_EULA_REL_PATH, _EULA_ACCEPTED_CONTENT))
         try:
             for rel_path, content in seeds:
+                # Each seed write relies on the lifecycle lock (issues #3927,
+                # #4045); a loss stops the rest.
+                await lock.ensure_held()
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

@@ -728,6 +728,11 @@ export interface paths {
          *
          *     The policy is `{keep_last}` XOR `{daily, weekly, monthly}`; it applies only
          *     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
+         *     Backups whose `health` is `healthy`, `unknown` or `unreadable` are chosen as
+         *     keepers first: a `quarantined` one keeps a keep-N slot only when too few
+         *     backups that are not `quarantined` are left to fill the N, and a tier bucket
+         *     only when the bucket holds no backup that is not `quarantined`. Every
+         *     scheduled backup no slot or bucket keeps is deleted.
          *     Setting it prunes immediately (best-effort), and every successful scheduled
          *     backup run prunes thereafter; each pruned backup is audited as
          *     `backup:delete` with no actor. The write itself is audited as
@@ -4368,6 +4373,8 @@ export interface components {
             crash_reason: string | null;
             /** Desired State */
             desired_state: string;
+            /** Final Snapshot Refusal */
+            final_snapshot_refusal?: string | null;
             /** Game Port */
             game_port: number | null;
             /** Id */

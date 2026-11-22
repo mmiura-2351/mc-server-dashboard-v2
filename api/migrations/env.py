@@ -50,6 +50,9 @@ def _do_run_migrations(connection: Connection) -> None:
 
 
 async def run_migrations_online() -> None:
+    # Without ``database.statement_timeout_seconds`` or the connect bound (issue
+    # #4042): a migration may rewrite a whole table, and nothing waits on this
+    # one-shot process the way a Worker's session waits on the API.
     engine = create_engine(_database_url())
     async with engine.connect() as connection:
         await connection.run_sync(_do_run_migrations)

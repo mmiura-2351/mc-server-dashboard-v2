@@ -13,7 +13,7 @@ from typing import Any
 import asyncpg
 import sqlalchemy.exc
 from sqlalchemy import MetaData, event, text
-from sqlalchemy.engine import Dialect
+from sqlalchemy.engine import Dialect, ExceptionContext
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import AsyncAdaptedQueuePool, PoolProxiedConnection
 
 from mc_server_dashboard_api.core.domain.health import DatabasePing
 
@@ -52,25 +53,85 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=_NAMING_CONVENTION)
 
 
+_TIMED_OUT = "the database did not answer within the engine's bound"
+
+
+class _DriverTimeoutPool(AsyncAdaptedQueuePool):
+    """The engines' pool, raising the driver's timeout as :class:`DatabaseTimeoutError`.
+
+    A checkout can run out the driver's bound before any statement does: in the
+    ping before a pooled connection is handed out, or in the queries that set up
+    a new one. SQLAlchemy raises both from here untranslated, past
+    ``handle_error``, which sees only the ping's driver errors (issue #4042).
+    """
+
+    # Log as the pool it extends, under SQLAlchemy's own quiet namespace, rather
+    # than at INFO under this module's. ``_sqla_logger_namespace`` is private to
+    # SQLAlchemy; tests/core/test_create_engine_pool.py pins the name it gives.
+    _sqla_logger_namespace = "sqlalchemy.pool.impl.AsyncAdaptedQueuePool"
+
+    def connect(self) -> PoolProxiedConnection:
+        try:
+            return super().connect()
+        except TimeoutError as exc:
+            raise DatabaseTimeoutError(_TIMED_OUT) from exc
+
+
+def _type_driver_timeout(context: ExceptionContext) -> BaseException | None:
+    """Raise a statement's, a commit's or a rollback's driver timeout typed.
+
+    Any bare ``TimeoutError`` SQLAlchemy meets there is the driver's bound: a
+    deadline set around the call cancels it instead (issue #4042).
+    """
+
+    if isinstance(context.original_exception, TimeoutError):
+        return DatabaseTimeoutError(_TIMED_OUT)
+    return None
+
+
 def create_engine(
     url: str,
     *,
     pool_size: int | None = None,
     max_overflow: int | None = None,
+    connect_timeout: float | None = None,
+    statement_timeout: float | None = None,
 ) -> AsyncEngine:
     """Create the application's async engine for ``url`` (e.g. asyncpg DSN).
 
     ``pool_size`` and ``max_overflow`` are forwarded to SQLAlchemy's
     ``create_async_engine`` when supplied; when omitted SQLAlchemy's own
     defaults (5 / 10) apply (issue #884).
+
+    ``connect_timeout`` bounds a new connection, its authentication included,
+    and ``statement_timeout`` each exchange with the server on a connection, in
+    seconds (issue #4042). Either one omitted keeps asyncpg's own default: 60 s
+    for a connect, no bound for a statement. Both are the driver's, not the
+    server's ``statement_timeout``, so they also fail a connection that went
+    silent, on which no server-side timeout can answer, though such a statement
+    fails at up to twice its bound: the driver waits the bound once more for the
+    server to confirm its cancel. A bound that runs out raises
+    :class:`DatabaseTimeoutError`, wherever the engine meets it.
     """
 
-    kwargs: dict[str, object] = {"pool_pre_ping": True}
+    kwargs: dict[str, object] = {
+        "pool_pre_ping": True,
+        "poolclass": _DriverTimeoutPool,
+    }
     if pool_size is not None:
         kwargs["pool_size"] = pool_size
     if max_overflow is not None:
         kwargs["max_overflow"] = max_overflow
-    return create_async_engine(url, **kwargs)
+    connect_args: dict[str, float] = {}
+    if connect_timeout is not None:
+        connect_args["timeout"] = connect_timeout
+    if statement_timeout is not None:
+        connect_args["command_timeout"] = statement_timeout
+    if connect_args:
+        kwargs["connect_args"] = connect_args
+    engine = create_async_engine(url, **kwargs)
+    event.listen(engine.sync_engine, "handle_error", _type_driver_timeout)
+    return engine
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
@@ -90,6 +151,17 @@ class DatabaseConnectError(Exception):
     """
 
 
+class DatabaseTimeoutError(Exception):
+    """The database did not answer within the engine's bound (issue #4042).
+
+    asyncpg raises a connect or a statement that outlasts its bound as the bare
+    ``TimeoutError``, which by type is no different from a store's or a Worker's.
+    Every engine :func:`create_engine` builds raises this instead, with the
+    driver's error as its ``__cause__``, so the outage handlers can tell the two
+    apart.
+    """
+
+
 # What a database outage raises, by when it hits (#3313, #3995). SQLAlchemy does
 # not translate a socket error, so a refused, timed-out or unresolvable connect is
 # the raw ``OSError``, or :class:`DatabaseConnectError` on an engine that
@@ -102,9 +174,13 @@ class DatabaseConnectError(Exception):
 # connection invalidated. No ``DBAPIError`` subclass is an outage by type
 # (#4010): an ``InterfaceError`` on a live connection is a concurrency bug or a
 # bad connect argument. asyncpg's own outage classes count for an error that
-# reaches a caller untranslated; through SQLAlchemy 2.1 none does.
+# reaches a caller untranslated; through SQLAlchemy 2.1 none does. A statement
+# that outlasts the engine's bound is :class:`DatabaseTimeoutError` (#4042). A
+# cancel the server reports, 57014, is never that bound: it is someone's cancel or
+# the operator's own ``statement_timeout``, and not an outage.
 _TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     DatabaseConnectError,
+    DatabaseTimeoutError,
     OSError,
     sqlalchemy.exc.TimeoutError,
     asyncpg.PostgresConnectionError,
@@ -145,6 +221,21 @@ def is_transient_database_error(exc: BaseException) -> bool:
         exc.connection_invalidated
         or sqlstate.startswith("08")
         or sqlstate in _OUTAGE_SQLSTATES
+    )
+
+
+def is_database_timeout(exc: BaseException) -> bool:
+    """Whether ``exc`` is the database not answering within an engine's bound.
+
+    A statement's or a checkout's is :class:`DatabaseTimeoutError`; a connect's,
+    on an engine passed to :func:`translate_connect_outages`, is the
+    :class:`DatabaseConnectError` over the driver's ``TimeoutError`` (issue
+    #4042).
+    """
+
+    return isinstance(exc, DatabaseTimeoutError) or (
+        isinstance(exc, DatabaseConnectError)
+        and isinstance(exc.__cause__, TimeoutError)
     )
 
 

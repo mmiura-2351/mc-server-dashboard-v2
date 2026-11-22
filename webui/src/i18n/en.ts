@@ -649,8 +649,10 @@ export const en = {
   "backups.retention.monthlyLabel": "Monthly",
   "backups.retention.hint":
     "Applies only to scheduled backups — manual, uploaded, and event backups are never auto-deleted.",
+  "backups.retention.keepLastHint":
+    "Applies only to scheduled backups — manual, uploaded, and event backups are never auto-deleted. Scheduled backups marked Damaged are kept only when there are not enough other scheduled backups to reach the number to keep.",
   "backups.retention.tieredHint":
-    "Keeps the newest scheduled backup for each of the most recent days, weeks, and months you set; older scheduled backups are pruned.",
+    "Keeps one scheduled backup for each of the most recent days, weeks, and months you set, and prunes the other scheduled backups. Each period keeps its newest backup not marked Damaged, or its newest Damaged one when it has no other.",
   "backups.retention.save": "Save retention",
   "backups.retention.saved": "Retention policy saved.",
   "backups.retention.cleared": "Retention policy cleared.",

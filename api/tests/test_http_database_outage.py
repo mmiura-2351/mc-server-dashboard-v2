@@ -23,18 +23,29 @@ import pytest
 import sqlalchemy.exc
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 
 from mc_server_dashboard_api import http_problem
 from mc_server_dashboard_api.app import create_app
-from mc_server_dashboard_api.core.adapters.database import DatabaseConnectError
+from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
+    DatabaseTimeoutError,
+    is_transient_database_error,
+)
 from mc_server_dashboard_api.dependencies import get_authenticate_request
 from mc_server_dashboard_api.identity.adapters.token_service import JwtTokenService
 from mc_server_dashboard_api.identity.application.authenticate_request import (
     AuthenticateRequest,
 )
 from tests.client_utils import enter_client
-from tests.core.fakes import interface_error, server_error
+from tests.core.fakes import (
+    black_hole_database,
+    first_failure,
+    interface_error,
+    server_error,
+    silent_database,
+)
 from tests.identity.fakes import (
     FakeClock,
     FakeTokenService,
@@ -148,6 +159,11 @@ def _get_me(client: TestClient, error: Exception) -> tuple[int, object, str | No
             ),
             id="interface-invalidated",
         ),
+        # A statement that outlasted the engine's bound (issue #4042).
+        pytest.param(
+            DatabaseTimeoutError("the database did not answer"),
+            id="statement-timeout",
+        ),
     ],
 )
 def test_an_outage_answers_503_with_one_warning(
@@ -216,6 +232,21 @@ def test_another_database_error_stays_a_500_with_its_traceback(
     [logged] = _records(logs, logging.ERROR)
     assert logged.exc_info is not None
     assert _records(logs, logging.WARNING) == []
+
+
+def test_a_timeout_that_is_not_the_databases_stays_a_500(
+    client: TestClient, logs: pytest.LogCaptureFixture
+) -> None:
+    # A store's or a Worker's bare ``TimeoutError`` is not taken for a database
+    # outage: the engine's own arrives typed (issue #4042).
+    assert _get_me(client, TimeoutError("the store did not answer")) == (
+        500,
+        _INTERNAL,
+        None,
+    )
+
+    [logged] = _records(logs, logging.ERROR)
+    assert logged.exc_info is not None
 
 
 def test_an_outage_warns_at_most_every_30_seconds(
@@ -348,3 +379,88 @@ def test_each_app_engine_raises_a_refused_connect_typed(
 
     with pytest.raises(DatabaseConnectError):
         client.portal.call(connect)
+
+
+# The bound the stalled-server tests configure, and how long they allow for it:
+# generous against a loaded host, far below what the driver applies unbounded.
+_BOUND = "0.2"
+_WITHIN_SECONDS = 2.0
+
+
+def _bounded_client(
+    monkeypatch: pytest.MonkeyPatch, url: str, *, setting: str
+) -> TestClient:
+    """The real app, its lifespan open, its database ``url``, ``setting`` small."""
+
+    monkeypatch.setenv("MCD_API_DATABASE__URL", url)
+    monkeypatch.setenv(f"MCD_API_DATABASE__{setting.upper()}", _BOUND)
+    return enter_client(TestClient(create_app(), raise_server_exceptions=False))
+
+
+def _first_query_failure(client: TestClient, engine: str) -> tuple[Exception, float]:
+    app = client.app
+    assert isinstance(app, FastAPI) and client.portal is not None
+
+    async def query() -> None:
+        async with getattr(app.state, engine).connect() as conn:
+            await conn.execute(text("SELECT 1"))
+
+    return client.portal.call(first_failure, query)
+
+
+@pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])
+def test_each_app_engine_bounds_a_connect_the_server_never_answers(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # A database host that stopped responding fails a connect at the configured
+    # bound (issue #4042), typed as the refused connect is.
+    with black_hole_database() as url:
+        client = _bounded_client(monkeypatch, url, setting="connect_timeout_seconds")
+        error, elapsed = _first_query_failure(client, engine)
+
+    assert elapsed < _WITHIN_SECONDS
+    assert isinstance(error, DatabaseConnectError)
+
+
+# A stall guard: without the bound the call never returns.
+@pytest.mark.timeout(10)
+def test_a_statement_the_database_never_answers_answers_503(
+    monkeypatch: pytest.MonkeyPatch, logs: pytest.LogCaptureFixture
+) -> None:
+    # The app's own engine at its configured bound: what the driver really
+    # raises, typed on its way out (issue #4042).
+    with silent_database() as url:
+        client = _bounded_client(monkeypatch, url, setting="statement_timeout_seconds")
+        app = client.app
+        assert isinstance(app, FastAPI)
+        key = app.state.settings.auth.token.signing_key
+        assert isinstance(key, str)
+        tokens = JwtTokenService(
+            signing_key=key,
+            algorithm="HS256",
+            access_ttl=dt.timedelta(minutes=15),
+            download_grant_ttl=dt.timedelta(minutes=1),
+            download_cookie_ttl=dt.timedelta(minutes=1),
+            clock=FakeClock(dt.datetime.now(dt.UTC)),
+        )
+        token = tokens.issue_access_token(make_user().id)
+
+        resp = client.get(_ROUTE, headers={"Authorization": f"Bearer {token}"})
+
+    assert (resp.status_code, resp.json()) == (503, _UNAVAILABLE)
+    assert resp.headers["retry-after"] == "5"
+    assert _records(logs, logging.ERROR) == []
+
+
+@pytest.mark.parametrize("engine", ["engine", "assignment_fence_engine"])
+def test_each_app_engine_bounds_a_query_the_server_never_answers(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+) -> None:
+    # A connection gone silent fails its statement at the configured bound
+    # (issue #4042), as an outage.
+    with silent_database() as url:
+        client = _bounded_client(monkeypatch, url, setting="statement_timeout_seconds")
+        error, elapsed = _first_query_failure(client, engine)
+
+    assert elapsed < _WITHIN_SECONDS
+    assert is_transient_database_error(error) is True

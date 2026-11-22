@@ -1782,7 +1782,9 @@ def get_create_server(
     unsupported type / unoffered version before staging the row (FR-VER-1), the
     file seam to Storage so create can seed the initial working set (server.properties
     + eula.txt, issues #243/#198), and the configured port range for game-port
-    auto-assignment (issue #243).
+    auto-assignment (issue #243). The shared lifecycle lock is held from before
+    the row commits until the last create-time write, so a start racing the
+    creation cannot hydrate it half-written (issue #4045).
     """
 
     session_factory = create_session_factory(get_engine(request))
@@ -1795,6 +1797,7 @@ def get_create_server(
         port_range=_port_range(request),
         default_memory_limit_mb=mem_cfg.default_mb,
         max_memory_limit_mb=mem_cfg.max_mb,
+        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 
@@ -2400,7 +2403,6 @@ def get_import_server(
         create_server=create_server,
         file_store=file_store,
         bedrock_port_range=_bedrock_port_range(request),
-        lifecycle_lock=get_lifecycle_lock(request),
     )
 
 

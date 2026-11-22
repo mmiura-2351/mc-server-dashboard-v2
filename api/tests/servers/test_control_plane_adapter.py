@@ -77,7 +77,6 @@ class _CapturingFleetControlPlane(FleetControlPlane):
     def __init__(self, *, result: CommandResult | None = None) -> None:
         self.last: Command | None = None
         self.last_timeout_override: float | None = None
-        self.last_snapshot_is_final: bool | None = None
         self._result = result or CommandResult(code=CommandResultCode.OK)
 
     async def dispatch(
@@ -87,11 +86,9 @@ class _CapturingFleetControlPlane(FleetControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandResult:
         self.last = command
         self.last_timeout_override = timeout_override
-        self.last_snapshot_is_final = snapshot_is_final
         return self._result
 
 
@@ -290,7 +287,6 @@ class _DeadlineFleetControlPlane(FleetControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandResult:
         timeout = (
             self._default_timeout if timeout_override is None else timeout_override
@@ -380,7 +376,6 @@ class _RaisingFleetControlPlane(FleetControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandResult:
         raise self._exc
 

@@ -48,6 +48,7 @@ import grpc
 from grpc import aio
 
 from mc_server_dashboard_api.core.adapters.database import (
+    is_database_timeout,
     is_transient_database_error,
 )
 from mc_server_dashboard_api.core.domain.health import DatabasePing
@@ -135,6 +136,17 @@ _MAX_CONSECUTIVE_HANDLER_FAILURES = 5
 _HOLD_RETRY_INITIAL_SECONDS = 0.5
 _HOLD_RETRY_MAX_SECONDS = 10.0
 
+# How long a message's first attempt may run before its hold starts (issue
+# #4042). A database that stopped answering fails a statement only at the
+# driver's bound, ``database.statement_timeout_seconds``, while a busy log stream
+# fills the queue within about a second; the reader then stops, and the session
+# ends 10 s later when the Worker's send stalls, or once the heartbeats lapse. So
+# the hold, and its purge of the queue, starts at this deadline, under a third of
+# the Worker's limit, while the attempt goes on: cancelling it could abandon a
+# commit that still lands, whose frame the retry would not stage again (review r1
+# of #4049). The driver's bounds end the attempt.
+_FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
+
 # Backpressure limit on the queue between the inbound reader task and the
 # processor task (issue #1698). Heartbeats bypass this queue entirely. Every
 # other message is queued in arrival order: StatusChange and CommandResult,
@@ -176,8 +188,9 @@ _KEEPALIVE_TIMEOUT_MS = 20_000
 # Shutdown budget for the Session teardowns (issue #3555): the wait for every
 # handler to reach its teardown and for those teardowns to finish. A normal
 # mark-unknown write takes milliseconds, so this is wide headroom; past it the
-# drain cancels what is left. The engine sets no statement timeout, so without
-# a bound a held row lock would block shutdown forever.
+# drain cancels what is left. The engine's statement bound,
+# ``database.statement_timeout_seconds``, is far longer, so without this a held
+# row lock would block shutdown for minutes.
 _TEARDOWN_DRAIN_SECONDS = 10.0
 
 # Bound on the wait for cancelled teardowns to settle once the budget is spent,
@@ -823,28 +836,46 @@ class WorkerSessionServicer(WorkerServiceServicer):
         error is the message's own, and holding it would block the queue for good.
         However the hold ends, one WARNING counts the log lines and metrics
         dropped meanwhile, those purged from the queue as it started included,
-        if any (issue #4028).
+        if any (issue #4028). The hold also starts while a first attempt is
+        still running after ``_FIRST_ATTEMPT_TIMEOUT_SECONDS``; that attempt is
+        awaited, and its outcome decides as any first attempt's does (issue
+        #4042).
         """
 
-        try:
-            await self._handle(worker_id, message)
-            return
-        except Exception as exc:
-            if (
-                not is_transient_database_error(exc)
-                or stream_ended.is_set()
-                or not self._registry.is_current_session(worker_id, session)
-            ):
-                raise
-            _LOG.warning(
-                "holding a worker message while the database is unavailable",
-                extra={"worker_id": worker_id.value},
-                exc_info=True,
-            )
         attempts = 1
-        delay = _HOLD_RETRY_INITIAL_SECONDS
-        hold.start()
+        deadline = asyncio.get_running_loop().call_later(
+            _FIRST_ATTEMPT_TIMEOUT_SECONDS, self._start_hold, worker_id, hold, None
+        )
         try:
+            try:
+                await self._handle(worker_id, message)
+            except Exception as exc:
+                if (
+                    not is_transient_database_error(exc)
+                    or stream_ended.is_set()
+                    or not self._registry.is_current_session(worker_id, session)
+                ):
+                    raise
+                if not hold.active:
+                    self._start_hold(worker_id, hold, exc)
+                else:
+                    # The deadline started the hold with no error to show; this
+                    # one says which bound ran out.
+                    _LOG.warning(
+                        "a held worker message's first attempt failed",
+                        extra={"worker_id": worker_id.value},
+                        exc_info=exc,
+                    )
+            else:
+                if hold.active:
+                    _LOG.info(
+                        "applied a held worker message",
+                        extra={"worker_id": worker_id.value, "attempts": attempts},
+                    )
+                return
+            finally:
+                deadline.cancel()
+            delay = _HOLD_RETRY_INITIAL_SECONDS
             while True:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stream_ended.wait(), timeout=delay)
@@ -877,8 +908,14 @@ class WorkerSessionServicer(WorkerServiceServicer):
                         raise
                     # Both pings must answer: one that fails after the retry
                     # means the database went down again, not that the error
-                    # is the message's own.
-                    if answered_before and await self._database_ping.is_reachable():
+                    # is the message's own. A timeout is never its own: a
+                    # database stalled on its disk answers a ping, which only
+                    # reads, while its writes time out (issue #4042).
+                    if (
+                        not is_database_timeout(exc)
+                        and answered_before
+                        and await self._database_ping.is_reachable()
+                    ):
                         _LOG.error(
                             "dropping a held worker message: the database "
                             "answers, yet the message still fails as if it were "
@@ -893,10 +930,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 )
                 return
         except asyncio.CancelledError:
-            _LOG.info(
-                "lost a held worker message: its session ended",
-                extra={"worker_id": worker_id.value, "attempts": attempts},
-            )
+            if hold.active:
+                _LOG.info(
+                    "lost a held worker message: its session ended",
+                    extra={"worker_id": worker_id.value, "attempts": attempts},
+                )
             raise
         finally:
             hold.active = False
@@ -908,6 +946,20 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     extra={"worker_id": worker_id.value},
                 )
             hold.logs = hold.metrics = 0
+
+    @staticmethod
+    def _start_hold(
+        worker_id: WorkerId, hold: _Hold, failure: Exception | None
+    ) -> None:
+        """Start ``hold``: one WARNING, with the first attempt's failure if one
+        started it, then the purge."""
+
+        _LOG.warning(
+            "holding a worker message while the database is unavailable",
+            extra={"worker_id": worker_id.value},
+            exc_info=failure,
+        )
+        hold.start()
 
     async def _rebuild_assignments(
         self, worker_id: WorkerId, session: SessionToken

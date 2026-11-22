@@ -20,13 +20,19 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import grpc
 import pytest
 from grpc import aio
 
+from mc_server_dashboard_api.core.adapters.database import (
+    DatabaseConnectError,
+    DatabaseTimeoutError,
+    create_engine,
+    create_session_factory,
+)
 from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -48,11 +54,16 @@ from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.servers.adapters.clock import SystemClock
+from mc_server_dashboard_api.servers.adapters.server_state_sink import (
+    ServersServerStateSink,
+)
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from mcsd.controlplane.v1.control_plane_pb2_grpc import (
     WorkerServiceStub,
     add_WorkerServiceServicer_to_server,
 )
+from tests.core.fakes import black_hole_database
 from tests.fleet.fakes import (
     FakeClock,
     FakeDatabasePing,
@@ -3400,6 +3411,453 @@ async def test_a_hold_purges_the_log_lines_queued_before_it_started(
         relayed = [e.payload["line"] for _, e in h.real_time_events.published][:-1]
         assert len(relayed) <= 1
         assert _logged(caplog, _dropped(flood - len(relayed), 0)) != []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _GatedFirstWriteSink(_OutageSink):
+    """The first write waits for ``gate``, as one on a database slow to answer;
+    every later one lands at once. ``calls`` counts every write begun, a cut one
+    included."""
+
+    def __init__(self, gate: asyncio.Event) -> None:
+        super().__init__()
+        self._gate: asyncio.Event | None = gate
+        self.calls: dict[str, int] = {}
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        self.calls[server_id] = self.calls.get(server_id, 0) + 1
+        if self._gate is not None:
+            gate, self._gate = self._gate, None
+            await gate.wait()
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_slow_first_attempt_is_held_while_the_session_lives(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A database that stops answering fails a statement only at its bound, long
+    # after a busy log stream has filled the queue and stopped the reader, which
+    # ends the session (issue #4042). The hold starts at the first attempt's
+    # deadline instead and purges the queue while the session lives. The
+    # attempt itself goes on, and the reports land in order once it answers.
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    answer = asyncio.Event()
+    sink = _GatedFirstWriteSink(answer)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call, [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+
+        await _wait_for_heartbeat_at(h, beat)
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        assert _logged(caplog, _HOLD_STARTED) != []
+        answer.set()
+        await _wait_until(lambda: len(sink.observed) == 2, "the reports did not land")
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        # The first attempt was awaited, not cut and tried again.
+        assert sink.calls == {_SERVER_A: 1, _SERVER_B: 1}
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _FailFirstSink(FakeServerStateSink):
+    """The first write fails at once with ``exc``; every later one lands."""
+
+    def __init__(self, exc: type[Exception]) -> None:
+        super().__init__()
+        self._exc: type[Exception] | None = exc
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._exc is not None:
+            exc, self._exc = self._exc, None
+            raise exc("scripted")
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+def _relayed_lines(h: _Harness) -> list[object]:
+    return [e.payload["line"] for _, e in h.real_time_events.published]
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize(
+    ("sink", "settled", "holds"),
+    [
+        pytest.param(FakeServerStateSink, "observed", 0, id="applied-at-once"),
+        pytest.param(lambda: _FailFirstSink(_BUG), "dropped", 0, id="own-error"),
+        pytest.param(lambda: _FailFirstSink(_OUTAGE), "observed", 1, id="outage"),
+    ],
+)
+async def test_a_message_done_before_the_deadline_leaves_no_hold_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink: Callable[[], FakeServerStateSink],
+    settled: str,
+    holds: int,
+) -> None:
+    # Every message arms the first attempt's deadline (review r2 of #4049). One
+    # that settles before it, however it settles, must disarm it: a deadline
+    # left armed would start a hold nothing ends, and the reader would drop the
+    # Worker's log lines from then on.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    deadline = 0.2
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", deadline)
+    state_sink = sink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=state_sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(
+            lambda: (
+                state_sink.observed
+                if settled == "observed"
+                else _logged(caplog, "dropping a worker message after a handler error")
+            ),
+            "the report was not settled",
+        )
+        # Past the deadline: a timer left armed fires now.
+        await asyncio.sleep(deadline * 2)
+        assert len(_logged(caplog, _HOLD_STARTED)) == holds
+        await call.write(_log_message(_FLOOD_SERVER, "after"))
+        await _wait_until(
+            lambda: _relayed_lines(h) == ["after"], "the line was dropped"
+        )
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _SlowFailureSink(FakeServerStateSink):
+    """The first write fails with ``DatabaseTimeoutError`` only after ``slow``
+    seconds, as a driver bound past the first attempt's deadline does; every
+    later one lands."""
+
+    def __init__(self, slow: float) -> None:
+        super().__init__()
+        self._slow: float | None = slow
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._slow is not None:
+            slow, self._slow = self._slow, None
+            await asyncio.sleep(slow)
+            raise DatabaseTimeoutError("the database did not answer")
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_first_attempt_that_fails_after_its_hold_started_logs_why(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The deadline starts the hold with no error to show, so the first
+    # attempt's failure, which comes later, is logged on its own, with its
+    # traceback: which bound ran out (review r2 of #4049). The hold is not
+    # started a second time: one WARNING that it started, one purge.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    purges = 0
+    purge = grpc_server._Hold.start
+
+    def _counted_purge(hold: Any) -> None:
+        nonlocal purges
+        purges += 1
+        purge(hold)
+
+    monkeypatch.setattr(grpc_server._Hold, "start", _counted_purge)
+    sink = _SlowFailureSink(slow=0.4)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+
+        await _wait_until(lambda: sink.observed, "the report did not land")
+        failures = [
+            r
+            for r in caplog.records
+            if r.name == _GRPC_SERVER_LOGGER
+            and r.exc_info is not None
+            and isinstance(r.exc_info[1], DatabaseTimeoutError)
+        ]
+        assert len(failures) == 1
+        assert failures[0].levelno == logging.WARNING
+        assert len(_logged(caplog, _HOLD_STARTED)) == 1
+        assert purges == 1
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _LateAnswerSink(FakeServerStateSink):
+    """A write's commit lands at once; the first one's answer comes ``late``
+    seconds after, as on a database slow to flush its log. As the real sink does,
+    a write publishes its frame once its commit answers, and only when it changed
+    the row."""
+
+    def __init__(self, late: float) -> None:
+        super().__init__()
+        self._late = late
+        self._rows: dict[str, str] = {}
+        self.frames: list[tuple[str, str]] = []
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        changed = self._rows.get(server_id) != state
+        self._rows[server_id] = state
+        late, self._late = self._late, 0.0
+        await asyncio.sleep(late)
+        if changed:
+            self.frames.append((server_id, state))
+        return True
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_first_attempt_past_its_deadline_still_publishes_its_frame(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A commit that lands but answers after the deadline (review r1 of #4049):
+    # cut there, the attempt would publish nothing, and its retry, finding the
+    # row already at the state, would stage no frame. The attempt is awaited
+    # instead, so its frame reaches subscribers once its answer comes.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    sink = _LateAnswerSink(late=0.6)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=True),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+
+        await _wait_until(
+            lambda: _logged(caplog, _HOLD_APPLIED), "the report was not applied"
+        )
+        assert sink.frames == [(_SERVER_A, "running")]
+        assert _logged(caplog, _HOLD_STARTED) != []
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _SlowRetrySink(FakeServerStateSink):
+    """The first write fails as an outage at once; every later one takes
+    ``slow`` seconds, longer than the first attempt's deadline, and lands."""
+
+    def __init__(self, slow: float) -> None:
+        super().__init__()
+        self._slow = slow
+        self._failed = False
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if not self._failed:
+            self._failed = True
+            raise DatabaseTimeoutError("the database did not answer")
+        await asyncio.sleep(self._slow)
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_retry_slower_than_the_first_attempt_deadline_still_lands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Only the first attempt has the deadline: a retry has the driver's bounds,
+    # so a write slower than the deadline still lands once the hold is on.
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    sink = _SlowRetrySink(slow=0.5)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+
+        await _wait_until(lambda: sink.observed, "the slow retry did not land")
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _RealWriteSink(FakeServerStateSink):
+    """Registers the Worker as the fake does, and writes its reports through the
+    real sink."""
+
+    def __init__(self, real: ServersServerStateSink) -> None:
+        super().__init__()
+        self._real = real
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        return await self._real.record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_connect_that_hangs_is_held_while_the_session_lives(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The real sink's write, its database a host that stopped answering, and no
+    # connect bound of its own: the first attempt's deadline alone starts the
+    # hold, before a log flood behind it can end the session.
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    with black_hole_database() as url:
+        engine = create_engine(url)
+        real = ServersServerStateSink(
+            create_session_factory(engine), clock=SystemClock()
+        )
+        h = _Harness(
+            InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+            FakeClock(_T0),
+            state_sink=_RealWriteSink(real),
+            database_ping=FakeDatabasePing(reachable=False),
+        )
+        try:
+            call = await _registered(await h.start())
+            await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+            flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+            await _write_all(
+                call, [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+            )
+            beat = _T0 + dt.timedelta(seconds=1)
+            h.clock.set(beat)
+            await call.write(_heartbeat_message())
+
+            await _wait_for_heartbeat_at(h, beat)
+            assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+            assert _logged(caplog, _HOLD_STARTED) != []
+        finally:
+            await h.stop()
+            await engine.dispose()
+
+
+class _TimingOutSink(FakeServerStateSink):
+    """Writes that time out while the database still answers its pings, as on a
+    database stalled on its disk: the next ``timeouts`` raise ``timeout()``, the
+    first of them only after the first attempt's deadline if ``slow_first``, and
+    the rest land."""
+
+    def __init__(
+        self, timeout: Callable[[], Exception], *, timeouts: int, slow_first: bool
+    ) -> None:
+        super().__init__()
+        self._timeout = timeout
+        self._timeouts = timeouts
+        self._slow = slow_first
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if self._slow:
+            self._slow = False
+            await asyncio.sleep(0.4)
+        if self._timeouts:
+            self._timeouts -= 1
+            raise self._timeout()
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+def _statement_timeout() -> Exception:
+    return DatabaseTimeoutError("the database did not answer")
+
+
+def _connect_timeout() -> Exception:
+    # What an engine that translates its connect outages raises for a connect
+    # that ran out its bound.
+    error = DatabaseConnectError("TimeoutError: ")
+    error.__cause__ = TimeoutError()
+    return error
+
+
+@pytest.mark.usefixtures("fast_hold")
+@pytest.mark.parametrize(
+    ("timeout", "slow_first"),
+    [
+        pytest.param(_statement_timeout, False, id="statement-bound"),
+        pytest.param(_connect_timeout, False, id="connect-bound"),
+        pytest.param(_statement_timeout, True, id="past-the-first-attempt-deadline"),
+    ],
+)
+async def test_a_report_that_times_out_while_the_database_answers_stays_held(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    timeout: Callable[[], Exception],
+    slow_first: bool,
+) -> None:
+    # A database stalled on its disk answers a ping, which only reads, while its
+    # writes time out. A timeout is never the message's own error, so the pings
+    # answering both sides of a retry do not drop the report: it stays held and
+    # lands once its write goes through (issue #4042).
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    sink = _TimingOutSink(timeout, timeouts=3, slow_first=slow_first)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=True),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+
+        await _wait_until(lambda: sink.observed, "the report did not land")
+        assert sink.observed == [(_SERVER_A, _WORKER_ID, "running")]
+        assert _logged(caplog, _HOLD_REFUSED) == []
+        assert _logged(caplog, _HOLD_APPLIED) != []
         await call.done_writing()
     finally:
         await h.stop()

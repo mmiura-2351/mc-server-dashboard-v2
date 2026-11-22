@@ -51,7 +51,13 @@ from mc_server_dashboard_api.storage.adapters.ownership import CLAIM_COMMAND
 async def run(settings: Settings) -> str | None:
     """Claim the store; why it was refused, or ``None`` once claimed."""
 
-    engine = create_engine(settings.database.url, pool_size=1, max_overflow=0)
+    engine = create_engine(
+        settings.database.url,
+        pool_size=1,
+        max_overflow=0,
+        connect_timeout=settings.database.connect_timeout_seconds,
+        statement_timeout=settings.database.statement_timeout_seconds,
+    )
     try:
         installation_id = await read_installation_id(create_session_factory(engine))
     finally:

@@ -50,7 +50,6 @@ class _CapturingFleetControlPlane(FleetControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandResult:
         self.last = command
         return CommandResult(code=CommandResultCode.OK)

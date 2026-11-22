@@ -89,6 +89,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     WorkerId,
     bound_status_detail,
@@ -227,9 +228,10 @@ class _World:
         """No status event was published over an uncommitted state write.
 
         The journal reads ``write`` (an UPDATE of ``observed_state``,
-        ``desired_state`` or ``assigned_worker_id``), ``commit``
-        and ``publish`` in the order they happened; a ``publish`` whose nearest
-        earlier DB activity is a ``write`` announced a state no reader could see.
+        ``desired_state``, ``assigned_worker_id`` or ``final_snapshot_refusal``),
+        ``commit`` and ``publish`` in the order they happened; a ``publish``
+        whose nearest earlier DB activity is a ``write`` announced a state no
+        reader could see.
         """
 
         last_db_activity = None
@@ -254,6 +256,7 @@ async def world() -> AsyncIterator[_World]:
             "observed_state=" in statement
             or "desired_state=" in statement
             or "assigned_worker_id=" in statement
+            or "final_snapshot_refusal=" in statement
         ):
             journal.append("write")
         if statement.startswith("SELECT") and "FOR UPDATE" in statement:
@@ -306,7 +309,8 @@ def _assigned(worker: uuid.UUID | None) -> dict[str, object]:
     return {"assigned_worker_id": None if worker is None else str(worker)}
 
 
-_RELEASED = _assigned(None)
+# A release clears the final-snapshot refusal with the assignment (#4054).
+_RELEASED = _assigned(None) | {"final_snapshot_refusal": None}
 
 
 async def _states(subscription: EventSubscription) -> list[tuple[str | None, object]]:
@@ -964,7 +968,8 @@ async def test_unit_of_work_without_the_bus_refuses_to_commit_an_intent_write(
 #
 # Every write that places or releases a server publishes the assignment it
 # left, after its commit, so a client never gates on a released Worker. A
-# release changes nothing else, so its frame carries the assignment alone.
+# release changes nothing else but the final-snapshot refusal it clears (#4054),
+# so its frame carries those two alone.
 
 
 async def test_reconciler_placement_publishes_the_assignment_alone(
@@ -1075,7 +1080,7 @@ async def test_late_final_snapshot_release_publishes_the_release(
     world.assert_published_after_commit()
 
 
-async def test_release_under_an_unchanged_state_publishes_the_assignment_alone(
+async def test_release_under_an_unchanged_state_publishes_the_release_alone(
     world: _World,
 ) -> None:
     """An unassigning write that repeats the state still announces the release."""
@@ -1139,6 +1144,58 @@ async def test_stale_release_guarded_off_a_newer_report_publishes_nothing(
     async with world.uow() as uow:
         assert not await uow.servers.clear_stale_assignment(
             server.id, WorkerId(worker), observed_at=read_at
+        )
+        await uow.commit()
+
+    assert await _received(watching) == []
+
+
+# --- The final-snapshot refusal: its own frame (issue #4054) -----------------
+
+
+async def test_final_snapshot_refusal_publishes_its_frame_after_commit(
+    world: _World,
+) -> None:
+    """A refusal set on a stop holding its Worker, then cleared while it holds."""
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    watching = world.watch(server)
+
+    for refusal in (FinalSnapshotRefusal.UNAVAILABLE, None):
+        async with world.uow() as uow:
+            assert await uow.servers.set_final_snapshot_refusal(
+                server.id, WorkerId(worker), refusal
+            )
+            await uow.commit()
+
+    assert [event.payload for event in await _received(watching)] == [
+        {"final_snapshot_refusal": "unavailable"},
+        {"final_snapshot_refusal": None},
+    ]
+    world.assert_published_after_commit()
+
+
+async def test_final_snapshot_refusal_that_changes_nothing_publishes_nothing(
+    world: _World,
+) -> None:
+    """The same refusal again, or one from a Worker the stop does not hold."""
+
+    worker = uuid.uuid4()
+    server = await _wedged_stop(world, worker, "stopped")
+    async with world.uow() as uow:
+        assert await uow.servers.set_final_snapshot_refusal(
+            server.id, WorkerId(worker), FinalSnapshotRefusal.BUSY
+        )
+        await uow.commit()
+    watching = world.watch(server)
+
+    async with world.uow() as uow:
+        assert not await uow.servers.set_final_snapshot_refusal(
+            server.id, WorkerId(worker), FinalSnapshotRefusal.BUSY
+        )
+        assert not await uow.servers.set_final_snapshot_refusal(
+            server.id, WorkerId(uuid.uuid4()), FinalSnapshotRefusal.UNAVAILABLE
         )
         await uow.commit()
 

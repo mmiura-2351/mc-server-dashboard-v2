@@ -783,7 +783,9 @@ function RetentionEditor({
         {t(
           mode === "tiered"
             ? "backups.retention.tieredHint"
-            : "backups.retention.hint",
+            : mode === "keepLast"
+              ? "backups.retention.keepLastHint"
+              : "backups.retention.hint",
         )}
       </p>
       {error !== null && (

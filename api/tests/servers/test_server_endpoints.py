@@ -110,6 +110,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -715,6 +716,36 @@ def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
         )
     ]
     assert recorder.events[0].actor_id is not None
+
+
+def test_create_that_lost_the_lock_before_its_row_is_503_lifecycle_lock_lost() -> None:
+    # The creation's lifecycle lock was lost before the row's commit (issues
+    # #3927, #4045): no server was created, so nothing is audited, and the
+    # caller retries a transient fault.
+    uow = FakeUnitOfWork()
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        create=CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=PortRange(start=25565, end=25664),
+            lifecycle_lock=lock,
+        ),
+        recorder=recorder,
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers", json=_create_body()
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert uow.commits == 0
+    assert recorder.events == []
 
 
 # Every door that names a server refuses a name with a control character or a
@@ -1520,6 +1551,31 @@ def test_read_server_last_crash_null_without_one() -> None:
         body["crash_detail"],
         body["crash_not_restarted"],
     ) == (None, None, False)
+
+
+@pytest.mark.parametrize(
+    ("refusal", "carried"),
+    [
+        (FinalSnapshotRefusal.BUSY, "busy"),
+        (FinalSnapshotRefusal.UNAVAILABLE, "unavailable"),
+        (None, None),
+    ],
+    ids=["busy", "unavailable", "none"],
+)
+def test_read_server_carries_the_final_snapshot_refusal(
+    refusal: FinalSnapshotRefusal | None, carried: str | None
+) -> None:
+    # Issue #4054: a page loaded while a stop is held by a refused final
+    # snapshot can tell why the server is still held.
+    community = uuid.uuid4()
+    server = _server_entity(community_id=community)
+    server.assigned_worker_id = WorkerId(uuid.uuid4())
+    server.final_snapshot_refusal = refusal
+    app = _app(member=True, allow=True, read=_FakeUseCase(result=server))
+    client = _client(app)
+    resp = client.get(f"/api/communities/{community}/servers/{uuid.uuid4()}")
+    assert resp.status_code == 200
+    assert resp.json()["final_snapshot_refusal"] == carried
 
 
 # --- config payload bounds (issue #94) -------------------------------------

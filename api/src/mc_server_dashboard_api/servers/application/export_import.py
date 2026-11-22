@@ -83,10 +83,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
-    LifecycleLock,
-    NullLifecycleLock,
-)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import HeldLifecycleLock
 from mc_server_dashboard_api.servers.domain.plugin import (
     LoaderType,
     PluginId,
@@ -325,10 +322,11 @@ class ImportServer:
     entry that fails either is :class:`InvalidExportMetadataError`. Its display
     name is made to fit the display-name rule, as a catalog title is.
 
-    Each read of the archive (the metadata, the dry run and the publish pass) runs
-    on the archive-validation pool it shares with the backup upload and the files
-    upload's extract (:mod:`.archive_validation`, issue #3912), so a crafted
-    import can hold a thread of that pool but none of the default executor's.
+    Each read of the archive (the metadata, the dry run and the read of the
+    entries to publish) runs on the archive-validation pool it shares with the
+    backup upload and the files upload's extract (:mod:`.archive_validation`,
+    issue #3912), so a crafted import can hold a thread of that pool but none of
+    the default executor's.
 
     On publish, the imported ``server.properties`` has every platform-managed key
     re-applied (issue #2621) via :func:`apply_platform_properties`: the archive
@@ -348,6 +346,13 @@ class ImportServer:
     defaults, so an imported server does not gain the ``sync-chunk-writes=false`` a
     created one starts with (issue #3443).
 
+    The publish and the plugin rows run inside the lifecycle-lock hold the
+    composed :class:`CreateServer` takes before the row commits (issue #4045), so
+    a start racing the import waits for the whole working set, or is refused
+    ``server_busy``, instead of hydrating it half-written. The archive's entries
+    are read before that hold, so the lock is not held while the read waits for
+    the archive-validation pool.
+
     The caps are fields (not bare constants) so a test can inject tiny caps and
     trip the size / entry-count guards with a small archive; production wiring uses
     the defaults.
@@ -364,7 +369,6 @@ class ImportServer:
     max_bytes: int = MAX_UPLOAD_BYTES
     max_entries: int = MAX_ARCHIVE_ENTRIES
     bedrock_port_range: PortRange | None = None
-    lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(
         self,
@@ -391,17 +395,47 @@ class ImportServer:
         # archive 413/422s with no server row left behind (issue #277). The metadata
         # member is included in this pass (it is a normal archive entry); only its
         # write is skipped later. A crafted archive that passes this pass costs as
-        # much again in the publish pass.
+        # much again in the read of the entries to publish, below.
         await run_archive_validation(
             _validate_import_archive,
             content,
             max_bytes=self.max_bytes,
             max_entries=self.max_entries,
         )
+        # Materialize the entries the publish writes, on the same pool and before
+        # the row's lifecycle lock is taken, so the lock is not held while this
+        # waits for a thread of that pool (issue #3912).
+        entries = await run_archive_validation(
+            lambda: list(
+                _archive_entries(
+                    EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
+                    content,
+                    max_bytes=self.max_bytes,
+                    max_entries=self.max_entries,
+                )
+            )
+        )
+
+        async def populate(server: Server, lock: HeldLifecycleLock) -> Server:
+            await self._publish_working_set(
+                community_id=community_id,
+                server_id=server.id,
+                game_port=server.game_port,
+                entries=entries,
+                lock=lock,
+            )
+            return await self._import_plugins(
+                server=server,
+                plugin_dicts=plugin_dicts,
+                now=self.create_server.clock.now(),
+                lock=lock,
+            )
+
         # Create the row through the shared use case: it runs the version validator
         # (unknown-version -> 422), assigns the game port (#243), and
-        # enforces name uniqueness (409). accept_eula stays false on purpose.
-        server = await self.create_server(
+        # enforces name uniqueness (409). accept_eula stays false on purpose. The
+        # publish runs inside its lifecycle-lock hold (issue #4045).
+        return await self.create_server(
             community_id=community_id,
             name=name,
             mc_edition=metadata.mc_edition,
@@ -410,17 +444,7 @@ class ImportServer:
             config={},
             accept_eula=False,
             new_server_defaults=False,
-        )
-        await self._publish_working_set(
-            community_id=community_id,
-            server_id=server.id,
-            game_port=server.game_port,
-            content=content,
-        )
-        return await self._import_plugins(
-            server=server,
-            plugin_dicts=plugin_dicts,
-            now=self.create_server.clock.now(),
+            populate=populate,
         )
 
     def _checked_plugin(self, raw: object) -> dict[str, object]:
@@ -459,36 +483,25 @@ class ImportServer:
         community_id: CommunityId,
         server_id: ServerId,
         game_port: int | None,
-        content: bytes,
+        entries: list[tuple[str, bytes]],
+        lock: HeldLifecycleLock,
     ) -> None:
         """Write the archive members into the new server's first published version.
 
         Runs only after :meth:`__call__`'s pre-commit validate pass has cleared the
-        whole archive, so the entries here are already known-safe; re-running the
-        SAME hardened extraction (``_archive_entries``) keeps the streamed decode in
-        one place and skips the metadata member so it never lands in the working
-        set. The archive-property cap/path rejections (413/422) cannot fire here
-        (the validate pass already raised them, before the row existed) but the
-        re-raise is kept defensively. The ONLY genuine post-commit failure is a
-        storage write error mid-publish: it reuses the #243/#252 seed-failure
-        posture -- the committed row stays (degraded but repairable via the files
-        API) and the failure surfaces as a mapped 503, never an unmapped 500.
+        whole archive, so ``entries`` (the SAME hardened extraction,
+        ``_archive_entries``, materialized before the row) are already known-safe;
+        the metadata member is skipped so it never lands in the working set. The
+        archive-property cap/path rejections (413/422) cannot fire here (the
+        validate pass already raised them, before the row existed) but the re-raise
+        is kept defensively. The ONLY genuine post-commit failure is a storage
+        write error mid-publish, or the lifecycle ``lock`` lost before it (issue
+        #3927): it reuses the #243/#252 seed-failure posture -- the committed row
+        stays (degraded but repairable via the files API) and the failure surfaces
+        as a mapped 503, never an unmapped 500.
         """
 
         try:
-            # Materialize the entry list on the archive-validation pool, as the
-            # dry run does (issue #3912). The async write loop below iterates the
-            # result.
-            entries = await run_archive_validation(
-                lambda: list(
-                    _archive_entries(
-                        EXPORT_METADATA_FILENAME + ".zip",  # route to the zip branch
-                        content,
-                        max_bytes=self.max_bytes,
-                        max_entries=self.max_entries,
-                    )
-                )
-            )
             for entry_path, data in entries:
                 if entry_path == EXPORT_METADATA_FILENAME:
                     continue
@@ -512,6 +525,9 @@ class ImportServer:
                         rcon_password=self.create_server.token_generator(),
                         resource_pack=None,
                     )
+                # Each member's write relies on the lifecycle lock (issues #3927,
+                # #4045); a loss stops the rest.
+                await lock.ensure_held()
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -537,6 +553,7 @@ class ImportServer:
         server: Server,
         plugin_dicts: list[dict[str, object]],
         now: dt.datetime,
+        lock: HeldLifecycleLock,
     ) -> Server:
         """Re-create plugin rows from the exported metadata (issue #1335).
 
@@ -544,11 +561,12 @@ class ImportServer:
         Geyser row in the exported set runs the SAME detection and allocation as
         :class:`InstallPlugin` / :class:`InstallFromCatalog`
         (``allocate_bedrock_port_if_geyser``), inside the per-server lifecycle
-        lock (issue #1587) so a concurrent PATCH cannot be clobbered by the
-        whole-entity write-back. The server entity is re-fetched under the lock
-        so the allocation operates on the current row, not the stale create-time
-        snapshot. By this point the server row and its working set are already
-        committed (issue #274), so a Bedrock window exhaustion -- or the
+        lock the creation holds, ``lock`` (issues #1587, #4045), so a concurrent
+        PATCH cannot be clobbered by the whole-entity write-back. The server
+        entity is re-fetched under the lock so the allocation operates on the
+        current row, not the stale create-time snapshot. By this point the server
+        row and its working set are already committed (issue #274), so a Bedrock
+        window exhaustion -- or the
         ``UNIQUE(bedrock_port)`` backstop firing on a concurrent allocation racer
         (:class:`PortAlreadyTakenError`, the #1550 race) -- is a post-commit
         failure here, not a clean abort with no row created; both reuse the
@@ -565,27 +583,27 @@ class ImportServer:
             return server
         uow = self.create_server.uow
         try:
-            async with self.lifecycle_lock.hold(server.id) as lock:
-                async with uow:
-                    # Re-fetch the current row so the whole-entity write-back in
-                    # allocate_bedrock_port_if_geyser does not clobber a concurrent
-                    # PATCH that landed after the create commit (issue #1587).
-                    fresh = await uow.servers.get_by_id(server.id)
-                    if fresh is None:
-                        raise ServerNotFoundError(str(server.id.value))
-                    for raw in plugin_dicts:
-                        plugin = _deserialize_plugin(raw, server_id=server.id, now=now)
-                        await uow.plugins.add(plugin)
-                        await allocate_bedrock_port_if_geyser(
-                            uow,
-                            server=fresh,
-                            plugin=plugin,
-                            port_range=self.bedrock_port_range,
-                            now=now,
-                        )
-                    # The rows rely on the lifecycle lock (issue #3927).
-                    await lock.ensure_held()
-                    await uow.commit()
+            async with uow:
+                # Re-fetch the current row so the whole-entity write-back in
+                # allocate_bedrock_port_if_geyser writes back the row as stored,
+                # not the create-time entity (issue #1587). The creation's hold
+                # keeps a PATCH out until it ends (issue #4045).
+                fresh = await uow.servers.get_by_id(server.id)
+                if fresh is None:
+                    raise ServerNotFoundError(str(server.id.value))
+                for raw in plugin_dicts:
+                    plugin = _deserialize_plugin(raw, server_id=server.id, now=now)
+                    await uow.plugins.add(plugin)
+                    await allocate_bedrock_port_if_geyser(
+                        uow,
+                        server=fresh,
+                        plugin=plugin,
+                        port_range=self.bedrock_port_range,
+                        now=now,
+                    )
+                # The rows rely on the lifecycle lock (issue #3927).
+                await lock.ensure_held()
+                await uow.commit()
             return fresh
         except (
             PortAlreadyTakenError,

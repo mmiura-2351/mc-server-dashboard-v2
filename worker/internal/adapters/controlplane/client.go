@@ -596,6 +596,7 @@ func toCommand(cmd *controlplanev1.ApiCommand) session.Command {
 	case *controlplanev1.ApiCommand_Snapshot:
 		out.TransferURL = c.Snapshot.GetTransferUrl()
 		out.TransferToken = c.Snapshot.GetTransferToken()
+		out.Final = c.Snapshot.GetFinal()
 	case *controlplanev1.ApiCommand_ReadFile:
 		out.Path = c.ReadFile.GetPath()
 	case *controlplanev1.ApiCommand_EditFile:
