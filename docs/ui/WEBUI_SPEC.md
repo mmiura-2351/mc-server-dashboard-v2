@@ -1083,7 +1083,9 @@ numbers): the UI for the general scheduler.
   (editable; a whole number ≥ 1, checked before anything is sent) or keep all,
   with a hint for the choice made. Keep-last-N prunes the server's existing
   scheduled backups beyond N as soon as it is set, so the step counts them
-  from the backups list (`backup:read`). When some would be deleted it says
+  from the backups list (`backup:read`), read since the dialog opened: a list
+  cached by the Backups tab counts only once read again, and a read that
+  fails makes the count unknown again. When some would be deleted it says
   how many, and Create waits for an acknowledgement checkbox, asked again
   when the count or N changes. While the list loads, a counting line
   replaces the count; without `backup:read`, or when the list fails, a

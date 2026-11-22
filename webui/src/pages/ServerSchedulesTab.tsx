@@ -624,7 +624,9 @@ function ScheduleDialog({
   // is set, so the step counts them from the backups list (backup:read) and
   // asks for a confirmation unless it knows nothing is deleted. Without the
   // permission, while the list loads, or when it fails, the count is unknown
-  // (null) and the confirmation is still asked for.
+  // (null) and the confirmation is still asked for. The Backups tab shares
+  // this cache, so only a read that succeeded since the dialog opened counts:
+  // a list cached before it may be out of date.
   const backupsQuery = useQuery({
     queryKey: backupsKey(communityId, serverId),
     enabled: showRetention && canReadBackups,
@@ -638,7 +640,7 @@ function ScheduleDialog({
       ),
   });
   const scheduledBackups =
-    canReadBackups && backupsQuery.data !== undefined
+    canReadBackups && backupsQuery.isSuccess && backupsQuery.isFetchedAfterMount
       ? backupsQuery.data.backups.filter(
           (backup) => backup.source === "scheduled",
         ).length

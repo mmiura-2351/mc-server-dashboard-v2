@@ -166,10 +166,13 @@ function routeGet(
   });
 }
 
-function renderTab(can: Can, srv = server()) {
-  const queryClient = new QueryClient({
+function testQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+}
+
+function renderTab(can: Can, srv = server(), queryClient = testQueryClient()) {
   return render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -1788,6 +1791,88 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     ).toBeInTheDocument();
     expect(unknown()).not.toBeInTheDocument();
     expect(createButton()).toBeDisabled();
+  });
+
+  describe("with a backups list cached by the Backups tab", () => {
+    // The dialog shares the Backups tab's list cache; a visit there leaves
+    // a list that may be out of date by the time the dialog opens.
+    function renderCached(cached: object[]) {
+      const queryClient = testQueryClient();
+      queryClient.setQueryData(["backups", CID, SID], { backups: cached });
+      renderTab(CAN_COUNT, server({ backup_retention: null }), queryClient);
+    }
+
+    // The dialog's own read of the backups list, answered by the test.
+    function holdBackupsRead() {
+      const read: {
+        answer: (list: object) => void;
+        fail: (error: unknown) => void;
+      } = { answer: () => {}, fail: () => {} };
+      routeGet({ schedules: [] });
+      const get = mockApi.get.getMockImplementation() as (
+        path: string,
+      ) => Promise<unknown>;
+      mockApi.get.mockImplementation((path: string) =>
+        path.endsWith("/backups")
+          ? new Promise((resolve, reject) => {
+              read.answer = resolve;
+              read.fail = reject;
+            })
+          : get(path),
+      );
+      routePost({ create: schedule() });
+      return read;
+    }
+
+    it("does not count the cached list while it is read again", async () => {
+      // Seven cached would prune nothing; the fresh read has not answered.
+      holdBackupsRead();
+      renderCached(scheduled(7));
+
+      await openBackupCreate();
+      expect(
+        screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("does not count the cached list when reading it again fails", async () => {
+      // Ten cached would read as three deletions, stated as a fact.
+      const read = holdBackupsRead();
+      renderCached(scheduled(10));
+
+      await openBackupCreate();
+      await act(async () =>
+        read.fail(new ApiError(503, { reason: "storage_unavailable" })),
+      );
+      expect(
+        await screen.findByText(t("schedules.dialog.retentionPruneUnknown")),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText(t("schedules.dialog.retentionPrune", { count: 3 })),
+      ).not.toBeInTheDocument();
+      expect(createButton()).toBeDisabled();
+    });
+
+    it("counts the list read again, and asks again for what it deletes", async () => {
+      const read = holdBackupsRead();
+      renderCached(scheduled(7));
+
+      await openBackupCreate();
+      fireEvent.click(pruneAck() as HTMLElement);
+      expect(createButton()).toBeEnabled();
+
+      // The fresh read finds three more than the cache held.
+      await act(async () => read.answer({ backups: scheduled(10) }));
+      expect(
+        await screen.findByText(
+          t("schedules.dialog.retentionPrune", { count: 3 }),
+        ),
+      ).toBeInTheDocument();
+      expect(pruneAck()).not.toBeChecked();
+      expect(createButton()).toBeDisabled();
+    });
   });
 
   it("leaves a policy that was set after the dialog read the server", async () => {
