@@ -524,6 +524,18 @@ async def test_concurrent_player_adds_keep_both_players(engine: AsyncEngine) -> 
     assert await world.players() == ["alice", "bob", "carol"]
 
 
+async def test_a_player_removal_behind_a_player_add_keeps_the_added_player(
+    engine: AsyncEngine,
+) -> None:
+    # Read before the lock, the removal's group would lack the added player.
+    world = _World(engine)
+    await world.seed()
+
+    await _second_waits_for_first(world, _edit("add", world), _edit("remove", world))
+
+    assert await world.players() == ["bob"]
+
+
 @pytest.mark.parametrize(("first", "second"), [("rename", "add"), ("add", "rename")])
 async def test_a_rename_and_a_player_add_keep_both_changes(
     engine: AsyncEngine, first: str, second: str
