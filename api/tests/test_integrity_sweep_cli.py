@@ -776,3 +776,38 @@ async def test_apply_refuses_a_store_not_marked_for_this_database(
         await integrity_sweep_cli.run_delete_dangling(
             load_settings(config_file=None), server_id=None, apply=True
         )
+
+
+def test_an_outage_reading_the_marker_before_the_pass_stops_it_in_one_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # An applied pass cannot tell whose store it is when the marker read fails,
+    # so it does not start: one line and the store status, not a traceback.
+    class _MarkerReadFails(ownership.FsStoreOwnership):
+        def _read_marker(self) -> bytes | None:
+            raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(
+        "mc_server_dashboard_api.app.FsStoreOwnership", _MarkerReadFails
+    )
+    monkeypatch.setenv("MCD_API_STORAGE__BACKEND", "fs")
+    monkeypatch.setenv("MCD_API_STORAGE__FS__ROOT", str(tmp_path))
+
+    async def _installation(_factory: object) -> uuid.UUID:
+        return uuid.UUID("00000000-0000-4000-8000-000000000001")
+
+    def _no_pass(**_fields: object) -> None:
+        raise AssertionError("the pass must not start")
+
+    monkeypatch.setattr(integrity_sweep_cli, "read_installation_id", _installation)
+    monkeypatch.setattr(integrity_sweep_cli, "DeleteDanglingBackups", _no_pass)
+
+    assert integrity_sweep_cli.main(["--delete-dangling", "--apply"]) == 1
+
+    assert capsys.readouterr().err == (
+        "dangling backups aborted: the store owner marker could not be read "
+        "(OSError: [Errno 5] Input/output error), so the pass stopped. Rows "
+        "already deleted this run stay deleted, and it is safe to re-run.\n"
+    )

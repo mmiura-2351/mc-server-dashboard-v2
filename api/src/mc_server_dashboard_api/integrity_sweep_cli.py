@@ -49,11 +49,12 @@ The marker is checked before the pass and again before each deletion.
 
 Its exit status keeps the meanings above: 0 when the pass completed; 1 when it
 completed but skipped a row the store could not answer for (an outage, a
-timeout); 2 on a bad argument, ``--apply`` without ``--delete-dangling`` among
-them, on a bad configuration, or when ``--apply`` refuses a store not marked for
-this database, before the pass or mid-pass; 3 when the database failed or a
-lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
-safe.
+timeout), or when ``--apply`` stopped because the store owner marker could not
+be read, before the pass or before a deletion; 2 on a bad argument, ``--apply``
+without ``--delete-dangling`` among them, on a bad configuration, or when
+``--apply`` refuses a store not marked for this database, before the pass or
+mid-pass; 3 when the database failed or a lifecycle lock was lost. A stop says
+so in one line. Rows already deleted stay deleted, so a re-run is safe.
 """
 
 from __future__ import annotations
@@ -189,6 +190,13 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
         await engine.dispose()
 
 
+class _OwnerMarkerUnreadableError(Exception):
+    """The store owner marker could not be read, so whose store it is is unknown.
+
+    The message names the read's error (issue #4158).
+    """
+
+
 @dataclass(frozen=True)
 class _MarkedForThisDatabase:
     """The ``StoreOwnership`` port for a command that never claims the store.
@@ -196,13 +204,19 @@ class _MarkedForThisDatabase:
     The store's own ``refusal`` always refuses in a process that never called
     ``claim``, so this asks whether the marker names ``installation_id``, the
     installation of the database the command was pointed at (issue #4107).
+    A marker read that fails, however it fails, raises
+    :class:`_OwnerMarkerUnreadableError`: the pass cannot tell whether the
+    store is this database's, so it deletes nothing more (issue #4158).
     """
 
     ownership: FsStoreOwnership | ObjectStoreOwnership
     installation_id: uuid.UUID
 
     async def refusal(self) -> str | None:
-        return await self.ownership.refusal_for(self.installation_id)
+        try:
+            return await self.ownership.refusal_for(self.installation_id)
+        except Exception as exc:
+            raise _OwnerMarkerUnreadableError(f"{type(exc).__name__}: {exc}") from exc
 
 
 async def run_delete_dangling(
@@ -378,6 +392,13 @@ def _delete_dangling(
     except StoreNotOwnedError as exc:
         sys.stderr.write(f"dangling backups: refusing to delete: {exc}\n")
         return 2
+    except _OwnerMarkerUnreadableError as exc:
+        _LOG.debug("dangling backups: the owner marker read failed", exc_info=True)
+        sys.stderr.write(
+            f"dangling backups aborted: the store owner marker could not be read "
+            f"({exc}), {stopped} it is safe to re-run.\n"
+        )
+        return 1
     except LifecycleLockLostError as exc:
         _LOG.debug("dangling backups: the lifecycle lock was lost", exc_info=True)
         sys.stderr.write(
