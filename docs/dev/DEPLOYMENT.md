@@ -282,8 +282,10 @@ every log it creates:
 - **The compose services.** `compose.yaml` gives every service the same
   `logging:` setting, the `x-logging` anchor at the top of the file: the
   `json-file` driver, rotated at `max-size` 50m, keeping at most `max-file` 5
-  files, the live one included. Each service holds at most 250 MB of log. To
-  change the bound, edit the anchor.
+  files, the live one included. Each service holds at most 250 MB of log. The
+  bound is part of `compose.yaml` itself, with no `.env` setting: the deploy
+  preflight refuses a checkout with local edits, so changing it is a change to
+  the repository.
 - **The Minecraft server containers.** They are not compose services: the
   worker creates them, and sets the same kind of bound on each, the launch
   container and the Forge install container alike. `driver.container.log_max_size`
