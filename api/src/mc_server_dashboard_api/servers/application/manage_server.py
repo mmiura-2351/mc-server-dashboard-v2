@@ -451,8 +451,15 @@ class CreateServer:
         writes nothing a start hydrates, and every write it vouches for is done.
         Were the lock lost by now, a start taking it would read the flag still
         set and be refused, which loses nothing, while refusing the clear would
-        leave a whole working set unstartable. A failure of the write or its
-        commit is :class:`WorkingSetSeedFailedError`, the row still unstartable.
+        leave a whole working set unstartable. Any other operation taking a lost
+        lock, such as a files write, could land during the last write, the one
+        no check follows. Both stores take their per-server lock in
+        ``write_file``, so within one process such a write composes with the
+        last write instead of replacing it. That lock is in-process only, and
+        across processes this is the window between a check and the writes it
+        guards that issue #3927 leaves open (``adapters/lifecycle_lock.py``).
+        A failure of the write or its commit is
+        :class:`WorkingSetSeedFailedError`, the row still unstartable.
         """
 
         try:

@@ -393,6 +393,32 @@ class ServerRepositoryContract:
         assert ended.creation_incomplete is False
         assert replace(ended, creation_incomplete=True) == stored
 
+    async def test_ending_one_creation_leaves_another_unfinished(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+    ) -> None:
+        # Issue #4065: a creation that finishes ends its own row's creation
+        # only. Another server whose import failed stays unstartable.
+        ended = server(contract_community_id)
+        ended.creation_incomplete = True
+        unfinished = server(contract_community_id, name="other")
+        unfinished.game_port = 25566
+        unfinished.bedrock_port = 19133
+        unfinished.creation_incomplete = True
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(ended)
+            await tx.repository.add(unfinished)
+            await tx.commit()
+
+        async with server_repository_harness.open() as tx:
+            await tx.repository.clear_creation_incomplete(ended.id)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            other = await tx.repository.get_by_id(unfinished.id)
+        assert other is not None
+        assert other.creation_incomplete is True
+
     async def test_lifecycle_update_is_guarded_and_writes_only_lifecycle_fields(
         self,
         server_repository_harness: RepositoryHarness[ServerRepository],
