@@ -749,9 +749,9 @@ each re-applies the platform-managed keys (`server-port`, the RCON triple, the
 resource-pack keys) from the DB afterwards. An archive carrying
 `server-port=25565` therefore publishes the importing/restoring server's own
 tracked port, not the archive's. A restore whose backup carries no
-`server.properties` at all gets one holding just those keys, the same file a
-create seeds; if that rewrite fails, the restore answers 503 `seed_failed` (the
-world data is restored, the seed is not — retry the restore).
+`server.properties` at all gets one holding just those keys, the same platform
+keys a create seeds; if that rewrite fails, the restore answers 503
+`seed_failed` (the world data is restored, the seed is not — retry the restore).
 
 **Residual drift modes.** Three remain, all recoverable:
 
