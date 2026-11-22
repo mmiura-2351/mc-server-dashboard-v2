@@ -27,6 +27,7 @@ import {
 } from "../api/client.ts";
 import { saveUrlAs } from "../api/download.ts";
 import { apiPath } from "../api/path.ts";
+import { schedulesKey } from "../api/scheduleQueryKeys.ts";
 import type { components } from "../api/schema";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Modal } from "../components/Modal.tsx";
@@ -51,6 +52,10 @@ import {
   normalizeState,
   serverAssignedKey,
 } from "./serverState.ts";
+import {
+  backupsGrowUnbounded,
+  UnboundedBackupsWarning,
+} from "./unboundedBackups.tsx";
 import { serversKey } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
@@ -110,6 +115,10 @@ export function ServerBackupsTab({
   // The restore dialog's one-click stop hits the lifecycle stop endpoint, gated
   // on server:stop. Without it the user must ask an operator to stop the server.
   const canStop = can("server:stop", { serverId });
+  // The keep-all warning (#4084) reads the schedule list, which needs
+  // schedule:read: without it the tab cannot tell whether a backup schedule
+  // runs, so it shows no warning.
+  const canReadSchedules = can("schedule:read", { serverId });
 
   const stopped = normalizeState(server.observed_state) === "stopped";
   // A stop holds its Worker until the final snapshot settles, and the API
@@ -151,6 +160,19 @@ export function ServerBackupsTab({
           community_id: communityId,
           server_id: serverId,
         }),
+        { signal },
+      ),
+  });
+
+  const schedulesQuery = useQuery({
+    queryKey: schedulesKey(communityId, serverId),
+    enabled: canRead && canReadSchedules,
+    queryFn: ({ signal }) =>
+      api.get(
+        apiPath(
+          "/api/communities/{community_id}/servers/{server_id}/schedules",
+          { community_id: communityId, server_id: serverId },
+        ),
         { signal },
       ),
   });
@@ -357,6 +379,15 @@ export function ServerBackupsTab({
           </>
         )}
       </div>
+
+      {schedulesQuery.data !== undefined &&
+        backupsGrowUnbounded(schedulesQuery.data, server.backup_retention) && (
+          <UnboundedBackupsWarning>
+            {canSchedule && (
+              <span>{t("backups.retention.unboundedSetBelow")}</span>
+            )}
+          </UnboundedBackupsWarning>
+        )}
 
       {canSchedule && (
         <div className="card backups-retention">

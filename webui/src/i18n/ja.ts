@@ -622,6 +622,11 @@ export const ja: Record<TranslationKey, string> = {
   "backups.retention.error.tiered":
     "0以上の整数を入力し、少なくとも1つは0より大きい値にしてください。",
   "backups.retention.error.invalid": "その保持ポリシーは無効です。",
+  // An enabled backup schedule with no retention policy (keep all) grows
+  // without bound (#4084): warned on both the Backups and Schedules tabs.
+  "backups.retention.unboundedWarning":
+    "バックアップのスケジュールが有効ですが、保持ポリシーが設定されていません。定期バックアップが際限なく溜まり、ディスクを使い切るおそれがあります。",
+  "backups.retention.unboundedSetBelow": "下で保持ポリシーを設定してください。",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "バックアップを復元",
   "backups.restoreDialog.blocked":
@@ -702,6 +707,8 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.empty": "スケジュールはまだありません。",
   "schedules.none": "—",
   "schedules.create": "+ スケジュールを作成",
+  "schedules.retentionWarning.link":
+    "「バックアップ」タブで保持ポリシーを設定する",
   "schedules.edit": "編集",
   "schedules.delete": "削除",
   "schedules.history": "実行履歴",
@@ -770,6 +777,10 @@ export const ja: Record<TranslationKey, string> = {
     "サーバーの稼働中のみバックアップする",
   "schedules.dialog.onlyWhenRunningHint":
     "予定時刻にサーバーが停止している場合、バックアップを取らずに実行を「スキップ」として記録します。",
+  // Create only, for a backup schedule on a server with no retention policy
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all.
+  "schedules.dialog.retentionHint":
+    "このサーバーには保持ポリシーがないため、定期バックアップはすべて保持されます。「最新のN件を保持」を選ぶと、スケジュールの作成時に保持ポリシーを設定し、その件数を超える古い定期バックアップを既存のものも含めて削除します。手動・アップロード・イベントのバックアップが削除されることはありません。",
   "schedules.dialog.warningsLabel": "プレイヤーへの警告",
   "schedules.dialog.warningsHint":
     "アクションの指定分前にメッセージを通知します（最大5ステップ）。",
@@ -793,6 +804,8 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.error.invalidWarnings":
     "警告は1〜120分（間隔より短い）の重複しないオフセットとメッセージが必要です。",
   "schedules.error.generic": "問題が発生しました。もう一度お試しください。",
+  "schedules.error.retentionNotSet":
+    "スケジュールは作成されましたが、保持ポリシーを設定できませんでした。定期バックアップは引き続き無制限に保持されます。「バックアップ」タブで設定してください。",
   "schedules.deleteDialog.title": "スケジュールを削除",
   "schedules.deleteDialog.body":
     "「{name}」を削除しますか？実行履歴も一緒に削除されます。",

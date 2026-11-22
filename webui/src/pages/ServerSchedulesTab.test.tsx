@@ -26,6 +26,7 @@ const SID = "s1";
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  put: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
 }));
@@ -72,7 +73,7 @@ function canFor(codes: PermissionCode[]): Can {
   return (code) => codes.includes(code);
 }
 
-function server() {
+function server(overrides: Record<string, unknown> = {}) {
   return {
     id: SID,
     community_id: CID,
@@ -97,6 +98,7 @@ function server() {
     bedrock_port: null,
     cpu_millis: null,
     memory_limit_mb: null,
+    ...overrides,
   };
 }
 
@@ -144,7 +146,7 @@ function routeGet(opts: { schedules?: object[]; runs?: object[] } = {}) {
   });
 }
 
-function renderTab(can: Can) {
+function renderTab(can: Can, srv = server()) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -152,7 +154,7 @@ function renderTab(can: Can) {
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <ServerSchedulesTab server={server()} communityId={CID} can={can} />
+          <ServerSchedulesTab server={srv} communityId={CID} can={can} />
         </ToastProvider>
       </QueryClientProvider>
     </MemoryRouter>,
@@ -163,6 +165,7 @@ beforeEach(() => {
   setAccessToken("tok-1");
   mockApi.get.mockReset();
   mockApi.post.mockReset();
+  mockApi.put.mockReset();
   mockApi.patch.mockReset();
   mockApi.delete.mockReset();
 });
@@ -1238,5 +1241,223 @@ describe("ServerSchedulesTab timezone select", () => {
       .map((o) => o.textContent);
     expect(options).toContain("Pacific/Auckland");
     expect(tzSelect).toHaveValue("Pacific/Auckland");
+  });
+});
+
+describe("ServerSchedulesTab keep-all retention (#4084)", () => {
+  const RETENTION_PATH = `/api/communities/${CID}/servers/${SID}/backups/retention`;
+  const warning = () =>
+    screen.queryByText(t("backups.retention.unboundedWarning"));
+  const createCalls = () =>
+    mockApi.post.mock.calls.filter(
+      (call) => !(call[0] as string).includes("/preview"),
+    );
+
+  async function openBackupCreate() {
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "nightly backup" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "backup" },
+    });
+  }
+
+  function submitCreate() {
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.dialog.create") }),
+    );
+  }
+
+  it("warns only for an enabled backup schedule on a server with no retention", async () => {
+    routeGet({ schedules: [schedule()] });
+    const keepAll = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).toBeInTheDocument();
+    keepAll.unmount();
+
+    // A disabled backup schedule takes no backups.
+    routeGet({ schedules: [schedule({ enabled: false })] });
+    const disabled = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).not.toBeInTheDocument();
+    disabled.unmount();
+
+    // A retention policy bounds what the schedule keeps.
+    routeGet({ schedules: [schedule()] });
+    const bounded = renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: { keep_last: 7 } }),
+    );
+    await screen.findByText("nightly backup");
+    expect(warning()).not.toBeInTheDocument();
+    bounded.unmount();
+
+    // An enabled schedule of another action takes no backups.
+    routeGet({ schedules: [schedule({ action: "restart" })] });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+    await screen.findByText("nightly backup");
+    expect(warning()).not.toBeInTheDocument();
+  });
+
+  it("links the warning to the Backups tab only for a member who can set retention", async () => {
+    const link = () =>
+      screen.queryByRole("link", {
+        name: t("schedules.retentionWarning.link"),
+      });
+    routeGet({ schedules: [schedule()] });
+    const editor = renderTab(
+      canFor([...ALL_CODES, "backup:read"]),
+      server({ backup_retention: null }),
+    );
+    await screen.findByText("nightly backup");
+    expect(link()).toHaveAttribute("href", "/#backups");
+    editor.unmount();
+
+    renderTab(canFor(["schedule:read"]), server({ backup_retention: null }));
+    await screen.findByText("nightly backup");
+    expect(warning()).toBeInTheDocument();
+    expect(link()).not.toBeInTheDocument();
+  });
+
+  it("prefills keep-last 7 and sets it after creating the backup schedule", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 7 });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    expect(screen.getByLabelText(t("backups.retention.modeLabel"))).toHaveValue(
+      "keepLast",
+    );
+    expect(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+    ).toHaveValue(7);
+    submitCreate();
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+    const [path, init] = mockApi.put.mock.calls[0];
+    expect(path).toBe(RETENTION_PATH);
+    expect(JSON.parse(init.body)).toEqual({ keep_last: 7 });
+    // The schedule is created first; the retention follows it.
+    expect(createCalls().length).toBe(1);
+    const createOrder =
+      mockApi.post.mock.invocationCallOrder[
+        mockApi.post.mock.calls.indexOf(createCalls()[0])
+      ];
+    expect(createOrder).toBeLessThan(mockApi.put.mock.invocationCallOrder[0]);
+  });
+
+  it("sets the edited keep-last value", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    mockApi.put.mockResolvedValue({ keep_last: 3 });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "3" } },
+    );
+    submitCreate();
+
+    await waitFor(() => expect(mockApi.put).toHaveBeenCalledTimes(1));
+    expect(JSON.parse(mockApi.put.mock.calls[0][1].body)).toEqual({
+      keep_last: 3,
+    });
+  });
+
+  it("sets no retention when keep all is chosen", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(screen.getByLabelText(t("backups.retention.modeLabel")), {
+      target: { value: "none" },
+    });
+    expect(
+      screen.queryByLabelText(t("backups.retention.keepLastLabel")),
+    ).not.toBeInTheDocument();
+    submitCreate();
+
+    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    expect(createCalls().length).toBe(1);
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses a keep-last below 1 before creating anything", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    fireEvent.change(
+      screen.getByLabelText(t("backups.retention.keepLastLabel")),
+      { target: { value: "0" } },
+    );
+    submitCreate();
+
+    expect(
+      await screen.findByText(t("backups.retention.error.keepLast")),
+    ).toBeInTheDocument();
+    expect(createCalls().length).toBe(0);
+    expect(mockApi.put).not.toHaveBeenCalled();
+  });
+
+  it("keeps the created schedule and the warning when the retention cannot be set", async () => {
+    let schedules: object[] = [];
+    mockApi.get.mockImplementation(() => Promise.resolve(schedules));
+    mockApi.post.mockImplementation((path: string) => {
+      if (path.includes("/preview")) {
+        return Promise.resolve({ next_runs: [] });
+      }
+      schedules = [schedule()];
+      return Promise.resolve(schedule());
+    });
+    mockApi.put.mockRejectedValue(
+      new ApiError(503, { reason: "storage_unavailable" }),
+    );
+    renderTab(canFor(ALL_CODES), server({ backup_retention: null }));
+
+    await openBackupCreate();
+    submitCreate();
+
+    expect(
+      await screen.findByText(t("schedules.error.retentionNotSet")),
+    ).toBeInTheDocument();
+    // The dialog closes on the created schedule; it is not rolled back.
+    expect(
+      screen.queryByRole("button", { name: t("schedules.dialog.create") }),
+    ).not.toBeInTheDocument();
+    expect(mockApi.delete).not.toHaveBeenCalled();
+    expect(await screen.findByText("nightly backup")).toBeInTheDocument();
+    expect(warning()).toBeInTheDocument();
+  });
+
+  it("offers no retention step on a server that already has a policy", async () => {
+    routeGet({ schedules: [] });
+    routePost({ create: schedule() });
+    renderTab(
+      canFor(ALL_CODES),
+      server({ backup_retention: { daily: 7, weekly: 4, monthly: 0 } }),
+    );
+
+    await openBackupCreate();
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
+    submitCreate();
+
+    expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
+    expect(mockApi.put).not.toHaveBeenCalled();
   });
 });

@@ -1246,6 +1246,20 @@ button.link:focus-visible {
   gap: 10px;
   margin-bottom: 14px;
 }
+/* Keep-all retention warning on the Backups and Schedules tabs (#4084). */
+.unbounded-backups-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--pill-transition-border);
+  border-radius: var(--radius-sm);
+  background: var(--pill-transition-bg);
+  color: var(--amber);
+  font-size: 13px;
+}
 /* Scheduled-backup settings card: the moved-to-Schedules note plus the
  * retention policy editor (#1843), both backup:schedule-gated. */
 .backups-retention {

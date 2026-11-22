@@ -115,15 +115,16 @@ const STATS = {
   oldest: "2026-06-04T00:00:00Z",
 };
 
-// Route api.get by path: server detail, backups list, statistics. Per-endpoint
-// (never a catch-all reject, #2247/#2359/#2525): `listError` / `statsError`
-// reject only their own endpoint so the other two keep resolving — the server
-// detail query must still succeed for the tab to mount.
+// Route api.get by path: server detail, backups list, statistics, schedules.
+// Per-endpoint (never a catch-all reject, #2247/#2359/#2525): `listError` /
+// `statsError` reject only their own endpoint so the others keep resolving —
+// the server detail query must still succeed for the tab to mount.
 function routeGet(
   opts: {
     srv?: Record<string, unknown>;
     backups?: Record<string, unknown>[];
     stats?: typeof STATS;
+    schedules?: Record<string, unknown>[];
     listError?: unknown;
     statsError?: unknown;
   } = {},
@@ -132,6 +133,9 @@ function routeGet(
   const list = { backups: opts.backups ?? [backup()] };
   const stats = opts.stats ?? STATS;
   mockApi.get.mockImplementation((path: string) => {
+    if (path.endsWith("/schedules")) {
+      return Promise.resolve(opts.schedules ?? []);
+    }
     if (path.endsWith("/backups/statistics")) {
       return opts.statsError !== undefined
         ? Promise.reject(opts.statsError)
@@ -1261,5 +1265,95 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
     expect(
       await screen.findByText(t("backups.retention.error.invalid")),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
+  // Only the fields the warning reads; the Schedules tab test owns the full
+  // schedule shape.
+  function schedule(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "sch1",
+      server_id: SID,
+      name: "nightly backup",
+      action: "backup",
+      enabled: true,
+      ...overrides,
+    };
+  }
+  const warning = () =>
+    screen.queryByText(t("backups.retention.unboundedWarning"));
+  const setBelow = () =>
+    screen.queryByText(t("backups.retention.unboundedSetBelow"));
+  const KEEP_ALL = { backup_retention: null };
+
+  // Re-route the reads and refetch every query, as a later visit would.
+  async function reload(
+    queryClient: QueryClient,
+    opts: Parameters<typeof routeGet>[0],
+  ) {
+    routeGet(opts);
+    await act(() => queryClient.invalidateQueries());
+  }
+
+  it("warns only while an enabled backup schedule runs with no retention", async () => {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    const { queryClient } = await openBackups();
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+
+    // A disabled backup schedule takes no backups.
+    await reload(queryClient, {
+      srv: KEEP_ALL,
+      schedules: [schedule({ enabled: false })],
+    });
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+
+    // A retention policy bounds what an enabled one keeps.
+    await reload(queryClient, { srv: KEEP_ALL, schedules: [schedule()] });
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    await reload(queryClient, {
+      srv: { backup_retention: { keep_last: 7 } },
+      schedules: [schedule()],
+    });
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+
+    // An enabled schedule of another action takes no backups.
+    await reload(queryClient, { srv: KEEP_ALL, schedules: [schedule()] });
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    await reload(queryClient, {
+      srv: KEEP_ALL,
+      schedules: [schedule({ action: "restart" })],
+    });
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+  });
+
+  it("points a member who can set retention at the editor below", async () => {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    expect(setBelow()).toBeInTheDocument();
+  });
+
+  it("still warns a member who cannot set retention, without the pointer", async () => {
+    mockCan = (code) => code !== "backup:schedule";
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    expect(setBelow()).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(t("backups.retention.modeLabel")),
+    ).not.toBeInTheDocument();
   });
 });

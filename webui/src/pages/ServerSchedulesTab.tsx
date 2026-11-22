@@ -17,6 +17,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router";
 import { ApiError, api } from "../api/client.ts";
 import {
   MAX_CONSOLE_LINE_BYTES,
@@ -35,6 +36,12 @@ import { getLanguage, type TranslationKey, t } from "../i18n/index.ts";
 import type { PermissionCode } from "../permissions/catalog.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
+import { serverKey } from "./serverKey.ts";
+import {
+  backupsGrowUnbounded,
+  UnboundedBackupsWarning,
+} from "./unboundedBackups.tsx";
+import { serversKey } from "./useCommunityEvents.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type ScheduleResponse = components["schemas"]["ScheduleResponse"];
@@ -240,6 +247,10 @@ export function ServerSchedulesTab({
   // so a schedule:manage holder with no action permission cannot create at all.
   const permittedActions = ACTIONS.filter(canAction);
   const canCreate = canManage && permittedActions.length > 0;
+  // The keep-all warning links to the Backups tab's retention editor, which
+  // needs both (WEBUI_SPEC.md 6.7); without them it shows the text alone.
+  const canSetRetention =
+    can("backup:read", { serverId }) && can("backup:schedule", { serverId });
 
   const listQuery = useQuery({
     queryKey: schedulesKey(communityId, serverId),
@@ -329,6 +340,13 @@ export function ServerSchedulesTab({
 
   return (
     <section className="schedules">
+      {backupsGrowUnbounded(schedules, server.backup_retention) && (
+        <UnboundedBackupsWarning>
+          {canSetRetention && (
+            <Link to="#backups">{t("schedules.retentionWarning.link")}</Link>
+          )}
+        </UnboundedBackupsWarning>
+      )}
       {canCreate && (
         <div className="schedules-toolbar">
           <button
@@ -444,6 +462,7 @@ export function ServerSchedulesTab({
           communityId={communityId}
           serverId={serverId}
           permittedActions={permittedActions}
+          retentionUnset={server.backup_retention == null}
           existing={dialog.mode === "edit" ? dialog.schedule : null}
           onDone={refresh}
           onClose={() => setDialog(null)}
@@ -505,13 +524,15 @@ interface WarningStepForm {
  * actions; on edit it is disabled (the action is immutable — delete and
  * recreate to change it). The cadence is a `cron` XOR `interval` choice; the
  * command line shows only for `command`; the warning-steps editor only for
- * `stop`/`restart`; the only-while-running option only for `backup`. Server
+ * `stop`/`restart`; the only-while-running option only for `backup`, and on
+ * create, for a server with no retention policy, a retention step too. Server
  * validation errors map to inline field messages.
  */
 function ScheduleDialog({
   communityId,
   serverId,
   permittedActions,
+  retentionUnset,
   existing,
   onDone,
   onClose,
@@ -519,12 +540,14 @@ function ScheduleDialog({
   communityId: string;
   serverId: string;
   permittedActions: readonly ScheduleAction[];
+  retentionUnset: boolean;
   existing: ScheduleResponse | null;
   onDone: () => void;
   onClose: () => void;
 }) {
   const { showToast } = useToast();
   const onForbidden = useOnForbidden();
+  const queryClient = useQueryClient();
   const editing = existing !== null;
 
   const initialAction: ScheduleAction = existing
@@ -576,12 +599,23 @@ function ScheduleDialog({
       message: step.message,
     })),
   );
+  // A backup schedule on a server with no retention policy keeps every backup
+  // it takes (#4084). Creating one offers keep-last 7, with keep all as the
+  // opt-out; the policy is set through the retention endpoint once the
+  // schedule exists. Creating a backup schedule needs backup:schedule, the
+  // same permission the retention endpoint does.
+  const showRetention = !editing && action === "backup" && retentionUnset;
+  const [retentionMode, setRetentionMode] = useState<"keepLast" | "none">(
+    "keepLast",
+  );
+  const [keepLast, setKeepLast] = useState("7");
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [cadenceError, setCadenceError] = useState<string | null>(null);
   const [timezoneError, setTimezoneError] = useState<string | null>(null);
   const [commandError, setCommandError] = useState<string | null>(null);
   const [warningError, setWarningError] = useState<string | null>(null);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
 
   const showWarnings = WARNING_ACTIONS.has(action);
   const noDaysSelected =
@@ -600,6 +634,7 @@ function ScheduleDialog({
     setTimezoneError(null);
     setCommandError(null);
     setWarningError(null);
+    setRetentionError(null);
   };
 
   const buildCadence = (): {
@@ -689,7 +724,7 @@ function ScheduleDialog({
   };
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: async (): Promise<"none" | "set" | "failed"> => {
       const cadence = buildCadence();
       if (editing) {
         const body: UpdateScheduleRequest = {
@@ -702,7 +737,7 @@ function ScheduleDialog({
           warning_steps: showWarnings ? warningSteps() : null,
           only_when_running: action === "backup" ? onlyWhenRunning : null,
         };
-        return api.patch(
+        await api.patch(
           apiPath(
             "/api/communities/{community_id}/servers/{server_id}/schedules/{schedule_id}",
             {
@@ -713,6 +748,7 @@ function ScheduleDialog({
           ),
           { body: JSON.stringify(body) },
         );
+        return "none";
       }
       const body: CreateScheduleRequest = {
         name,
@@ -725,19 +761,46 @@ function ScheduleDialog({
         warning_steps: showWarnings ? warningSteps() : null,
         only_when_running: action === "backup" ? onlyWhenRunning : null,
       };
-      return api.post(
+      await api.post(
         apiPath(
           "/api/communities/{community_id}/servers/{server_id}/schedules",
           { community_id: communityId, server_id: serverId },
         ),
         { body: JSON.stringify(body) },
       );
+      if (!showRetention || retentionMode === "none") {
+        return "none";
+      }
+      // The schedule exists now, so a failed retention write must not fail the
+      // create: the dialog would stay open and a retry would refuse its own
+      // name (409). It is reported on its own and the schedule is kept.
+      try {
+        await api.put(
+          apiPath(
+            "/api/communities/{community_id}/servers/{server_id}/backups/retention",
+            { community_id: communityId, server_id: serverId },
+          ),
+          { body: JSON.stringify({ keep_last: Number(keepLast) }) },
+        );
+        return "set";
+      } catch {
+        return "failed";
+      }
     },
-    onSuccess: () => {
+    onSuccess: (retention) => {
       showToast(
         t(editing ? "schedules.updated" : "schedules.created"),
         "success",
       );
+      if (retention === "set") {
+        // The policy is read from the server, so the warning clears on refetch.
+        queryClient.invalidateQueries({
+          queryKey: serverKey(communityId, serverId),
+        });
+        queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
+      } else if (retention === "failed") {
+        showToast(t("schedules.error.retentionNotSet"), "error");
+      }
       onDone();
       onClose();
     },
@@ -777,6 +840,13 @@ function ScheduleDialog({
         t("schedules.error.warningTooLong", { max: MAX_WARNING_MESSAGE_BYTES }),
       );
       return;
+    }
+    if (showRetention && retentionMode === "keepLast") {
+      const n = Number(keepLast);
+      if (keepLast.trim() === "" || !Number.isInteger(n) || n < 1) {
+        setRetentionError(t("backups.retention.error.keepLast"));
+        return;
+      }
     }
     save.mutate();
   };
@@ -1092,6 +1162,42 @@ function ScheduleDialog({
           </label>
           <p className="sub">{t("schedules.dialog.onlyWhenRunningHint")}</p>
         </div>
+      )}
+
+      {showRetention && (
+        <>
+          <label className="field">
+            {t("backups.retention.modeLabel")}
+            {/* aria-label: see the action select. */}
+            <select
+              value={retentionMode}
+              aria-label={t("backups.retention.modeLabel")}
+              onChange={(e) =>
+                setRetentionMode(e.target.value as "keepLast" | "none")
+              }
+            >
+              <option value="keepLast">
+                {t("backups.retention.mode.keepLast")}
+              </option>
+              <option value="none">{t("backups.retention.mode.none")}</option>
+            </select>
+          </label>
+          {retentionMode === "keepLast" && (
+            <label className="field">
+              {t("backups.retention.keepLastLabel")}
+              <input
+                type="number"
+                min={1}
+                value={keepLast}
+                onChange={(e) => setKeepLast(e.target.value)}
+              />
+              {retentionError !== null && (
+                <span className="field-error">{retentionError}</span>
+              )}
+            </label>
+          )}
+          <p className="sub">{t("schedules.dialog.retentionHint")}</p>
+        </>
       )}
 
       <label className="checkbox">

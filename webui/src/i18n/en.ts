@@ -706,6 +706,11 @@ export const en = {
   "backups.retention.error.tiered":
     "Enter whole numbers (0 or more), with at least one above 0.",
   "backups.retention.error.invalid": "That retention policy is not valid.",
+  // An enabled backup schedule with no retention policy (keep all) grows
+  // without bound (#4084): warned on both the Backups and Schedules tabs.
+  "backups.retention.unboundedWarning":
+    "A backup schedule is enabled but no retention policy is set, so scheduled backups accumulate without bound and can fill the disk.",
+  "backups.retention.unboundedSetBelow": "Set a retention policy below.",
   // Restore dialog (stopped-only; two-step stop-then-restore).
   "backups.restoreDialog.title": "Restore backup",
   "backups.restoreDialog.blocked":
@@ -791,6 +796,8 @@ export const en = {
   "schedules.empty": "No schedules yet.",
   "schedules.none": "—",
   "schedules.create": "+ Create schedule",
+  "schedules.retentionWarning.link":
+    "Set a retention policy on the Backups tab",
   "schedules.edit": "Edit",
   "schedules.delete": "Delete",
   "schedules.history": "Run history",
@@ -859,6 +866,10 @@ export const en = {
     "Back up only while the server is running",
   "schedules.dialog.onlyWhenRunningHint":
     "If the server is stopped at the scheduled time, the run is recorded as skipped instead of taking a backup.",
+  // Create only, for a backup schedule on a server with no retention policy
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all.
+  "schedules.dialog.retentionHint":
+    "This server has no retention policy, so every scheduled backup is kept. Keeping the last N sets one when the schedule is created and deletes the older scheduled backups beyond that number, existing ones included. Manual, uploaded and event backups are never deleted.",
   "schedules.dialog.warningsLabel": "Player warnings",
   "schedules.dialog.warningsHint":
     "Broadcast a message this many minutes before the action (up to 5 steps).",
@@ -884,6 +895,8 @@ export const en = {
   "schedules.error.invalidWarnings":
     "Warnings need distinct offsets of 1–120 minutes (shorter than the interval) with a message.",
   "schedules.error.generic": "Something went wrong. Please try again.",
+  "schedules.error.retentionNotSet":
+    "The schedule was created, but its retention policy could not be set, so scheduled backups are still kept without limit. Set one on the Backups tab.",
   "schedules.deleteDialog.title": "Delete schedule",
   "schedules.deleteDialog.body":
     "Delete “{name}”? Its run history is removed with it.",
