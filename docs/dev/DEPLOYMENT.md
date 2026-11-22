@@ -1215,11 +1215,26 @@ for any new code is in place before the worker starts emitting it.
 >   `reconciler.held_start_grace_seconds` a held server gets.
 > - **To avoid both**, stop every server on the Worker before upgrading it: a
 >   stop publishes the server's final snapshot, so nothing unpublished is held.
->   That holds only when the final snapshot publishes; a refused one keeps the
->   working set, and the upgrade then hydrates over it, so check that no `<id>`
->   directory is left in `worker.scratch_dir` first. Or take an on-demand backup
->   of each running server just before; for a running server it publishes a
->   quiesced snapshot first.
+>   That holds only when the final snapshot publishes:
+>   - One the Worker refuses `BUSY` or `UNAVAILABLE` keeps the server assigned
+>     to the Worker, with `final_snapshot_refusal` set, so nothing hydrates over
+>     its working set until the server is released. The upgrade's Worker
+>     restart is a drop of that Worker. Back within `reconciler.grace_seconds`,
+>     it gets the snapshot retried: it reads the set's marker as generation 0,
+>     so the retry declares no base generation, and the publish-time generation
+>     guard has none to compare. Past the grace, the server is released without
+>     the snapshot, and its next start hydrates from the store, losing what the
+>     snapshot owed. A `stop` of that server while the Worker is down releases
+>     it at once, without the snapshot (issue #4111). See
+>     [`../app/CONFIGURATION.md`](../app/CONFIGURATION.md) Section 5.6.
+>   - One that fails any other way, such as the region check's
+>     `TRANSFER_FAILED`, releases the server and keeps the working set, and the
+>     upgrade then hydrates over it.
+>
+>   So before upgrading, check that no stopped server is still assigned to the
+>   Worker, and that no `<id>` directory is left in `worker.scratch_dir`. Or
+>   take an on-demand backup of each running server just before; for a running
+>   server it publishes a quiesced snapshot first.
 > - **A rollback costs the same again.** A Worker from before #3349 reads a
 >   signed marker as no generation, so stop the servers before rolling back
 >   too.

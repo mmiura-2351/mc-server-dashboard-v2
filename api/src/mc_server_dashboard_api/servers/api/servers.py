@@ -133,6 +133,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     CommunityNotFoundError,
     EulaNotAcceptedError,
     FileTooLargeError,
+    FinalSnapshotRefusedError,
     InvalidCpuAllocationError,
     InvalidExportMetadataError,
     InvalidFilePathError,
@@ -1578,6 +1579,11 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     # and the retry takes the lock afresh.
     LifecycleLockLostError: (Outcome.ERROR, "lifecycle_lock_lost"),
     CommandDispatchError: (Outcome.DENIED, "command_failed"),
+    # A stop of a held server retried its final snapshot, and the Worker refused
+    # it BUSY or UNAVAILABLE again (issue #3697): the server stays assigned, the
+    # reconciler keeps retrying, and the operator may release it without the
+    # snapshot instead.
+    FinalSnapshotRefusedError: (Outcome.DENIED, "final_snapshot_refused"),
     ServerNotRunningError: (Outcome.DENIED, "server_not_running"),
     NoEligibleWorkerError: (Outcome.ERROR, "no_eligible_worker"),
     WorkerUnavailableError: (Outcome.ERROR, "worker_unavailable"),

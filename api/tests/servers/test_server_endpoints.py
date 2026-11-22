@@ -864,8 +864,10 @@ def test_update_while_running_is_409() -> None:
 
 
 _SERVER_ASSIGNED_DETAIL = (
-    "The server is still assigned to a Worker. Wait for it to be released, then "
-    "try again."
+    "The server is still assigned to a Worker until its final snapshot is taken. "
+    "If the Worker refuses the snapshot, the server stays assigned until a retry "
+    "succeeds or someone allowed to stop it releases it without the snapshot. Try "
+    "again once it is released."
 )
 
 

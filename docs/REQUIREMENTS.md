@@ -314,8 +314,10 @@ Requirements:
   Community, specifying at least: Minecraft edition/version and server type
   (vanilla/Forge/Paper/etc. as supported). The execution backend is not a create
   parameter; it is fixed to container (FR-EXE-2, FR-EXE-3).
-- FR-SRV-2: Supported lifecycle operations: start, stop, restart, delete, and
-  configuration edit. Each maps to an operation code and is permission-gated.
+- FR-SRV-2: Supported lifecycle operations: start, stop, restart, delete,
+  configuration edit, and the release of a stopped server whose Worker refused
+  its final snapshot, without that snapshot (6.9). Each maps to an operation code
+  and is permission-gated.
 - FR-SRV-3: The API holds the authoritative record of each server (identity,
   Community, config, desired state, last-known runtime state, assigned Worker).
 - FR-SRV-4: Runtime state (running/stopped/starting/crashed) is reported by the
@@ -442,7 +444,10 @@ would lack that snapshot. Reads are served. The refusal is a
 `409 server_assigned`, and the operator retries once the server is released; a
 scheduled backup waits for the release by itself, for up to
 `reconciler.grace_seconds`, and then records a skipped run
-([docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 5.14).
+([docs/app/CONFIGURATION.md](app/CONFIGURATION.md) Section 5.14). While the
+Worker refuses the final snapshot, the server stays assigned until a retry of
+the snapshot succeeds, or until someone allowed to stop it releases it without
+the snapshot and gives up what that snapshot would have saved.
 
 ### 6.10 File Management
 

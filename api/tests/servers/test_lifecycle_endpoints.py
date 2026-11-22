@@ -54,6 +54,7 @@ from mc_server_dashboard_api.servers.application.lifecycle import (
 from mc_server_dashboard_api.servers.domain.control_plane import (
     MAX_CONSOLE_LINE_BYTES,
     CommandOutcome,
+    CommandStatus,
     UnavailableWorkerState,
     WorkerUnavailableError,
 )
@@ -461,12 +462,19 @@ def _desired_stopped(
     )
 
 
-def _post_real_stop(server: Server, cp: FakeControlPlane) -> httpx2.Response:
+def _post_real_stop(
+    server: Server,
+    cp: FakeControlPlane,
+    *,
+    recorder: RecordingAuditRecorder | None = None,
+) -> httpx2.Response:
     uow = FakeUnitOfWork()
     uow.servers.seed(server)
     use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
     app = _app(member=True, allow=True)
     _shared_app.dependency_overrides[get_stop_server] = lambda: use_case
+    if recorder is not None:
+        _shared_app.dependency_overrides[get_audit_recorder] = lambda: recorder
     return _client(app).post(_url(server.community_id.value, server.id.value, "stop"))
 
 
@@ -500,6 +508,46 @@ def test_stop_on_stopped_unknown_assigned_converges_like_the_reconciler() -> Non
     assert resp.status_code == 200
     assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
     assert resp.json()["assigned_worker_id"] is None
+
+
+@pytest.mark.parametrize("code", [CommandStatus.BUSY, CommandStatus.UNAVAILABLE])
+def test_a_stop_whose_final_snapshot_is_refused_answers_the_server_held(
+    code: CommandStatus,
+) -> None:
+    # Issue #3697: the stop the operator asked for is done, so it answers. The
+    # server stays assigned to its Worker, which still owes the snapshot, and
+    # the response says why.
+    worker = WorkerId(uuid.uuid4())
+    server = dataclasses.replace(_server(uuid.uuid4()), assigned_worker_id=worker)
+    cp = FakeControlPlane(outcomes={"snapshot": CommandOutcome(status=code)})
+
+    resp = _post_real_stop(server, cp)
+
+    assert resp.status_code == 200
+    assert [k for k, _, _ in cp.dispatched] == ["stop", "snapshot"]
+    body = resp.json()
+    assert body["observed_state"] == "stopped"
+    assert body["assigned_worker_id"] == str(worker.value)
+    assert body["final_snapshot_refusal"] == code.value
+
+
+def test_a_stop_of_a_held_server_refused_again_is_409_and_audited_denied() -> None:
+    # Issue #3697: an operator's stop of a held server retries the snapshot at
+    # once; a refusal again says so rather than a generic worker failure.
+    server = _desired_stopped(uuid.uuid4(), ObservedState.STOPPED, assigned=True)
+    cp = FakeControlPlane(
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
+    )
+    recorder = RecordingAuditRecorder()
+
+    resp = _post_real_stop(server, cp, recorder=recorder)
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "final_snapshot_refused"
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    [event] = recorder.events
+    assert event.operation == ops.SERVER_STOP
+    assert event.outcome is Outcome.DENIED
 
 
 def test_stop_on_an_unassigned_desired_stopped_server_is_still_409() -> None:

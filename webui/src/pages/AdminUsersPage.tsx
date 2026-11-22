@@ -523,7 +523,7 @@ function CreateUserDialog({
           <input
             id="admin-create-username"
             type="text"
-            autoComplete="off"
+            autoComplete="username"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             required
@@ -558,6 +558,7 @@ function CreateUserDialog({
           </label>
           <PasswordInput
             id="admin-create-password"
+            name="new-password"
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}

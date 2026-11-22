@@ -22,6 +22,7 @@ import pytest
 from fastapi import FastAPI, Request
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from mc_server_dashboard_api import dependencies
 from mc_server_dashboard_api.dependencies import get_release_held_server
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -98,6 +99,11 @@ def _release(
     )
 
 
+def _commits(release: ReleaseHeldServer) -> int:
+    assert isinstance(release.uow, FakeUnitOfWork)
+    return release.uow.commits
+
+
 def _seeded(server: Server) -> FakeServerRepository:
     repo = FakeServerRepository()
     repo.seed(server)
@@ -119,11 +125,11 @@ async def test_a_held_server_is_released_without_its_final_snapshot(
     # operator is given a way out of.
     server = _held(observed_state=observed, final_snapshot_refusal=refusal)
     repo = _seeded(server)
+    release = _release(repo)
 
-    released = await _release(repo)(
-        community_id=server.community_id, server_id=server.id
-    )
+    released = await release(community_id=server.community_id, server_id=server.id)
 
+    assert _commits(release) == 1
     row = repo.by_id[server.id]
     assert row.assigned_worker_id is None
     assert row.final_snapshot_refusal is None
@@ -181,24 +187,26 @@ async def test_a_server_not_held_by_a_refusal_is_not_released(
     server = _held(**changes)
     repo = _seeded(server)
     before = dataclasses.replace(repo.by_id[server.id])
+    release = _release(repo)
 
     with pytest.raises(InvalidLifecycleTransitionError):
-        await _release(repo)(community_id=server.community_id, server_id=server.id)
+        await release(community_id=server.community_id, server_id=server.id)
 
     assert repo.by_id[server.id] == before
+    assert _commits(release) == 0
 
 
 async def test_a_server_of_another_community_is_not_found() -> None:
     server = _held()
     repo = _seeded(server)
     before = dataclasses.replace(repo.by_id[server.id])
+    release = _release(repo)
 
     with pytest.raises(ServerNotFoundError):
-        await _release(repo)(
-            community_id=CommunityId(uuid.uuid4()), server_id=server.id
-        )
+        await release(community_id=CommunityId(uuid.uuid4()), server_id=server.id)
 
     assert repo.by_id[server.id] == before
+    assert _commits(release) == 0
 
 
 async def test_a_release_refuses_while_a_stop_convergence_holds_the_claim() -> None:
@@ -208,14 +216,14 @@ async def test_a_release_refuses_while_a_stop_convergence_holds_the_claim() -> N
     repo = _seeded(server)
     before = dataclasses.replace(repo.by_id[server.id])
     guard = StopConvergenceGuard()
+    release = _release(repo, guard)
 
     with guard.claim(server.id):
         with pytest.raises(LifecycleTransitionConflictError):
-            await _release(repo, guard)(
-                community_id=server.community_id, server_id=server.id
-            )
+            await release(community_id=server.community_id, server_id=server.id)
 
     assert repo.by_id[server.id] == before
+    assert _commits(release) == 0
 
 
 class _ReportLandsAfterTheRead(FakeServerRepository):
@@ -235,9 +243,12 @@ async def test_a_release_refuses_a_server_whose_state_moved_before_the_write() -
     server = _held()
     repo = _ReportLandsAfterTheRead()
     repo.seed(server)
+    release = _release(repo)
 
     with pytest.raises(LifecycleTransitionConflictError):
-        await _release(repo)(community_id=server.community_id, server_id=server.id)
+        await release(community_id=server.community_id, server_id=server.id)
+
+    assert _commits(release) == 0
 
     row = repo.by_id[server.id]
     assert row.assigned_worker_id == server.assigned_worker_id
@@ -316,9 +327,18 @@ async def test_a_release_refuses_while_a_final_snapshot_is_outstanding() -> None
     assert worker.queue.empty()
 
 
-async def test_the_http_release_shares_the_app_guard_and_event_bus() -> None:
+async def test_the_http_release_shares_the_app_guard_and_event_bus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The in-flight check and the release frame only work on the app's guard and
     # bus; a construction site left on a private default fails silently.
+    buses: list[object] = []
+
+    def _unit_of_work(_factory: object, events: object) -> FakeUnitOfWork:
+        buses.append(events)
+        return FakeUnitOfWork()
+
+    monkeypatch.setattr(dependencies, "ServersUnitOfWork", _unit_of_work)
     app = FastAPI()
     app.state.engine = create_async_engine("postgresql+asyncpg://u:p@h/db")
     app.state.real_time_events = InProcessRealTimeEvents()
@@ -331,4 +351,4 @@ async def test_the_http_release_shares_the_app_guard_and_event_bus() -> None:
         await app.state.engine.dispose()
 
     assert release.stop_convergence is app.state.stop_convergence
-    assert release.uow._real_time_events is app.state.real_time_events  # type: ignore[attr-defined]
+    assert buses == [app.state.real_time_events]
