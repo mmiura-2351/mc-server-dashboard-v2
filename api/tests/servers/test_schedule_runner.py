@@ -1365,6 +1365,8 @@ async def test_backups_failing_in_a_database_outage_leave_no_rows() -> None:
     schedule = _schedule(
         server,
         action=ScheduleAction.BACKUP,
+        # Keeps the next occurrence clear of the ticks below.
+        cadence=_HOURLY,
         only_when_running=False,
         next_run_at=_NOW - dt.timedelta(seconds=10),
     )
