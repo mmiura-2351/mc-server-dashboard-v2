@@ -1196,8 +1196,7 @@ func (m *Manager) Handle(ctx context.Context, cmd session.Command) session.Comma
 // StartServer, so the not-running precondition holds on the start path.
 func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) session.CommandResult {
 	if m.transfer == nil {
-		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
-			"instancemanager: no data-plane transfer client configured")
+		return failHydrate(cmd.CommandID, false, "instancemanager: no data-plane transfer client configured")
 	}
 	// Reserve the id for the duration of the transfer so a re-issued HydrateTrigger
 	// (or a racing StartServer/SnapshotTrigger) cannot write the same working set
@@ -1234,7 +1233,10 @@ func (m *Manager) handleHydrate(ctx context.Context, cmd session.Command) sessio
 	marker := func(gen uint64) []byte { return m.genKey.seal(cmd.ServerID, gen) }
 	gen, err := m.transfer.Hydrate(transferCtx, cmd.TransferURL, cmd.TransferToken, workingDir, marker)
 	if err != nil {
-		return fail(cmd.CommandID, session.CommandErrorTransferFailed,
+		// Only an error the transfer marked as from before its swap says the working
+		// dir is as it was (issue #4041). Any other may come from the swap, so the
+		// API is told the swap began, the safe direction.
+		return failHydrate(cmd.CommandID, !errors.Is(err, scratchformat.ErrBeforeSwap),
 			fmt.Sprintf("instancemanager: hydrate: %v", err))
 	}
 	// Record the generation the working set is now at (issue #763): the API served
@@ -5543,6 +5545,14 @@ func fail(commandID string, code session.CommandErrorCode, msg string) session.C
 		ErrorCode:    code,
 		ErrorMessage: msg,
 	}
+}
+
+// failHydrate builds the CommandErrorTransferFailed result of a hydrate, saying
+// whether its swap began (issue #4041).
+func failHydrate(commandID string, swapBegan bool, msg string) session.CommandResult {
+	res := fail(commandID, session.CommandErrorTransferFailed, msg)
+	res.SwapBegan = &swapBegan
+	return res
 }
 
 // failFileAccess builds a CommandErrorFileAccessDenied result carrying the

@@ -1556,6 +1556,7 @@ class CommandError(_message.Message):
     CODE_FIELD_NUMBER: _builtins.int
     MESSAGE_FIELD_NUMBER: _builtins.int
     FILE_ACCESS_REASON_FIELD_NUMBER: _builtins.int
+    SWAP_BEGAN_FIELD_NUMBER: _builtins.int
     code: Global___CommandErrorCode.ValueType
     """code classifies the failure for programmatic handling."""
     message: _builtins.str
@@ -1570,18 +1571,32 @@ class CommandError(_message.Message):
     leaves it UNSPECIFIED, and a genuine traversal/path denial, both map back to
     the pre-existing invalid-path behaviour.
     """
+    swap_began: _builtins.bool
+    """swap_began says whether a failed HydrateTrigger got as far as replacing the
+    server's working dir (issue #4041). The Worker sets it on every
+    TRANSFER_FAILED its hydrate handler answers, and on nothing else. It is true
+    from the first rename that moves the working dir aside or the new tree in:
+    a step that fails from there on can leave the working dir changed or absent.
+    It is false when the hydrate failed before that rename, as a failed pull or
+    unpack does, and the working dir is as it was. The field is OPTIONAL so that
+    absent, which is what an older Worker sends, reads as "unknown", which the API
+    treats as true.
+    """
     def __init__(
         self,
         *,
         code: Global___CommandErrorCode.ValueType = ...,
         message: _builtins.str = ...,
         file_access_reason: Global___FileAccessReason.ValueType = ...,
+        swap_began: _builtins.bool | None = ...,
     ) -> None: ...
-    _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
+    _HasFieldArgType: _TypeAlias = _typing.Literal["_swap_began", b"_swap_began", "swap_began", b"swap_began"]  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["code", b"code", "file_access_reason", b"file_access_reason", "message", b"message"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["_swap_began", b"_swap_began", "code", b"code", "file_access_reason", b"file_access_reason", "message", b"message", "swap_began", b"swap_began"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
-    def WhichOneof(self, oneof_group: _Never) -> None: ...
+    _WhichOneofReturnType__swap_began: _TypeAlias = _typing.Literal["swap_began"]  # noqa: Y015
+    _WhichOneofArgType__swap_began: _TypeAlias = _typing.Literal["_swap_began", b"_swap_began"]  # noqa: Y015
+    def WhichOneof(self, oneof_group: _WhichOneofArgType__swap_began) -> _WhichOneofReturnType__swap_began | None: ...
 
 Global___CommandError: _TypeAlias = CommandError  # noqa: Y015
 

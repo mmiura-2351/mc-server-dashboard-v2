@@ -701,12 +701,23 @@ async def _post_snapshot(
             (2, b"packed-by-a"),
         ),
         (
+            CommandOutcome(
+                status=CommandStatus.TRANSFER_FAILED, message="pull", swap_began=False
+            ),
+            204,
+            (2, b"packed-by-a"),
+        ),
+        (
             CommandOutcome(status=CommandStatus.TRANSFER_FAILED, message="unpack"),
             409,
             (1, b"a-g1"),
         ),
     ],
-    ids=["refused-before-the-pull", "transfer-failed"],
+    ids=[
+        "refused-before-the-pull",
+        "transfer-failed-before-the-swap",
+        "transfer-failed",
+    ],
 )
 @_BACKENDS
 def test_a_resent_start_whose_hydrate_failed_marks_the_row_by_what_it_left(
@@ -718,9 +729,10 @@ def test_a_resent_start_whose_hydrate_failed_marks_the_row_by_what_it_left(
     live: tuple[int, bytes],
 ) -> None:
     # Issue #4024. A re-sent start marked the row before it hydrated A. Refused
-    # before the pull, the hydrate left A's working set as it was, so the start
-    # put the mark back, and A's next snapshot lands. A failed transfer may have
-    # swapped the new tree in, so the mark stays, and the snapshot is refused
+    # before the pull, or failed before its swap as A said (issue #4041), the
+    # hydrate left A's working set as it was, so the start put the mark back, and
+    # A's next snapshot lands. A failed transfer that says nothing of its swap may
+    # have swapped the new tree in, so the mark stays, and the snapshot is refused
     # until a hydrate lands.
     storage = make_storage(tmp_path)
     server = _server(
