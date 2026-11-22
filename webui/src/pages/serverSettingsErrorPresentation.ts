@@ -22,9 +22,10 @@ export interface SettingsErrorPresentation {
 const SETTINGS_ERROR_KEY: Record<string, TranslationKey> = {
   server_not_stopped: "serverDetail.error.notStopped",
   server_unsettled: "serverDetail.error.unsettled",
-  // A delete a Worker still holds (#3852): the cache showed the server
-  // released, so the button was not held. Same words as the held button.
-  server_assigned: "serverDetail.danger.deleteAwaitsRelease",
+  // A save, delete or export the stop's Worker still holds the server for
+  // (#3852, #3998): the cache showed the server released, so the control was
+  // not held. One neutral message, as on the other tabs (#4003).
+  server_assigned: "common.serverAssigned",
   // A rename the server-name rule refuses (#3957). The save sends the name
   // only when it changed (#3988), so a server stored with such a name before
   // the rule still saves its other settings.

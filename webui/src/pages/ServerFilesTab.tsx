@@ -30,7 +30,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { zip } from "fflate";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useNavigate as useRouterNavigate } from "react-router";
 import {
   ApiError,
@@ -71,7 +71,7 @@ import {
   fileReadErrorPresentation,
   fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
-import { atRest, normalizeState } from "./serverState.ts";
+import { atRestWriteRefusal, normalizeState } from "./serverState.ts";
 import { useFileBrowserParams } from "./urlState.ts";
 import { type NavState, useNavHistory } from "./useNavHistory.ts";
 
@@ -306,10 +306,16 @@ export function ServerFilesTab({
 
   const canRead = can("file:read", { serverId: server.id });
   const canEdit = can("file:edit", { serverId: server.id });
-  const notAtRest = !atRest(
+  const writeRefusal = atRestWriteRefusal(
     normalizeState(server.observed_state),
     normalizeState(server.desired_state),
+    server.assigned_worker_id !== null,
   );
+  const notAtRest = writeRefusal === "not_at_rest";
+  // A stop holds its Worker until the final snapshot settles, and the API
+  // refuses every write until the release (409 server_assigned, #3998), while
+  // it still serves the reads: the writes are held, the downloads stay.
+  const held = writeRefusal === "server_assigned";
 
   // URL-driven file browser state: `?dir=` and `?file=` query params sync with
   // the browser history so back/forward restore the prior view (#1484).
@@ -647,7 +653,7 @@ export function ServerFilesTab({
   // Drag-and-drop state for the file-tree drop zone.
   const dragCounter = useRef(0);
   const [dragOver, setDragOver] = useState(false);
-  const dropEnabled = canEdit && !notAtRest;
+  const dropEnabled = canEdit && !notAtRest && !held;
 
   const onDragEnter = useCallback(
     (e: React.DragEvent) => {
@@ -1101,7 +1107,7 @@ export function ServerFilesTab({
       }
 
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selected.size > 0 && canEdit && !notAtRest) {
+        if (selected.size > 0 && canEdit && !notAtRest && !held) {
           e.preventDefault();
           setKbDeleteOpen(true);
         }
@@ -1109,7 +1115,13 @@ export function ServerFilesTab({
       }
 
       if (e.key === "F2") {
-        if (selected.size === 1 && canEdit && !notAtRest && listing.data) {
+        if (
+          selected.size === 1 &&
+          canEdit &&
+          !notAtRest &&
+          !held &&
+          listing.data
+        ) {
           e.preventDefault();
           const selectedPath = Array.from(selected)[0];
           const name = selectedPath.split("/").at(-1) ?? selectedPath;
@@ -1157,7 +1169,7 @@ export function ServerFilesTab({
       }
 
       if (e.key === "v" && (e.ctrlKey || e.metaKey)) {
-        if (clipboard.length > 0 && canEdit && !notAtRest) {
+        if (clipboard.length > 0 && canEdit && !notAtRest && !held) {
           e.preventDefault();
           void pasteFilesRef.current();
         }
@@ -1199,7 +1211,16 @@ export function ServerFilesTab({
 
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [selected, canEdit, notAtRest, listing.data, dir, clipboard, showToast]);
+  }, [
+    selected,
+    canEdit,
+    notAtRest,
+    held,
+    listing.data,
+    dir,
+    clipboard,
+    showToast,
+  ]);
 
   if (!canRead) {
     return <p className="field-error">{t("files.denied")}</p>;
@@ -1224,6 +1245,7 @@ export function ServerFilesTab({
       {notAtRest && (
         <div className="notice info">{t("files.runningNotice")}</div>
       )}
+      {held && <div className="notice info">{t("common.serverAssigned")}</div>}
       {contentDirNotice && (
         <ContentDirNotice
           serverType={server.server_type}
@@ -1242,6 +1264,7 @@ export function ServerFilesTab({
         canEdit={canEdit}
         maxBulkDownloadBytes={maxBulkDownloadBytes}
         running={notAtRest}
+        held={held}
         onChanged={refetchList}
         onError={onError}
         selected={selected}
@@ -1333,6 +1356,7 @@ export function ServerFilesTab({
               serverId={serverId}
               canEdit={canEdit}
               running={notAtRest}
+              held={held}
               openFile={openFile}
               onEnter={enter}
               onChanged={() => {
@@ -1409,6 +1433,7 @@ export function ServerFilesTab({
               canEdit={canEdit}
               can={can}
               running={notAtRest}
+              held={held}
               fileSize={
                 listing.data?.entries.find(
                   (e) => joinPath(dir, e.name) === openFile,
@@ -1688,6 +1713,7 @@ function Listing({
   serverId,
   canEdit,
   running,
+  held,
   openFile,
   onEnter,
   onChanged,
@@ -1710,6 +1736,8 @@ function Listing({
   serverId: string;
   canEdit: boolean;
   running: boolean;
+  /** At rest, but the stop's Worker still holds the server: no edit applies. */
+  held: boolean;
   openFile: string | null;
   onEnter: (entry: DirEntry) => void;
   onChanged: () => void;
@@ -1727,6 +1755,8 @@ function Listing({
   onExtract: (file: File) => void;
 }) {
   const { showToast } = useToast();
+  // The context menu offers no edit while the server is held; its reads stay.
+  const menuCanEdit = canEdit && !held;
   const [renaming, setRenaming] = useState<DirEntry | null>(null);
   const [deleting, setDeleting] = useState<DirEntry | null>(null);
   const [mkdirOpen, setMkdirOpen] = useState(false);
@@ -1860,7 +1890,7 @@ function Listing({
           // Only fire for empty space (not bubbled from a file row).
           if ((e.target as HTMLElement).closest(".file-row")) return;
           e.preventDefault();
-          if (contextMenuHasItems(null, canEdit, running)) {
+          if (contextMenuHasItems(null, menuCanEdit, running)) {
             setContextMenu({ entry: null, x: e.clientX, y: e.clientY });
           }
         }}
@@ -1883,7 +1913,7 @@ function Listing({
               onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                if (contextMenuHasItems(entry, canEdit, running)) {
+                if (contextMenuHasItems(entry, menuCanEdit, running)) {
                   setContextMenu({ entry, x: e.clientX, y: e.clientY });
                 }
               }}
@@ -2021,7 +2051,7 @@ function Listing({
               entry={ctxEntry}
               x={contextMenu.x}
               y={contextMenu.y}
-              canEdit={canEdit}
+              canEdit={menuCanEdit}
               running={running}
               onClose={() => setContextMenu(null)}
               onOpen={
@@ -2294,6 +2324,7 @@ function Viewer({
   canEdit,
   can,
   running,
+  held,
   fileSize,
   onClose,
   onError,
@@ -2306,6 +2337,8 @@ function Viewer({
   canEdit: boolean;
   can: Can;
   running: boolean;
+  /** At rest, but the stop's Worker still holds the server: Save is held. */
+  held: boolean;
   fileSize?: number;
   onClose: () => void;
   onError: (error: unknown) => void;
@@ -2322,6 +2355,7 @@ function Viewer({
     onDraftChange(draft !== null);
   }, [draft, onDraftChange]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const heldId = useId();
 
   const canHistory = can("file:history", { serverId });
 
@@ -2441,7 +2475,8 @@ function Viewer({
             <button
               type="button"
               className="btn sm primary"
-              disabled={draft === null || save.isPending}
+              disabled={draft === null || save.isPending || held}
+              aria-describedby={held ? heldId : undefined}
               onClick={() =>
                 draft !== null &&
                 save.mutate({ text: draft, charset: decoded.charset })
@@ -2467,6 +2502,7 @@ function Viewer({
           serverId={serverId}
           mcVersion={mcVersion}
           canRollback={can("file:rollback", { serverId })}
+          held={held}
           onClose={() => setHistoryOpen(false)}
           onRolledBack={() => {
             queryClient.invalidateQueries({ queryKey: contentKey });
@@ -2479,6 +2515,11 @@ function Viewer({
         <>
           {running && canEdit && (
             <p className="field-hint">{t("files.runningNotice")}</p>
+          )}
+          {held && canEdit && (
+            <p className="field-hint" id={heldId}>
+              {t("common.serverAssigned")}
+            </p>
           )}
           <textarea
             className="file-editor"
@@ -2511,6 +2552,7 @@ function HistoryDrawer({
   serverId,
   mcVersion,
   canRollback,
+  held,
   onClose,
   onRolledBack,
   onError,
@@ -2520,6 +2562,8 @@ function HistoryDrawer({
   serverId: string;
   mcVersion: string;
   canRollback: boolean;
+  /** At rest, but the stop's Worker still holds the server: no rollback. */
+  held: boolean;
   onClose: () => void;
   onRolledBack: () => void;
   onError: (error: unknown) => void;
@@ -2530,6 +2574,7 @@ function HistoryDrawer({
   // The version selected for a read-only content preview, or `null` when the
   // preview is closed. Keyed query fetches only while a version is selected.
   const [previewing, setPreviewing] = useState<string | null>(null);
+  const heldId = useId();
 
   const historyKey = ["files", "history", communityId, serverId, path];
   const history = useQuery({
@@ -2635,7 +2680,8 @@ function HistoryDrawer({
               <button
                 type="button"
                 className="btn danger"
-                disabled={rollback.isPending}
+                disabled={rollback.isPending || held}
+                aria-describedby={held ? heldId : undefined}
                 onClick={() => rollback.mutate(confirming)}
               >
                 {t("files.rollback.confirm")}
@@ -2647,6 +2693,11 @@ function HistoryDrawer({
           <p className="files-history-date">
             {versionDate(confirming).toLocaleString()}
           </p>
+          {held && (
+            <p className="field-hint" id={heldId}>
+              {t("common.serverAssigned")}
+            </p>
+          )}
         </Modal>
       )}
       {previewing !== null && (
@@ -2705,6 +2756,7 @@ function Toolbar({
   canEdit,
   maxBulkDownloadBytes,
   running,
+  held,
   onChanged,
   onError,
   selected,
@@ -2720,6 +2772,8 @@ function Toolbar({
   canEdit: boolean;
   maxBulkDownloadBytes: number;
   running: boolean;
+  /** At rest, but the stop's Worker still holds the server: no bulk edit. */
+  held: boolean;
   onChanged: () => void;
   onError: (error: unknown) => void;
   selected: Set<string>;
@@ -2997,6 +3051,7 @@ function Toolbar({
   const atRestTooltip = running
     ? t("files.error.serverMustBeStopped")
     : undefined;
+  const editTooltip = held ? t("common.serverAssigned") : atRestTooltip;
 
   return (
     <>
@@ -3026,8 +3081,8 @@ function Toolbar({
             <button
               type="button"
               className="btn sm danger"
-              disabled={running || bulkBusy}
-              title={atRestTooltip}
+              disabled={running || held || bulkBusy}
+              title={editTooltip}
               onClick={() => setBulkDeleteOpen(true)}
             >
               {t("files.bulk.delete")}
@@ -3044,8 +3099,8 @@ function Toolbar({
             <button
               type="button"
               className="btn sm"
-              disabled={running || bulkBusy}
-              title={atRestTooltip}
+              disabled={running || held || bulkBusy}
+              title={editTooltip}
               onClick={() => setBulkMoveOpen(true)}
             >
               {t("files.bulk.move")}

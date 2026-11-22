@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -21,7 +22,7 @@ import { setAccessToken } from "../auth/tokenStore.ts";
 import { ToastProvider } from "../components/Toast.tsx";
 import { t } from "../i18n/index.ts";
 import type { Can } from "../permissions/useCan.ts";
-import { installMockWebSocket } from "../test/mockWebSocket.ts";
+import { installMockWebSocket, MockWebSocket } from "../test/mockWebSocket.ts";
 import { ServerDetailPage } from "./ServerDetailPage.tsx";
 
 const CID = "c1";
@@ -522,7 +523,13 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
   });
 
   it("restores after typed confirm when stopped", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
+    });
     mockApi.post.mockResolvedValue(undefined);
     await openBackups();
 
@@ -548,7 +555,11 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
   it("gates a quarantined restore behind acknowledgement and sends force=true (#745)", async () => {
     routeGet({
-      srv: { observed_state: "stopped", desired_state: "stopped" },
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
       backups: [backup({ health: "quarantined" })],
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -585,7 +596,11 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
   it("offers no restore for an unreadable backup, even when stopped (#2374)", async () => {
     routeGet({
-      srv: { observed_state: "stopped", desired_state: "stopped" },
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
       backups: [backup({ health: "unreadable" })],
     });
     await openBackups();
@@ -608,7 +623,11 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
 
   it("restores a healthy backup without force and with no extra acknowledgement", async () => {
     routeGet({
-      srv: { observed_state: "stopped", desired_state: "stopped" },
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
       backups: [backup({ health: "healthy" })],
     });
     mockApi.post.mockResolvedValue(undefined);
@@ -718,7 +737,13 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
   });
 
   it("surfaces a 409 server_not_stopped specifically on restore", async () => {
-    routeGet({ srv: { observed_state: "stopped", desired_state: "stopped" } });
+    routeGet({
+      srv: {
+        observed_state: "stopped",
+        desired_state: "stopped",
+        assigned_worker_id: null,
+      },
+    });
     mockApi.post.mockRejectedValue(
       new ApiError(409, { reason: "server_not_stopped" }),
     );
@@ -745,6 +770,69 @@ describe("ServerBackupsTab restore (stopped-only two-step)", () => {
     expect(
       screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
     ).toHaveValue("RESTORE");
+  });
+});
+
+// A stop holds its Worker until the final snapshot settles, and the API
+// refuses a restore until the release (409 server_assigned, #3998): the server
+// reads stopped, so the confirm is held, with the reason (#4003).
+describe("ServerBackupsTab restore of a stopped server its Worker still holds", () => {
+  const held = {
+    observed_state: "stopped",
+    desired_state: "stopped",
+    assigned_worker_id: "worker-a",
+  };
+
+  async function openRestoreAndType() {
+    await openBackups();
+    fireEvent.click(
+      await screen.findByRole("button", { name: t("backups.restore") }),
+    );
+    fireEvent.change(
+      screen.getByPlaceholderText(t("backups.restoreDialog.phrase")),
+      { target: { value: "RESTORE" } },
+    );
+    return screen.getByRole("button", {
+      name: t("backups.restoreDialog.confirm"),
+    });
+  }
+
+  it("holds the confirm with the reason", async () => {
+    routeGet({ srv: held });
+    const confirm = await openRestoreAndType();
+
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAccessibleDescription(t("common.serverAssigned"));
+  });
+
+  it("frees the confirm on the release frame", async () => {
+    routeGet({ srv: held });
+    mockApi.post.mockResolvedValue(undefined);
+    const confirm = await openRestoreAndType();
+    expect(confirm).toBeDisabled();
+
+    act(() => {
+      MockWebSocket.last().open();
+      MockWebSocket.last().message(
+        JSON.stringify({
+          stream: "status",
+          ts: "t",
+          payload: { assigned_worker_id: null },
+        }),
+      );
+    });
+
+    // The frame alone frees it: every REST read still answers worker-a.
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(
+      screen.queryByText(t("common.serverAssigned")),
+    ).not.toBeInTheDocument();
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        `/api/communities/${CID}/servers/${SID}/backups/${BID}/restore`,
+      ),
+    );
   });
 });
 
