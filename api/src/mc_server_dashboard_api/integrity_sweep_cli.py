@@ -32,6 +32,25 @@ to re-run.
 ``log.level=debug`` logs the traceback of a 3. Any other error, a full disk on
 the store for one, ends in a traceback, and Python exits 1 for it too, so a 1
 alone does not prove a store outage.
+
+``--delete-dangling`` runs :class:`DeleteDanglingBackups` instead of the sweep
+(issue #4107): it lists the backup rows whose archive the store reports missing,
+with a HEAD per row rather than a full read, and deletes nothing. ``--apply``
+deletes the rows it lists, each audited as ``backup:delete_dangling``; it runs
+only while the store owner marker names this database's installation
+(STORAGE.md Section 4.3), since a store that is not this database's answers
+NotFound for every row. ``--server`` scopes it the same way::
+
+    cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
+        --delete-dangling [--apply] [--server <server-uuid>]
+
+Its exit status keeps the meanings above: 0 when the pass completed; 1 when it
+completed but skipped a row the store could not answer for (an outage, a
+timeout), or stopped when deleting an archive met an outage; 2 on a bad
+argument, ``--apply`` without ``--delete-dangling`` among them, on a bad
+configuration, or when ``--apply`` refuses a store not marked for this
+database; 3 when the database failed or a lifecycle lock was lost. Rows already
+deleted stay deleted, so a re-run is safe.
 """
 
 from __future__ import annotations
@@ -62,16 +81,22 @@ from mc_server_dashboard_api.core.adapters.database import (
     is_transient_database_error,
     translate_connect_outages,
 )
+from mc_server_dashboard_api.core.adapters.installation import read_installation_id
 from mc_server_dashboard_api.logging import configure_logging
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
 from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.servers.adapters.unit_of_work import SqlAlchemyUnitOfWork
+from mc_server_dashboard_api.servers.application.backups import (
+    DanglingBackups,
+    DeleteDanglingBackups,
+)
 from mc_server_dashboard_api.servers.application.integrity_sweep import (
     IntegritySweep,
     SweepSummary,
 )
+from mc_server_dashboard_api.servers.domain.backup import Backup
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
@@ -155,6 +180,53 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
         await engine.dispose()
 
 
+class StoreNotOwnedError(Exception):
+    """The store's owner marker does not name this database's installation."""
+
+
+async def run_delete_dangling(
+    settings: Settings, *, server_id: ServerId | None, apply: bool
+) -> DanglingBackups:
+    """List, and with ``apply`` delete, the dangling backup rows (issue #4107).
+
+    Wired as :func:`run` wires the sweep, the lock on its own engine. An applied
+    pass first checks that the store owner marker names this database's
+    installation (STORAGE.md Section 4.3), and raises
+    :class:`StoreNotOwnedError` otherwise: a store that is not this database's,
+    a wrong bucket or fs root, answers NotFound for every row, so the pass
+    would delete them all. A dry run deletes nothing, so it runs without the
+    check.
+    """
+
+    engine = _engine(
+        settings.database,
+        pool_size=settings.database.pool_size,
+        max_overflow=settings.database.max_overflow,
+    )
+    lock_engine = _engine(settings.database, pool_size=1, max_overflow=0)
+    try:
+        session_factory = create_session_factory(engine)
+        storage, ownership = _build_storage(settings)
+        if apply:
+            refusal = await ownership.refusal_for(
+                await read_installation_id(session_factory)
+            )
+            if refusal is not None:
+                raise StoreNotOwnedError(refusal)
+        delete_dangling = DeleteDanglingBackups(
+            uow=SqlAlchemyUnitOfWork(session_factory),
+            backup_store=StorageBackupStoreAdapter(storage=storage),
+            audit=LoggingAuditRecorder(
+                SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
+            ),
+            lifecycle_lock=PgLifecycleLock(engine=lock_engine),
+        )
+        return await delete_dangling(apply=apply, server_id=server_id)
+    finally:
+        await lock_engine.dispose()
+        await engine.dispose()
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m mc_server_dashboard_api.integrity_sweep_cli",
@@ -165,7 +237,23 @@ def main(argv: list[str]) -> int:
         metavar="UUID",
         help="scope the sweep to a single server id (default: every server)",
     )
+    parser.add_argument(
+        "--delete-dangling",
+        action="store_true",
+        help=(
+            "instead of the sweep, list the backup rows whose archive the store "
+            "reports missing; a dry run unless --apply is given (issue #4107)"
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="with --delete-dangling, delete the rows it lists",
+    )
     args = parser.parse_args(argv)
+    if args.apply and not args.delete_dangling:
+        sys.stderr.write("--apply needs --delete-dangling\n")
+        return 2
 
     server_id: ServerId | None = None
     if args.server is not None:
@@ -187,6 +275,8 @@ def main(argv: list[str]) -> int:
     # The API's handler, level and format (issue #3942), so the sweep's lines are
     # escaped as the API's are (issue #3938).
     configure_logging(settings.log.level, settings.log.format)
+    if args.delete_dangling:
+        return _delete_dangling(settings, server_id=server_id, apply=args.apply)
     try:
         summary = asyncio.run(run(settings, server_id=server_id))
     except BackupStorageUnavailableError as exc:
@@ -249,6 +339,74 @@ def main(argv: list[str]) -> int:
         f"{summary.snapshots_not_examined}"
     )
     return 0
+
+
+def _delete_dangling(
+    settings: Settings, *, server_id: ServerId | None, apply: bool
+) -> int:
+    """Run ``--delete-dangling`` and print what it found; the exit status."""
+
+    stopped = "so the pass stopped. Rows already deleted this run stay deleted, and"
+    try:
+        found = asyncio.run(
+            run_delete_dangling(settings, server_id=server_id, apply=apply)
+        )
+    except StoreNotOwnedError as exc:
+        sys.stderr.write(f"dangling backups: refusing to delete: {exc}\n")
+        return 2
+    except BackupStorageUnavailableError as exc:
+        # The HEAD answered NotFound, then the (idempotent) archive delete of
+        # the row met an outage: the row was not deleted.
+        sys.stderr.write(
+            f"dangling backups aborted: the object store failed while deleting "
+            f"the archive of a dangling row on server {exc}, {stopped} it is safe "
+            f"to re-run.\n"
+        )
+        return 1
+    except LifecycleLockLostError as exc:
+        _LOG.debug("dangling backups: the lifecycle lock was lost", exc_info=True)
+        sys.stderr.write(
+            f"dangling backups aborted: the lifecycle lock on server {exc} was "
+            f"lost, {stopped} it is safe to re-run.\n"
+        )
+        return 3
+    except Exception as exc:
+        if not _is_database_failure(exc):
+            raise
+        _LOG.debug("dangling backups: the database failed", exc_info=True)
+        detail = exc.orig if isinstance(exc, DBAPIError) else exc
+        sys.stderr.write(
+            f"dangling backups aborted: the database failed "
+            f"({type(exc).__name__}: {detail}), {stopped} it is safe to re-run.\n"
+        )
+        return 3
+    print(f"servers scanned: {found.servers_scanned}")
+    _print_rows("dangling backup rows (the store reports no archive)", found.dangling)
+    _print_rows(
+        "skipped (the store could not say whether the archive exists; re-run "
+        "once it is healthy)",
+        found.skipped_store_error,
+    )
+    _print_rows("skipped (server busy; re-run to check them)", found.skipped_busy)
+    if apply:
+        print(
+            f"deleted: {len(found.dangling)} (each audited as backup:delete_dangling)"
+        )
+    else:
+        print(
+            "dry run: nothing was deleted. Re-run with --apply to delete the "
+            "dangling rows listed above."
+        )
+    return 1 if found.skipped_store_error else 0
+
+
+def _print_rows(heading: str, rows: tuple[Backup, ...]) -> None:
+    print(f"{heading}: {len(rows)}")
+    for row in rows:
+        print(
+            f"  backup {row.id.value} of server {row.server_id.value}, created "
+            f"{row.created_at.isoformat()}, source {row.source.value}"
+        )
 
 
 if __name__ == "__main__":
