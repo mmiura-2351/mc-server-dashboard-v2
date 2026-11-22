@@ -1737,6 +1737,37 @@ async def test_a_record_owed_for_hours_warns_once_an_hour(
 # finished, so the occurrences that came due meanwhile follow the missed-run rule.
 
 
+class _SlowArchiveStore(FakeBackupArchiveStore):
+    """An archive that takes ``duration`` of the fake clock."""
+
+    def __init__(self, clock: FakeClock, duration: dt.timedelta) -> None:
+        super().__init__()
+        self._clock = clock
+        self._duration = duration
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        self._clock.set(self._clock.now() + self._duration)
+        await super().create_from_current(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+async def test_a_run_advances_to_the_first_occurrence_after_it_finished() -> None:
+    clock = FakeClock(_NOW)
+    env = _env(
+        backup_store=_SlowArchiveStore(clock, dt.timedelta(hours=1)), clock=clock
+    )
+    schedule = _backup_schedule(env)
+
+    await env.runner.tick()
+
+    # Ran 12:00:30 to 13:00:30: the 13:00 occurrence came due during the run.
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at == _NOW.replace(hour=14, minute=0, second=0)
+
+
 async def test_backups_due_while_a_record_is_owed_coalesce_into_one_catch_up() -> None:
     store = FakeBackupArchiveStore()
     env = _env(backup_store=store)
