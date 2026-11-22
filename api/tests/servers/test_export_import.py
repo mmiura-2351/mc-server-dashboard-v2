@@ -348,6 +348,31 @@ async def test_import_seeds_rcon_when_archive_has_no_properties() -> None:
     assert props["rcon.password"] != ""
 
 
+@pytest.mark.parametrize(
+    "members",
+    [
+        pytest.param({"server.properties": b"motd=hi\n"}, id="archive-properties"),
+        pytest.param({"world/level.dat": b"\x00"}, id="no-properties"),
+    ],
+)
+async def test_import_does_not_add_the_new_server_sync_chunk_writes(
+    members: dict[str, bytes],
+) -> None:
+    # sync-chunk-writes=false is what a NEW server starts with (issue #3443). An
+    # imported server keeps the settings its archive carries, so the key is not
+    # added -- not to the archive's file, and not to the platform keys seeded
+    # when the archive has no file.
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), **members})
+    await imp(community_id=CommunityId(uuid.uuid4()), name="fresh", content=archive)
+    assert "sync-chunk-writes" not in _parse_properties(
+        dst_store.files["server.properties"]
+    )
+
+
 # --- import: platform-managed keys (issue #2621) ----------------------------
 
 
