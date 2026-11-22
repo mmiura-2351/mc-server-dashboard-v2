@@ -274,7 +274,9 @@ class _CommitLandsThenRaises(FakeUnitOfWork):
     """A unit of work whose ``at``-th commit lands, then raises ``error``.
 
     That is an ambiguous commit: a lost response raises a database error, and a
-    client disconnect cancels the request task at the same await.
+    task cancelled at the same await raises ``CancelledError``. A client
+    disconnect does not cancel it on the shipped server stack unless the handler
+    reads the request body (issue #3950).
     """
 
     def __init__(
@@ -639,6 +641,9 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
     # the stop then commits and is sent while the re-send re-reads. A bump made
     # before the write would precede the re-send's read of the counter, and the
     # start would follow the stop out. The bump follows the commit, so it is seen.
+    # The re-send marked the row before its hydrate, which landed, so the mark
+    # stays: the re-send does not clear the mark of a row no longer its own, and
+    # the release takes no snapshot, as after a user start (issue #4024).
     world = _World(desired=DesiredState.RUNNING, assigned=True)
     write = asyncio.Event()
     world.repo.pause_next_flip = write
@@ -656,9 +661,127 @@ async def test_a_re_sent_start_sees_a_stop_that_was_waiting_on_its_write() -> No
             community_id=world.community, server_id=world.server_id
         )
 
-    assert world.kinds() == ["hydrate", "stop", "snapshot"]
+    assert world.kinds() == ["hydrate", "stop"]
     assert world.stored() == (DesiredState.STOPPED, None)
     assert world.cp.live == set()
+
+
+class _StopDuringTheWait(FakeStoreGenerationReader):
+    """A store whose wait for the Worker's uploads runs ``during`` first."""
+
+    def __init__(self, during: Hook) -> None:
+        super().__init__()
+        self._during = during
+
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        await self._during()
+        return True
+
+
+async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot() -> None:
+    # Issue #4024. The re-sent start marked the row before its wait for the
+    # Worker's uploads, and an operator's stop commits during the wait and is
+    # sent. The start then answers the conflict without sending its hydrate, so
+    # the Worker's working set is as it was, and the start puts the mark back.
+    # The stop, whose answer comes after that, takes the final snapshot it would
+    # have taken without the start. Had its answer come first, it would have
+    # found the mark and taken none. The stop runs a second later, so its flip
+    # stamps the row anew, and the start knows the row by the stamp the stop's
+    # bump recorded.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    world.cp.hold_stop_answer = asyncio.Event()
+    stops: list[asyncio.Task[Server]] = []
+    later = StopServer(
+        uow=FakeUnitOfWork(servers=world.repo),
+        control_plane=world.cp,
+        clock=FakeClock(_NOW + dt.timedelta(seconds=1)),
+        stop_intents=world.intents,
+    )
+
+    async def stop_is_sent() -> None:
+        stops.append(
+            asyncio.create_task(
+                later(community_id=world.community, server_id=world.server_id)
+            )
+        )
+        await world.cp.stop_sent.wait()
+
+    start = replace(
+        world.start_server(), store_generation=_StopDuringTheWait(stop_is_sent)
+    )
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await start.redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    world.cp.hold_stop_answer.set()
+    await stops[0]
+
+    assert world.kinds() == ["stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
+async def test_a_drain_during_a_re_sent_starts_wait_leaves_the_final_snapshot() -> None:
+    # Issue #4024. A drain of the Worker withdraws the re-sent start's intent
+    # during its wait, a second later, so its flip stamps the row anew. The start
+    # answers the conflict without sending its hydrate, and finds the row by the
+    # stamp the drain's bump recorded, so it puts the mark back. The stop sent
+    # after the drain then takes the final snapshot.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    drain = StopServersAssignedToWorker(
+        uow=FakeUnitOfWork(servers=world.repo),
+        clock=FakeClock(_NOW + dt.timedelta(seconds=1)),
+        stop_intents=world.intents,
+    )
+
+    async def drained() -> None:
+        assert await drain(worker_id=world.worker) == [world.server_id]
+
+    start = replace(world.start_server(), store_generation=_StopDuringTheWait(drained))
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await start.redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    assert world.repo.by_id[world.server_id].awaiting_hydrate is False
+    await world.stop()
+
+    assert world.kinds() == ["stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
+async def test_a_stop_after_a_re_sent_starts_hydrate_takes_no_final_snapshot() -> None:
+    # Issue #4024. The same stop, but it commits once the re-sent start's hydrate
+    # has landed, as the start re-reads the row before it sends. The start
+    # answers the conflict, and its hydrate may have replaced the Worker's
+    # working set, so it leaves its mark: the stop, whose answer comes after
+    # that, takes no final snapshot, as after a user start.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    world.cp.hold_stop_answer = asyncio.Event()
+    stops: list[asyncio.Task[Server]] = []
+
+    async def stop_is_sent() -> None:
+        stops.append(asyncio.create_task(world.stop()))
+        await world.cp.stop_sent.wait()
+
+    world.after_hydrate_and_next_read(stop_is_sent)
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await world.start_server().redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    world.cp.hold_stop_answer.set()
+    await stops[0]
+
+    assert world.kinds() == ["hydrate", "stop"]
+    assert world.stored() == (DesiredState.STOPPED, None)
 
 
 async def test_a_re_sent_start_reads_the_counter_before_it_finds_the_intent() -> None:

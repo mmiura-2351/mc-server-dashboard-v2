@@ -2417,17 +2417,19 @@ export interface paths {
          *     fence is permissive when no worker is assigned (``None``): the held-assignment
          *     final-snapshot window and the post-clear no-replacement case must still land.
          *
-         *     A placement whose Worker has not hydrated the server yet (``awaiting_hydrate``,
-         *     issue #3890) accepts no publish from that Worker at all, before the upload (409
-         *     ``publisher_awaiting_hydrate``): its scratch may be a leftover older than the
-         *     store, whatever base it declares. No base (a scratch whose generation marker
-         *     reads 0), a stale base, one whose ``current`` it published itself and the
+         *     A placement whose Worker is not known to hold the store's working set
+         *     (``awaiting_hydrate``: it has not hydrated the server under this assignment,
+         *     issue #3890, or a re-sent start marked it for a new hydrate that has not cleared
+         *     the mark, issue #4024) accepts no publish from that Worker at all, before the
+         *     upload (409 ``publisher_awaiting_hydrate``): its scratch may be a leftover older
+         *     than the store, whatever base it declares. No base (a scratch whose generation
+         *     marker reads 0), a stale base, one whose ``current`` it published itself and the
          *     current one are all refused, and so is a publish that does not name its Worker,
          *     which cannot be told from it. A late final snapshot of that Worker's previous
          *     assignment that starts uploading after the placement is refused the same way:
-         *     its scratch stays on the Worker, and the store wins. An upload that passed
-         *     this check before the placement was marked still commits, since the
-         *     commit-time fence stays keyed on the Worker id.
+         *     its scratch stays on the Worker, and the store wins. An upload that passed this
+         *     check before the placement was marked still commits, since the commit-time fence
+         *     stays keyed on the Worker id.
          *
          *     A publish that names its Worker counts as in flight from the moment it
          *     arrives until it has committed or been refused (issue #3950). A start that

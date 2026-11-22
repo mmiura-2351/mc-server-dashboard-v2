@@ -503,17 +503,19 @@ async def publish_snapshot(
     fence is permissive when no worker is assigned (``None``): the held-assignment
     final-snapshot window and the post-clear no-replacement case must still land.
 
-    A placement whose Worker has not hydrated the server yet (``awaiting_hydrate``,
-    issue #3890) accepts no publish from that Worker at all, before the upload (409
-    ``publisher_awaiting_hydrate``): its scratch may be a leftover older than the
-    store, whatever base it declares. No base (a scratch whose generation marker
-    reads 0), a stale base, one whose ``current`` it published itself and the
+    A placement whose Worker is not known to hold the store's working set
+    (``awaiting_hydrate``: it has not hydrated the server under this assignment,
+    issue #3890, or a re-sent start marked it for a new hydrate that has not cleared
+    the mark, issue #4024) accepts no publish from that Worker at all, before the
+    upload (409 ``publisher_awaiting_hydrate``): its scratch may be a leftover older
+    than the store, whatever base it declares. No base (a scratch whose generation
+    marker reads 0), a stale base, one whose ``current`` it published itself and the
     current one are all refused, and so is a publish that does not name its Worker,
     which cannot be told from it. A late final snapshot of that Worker's previous
     assignment that starts uploading after the placement is refused the same way:
-    its scratch stays on the Worker, and the store wins. An upload that passed
-    this check before the placement was marked still commits, since the
-    commit-time fence stays keyed on the Worker id.
+    its scratch stays on the Worker, and the store wins. An upload that passed this
+    check before the placement was marked still commits, since the commit-time fence
+    stays keyed on the Worker id.
 
     A publish that names its Worker counts as in flight from the moment it
     arrives until it has committed or been refused (issue #3950). A start that
@@ -544,8 +546,9 @@ async def publish_snapshot(
     # it publishes. See ``uploads.py``.
     async with uploads.track(server_id, publisher), transfer_semaphore:
         scope = (CommunityId(community_id), ServerId(server_id))
-        # Nothing publishes from a Worker that has not hydrated its placement
-        # (issue #3890), whatever the base header says; see the docstring.
+        # Nothing publishes from a Worker not known to hold the store's working
+        # set (issues #3890 and #4024), whatever the base header says; see the
+        # docstring.
         assigned = await assigned_worker(community_id, server_id)
         if (
             assigned is not None
@@ -553,8 +556,8 @@ async def publish_snapshot(
             and (publisher is None or publisher == assigned.worker_id)
         ):
             _logger.warning(
-                "snapshot publish refused: worker %s has not hydrated server %s "
-                "under its assignment (publisher %s)",
+                "snapshot publish refused: worker %s is not known to hold the "
+                "store's working set of server %s (publisher %s)",
                 assigned.worker_id,
                 server_id,
                 publisher,
@@ -631,8 +634,8 @@ async def publish_snapshot(
                         _logger.warning(
                             "snapshot publish refused: stale base "
                             "generation for server %s from a worker that "
-                            "is not the assigned one or has not hydrated "
-                            "it (publisher %s held %d, store at "
+                            "is not the assigned one or is not known to hold "
+                            "its working set (publisher %s held %d, store at "
                             "%d published by %s)",
                             server_id,
                             publisher,

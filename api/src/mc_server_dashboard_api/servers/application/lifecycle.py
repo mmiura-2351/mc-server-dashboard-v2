@@ -96,11 +96,12 @@ observed=unknown, and raise the refusal as before, so the reconciler retries the
 start on that same Worker.
 
 A kept Worker has not hydrated the server, and its scratch may be a leftover older
-than the store. The placement's commit sets the row's ``awaiting_hydrate``, and
-``_launch`` clears it only once the Worker holds the store's working set, and only
-for its own placement. While it is set, nothing publishes a snapshot from that
-Worker: the periodic tick skips the row, ``_final_snapshot`` takes none and lets the
-stop release, and the data plane refuses every publish from the Worker. A
+than the store. The placement's commit sets the row's ``awaiting_hydrate``, as
+does a ``redispatch_start`` that hydrates its Worker (issue #4024), and ``_launch``
+clears it only once the Worker holds the store's working set, and only for its own
+placement. While it is set, nothing publishes a snapshot from that Worker: the
+periodic tick skips the row, ``_final_snapshot`` takes none and lets the stop
+release, and the data plane refuses every publish from the Worker. A
 ``running`` report from the Worker clears it too, since that instance's working set
 is what its snapshots capture from then on.
 
@@ -263,6 +264,13 @@ _HYDRATE_REFUSALS_KEEPING_THE_WORKER = frozenset(
     {CommandStatus.BUSY, CommandStatus.UNAVAILABLE, CommandStatus.EXPIRED}
 )
 
+# The hydrate answers that leave the Worker's working set as it was (issue #4024):
+# the Worker refused the hydrate before the pull, or never ran it. A failed transfer
+# is not one of them: the Worker can report it after its swap renamed the new tree in.
+_HYDRATE_REFUSALS_BEFORE_THE_SWAP = _HYDRATE_REFUSALS_KEEPING_THE_WORKER | {
+    CommandStatus.INVALID_STATE
+}
+
 
 def is_working_set_absent_refusal(outcome: CommandOutcome) -> bool:
     """Whether an outcome is the Worker's "I hold no working set for this id" refusal.
@@ -313,6 +321,9 @@ class _Dispatch:
     """
 
     attempted: bool = False
+    # Whether the hydrate was sent (issue #4024): until then the Worker's working
+    # set is as it was.
+    hydrate_sent: bool = False
 
 
 async def _mark_stopped(uow: UnitOfWork, server: Server, *, at: dt.datetime) -> bool:
@@ -979,10 +990,13 @@ class StartServer:
         and a Worker is assigned, but the launch was never sent (crash between
         commit and dispatch) or the Worker is not actually running it. The intent
         and assignment stand; only the dispatch is replayed, so this changes no DB
-        row but the ``awaiting_hydrate`` mark ``_launch`` clears (issue #3890) —
-        and on failure it reverts nothing (a later reconcile tick retries under
-        backoff). The placement load was already counted on the original
-        assignment, so it is not incremented again.
+        row but the ``awaiting_hydrate`` mark — set before a hydrate, as a
+        placement sets it, and put back as it was when that hydrate cannot have
+        replaced the Worker's working set (issue #4024), or cleared by ``_launch``
+        once it lands (issue #3890) — and on failure it reverts nothing else (a
+        later reconcile tick retries under backoff). The placement load was
+        already counted on the original assignment, so it is not incremented
+        again.
 
         An ``INVALID_STATE`` outcome means the Worker is already running the server
         (the hydrate/start guards reject a live instance): the divergence is in fact
@@ -1056,16 +1070,66 @@ class StartServer:
         skip_hydrate = (
             held_generation is not None and held_generation >= store_generation
         )
-        outcome = await self._launch(
-            server,
-            community_id,
-            server_id,
-            worker_id,
-            skip_hydrate=skip_hydrate,
-            stop_intent_count=stop_intent_count,
-        )
+        # The row as this start read it when its own mark changed it, so that a
+        # hydrate that leaves the Worker's tree as it was can put the mark back.
+        marked: Server | None = None
+        if not skip_hydrate:
+            # The Worker does not hold the store's working set, so it owes the
+            # hydrate, as after a placement (issue #4024): mark the row before the
+            # wait for its uploads in ``_launch``, so that one arriving after the
+            # wait is refused rather than committed over the hydrated set. Only
+            # while the intent is still this one's, as the clear in ``_launch``
+            # checks: a stop and a newer start may have hydrated and cleared the
+            # mark on this Worker since the load above.
+            async with self.uow:
+                current = await self.uow.servers.get_by_id(server_id)
+                if current is None or not self._still_owns(
+                    current, worker_id, stop_intent_count
+                ):
+                    raise LifecycleTransitionConflictError(str(server_id.value))
+                if await self.uow.servers.mark_awaiting_hydrate(server_id, worker_id):
+                    marked = current
+                await self.uow.commit()
+        dispatch = _Dispatch()
+        try:
+            outcome = await self._launch(
+                server,
+                community_id,
+                server_id,
+                worker_id,
+                dispatch,
+                skip_hydrate=skip_hydrate,
+                stop_intent_count=stop_intent_count,
+            )
+        except (LifecycleTransitionConflictError, SnapshotUploadInFlightError):
+            # The wait ran out, or the intent was withdrawn, before the hydrate
+            # was sent: the Worker's tree is as it was.
+            if marked is not None and not dispatch.hydrate_sent:
+                await self._unmark(marked, worker_id, stop_intent_count)
+            raise
+        except WorkerUnavailableError as exc:
+            # A hydrate the Worker never received leaves its tree as it was: it
+            # had no session when the hydrate was dispatched, or this API lacks
+            # the data-plane URL or credential to send one. One that timed out,
+            # or whose session ended while it awaited its answer, may have
+            # swapped the tree in, and the mark stays.
+            if (
+                marked is not None
+                and not dispatch.attempted
+                and not exc.upload_may_be_live
+                and not exc.session_ended_in_flight
+            ):
+                await self._unmark(marked, worker_id, stop_intent_count)
+            raise
         if outcome.success:
             return server
+        if (
+            marked is not None
+            and not dispatch.attempted
+            and outcome.status in _HYDRATE_REFUSALS_BEFORE_THE_SWAP
+        ):
+            # The Worker refused the hydrate before it replaced anything.
+            await self._unmark(marked, worker_id, stop_intent_count)
         if outcome.status is CommandStatus.INVALID_STATE:
             await self._record_running(server, worker_id)
             return server
@@ -1171,9 +1235,8 @@ class StartServer:
             # an upload needs. A skipped hydrate does not wait: the Worker runs
             # on the tree such an upload packed, or a newer one. An upload that
             # registers only after the wait is refused by the ``awaiting_hydrate``
-            # mark on a start that placed the server, but not on a
-            # ``redispatch_start``, which does not mark the row: CONTROL_PLANE.md
-            # Section 5 says what keeps that case out today (issue #4024).
+            # mark, which every caller has set before it: the placement's commit,
+            # ``redispatch_start`` (issue #4024) and the #2499 replay below.
             #
             # The wait and the hydrate share one deadline, the hydrate budget from
             # the moment the wait begins, measured on the monotonic clock, so the
@@ -1240,6 +1303,8 @@ class StartServer:
                     budget,
                 )
                 raise SnapshotUploadInFlightError(str(server_id.value))
+            if dispatch is not None:
+                dispatch.hydrate_sent = True
             hydrate = await self.control_plane.hydrate(
                 worker_id=worker_id,
                 community_id=community_id,
@@ -1621,6 +1686,49 @@ class StartServer:
             and self.stop_intents.current(server.id) == stop_intent_count
         )
 
+    async def _unmark(
+        self, marked: Server, worker_id: WorkerId, stop_intent_count: int
+    ) -> None:
+        """Put back the mark a re-sent start set, for a hydrate that changed nothing.
+
+        ``redispatch_start`` marks the row ``awaiting_hydrate`` before its wait
+        (issue #4024). When its hydrate was not sent, or the Worker refused it
+        before the pull, the Worker's working set is the one the row described
+        before the mark, so the row goes back to that. ``marked`` is the row as
+        the start read it when its mark changed it.
+
+        The clear lands only while the mark is still this start's: while the row is as
+        the start marked it, or while the one stop or drain that withdrew the start's
+        intent holds it for its final snapshot. That stop or drain is the only
+        withdrawal since (the count moved exactly once), and the row still carries the
+        ``updated_at`` its flip wrote, which its bump recorded. Any other row may carry
+        a newer placement on this Worker, made after a release, whose own hydrate has
+        not landed, and its mark stays. That includes a newer placement a second stop
+        has just stopped: its flip is visible before its commit returns and it bumps,
+        but it wrote a stamp of its own.
+
+        This is best effort for a stop: the stop reads the mark for its final
+        snapshot once the Worker has answered it, which can come before the wait
+        that the stop interrupted has ended.
+        """
+
+        server_id = marked.id
+        async with self.uow:
+            current = await self.uow.servers.get_by_id(server_id)
+            if current is None or current.assigned_worker_id != worker_id:
+                return
+            held_by_its_stop = (
+                current.desired_state is DesiredState.STOPPED
+                and self.stop_intents.current(server_id) == stop_intent_count + 1
+                and self.stop_intents.flipped_at(server_id) == current.updated_at
+            )
+            if current.updated_at != marked.updated_at and not held_by_its_stop:
+                return
+            await self.uow.servers.clear_awaiting_hydrate(
+                server_id, worker_id, updated_at=current.updated_at
+            )
+            await self.uow.commit()
+
     async def _compensate(
         self,
         community_id: CommunityId,
@@ -1950,10 +2058,12 @@ class StopServer:
                 # sent at all. The cost: a commit that truly failed refuses an
                 # in-flight start of the still-running intent, which then waits for
                 # the reconciler's re-send.
+                # The bump records the stamp the flip wrote (issue #4024, see
+                # ``StartServer._unmark``).
                 try:
                     await self.uow.commit()
                 finally:
-                    self.stop_intents.bump(server_id)
+                    self.stop_intents.bump(server_id, flipped_at=server.updated_at)
 
         if owed == "redispatch_stop":
             # The same replay the reconciler sends, with the operator's ``force``.
@@ -2399,13 +2509,15 @@ class StopServer:
         here would orphan the set in the Worker's scratch while a start placed the
         server from the older store.
 
-        A row whose Worker has not hydrated it under this assignment
-        (``awaiting_hydrate``, issue #3890) is not snapshotted at all, and this
-        returns ``False`` so the caller releases it. That Worker's scratch may be a
-        leftover older than the store, and publishing it would replace the newer
-        working set. The store wins, as it did when a refused hydrate gave the
-        Worker back, and the next start's hydrate displaces the scratch. The row is
-        read here, so all three callers pass this one check.
+        A row whose Worker is not known to hold the store's working set
+        (``awaiting_hydrate``: it has not hydrated the server under this assignment,
+        issue #3890, or a re-sent start marked it for a new hydrate that has not
+        cleared the mark, issue #4024) is not snapshotted at all, and this returns
+        ``False`` so the caller releases it. That Worker's scratch may be a leftover
+        older than the store, and publishing it would replace the newer working set.
+        The store wins, as it did when a refused hydrate gave the Worker back, and
+        the next start's hydrate displaces the scratch. The row is read here, so all
+        three callers pass this one check.
         """
 
         # A dispatched snapshot may outlive its caller, so a finished stop recorded
@@ -2422,8 +2534,8 @@ class StopServer:
             and current.awaiting_hydrate
         ):
             _LOG.warning(
-                "final snapshot skipped for server %s: worker %s has not hydrated it "
-                "under this assignment, so its scratch may be older than the store. "
+                "final snapshot skipped for server %s: worker %s is not known to hold "
+                "the store's working set, so its scratch may be older than the store. "
                 "The store's working set stands, and the next start's hydrate "
                 "replaces the scratch (issue #3890)",
                 server_id.value,
@@ -3111,7 +3223,7 @@ class StopServersAssignedToWorker:
     stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
 
     async def __call__(self, *, worker_id: WorkerId) -> list[ServerId]:
-        stopped: list[ServerId] = []
+        stopped: list[Server] = []
         async with self.uow:
             assigned = [
                 server
@@ -3120,18 +3232,19 @@ class StopServersAssignedToWorker:
             ]
             for server in assigned:
                 if await _mark_stopped(self.uow, server, at=self.clock.now()):
-                    stopped.append(server.id)
+                    stopped.append(server)
             # Withdrawn, as in ``StopServer`` (issue #3739): a start of one of these
             # intents that has not sent yet sees it, and one that has is ahead of
             # the stop the reconciler sends. A commit that raises may have landed,
             # so it bumps too, at the same cost: if it truly failed, an in-flight
-            # start is refused and waits for the reconciler's re-send.
+            # start is refused and waits for the reconciler's re-send. Each bump
+            # records the stamp its flip wrote, as a stop's does (issue #4024).
             try:
                 await self.uow.commit()
             finally:
-                for server_id in stopped:
-                    self.stop_intents.bump(server_id)
-        return stopped
+                for server in stopped:
+                    self.stop_intents.bump(server.id, flipped_at=server.updated_at)
+        return [server.id for server in stopped]
 
 
 @dataclass(frozen=True)
