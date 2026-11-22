@@ -180,6 +180,12 @@ class CommandResult:
     # GC'd the scratch, one whose marker stamp was refused, or a Worker too old
     # to send the field — and the held inventory is then left untouched.
     held_generation: int | None = None
+    # Whether a failed hydrate got as far as replacing the Worker's working dir
+    # (issue #4041). The Worker says it on every TRANSFER_FAILED of a hydrate:
+    # ``False`` when the hydrate failed before its swap, so the working dir is as
+    # it was. ``None`` is "not said": any other failure, or a Worker too old to
+    # send the field.
+    swap_began: bool | None = None
 
     @property
     def success(self) -> bool:

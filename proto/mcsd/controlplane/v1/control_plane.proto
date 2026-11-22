@@ -594,6 +594,16 @@ message CommandError {
   // leaves it UNSPECIFIED, and a genuine traversal/path denial, both map back to
   // the pre-existing invalid-path behaviour.
   FileAccessReason file_access_reason = 3;
+  // swap_began says whether a failed HydrateTrigger got as far as replacing the
+  // server's working dir (issue #4041). The Worker sets it on every
+  // TRANSFER_FAILED its hydrate handler answers, and on nothing else. It is true
+  // from the first rename that moves the working dir aside or the new tree in:
+  // a step that fails from there on can leave the working dir changed or absent.
+  // It is false when the hydrate failed before that rename, as a failed pull or
+  // unpack does, and the working dir is as it was. The field is OPTIONAL so that
+  // absent, which is what an older Worker sends, reads as "unknown", which the API
+  // treats as true.
+  optional bool swap_began = 4;
 }
 
 // FileAccessReason refines a FILE_ACCESS_DENIED failure (issue #548). The Worker
