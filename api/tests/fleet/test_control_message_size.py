@@ -60,6 +60,7 @@ from mcsd.controlplane.v1.control_plane_pb2_grpc import (
 )
 from tests.fleet.fakes import (
     FakeClock,
+    FakeDatabasePing,
     FakeServerStateSink,
     RecordingRealTimeEvents,
 )
@@ -136,6 +137,7 @@ class _Harness:
             control_plane=self.state,
             state_sink=FakeServerStateSink(),
             real_time_events=RecordingRealTimeEvents(),
+            database_ping=FakeDatabasePing(),
         )
         add_WorkerServiceServicer_to_server(servicer, server)
         port = server.add_insecure_port("127.0.0.1:0")

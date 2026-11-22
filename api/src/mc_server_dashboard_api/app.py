@@ -37,6 +37,7 @@ from mc_server_dashboard_api.community.api import (
 )
 from mc_server_dashboard_api.config import Settings, load_settings
 from mc_server_dashboard_api.core.adapters.database import (
+    SqlAlchemyDatabasePing,
     create_engine,
     create_session_factory,
     translate_connect_outages,
@@ -1033,6 +1034,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 control_plane=control_plane_state,
                 state_sink=state_sink,
                 real_time_events=real_time_events,
+                database_ping=SqlAlchemyDatabasePing(engine),
                 host=settings.server.host,
                 port=settings.server.grpc_port,
                 cert_file=settings.control.tls.cert_file,

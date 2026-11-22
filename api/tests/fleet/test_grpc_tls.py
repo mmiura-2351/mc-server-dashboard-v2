@@ -31,6 +31,7 @@ from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from mcsd.controlplane.v1.control_plane_pb2_grpc import WorkerServiceStub
 from tests.fleet.fakes import (
     FakeClock,
+    FakeDatabasePing,
     FakeServerStateSink,
     RecordingRealTimeEvents,
 )
@@ -76,6 +77,7 @@ def _make_server(
         control_plane=ControlPlaneState(),
         state_sink=FakeServerStateSink(),
         real_time_events=RecordingRealTimeEvents(),
+        database_ping=FakeDatabasePing(),
         host="127.0.0.1",
         port=0,
         cert_file=cert_file,
