@@ -517,17 +517,19 @@ too. When more than five drops follow one another, the API ends the session. A
 held message's failures do not count toward them; a drop after the Worker closed
 the stream does.
 
-Log lines and metrics wait in the same queue, except while a message is held:
-the ones the API reads then are dropped, not queued, and as the hold ends one
-WARNING gives how many of each it dropped (issue #4028). So a busy log stream
-cannot fill the queue during a hold. The ones already queued when the hold began
-wait behind it and share the queue's fate when the session ends. Dropping moves
-nothing, so the lines and samples relayed keep their order against status
-frames, which the Web UI relies on: a status frame that puts a server at rest
-clears its metrics. At most 1024 messages wait. Once that many do, the API stops
-reading the stream, heartbeats included, until one leaves the queue. During a
-hold only reports and command results can fill it, and none leaves until the
-hold ends.
+Log lines and metrics wait in the same queue, except while a message is held
+(issue #4028). As the hold starts, the API drops the ones already queued, which
+a busy log stream may have queued while the message's first attempt was still
+failing. It drops the ones it reads during the hold as well, rather than
+queueing them. As the hold ends, one WARNING gives how many of each it dropped.
+So a busy log stream cannot keep the queue full during a hold. Only a line the
+API had read but could not yet queue when the hold started is still queued.
+Dropping moves nothing, so the lines and samples relayed keep their order
+against status frames, which the Web UI relies on: a status frame that puts a
+server at rest clears its metrics. At most 1024 messages wait. Once that many
+do, the API stops reading the stream, heartbeats included, until one leaves the
+queue. During a hold only reports and command results can fill it, and none
+leaves until the hold ends.
 
 The delivery guarantee: a report is applied at least once across transient
 database errors within a session; a report held when the session ends is lost;

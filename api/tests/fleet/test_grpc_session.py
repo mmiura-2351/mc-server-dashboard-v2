@@ -3242,6 +3242,27 @@ def _metrics_message(server_id: str, cpu_millis: int) -> pb.WorkerMessage:
     )
 
 
+def _command_result_message(command_id: str) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        correlation_id=command_id, command_result=pb.CommandResult(success=True)
+    )
+
+
+class _RecordingControlPlane(ControlPlaneState):
+    """Records each command result it resolves, with the reports applied by then."""
+
+    def __init__(self, observed: list[tuple[str, str, str]]) -> None:
+        super().__init__()
+        self._observed = observed
+        self.resolved: list[tuple[str, list[tuple[str, str, str]]]] = []
+
+    async def resolve(
+        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+    ) -> None:
+        self.resolved.append((command_id, list(self._observed)))
+        await super().resolve(command_id, worker_id, result)
+
+
 async def _write_all(
     call: aio.StreamStreamCall, messages: list[pb.WorkerMessage]
 ) -> None:
@@ -3267,13 +3288,15 @@ async def test_a_log_flood_during_a_hold_does_not_fill_the_queue(
     # Queued behind a held report, a busy log stream would fill the queue, stop
     # the reader, heartbeats included, and end the session with the report when
     # they lapse. The log lines and metrics read during the hold are dropped
-    # instead, and the held report and the one behind it land once the database
-    # is back.
+    # instead, and the held report, the one behind it and a command result land
+    # once the database is back, in order.
     sink = _OutageSink(down=True)
+    control_plane = _RecordingControlPlane(sink.observed)
     h = _Harness(
         InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
         FakeClock(_T0),
         state_sink=sink,
+        control_plane=control_plane,
         database_ping=FakeDatabasePing(reachable=False),
     )
     try:
@@ -3287,7 +3310,8 @@ async def test_a_log_flood_during_a_hold_does_not_fill_the_queue(
         await _write_all(
             call,
             [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
-            + [_metrics_message(_FLOOD_SERVER, i) for i in range(3)],
+            + [_metrics_message(_FLOOD_SERVER, i) for i in range(3)]
+            + [_command_result_message("result-read-during-the-hold")],
         )
         beat = _T0 + dt.timedelta(seconds=1)
         h.clock.set(beat)
@@ -3298,16 +3322,84 @@ async def test_a_log_flood_during_a_hold_does_not_fill_the_queue(
         assert h.real_time_events.published == []
 
         sink.down = False
-        await _wait_until(lambda: len(sink.observed) == 2, "the reports not applied")
-        assert sink.observed == [
+        await _wait_until(lambda: control_plane.resolved, "the result not resolved")
+        reports = [
             (_SERVER_A, _WORKER_ID, "running"),
             (_SERVER_B, _WORKER_ID, "stopped"),
         ]
+        assert sink.observed == reports
+        assert control_plane.resolved == [("result-read-during-the-hold", reports)]
         assert _logged(caplog, _dropped(flood, 3)) != []
         # Once the hold is over, log lines are relayed again.
         await call.write(_log_message(_FLOOD_SERVER, "after"))
         await _wait_until(lambda: h.real_time_events.published, "no line relayed")
         assert [e.payload["line"] for _, e in h.real_time_events.published] == ["after"]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_hold_purges_the_log_lines_queued_before_it_started(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A report's first attempt can run as long as a connect timeout before it
+    # fails and the hold starts, and a busy log stream can fill the queue
+    # meanwhile, which stops the reader. As the hold starts, the log lines
+    # already queued are dropped too, so the reader reads heartbeats again. A
+    # report and a command result queued among them keep their place.
+    gate = asyncio.Event()
+    sink = _OutageSink(gate=gate)
+    control_plane = _RecordingControlPlane(sink.observed)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=control_plane,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await call.write(_command_result_message("result-queued-before-the-hold"))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call, [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+        # A's first attempt is still running, so more than the queue holds
+        # stands ahead of the heartbeat.
+        await asyncio.sleep(0.2)
+        assert h.registry.list_workers()[0].last_heartbeat_at == _T0
+
+        sink.down = True
+        gate.set()
+        await _wait_for_heartbeat_at(h, beat)
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+
+        sink.down = False
+        await _wait_until(lambda: control_plane.resolved, "the result not resolved")
+        reports = [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        assert sink.observed == reports
+        assert control_plane.resolved == [("result-queued-before-the-hold", reports)]
+        await call.write(_log_message(_FLOOD_SERVER, "after"))
+        await _wait_until(
+            lambda: (
+                [e.payload["line"] for _, e in h.real_time_events.published][-1:]
+                == ["after"]
+            ),
+            "no line relayed",
+        )
+        # Only a line the stopped reader had already taken can still be relayed.
+        relayed = [e.payload["line"] for _, e in h.real_time_events.published][:-1]
+        assert len(relayed) <= 1
+        assert _logged(caplog, _dropped(flood - len(relayed), 0)) != []
         await call.done_writing()
     finally:
         await h.stop()

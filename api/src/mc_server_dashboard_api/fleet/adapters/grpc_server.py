@@ -136,9 +136,13 @@ _HOLD_RETRY_INITIAL_SECONDS = 0.5
 _HOLD_RETRY_MAX_SECONDS = 10.0
 
 # Backpressure limit on the queue between the inbound reader task and the
-# processor task (issue #1698). Heartbeats bypass this queue entirely, so only
-# DB-bound messages (StatusChange, CommandResult, etc.) are queued. A bounded
-# queue keeps a burst of status changes from consuming unbounded memory; the
+# processor task (issue #1698). Heartbeats bypass this queue entirely. Every
+# other message is queued in arrival order: StatusChange and CommandResult,
+# which are DB-bound, and log lines and metrics, which are only relayed but
+# keep their place relative to status frames. While a message is held
+# through a database outage, the log lines and metrics read are dropped
+# instead, and those already queued are purged as the hold starts (issue
+# #4028). A bounded queue keeps a burst from consuming unbounded memory; the
 # size is generous enough that a healthy processor never blocks the reader.
 _INBOUND_QUEUE_MAXSIZE = 1024
 
@@ -270,14 +274,33 @@ class _Hold:
     While :attr:`active`, the reader drops the log lines and metrics it reads
     rather than queueing them behind the held message, so a busy log stream
     cannot fill the queue and stop the heartbeats being read (issue #4028).
-    Dropping repositions nothing, so the frames still relayed keep their order
-    relative to status frames.
+    :meth:`start` also purges the ones queued while the message's first attempt
+    was still failing, which frees a reader the full queue stopped. Dropping
+    repositions nothing, so the frames still relayed keep their order relative
+    to status frames.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, queue: asyncio.Queue[pb.WorkerMessage | None]) -> None:
+        self._queue = queue
         self.active = False
         self.logs = 0
         self.metrics = 0
+
+    def start(self) -> None:
+        """Start dropping, and purge the log lines and metrics already queued.
+
+        The queue is emptied and refilled with what is kept, in order, with no
+        await in between, so nothing else can reach it meanwhile.
+        """
+
+        self.active = True
+        kept = []
+        while not self._queue.empty():
+            message = self._queue.get_nowait()
+            if message is None or not self.drop(message):
+                kept.append(message)
+        for message in kept:
+            self._queue.put_nowait(message)
 
     def drop(self, message: pb.WorkerMessage) -> bool:
         """Count ``message`` and return True if it is dropped during a hold."""
@@ -681,7 +704,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # Set at a clean EOF: the session is ending, so a held message gets one
         # last attempt rather than holding up the teardown (issue #3614).
         stream_ended = asyncio.Event()
-        hold = _Hold()
+        hold = _Hold(queue)
         processor = asyncio.ensure_future(
             self._process_inbound(worker_id, session, queue, stream_ended, hold)
         )
@@ -798,8 +821,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
         does. Any other failure is raised, and so is an outage's failure on a
         retry the database answered a ping both just before and just after: that
         error is the message's own, and holding it would block the queue for good.
-        However the hold ends, one WARNING counts the log lines and metrics the
-        reader dropped meanwhile, if any (issue #4028).
+        However the hold ends, one WARNING counts the log lines and metrics
+        dropped meanwhile, those purged from the queue as it started included,
+        if any (issue #4028).
         """
 
         try:
@@ -819,7 +843,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             )
         attempts = 1
         delay = _HOLD_RETRY_INITIAL_SECONDS
-        hold.active = True
+        hold.start()
         try:
             while True:
                 with contextlib.suppress(TimeoutError):
