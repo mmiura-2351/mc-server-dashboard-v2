@@ -655,6 +655,13 @@ its caller can tell it from one dispatched to a Worker with no session, which
 was never queued (issue #3781). Each step is guarded by the ending Session's
 token: a stale teardown, for a Worker that has already re-registered on a newer
 Session, leaves that Worker online and its servers' states untouched. The
+Worker can also re-register after that check, while the `unknown` write waits
+on a slow database, however the Session ended, a refused registration
+included, and the new Session's reports can then commit first. So the write
+is stamped as the check passes and leaves every server observed later than
+that stamp: the ending Session's own reports were all stamped earlier, and a
+newer Session's are stamped later, so the outcome no longer depends on which
+write commits first (issue #4092). The
 teardown runs in a task the API owns, not in the RPC task. When a Worker's
 transport dies, gRPC reports the end of the inbound stream and cancels the RPC
 separately, and the cancel can arrive while the teardown is already writing. The
@@ -1420,8 +1427,9 @@ and equally the writes the API makes without one, whose frames carry an empty
 `detail` and reason:
 
 - `unknown` for each server of a Worker whose session drops, except a crashed
-  one, which keeps its state and publishes nothing (Section 4.4), and for each
-  assigned server still in a non-terminal state at API startup;
+  one, which keeps its state and publishes nothing, and one the Worker's next
+  session has reported since (Section 4.4), and for each assigned server still
+  in a non-terminal state at API startup;
 - the state a lifecycle operation converges from a command's outcome —
   `running` when a start or its hydrate is refused `INVALID_STATE` (the
   instance is already live, so no `StatusChange` will follow), `unknown` when

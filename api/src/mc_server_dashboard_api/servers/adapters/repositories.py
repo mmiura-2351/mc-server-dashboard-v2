@@ -731,11 +731,14 @@ class SqlAlchemyServerRepository(ServerRepository):
     async def mark_worker_servers_unknown(
         self, worker_id: WorkerId, observed_at: dt.datetime
     ) -> None:
-        # No monotonic guard (issue #216): this is a bulk cache-invalidation marking
-        # state LESS certain (-> unknown) on a worker disconnect. It must always win,
-        # even against a row with a newer observed_at — that fresher report came from
-        # the now-disconnected worker and is exactly the untrustworthy data this
-        # write exists to invalidate.
+        # A row observed later than this write's stamp is left alone (issue #4092):
+        # the disconnected session's own reports were all stamped before it, so a
+        # later stamp is a report of the Worker's next session, which this write,
+        # landing late, must not overwrite. An equal stamp is still marked, as a
+        # report stamped at the same instant is not newer. The condition sits in
+        # the locking read, which re-checks it once a lock is granted, so it holds
+        # against a report that commits while this write waits; and it covers both
+        # writes below, so the crashed row's stamp never moves back either.
         # A crashed row keeps its state (issue #3885), as the startup reset leaves
         # it: the Worker has already forgotten the crashed instance, so the row
         # stays truthful, and its stored crash keeps explaining it.
@@ -760,6 +763,10 @@ class SqlAlchemyServerRepository(ServerRepository):
                         ServerModel.observed_state != crashed,
                         ServerModel.desired_state == DesiredState.STOPPED.value,
                     ),
+                    or_(
+                        ServerModel.observed_at.is_(None),
+                        ServerModel.observed_at <= observed_at,
+                    ),
                 )
                 .order_by(ServerModel.id)
                 .with_for_update()
@@ -783,9 +790,9 @@ class SqlAlchemyServerRepository(ServerRepository):
         # Assigned rows whose observed state is non-terminal (an in-flight cache
         # of a worker report). Terminal/cache-stable states (stopped, crashed,
         # unknown) stay truthful across a restart, so they are excluded.
-        # No monotonic guard (issue #216): like mark_worker_servers_unknown this is a
-        # bulk cache-invalidation marking state LESS certain (-> unknown) on API
-        # restart, and must always win regardless of the row's observed_at.
+        # No monotonic guard (issue #216): this is a bulk cache-invalidation marking
+        # state LESS certain (-> unknown) on API restart, and must always win
+        # regardless of the row's observed_at.
         return await self._write_observed_state(
             [
                 ServerModel.assigned_worker_id.is_not(None),

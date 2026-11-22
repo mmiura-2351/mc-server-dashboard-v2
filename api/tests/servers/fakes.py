@@ -1171,6 +1171,9 @@ class FakeServerRepository(ServerRepository):
         for server in self.by_id.values():
             if server.assigned_worker_id != worker_id:
                 continue
+            # A report stamped after this write is newer and kept (issue #4092).
+            if server.observed_at is not None and server.observed_at > observed_at:
+                continue
             if server.observed_state is not ObservedState.CRASHED:
                 _observe(server, ObservedState.UNKNOWN, observed_at)
             elif server.desired_state is DesiredState.STOPPED:
