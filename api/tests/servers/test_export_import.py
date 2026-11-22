@@ -1335,8 +1335,9 @@ async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> Non
     await _import(held_uow, FakeLifecycleLock())
     lost_uow = FakeUnitOfWork()
     lost = FakeLifecycleLock()
-    # The seed's check and the publish's pass; the plugin commit's is lost.
-    lost.checks_before_loss = 2
+    # The seed's check passes (the archive has no member to publish); the
+    # plugin commit's is lost.
+    lost.checks_before_loss = 1
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await _import(lost_uow, lost)
 
@@ -1349,7 +1350,7 @@ async def test_import_publishes_inside_the_lock_its_create_took() -> None:
     # Issue #4045: each member's write publishes on its own, so a start admitted
     # mid-publish would hydrate the archive half-written. The publish runs in
     # the hold the composed CreateServer took before its row committed, with no
-    # release in between, and confirms the lock first (#3927).
+    # release in between, and confirms the lock before each write (#3927).
     community = uuid.uuid4()
     dst_uow = FakeUnitOfWork()
     dst_store = FakeFileStore()
@@ -1384,14 +1385,12 @@ async def test_import_publishes_inside_the_lock_its_create_took() -> None:
     # The create's server.properties seed, then the two members.
     assert len(writes) == 3, ev
     assert writes[-1] < release_at, ev
-    # The seed's check, then the publish's, each right before its first write.
-    assert ev[writes[0] - 1] == (server.id, "check"), ev
-    assert ev[writes[1] - 1] == (server.id, "check"), ev
+    assert all(ev[i - 1] == (server.id, "check") for i in writes), ev
 
 
 async def test_import_that_lost_the_lock_before_its_publish_writes_no_member() -> None:
-    # A lock lost after the seed stops the publish before its first write
-    # (issue #3927); the row stands, so it is the seed failure.
+    # A lock lost after the seed stops the publish before its first member's
+    # write (issue #3927); the row stands, so it is the seed failure.
     community = uuid.uuid4()
     dst_uow = FakeUnitOfWork()
     dst_store = FakeFileStore()

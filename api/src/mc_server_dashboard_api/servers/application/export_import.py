@@ -501,8 +501,6 @@ class ImportServer:
         """
 
         try:
-            # The publish relies on the lifecycle lock (issues #3927, #4045).
-            await lock.ensure_held()
             for entry_path, data in entries:
                 if entry_path == EXPORT_METADATA_FILENAME:
                     continue
@@ -526,6 +524,9 @@ class ImportServer:
                         rcon_password=self.create_server.token_generator(),
                         resource_pack=None,
                     )
+                # Each member's write relies on the lifecycle lock (issues #3927,
+                # #4045); a loss stops the rest.
+                await lock.ensure_held()
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,
@@ -583,8 +584,9 @@ class ImportServer:
         try:
             async with uow:
                 # Re-fetch the current row so the whole-entity write-back in
-                # allocate_bedrock_port_if_geyser does not clobber a concurrent
-                # PATCH that landed after the create commit (issue #1587).
+                # allocate_bedrock_port_if_geyser writes back the row as stored,
+                # not the create-time entity (issue #1587). The creation's hold
+                # keeps a PATCH out until it ends (issue #4045).
                 fresh = await uow.servers.get_by_id(server.id)
                 if fresh is None:
                     raise ServerNotFoundError(str(server.id.value))

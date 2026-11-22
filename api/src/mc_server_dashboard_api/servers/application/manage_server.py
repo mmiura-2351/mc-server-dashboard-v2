@@ -273,8 +273,8 @@ class CreateServer:
     or is refused ``server_busy`` once its acquire budget runs out. ``populate`` is
     more create-time work run inside the same hold, after the seed: import passes
     the publish of its archive and the re-creation of its plugin rows. The held
-    lock is confirmed before the seed (issue #3927); a loss there is the seed
-    failure above, as the row already stands.
+    lock is confirmed before each seed write (issue #3927); a loss there is the
+    seed failure above, as the row already stands.
 
     A new server's ``server.properties`` also gets ``sync-chunk-writes=false``
     (issue #3443), a default that the user's own value replaces. With
@@ -469,9 +469,10 @@ class CreateServer:
         if accept_eula:
             seeds.append((_EULA_REL_PATH, _EULA_ACCEPTED_CONTENT))
         try:
-            # The seed writes rely on the lifecycle lock (issues #3927, #4045).
-            await lock.ensure_held()
             for rel_path, content in seeds:
+                # Each seed write relies on the lifecycle lock (issues #3927,
+                # #4045); a loss stops the rest.
+                await lock.ensure_held()
                 await self.file_store.write_file(
                     community_id=community_id,
                     server_id=server_id,

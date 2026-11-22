@@ -643,7 +643,7 @@ async def test_create_server_takes_lock_around_its_row_and_seed() -> None:
     # Issue #4045: each seed write publishes on its own, so a start admitted
     # between the row's commit and the last write would hydrate the seed half
     # written. The lock is taken before the row is added, so the start waits for
-    # the whole seed, and confirmed right before the seed writes (#3927).
+    # the whole seed, and confirmed right before each seed write (#3927).
     lock = FakeLifecycleLock()
     store = FakeFileStore()
     store.events = lock.events
@@ -656,7 +656,7 @@ async def test_create_server_takes_lock_around_its_row_and_seed() -> None:
     writes = [i for i, e in enumerate(lock.events) if e == (server.id, "write-file")]
     assert len(writes) == 2, lock.events
     assert writes[-1] < lock.events.index((server.id, "release")), lock.events
-    _assert_checked_right_before(lock.events, server.id, "write-file")
+    assert all(lock.events[i - 1] == (server.id, "check") for i in writes), lock.events
 
 
 async def test_create_server_that_lost_the_lock_writes_no_seed() -> None:
