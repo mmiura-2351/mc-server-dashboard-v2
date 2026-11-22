@@ -472,7 +472,10 @@ the stop's final snapshot (#4054). A retry left unanswered changes nothing and
 publishes nothing (#4111); the refusal is cleared only by the release, whose
 frame carries the `null`. The same refusal recorded again publishes nothing,
 except from the held retry of a late final-snapshot result, which publishes it
-even when it finds it recorded, as it does the release (#4104).
+even when it finds it recorded, as it does the release (#4104). So does the
+next refused retry after a write of the refusal whose commit failed, since that
+commit may have landed unpublished. An API restart in between loses that, and a
+reload shows the refusal (#4152).
 
 A client applies each `status` frame by setting the fields it carries, so
 another tab's dashboard offers the actions of the current intent without a

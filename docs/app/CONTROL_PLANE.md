@@ -880,8 +880,9 @@ Notes:
   on #3701). So the stop keeps the assignment, records the refusal on the
   server (`final_snapshot_refusal`, DATABASE.md Section 7) and logs a warning,
   not an error. The stop that set the intent still answers, with the server
-  stopped, assigned and the refusal set. A late result of an abandoned final
-  snapshot that is such a refusal holds the server the same way.
+  stopped and assigned, and with the refusal set unless its write fails
+  (below). A late result of an abandoned final snapshot that is such a refusal
+  holds the server the same way.
   The reconciler retries the snapshot once `refused_stop_grace_seconds` has
   passed since the server's last report or intent commit (the refusal only
   selects that shorter grace), then retries a `BUSY` one every tick and backs an
@@ -890,14 +891,19 @@ Notes:
   `409 final_snapshot_refused` when the Worker refuses again. A write of the
   refusal that fails changes none of these answers: it is logged, the server
   stays assigned and so held, and the next refused retry records the refusal
-  (issue #4103). Until then the server reads no refusal, so the release
-  without the snapshot refuses it, and a stop while its Worker is not
-  connected releases it at once. A retry that
-  publishes releases the server and clears
-  the refusal. One that times out or meets a session end keeps the server and
-  the refusal (issue #4111): the snapshot the server is held for is still
-  owed, so only a release clears the refusal, and a later refusal rewrites
-  it. Every other answer to a final snapshot releases the
+  (issue #4103). Until then the server keeps the refusal it held before, unless
+  the write landed. After a first refusal that is none, so the release without
+  the snapshot refuses it, and a stop while its Worker is not connected
+  releases it at once. A write whose COMMIT lands with its answer lost has
+  recorded the refusal but published no `{final_snapshot_refusal}` frame. So
+  the API remembers a write whose COMMIT failed, and the next refused retry,
+  answered in time or late, writes the refusal again and publishes its frame
+  (issue #4152). A release forgets it, and so does an API restart, after which
+  a reload shows the hold. A retry that publishes releases the server and
+  clears the refusal. One that times out or meets a session end keeps the
+  server and the refusal (issue #4111): the snapshot the server is held for
+  is still owed, so only a release clears the refusal, and a later refusal
+  rewrites it. Every other answer to a final snapshot releases the
   server as before. While the server is held, a start is
   `409 transition_conflict`, and a delete and every at-rest write are
   `409 server_assigned` (WEBUI_SPEC.md Section 2.3), so the store generation

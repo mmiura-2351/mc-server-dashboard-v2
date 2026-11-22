@@ -1310,12 +1310,14 @@ class ClearCreationFailsRepository(FakeServerRepository):
 
 class RefusalWriteFailsRepository(FakeServerRepository):
     """Fails the write that records a final-snapshot refusal with each of
-    ``errors`` in turn, then makes it (issue #4103), counting every attempt."""
+    ``errors`` in turn, then makes it (issue #4103), counting every attempt.
+    ``refusal_retries`` is each attempt's ``retry`` (issue #4152)."""
 
     def __init__(self, *errors: Exception) -> None:
         super().__init__()
         self._errors = list(errors)
         self.refusal_writes = 0
+        self.refusal_retries: list[bool] = []
 
     async def set_final_snapshot_refusal(
         self,
@@ -1326,6 +1328,7 @@ class RefusalWriteFailsRepository(FakeServerRepository):
         retry: bool = False,
     ) -> bool:
         self.refusal_writes += 1
+        self.refusal_retries.append(retry)
         if self._errors:
             raise self._errors.pop(0)
         return await super().set_final_snapshot_refusal(
@@ -2144,6 +2147,23 @@ class OutageUnitOfWork(FakeUnitOfWork):
         if self.down:
             raise DatabaseOutageError("database unreachable")
         return self
+
+
+class CommitAnswerLostUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` whose next commit lands and then raises, once
+    ``lose_next_answer`` is set: a COMMIT whose answer was lost with its
+    connection (issues #4062, #4152). This fake applies a write at once, so the
+    write stands."""
+
+    lose_next_answer = False
+
+    async def commit(self) -> None:
+        await super().commit()
+        if self.lose_next_answer:
+            self.lose_next_answer = False
+            raise DatabaseOutageError(
+                "connection was closed in the middle of operation"
+            )
 
 
 @dataclass

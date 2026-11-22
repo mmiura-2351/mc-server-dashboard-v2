@@ -233,6 +233,9 @@ from mc_server_dashboard_api.servers.application.stop_dispatch_refusals import (
 from mc_server_dashboard_api.servers.application.stop_intents import (
     StopIntentCounter,
 )
+from mc_server_dashboard_api.servers.application.unannounced_refusals import (
+    UnannouncedRefusals,
+)
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
@@ -897,6 +900,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # shared the same way and for the same reader: without it the reconciler
         # cannot tell such a stop from one that may still be in flight.
         app.state.unrecorded_stops = UnrecordedStops()
+        # Process-wide record of final-snapshot refusals whose write's COMMIT
+        # failed (issue #4152), shared by every StopServer and ReleaseHeldServer:
+        # the next refused attempt, whichever flow makes it, announces the
+        # refusal, and a release by any of them forgets it.
+        app.state.unannounced_refusals = UnannouncedRefusals()
         # Shared control-plane command-routing state: the servicer registers
         # sessions and resolves results on it; the GrpcControlPlane adapter
         # dispatches through it. The lifecycle use cases reach it via the adapter.
@@ -994,6 +1002,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 real_time_events=real_time_events,
                 stop_convergence=app.state.stop_convergence,
                 unrecorded_stops=app.state.unrecorded_stops,
+                unannounced_refusals=app.state.unannounced_refusals,
             )
         )
         logging.getLogger(__name__).info(
@@ -1192,6 +1201,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         bedrock_tunnel_sync=bedrock_tunnel_syncer,
                         stop_refusals=app.state.stop_dispatch_refusals,
                         unrecorded_stops=app.state.unrecorded_stops,
+                        unannounced_refusals=app.state.unannounced_refusals,
                         stop_convergence=app.state.stop_convergence,
                         stop_intents=app.state.stop_intents,
                     ),
@@ -1324,6 +1334,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     bedrock_tunnel_sync=bedrock_tunnel_syncer,
                     stop_refusals=app.state.stop_dispatch_refusals,
                     unrecorded_stops=app.state.unrecorded_stops,
+                    unannounced_refusals=app.state.unannounced_refusals,
                     stop_convergence=app.state.stop_convergence,
                     stop_intents=app.state.stop_intents,
                 ),
