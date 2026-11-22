@@ -11,9 +11,9 @@ retains. It is a union type — exactly one of two forms (owner-confirmed):
   at least one ``> 0``; a backup kept by *any* tier bucket survives.
 
 Healthy rows are chosen as keepers first (issue #1864): a ``QUARANTINED`` row
-keeps a keep-N slot only when too few non-quarantined scheduled rows are left
-to fill the N, and a tier bucket only when the bucket holds no non-quarantined
-row. Keep-N therefore
+keeps a keep-N slot only when too few sized non-quarantined scheduled rows are
+left to fill the N, and a tier bucket only when the bucket holds no sized
+non-quarantined row. Keep-N therefore
 keeps as many rows as it would ignoring health, every bucket stays filled, and
 an all-quarantined set keeps exactly the health-blind selection. ``UNKNOWN`` and
 ``UNREADABLE`` rank like ``HEALTHY``.

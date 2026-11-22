@@ -6,8 +6,9 @@ construction and on the JSON round-trip) and the pure selection function
 keep-N keeps the newest N, and the tiered form keeps the newest backup per UTC
 calendar day / ISO week / calendar month over the configured windows. Healthy
 rows are chosen as keepers first (issue #1864): a quarantined row keeps only a
-slot or bucket no other row is left to fill. A row with no recorded size, whose
-archive may be missing, ranks with the quarantined rows (issue #4105).
+slot or bucket no sized non-quarantined row is left to fill. A row with no
+recorded size, whose archive may be missing, ranks with the quarantined rows
+(issue #4105).
 """
 
 from __future__ import annotations
@@ -309,7 +310,8 @@ def test_tiered_same_backup_claims_multiple_buckets() -> None:
 # Healthy rows are chosen as keepers first: a QUARANTINED row keeps a keep-N
 # slot only when too few other rows are left to fill the N, and a tier bucket
 # only when the bucket holds no other row. UNKNOWN (a legacy row the sweep has
-# not read yet) and UNREADABLE (a revisable verdict) rank like HEALTHY.
+# not read yet) and UNREADABLE (a revisable verdict) rank like HEALTHY. Every
+# row here has a recorded size; NULL-size rows have their own section below.
 
 # One slot or one bucket each, so a single sibling can hold it.
 _SINGLE_SLOT_POLICIES = {

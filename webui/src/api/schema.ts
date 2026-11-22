@@ -729,11 +729,11 @@ export interface paths {
          *
          *     The policy is `{keep_last}` XOR `{daily, weekly, monthly}`; it applies only
          *     to `source=scheduled` backups — manual/uploaded rows are never auto-deleted.
-         *     Backups whose `health` is `healthy`, `unknown` or `unreadable` are chosen as
-         *     keepers first: a `quarantined` one keeps a keep-N slot only when too few
-         *     backups that are not `quarantined` are left to fill the N, and a tier bucket
-         *     only when the bucket holds no backup that is not `quarantined`. Every
-         *     scheduled backup no slot or bucket keeps is deleted.
+         *     Backups whose `health` is `healthy`, `unknown` or `unreadable` and whose
+         *     `size_bytes` is recorded are chosen as keepers first: a `quarantined` one,
+         *     or one whose `size_bytes` is null, keeps a keep-N slot only when too few of
+         *     those are left to fill the N, and a tier bucket only when the bucket holds
+         *     none of them. Every scheduled backup no slot or bucket keeps is deleted.
          *     Setting it prunes immediately (best-effort), and every successful scheduled
          *     backup run prunes thereafter; each pruned backup is audited as
          *     `backup:delete` with no actor. The write itself is audited as
