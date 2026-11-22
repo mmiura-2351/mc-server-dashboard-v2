@@ -1829,12 +1829,21 @@ subtree's extent, its deepest directory and longest path below the source,
 measured as stored (`subtree_extent`): on fs in one walk that opens each
 directory by its parent's descriptor, so a subtree past `PATH_MAX` is measured
 like any other, and on object in one prefix listing. A subtree too deep or too
-long to move is refused whole, and one the walk cannot open answers `503
-storage_unavailable`. The moved names keep their characters and are not asked
-about them, so a directory whose name no path can spell moves with the rest. A
-server import refuses such a member before its row exists, and the backup upload
-gate refuses one as `422 invalid_archive`, its `detail` naming the member and
-the reason, before the archive is stored.
+long to move is refused whole. The measure goes no deeper than the level at
+which a directory below would put the moved subtree past the depth bound, at
+most 128 levels below the source: a directory there decides the answer, so the
+fs walk holds at most about 130 descriptors however deep the tree is, as the
+Worker's walk stops at its bound, and the names below that level, already past
+the bound unless the move deepens them, are not measured for their length. A
+directory the walk cannot open or list fails the rename as the adapter's errno
+posture says (issue #2555): a transient fault is `StorageUnavailableError`, and
+a standing one, such as a mode-000 directory, stays the error it is when the
+same directory is listed, read or made into. The rename route answers either as
+the 500 it answers for a failed move (issue #3233). The moved names keep their
+characters and are not asked about them, so a directory whose name no path can
+spell moves with the rest. A server import refuses such a member before its row
+exists, and the backup upload gate refuses one as `422 invalid_archive`, its
+`detail` naming the member and the reason, before the archive is stored.
 
 The files-API doors also refuse the characters an uploaded file's name may not
 carry (issues #3922, #3969, #3988): a `\`, a control character (C0, DEL or C1),

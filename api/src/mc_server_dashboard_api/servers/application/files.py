@@ -58,6 +58,7 @@ from mc_server_dashboard_api.archive_member import (
     HeaderLimitError,
 )
 from mc_server_dashboard_api.member_name import (
+    MAX_DIRECTORY_DEPTH,
     component_refusal,
     extent_refusal,
     member_name_refusal,
@@ -1675,6 +1676,13 @@ async def _refuse_unstorable_subtree(
     subtree's extent is measured as stored and judged after the destination. The
     names themselves do not change, so their characters are not asked about: a
     name no path can spell moves with the rest.
+
+    The measure goes no deeper than the level at which a directory below would
+    put the destination's subtree past the depth bound: a directory found there
+    decides the depth, and nothing below it can change the answer. So an fs walk
+    holds at most 128 descriptors and a listing's, however deep the tree, and the
+    names below that level, all of them past the bound once moved and already
+    past it unless the move deepens them, are not measured for their length.
     """
 
     to_components, to_bytes = path_size(to_path)
@@ -1683,7 +1691,10 @@ async def _refuse_unstorable_subtree(
     if not deeper and not longer:
         return
     extent = await file_store.subtree_extent(
-        community_id=community_id, server_id=server_id, rel_path=from_path
+        community_id=community_id,
+        server_id=server_id,
+        rel_path=from_path,
+        max_depth=max(MAX_DIRECTORY_DEPTH + 1 - to_components, 1),
     )
     # A limit with no name below to judge, or one the destination does not grow,
     # is passed a zero, which it admits.

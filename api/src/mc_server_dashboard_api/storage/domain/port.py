@@ -188,7 +188,9 @@ class SubtreeExtent:
     0 itself: a child directory is level 1, and a directory holding none is 0.
     ``longest`` is the longest path below it, relative to it, in bytes: a child
     ``a`` is 1 and ``a/b`` is 3, and an empty directory is 0. Both are measured
-    on the names as stored, whatever characters they hold.
+    on the names as stored, whatever characters they hold, and no deeper than
+    the measure was asked to go: a subtree that reaches that depth reports it as
+    its ``depth``, and its names past it are not measured.
     """
 
     depth: int
@@ -1044,7 +1046,12 @@ class FileStore(abc.ABC):
 
     @abc.abstractmethod
     async def subtree_extent(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: RelPath,
+        *,
+        max_depth: int,
     ) -> SubtreeExtent:
         """Measure the subtree of the directory ``rel_path`` in ``current/`` (#3973).
 
@@ -1053,12 +1060,18 @@ class FileStore(abc.ABC):
         ``rel_path`` is resolved, as :meth:`list_dir` resolves it; what lies
         below is measured as stored, without a resolve per name, so a name no
         ``RelPath`` can spell (a C0 or DEL character) counts like any other. A
-        symlink below is a name and is not followed. One walk by directory
-        descriptor on fs, so no absolute path bounds it, and one prefix listing
-        on object. A failure to open or list a directory below is
-        :class:`~.errors.StorageUnavailableError`: the extent is then unknown.
-        Raises :class:`~.errors.NotFoundError` for a path that is not a
-        directory.
+        symlink below is a name and is not followed.
+
+        No name more than ``max_depth`` levels below is measured, ``max_depth``
+        being at least 1: a subtree that reaches that level answers it as its
+        ``depth``, which is all a move needs to know once the level makes it too
+        deep. So the fs walk, by directory descriptor so that no absolute path
+        bounds it, holds at most ``max_depth`` descriptors and a listing's. One
+        prefix listing on object. Raises :class:`~.errors.NotFoundError` for a
+        path that is not a directory, and on fs
+        :class:`~.errors.StorageUnavailableError` for a transient fault (the
+        adapter's errno posture); a standing one propagates, as at its other
+        doors.
         """
 
     @abc.abstractmethod

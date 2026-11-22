@@ -350,12 +350,17 @@ class StorageFileStoreAdapter(FileStore):
             raise ServerFileNotFoundError(str(server_id.value)) from exc
 
     async def subtree_extent(
-        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        max_depth: int,
     ) -> SubtreeExtent:
         community, server = _scope(community_id, server_id)
         try:
             extent = await self._storage.subtree_extent(
-                community, server, _rel_path(rel_path)
+                community, server, _rel_path(rel_path), max_depth=max_depth
             )
         except StorageUnavailableError as exc:
             raise ServerFileStorageUnavailableError(str(server_id.value)) from exc

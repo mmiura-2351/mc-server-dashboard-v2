@@ -2149,13 +2149,19 @@ class ObjectStorage(Storage):
         return _entries_at_level(objs, snapshot_prefix, dir_suffix)
 
     async def subtree_extent(
-        self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: RelPath,
+        *,
+        max_depth: int,
     ) -> SubtreeExtent:
         # One prefix listing of every key below the directory (issue #3973), not
         # one listing per directory: a key is the whole path of a member, so its
         # own components give the deepest directory and its length the longest
         # path. A ``.dir`` marker (issue #1125) is no name: it stands for the
-        # directory that holds it, as a listing reads it.
+        # directory that holds it, as a listing reads it. Measured as the fs walk
+        # measures, no further than ``max_depth`` components.
         sub = self._safe_subkey(rel_path)
         dir_suffix = sub + "/" if sub else ""
         async with self._client_factory() as client:
@@ -2178,9 +2184,11 @@ class ObjectStorage(Storage):
             below = obj.key[len(prefix) :]
             if below == _DIR_MARKER:
                 continue
-            depth = max(depth, below.count("/"))
-            below = below.removesuffix("/" + _DIR_MARKER)
-            longest = max(longest, len(below.encode("utf-8", "surrogateescape")))
+            depth = max(depth, min(below.count("/"), max_depth))
+            names = below.removesuffix("/" + _DIR_MARKER).split("/")[:max_depth]
+            longest = max(
+                longest, len("/".join(names).encode("utf-8", "surrogateescape"))
+            )
         return SubtreeExtent(depth=depth, longest=longest)
 
     async def path_exists(

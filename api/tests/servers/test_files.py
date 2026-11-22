@@ -496,7 +496,12 @@ class FakeFileStore(FileStore):
         self.renamed_dirs.append((from_path, to_path))
 
     async def subtree_extent(
-        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        max_depth: int,
     ) -> SubtreeExtent:
         # Measured under the shared seam contract (tests/contracts/
         # server_file_store.py), on the shared fake and both adapters, so this

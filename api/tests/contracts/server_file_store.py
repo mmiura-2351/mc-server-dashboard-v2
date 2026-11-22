@@ -154,14 +154,35 @@ class FileStoreContract:
         await harness.store.make_dir(**scope, rel_path="world/empty/inner")
 
         assert await harness.store.subtree_extent(
-            **scope, rel_path="world"
+            **scope, rel_path="world", max_depth=129
         ) == SubtreeExtent(depth=2, longest=22)
         assert await harness.store.subtree_extent(
-            **scope, rel_path="world/empty/inner"
+            **scope, rel_path="world/empty/inner", max_depth=129
         ) == SubtreeExtent(depth=0, longest=0)
         assert await harness.store.subtree_extent(
-            **scope, rel_path="world/region"
+            **scope, rel_path="world/region", max_depth=129
         ) == SubtreeExtent(depth=0, longest=len("r.0.0.mca"))
+
+    async def test_subtree_extent_measures_no_deeper_than_it_is_asked(
+        self, file_store_harness: FileStoreHarness
+    ) -> None:
+        # A subtree that reaches ``max_depth`` answers it, and nothing past it is
+        # measured: ``a/b/c`` is level 3, counted and not walked into.
+        harness = file_store_harness
+        scope: _Scope = {
+            "community_id": harness.community_id,
+            "server_id": harness.server_id,
+        }
+        await harness.write("top/a/b/c/d/long-file-name", b"1")
+        await harness.write("top/x/y", b"2")
+        await harness.store.make_dir(**scope, rel_path="top/a/b/c/e/f")
+
+        assert await harness.store.subtree_extent(
+            **scope, rel_path="top", max_depth=129
+        ) == SubtreeExtent(depth=5, longest=22)
+        assert await harness.store.subtree_extent(
+            **scope, rel_path="top", max_depth=3
+        ) == SubtreeExtent(depth=3, longest=len("a/b/c"))
 
     @pytest.mark.parametrize("path", ["missing", "world/region/r.0.0.mca"])
     async def test_subtree_extent_of_a_path_that_is_not_a_directory_is_a_miss(
@@ -175,6 +196,7 @@ class FileStoreContract:
                 community_id=harness.community_id,
                 server_id=harness.server_id,
                 rel_path=path,
+                max_depth=129,
             )
 
     @pytest.mark.parametrize("method", ["download", "export"])
@@ -251,7 +273,7 @@ class FileStoreContract:
             assert await store.path_exists(**scope, rel_path=file_alias)
         elif method == "subtree_extent":
             assert await store.subtree_extent(
-                **scope, rel_path=dir_alias
+                **scope, rel_path=dir_alias, max_depth=129
             ) == SubtreeExtent(depth=0, longest=len("level.dat"))
         elif method == "write_file":
             await store.write_file(**scope, rel_path=file_alias, content=b"changed")
@@ -347,5 +369,7 @@ class FileStoreContract:
                 await store.write_file(**scope, rel_path=path, content=b"new")
             elif method in {"read_version", "rollback"}:
                 await getattr(store, method)(**scope, rel_path=path, version_id="v1")
+            elif method == "subtree_extent":
+                await store.subtree_extent(**scope, rel_path=path, max_depth=129)
             else:
                 await getattr(store, method)(**scope, rel_path=path)

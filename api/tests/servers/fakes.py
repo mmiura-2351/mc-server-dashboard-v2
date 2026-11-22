@@ -624,22 +624,35 @@ class FakeFileStore(FileStore):
             self.dirs.add((to_prefix + (recorded + "/")[len(prefix) :]).rstrip("/"))
 
     async def subtree_extent(
-        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        max_depth: int,
     ) -> SubtreeExtent:
         # Every seeded file and created directory below the path, measured as a
-        # path below it, the way the object backend measures its keys.
+        # path below it no further than ``max_depth`` components, the way the
+        # object backend measures its keys.
         path = _canonical(rel_path)
         prefix = "" if path == "." else path + "/"
         below = [m[len(prefix) :] for m in self._files() if m.startswith(prefix)]
         made = [d[len(prefix) :] for d in self._dirs() if d.startswith(prefix)]
         if path != "." and not below and not made and path not in self._dirs():
             raise ServerFileNotFoundError(str(server_id.value))
+        depth = max(
+            [m.count("/") for m in below] + [d.count("/") + 1 for d in made],
+            default=0,
+        )
         return SubtreeExtent(
-            depth=max(
-                [m.count("/") for m in below] + [d.count("/") + 1 for d in made],
+            depth=min(depth, max_depth),
+            longest=max(
+                (
+                    len("/".join(m.split("/")[:max_depth]).encode())
+                    for m in below + made
+                ),
                 default=0,
             ),
-            longest=max((len(m.encode()) for m in below + made), default=0),
         )
 
     async def make_dir(

@@ -219,17 +219,23 @@ class FileStore(abc.ABC):
 
     @abc.abstractmethod
     async def subtree_extent(
-        self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: str,
+        max_depth: int,
     ) -> SubtreeExtent:
         """Measure the subtree of the directory ``rel_path`` in ``current/`` (#3973).
 
         What a directory rename judges the names it creates by. Only ``rel_path``
         is resolved; the names below are measured as stored, whatever they hold,
-        so one no path can spell does not fail the measure. Raises
-        :class:`ServerFileNotFoundError` for a path that is not a directory,
-        :class:`InvalidFilePathError` for a traversal-unsafe one and
-        :class:`ServerFileStorageUnavailableError` when a directory below cannot
-        be opened or listed.
+        so one no path can spell does not fail the measure. No name more than
+        ``max_depth`` levels below is measured: a subtree that reaches that level
+        answers it as its ``depth``. Raises :class:`ServerFileNotFoundError` for a
+        path that is not a directory, :class:`InvalidFilePathError` for a
+        traversal-unsafe one and :class:`ServerFileStorageUnavailableError` for a
+        transient store fault.
         """
 
     @abc.abstractmethod

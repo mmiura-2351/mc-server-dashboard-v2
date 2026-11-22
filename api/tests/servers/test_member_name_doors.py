@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import errno
 import io
 import os
 import tarfile
@@ -840,32 +841,52 @@ async def test_a_growing_move_past_path_max_is_answered_by_the_rule(
     await doors.rename("a", "a" + "x" * 40)
     await doors.rename("a" + "x" * 40, "a" + "x" * 41)
     await doors.rename("a" + "x" * 41, "z/a")
-    # Then to a 255-byte name: refused by the rule when the moved path passes
-    # 4,095 bytes relative to the working set, which depends on the store's own
-    # prefix here, and admitted otherwise.
-    moved = len(("n" * 255 + "/" + inner).encode())
-    if moved > 4095:
-        assert await _refusal(doors.rename("z/a", "n" * 255)) == "path_too_long"
-        assert await doors.names("z") == ["a"]
-    else:
-        await doors.rename("z/a", "n" * 255)
-        assert "n" * 255 in await doors.names()
+    # Then to destinations sized from the store's own prefix, so both answers
+    # run whatever pytest's temp path is: a moved path of 4,096 bytes relative
+    # to the working set is refused by the rule, and one of 4,095 is admitted.
+    size = 4095 - len(inner)
+    assert await _refusal(doors.rename("z/a", _long_path(size))) == "path_too_long"
+    assert await doors.names("z") == ["a"]
+
+    await doors.rename("z/a", _long_path(size - 1))
+    assert await doors.names(_long_path(size - 1)) == [inner.split("/")[0]]
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
-async def test_a_subtree_the_walk_cannot_open_is_the_store_failing(
+async def test_a_subtree_the_walk_cannot_open_fails_as_its_other_doors_do(
     fs_doors: _FsDoors,
 ) -> None:
+    # A standing fault (EACCES) stays the error it is when the same directory is
+    # listed, read or made into; the tree is not moved.
     doors = fs_doors.doors
     await doors.write("a/locked/f")
     locked = fs_doors.root / "a" / "locked"
     locked.chmod(0)
     try:
-        with pytest.raises(ServerFileStorageUnavailableError):
+        with pytest.raises(PermissionError):
             await doors.rename("a", "longer")
     finally:
         locked.chmod(0o755)
     assert await doors.read("a/locked/f") == b"x"
+
+
+async def test_a_transient_fault_under_the_walk_is_the_store_unavailable(
+    fs_doors: _FsDoors, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The adapter's errno posture (issue #2555): EIO is the retryable type.
+    doors = fs_doors.doors
+    await doors.write("a/b/f")
+    real_scandir = os.scandir
+
+    def failing(path: int) -> object:
+        if isinstance(path, int):
+            raise OSError(errno.EIO, "Input/output error")
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", failing)
+
+    with pytest.raises(ServerFileStorageUnavailableError):
+        await doors.rename("a", "longer")
 
 
 async def test_a_file_already_too_long_is_renamed_at_its_own_length(
@@ -892,3 +913,76 @@ async def test_a_file_already_too_long_is_renamed_at_its_own_length(
     await doors.rename(_long_path(4096) + "a", _long_path(4096) + "b")
 
     assert await doors.read(_long_path(4096) + "b") == b"long"
+
+
+async def test_a_too_deep_file_moves_to_a_new_chain_of_the_same_shape(
+    odd: _Doors,
+) -> None:
+    # The accepted exception (review r3): a move that grows no name may keep a
+    # chain already past the bound, under new directories too.
+    await odd.rename(_nested(129, "f"), "e/" * 129 + "f")
+
+    assert await odd.read("e/" * 129 + "f") == b"deep"
+
+
+@pytest.fixture(params=["fs", "object"])
+async def deep300(request: pytest.FixtureRequest, tmp_path: Path) -> _Doors:
+    """A working set holding a file 300 directory levels deep."""
+
+    harness = build_harness(request.param, tmp_path)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    await harness.publish(
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {_nested(300, "f"): b"deep"},
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community, server, running=False))
+    return _Doors(
+        community=CommunityId(community),
+        server=ServerId(server),
+        store=StorageFileStoreAdapter(storage=harness.storage),
+        uow=uow,
+    )
+
+
+async def test_a_300_level_tree_moves_to_a_longer_name_at_its_own_level(
+    deep300: _Doors,
+) -> None:
+    # As on the base: the move adds a byte but no level.
+    await deep300.rename("d", "dd")
+
+    assert await deep300.read("dd/" + _nested(299, "f")) == b"deep"
+
+
+async def test_a_300_level_tree_is_not_moved_deeper(deep300: _Doors) -> None:
+    assert await _refusal(deep300.rename("d", "x/d")) == "path_too_deep"
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/proc/self/fd"))
+
+
+@pytest.mark.parametrize("deep300", ["fs"], indirect=True)
+async def test_the_walk_of_a_300_level_tree_holds_at_most_130_descriptors(
+    deep300: _Doors, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # It stops at the level that decides the depth, as the Worker's walk stops
+    # at its bound, rather than holding one descriptor per level of the tree.
+    doors = deep300
+    held: list[int] = []
+    real_scandir = os.scandir
+
+    def counting(path: int) -> object:
+        if isinstance(path, int):
+            held.append(_open_descriptors())
+        return real_scandir(path)
+
+    before = _open_descriptors()
+    monkeypatch.setattr(os, "scandir", counting)
+
+    await doors.rename("d", "dd")
+    assert await _refusal(doors.rename("dd", "x/d")) == "path_too_deep"
+
+    assert 0 < max(held) - before <= 130
+    assert _open_descriptors() == before

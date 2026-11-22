@@ -2985,16 +2985,18 @@ async def test_subtree_extent_measures_the_names_below_as_stored(
     # is not a name, so ``a/b/emptydir`` is 12 bytes, not 17.
     await harness.storage.make_dir(community, server, RelPath("top/a/b/emptydir"))
 
-    extent = await harness.storage.subtree_extent(community, server, RelPath("top"))
+    extent = await harness.storage.subtree_extent(
+        community, server, RelPath("top"), max_depth=129
+    )
 
     # ``a/b/emptydir`` is level 3; four three-byte characters and ``/q`` are 14
     # bytes.
     assert extent == SubtreeExtent(depth=3, longest=14)
     assert await harness.storage.subtree_extent(
-        community, server, RelPath(".")
+        community, server, RelPath("."), max_depth=129
     ) == SubtreeExtent(depth=4, longest=len("top/") + 14)
     assert await harness.storage.subtree_extent(
-        community, server, RelPath("top/a/b/emptydir")
+        community, server, RelPath("top/a/b/emptydir"), max_depth=129
     ) == SubtreeExtent(depth=0, longest=0)
 
 
@@ -3005,9 +3007,13 @@ async def test_subtree_extent_of_a_path_that_is_not_a_directory_is_a_miss(
     await harness.publish(community, server, {"top/f": b"1"})
 
     with pytest.raises(NotFoundError):
-        await harness.storage.subtree_extent(community, server, RelPath("top/f"))
+        await harness.storage.subtree_extent(
+            community, server, RelPath("top/f"), max_depth=129
+        )
     with pytest.raises(NotFoundError):
-        await harness.storage.subtree_extent(community, server, RelPath("gone"))
+        await harness.storage.subtree_extent(
+            community, server, RelPath("gone"), max_depth=129
+        )
 
 
 async def test_write_file_before_any_publish_initializes_first_version(
@@ -3801,7 +3807,31 @@ async def test_subtree_extent_before_any_publish_is_of_an_empty_root(
     community, server = new_scope()
 
     assert await harness.storage.subtree_extent(
-        community, server, RelPath(".")
+        community, server, RelPath("."), max_depth=129
     ) == SubtreeExtent(depth=0, longest=0)
     with pytest.raises(NotFoundError):
-        await harness.storage.subtree_extent(community, server, RelPath("top"))
+        await harness.storage.subtree_extent(
+            community, server, RelPath("top"), max_depth=129
+        )
+
+
+async def test_subtree_extent_measures_no_deeper_than_it_is_asked(
+    harness: StorageHarness,
+) -> None:
+    """A subtree that reaches ``max_depth`` answers it, unmeasured past it (#3973)."""
+
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"top/a/b/c/d/long-file-name": b"1", "top/x/y": b"2"}
+    )
+    await harness.storage.make_dir(community, server, RelPath("top/a/b/c/e/f"))
+
+    async def extent(max_depth: int) -> SubtreeExtent:
+        return await harness.storage.subtree_extent(
+            community, server, RelPath("top"), max_depth=max_depth
+        )
+
+    assert await extent(129) == SubtreeExtent(depth=5, longest=22)
+    # ``a/b/c`` is level 3: counted, not walked into.
+    assert await extent(3) == SubtreeExtent(depth=3, longest=len("a/b/c"))
+    assert await extent(1) == SubtreeExtent(depth=1, longest=len("a"))
