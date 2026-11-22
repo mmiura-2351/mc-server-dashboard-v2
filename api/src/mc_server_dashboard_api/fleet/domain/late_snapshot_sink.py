@@ -30,7 +30,13 @@ class LateSnapshotResultSink(abc.ABC):
 
     @abc.abstractmethod
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         """Release ``server_id``'s held assignment on a late snapshot result (#891).
 
@@ -57,4 +63,9 @@ class LateSnapshotResultSink(abc.ABC):
         a cause it never observed. The caller resolves it, so a failed result always
         carries something to log — mirroring the ``message or status.value`` every
         other failed-command log in the API renders.
+
+        ``retry`` marks a retry of a result whose earlier attempt failed. That
+        attempt may have committed the release with its answer lost, so a retry
+        that finds the row already released under the stopped intent announces
+        and logs the release, as that attempt would have (issue #4062).
         """

@@ -3174,17 +3174,67 @@ async def test_a_held_report_gets_a_last_attempt_when_the_worker_closes_the_stre
         await h.stop()
 
 
+class _RetryFlagSink(_OutageSink):
+    """Records, per write, whether it was told it retries an earlier attempt."""
+
+    def __init__(self, **outage: Any) -> None:
+        super().__init__(**outage)
+        self.retries: list[bool] = []
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        self.retries.append(frame.get("retry", False))
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_report_tells_the_sink_its_retries_are_retries() -> None:
+    # Issue #4062: an attempt that failed as an outage may have committed, its
+    # answer lost with the connection. Its retry then finds the row already at
+    # the reported state, and must say it is a retry for the sink to publish the
+    # frame anyway. A first attempt is none, so a repeated report stays quiet.
+    sink = _RetryFlagSink(errors={_SERVER_A: [_OUTAGE] * 2})
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        await _wait_until(lambda: len(sink.observed) == 2, "both reports not applied")
+
+        assert sink.retries == [False, True, True, False]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
 class _OutageLateSnapshotSink(LateSnapshotResultSink):
-    """Fails the first clear with an outage, then records each server it clears."""
+    """Fails the first clear with an outage, then records each server it clears,
+    and whether each clear was told it retries an earlier attempt."""
 
     def __init__(self) -> None:
         self.attempts = 0
         self.cleared: list[str] = []
+        self.retries: list[bool] = []
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         self.attempts += 1
+        self.retries.append(retry)
         if self.attempts == 1:
             raise _OUTAGE("connect call failed")
         self.cleared.append(server_id)
@@ -3221,6 +3271,36 @@ async def test_a_held_late_final_snapshot_result_releases_on_its_retry() -> None
 
         assert sink.cleared == [_SERVER_A]
         assert sink.attempts == 2
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_late_final_snapshot_result_tells_the_sink_its_retry_is_one() -> (
+    None
+):
+    # Issue #4062: the release the first attempt wrote may have committed, its
+    # answer lost with the connection. The retry must say it is one, for the
+    # sink to announce a release it finds already made.
+    sink = _OutageLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        control_plane=state,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        state.register_pending(
+            "snapshot-1", WorkerId(_WORKER_ID), snapshot_server_id=_SERVER_A
+        )
+        state.discard_pending("snapshot-1")
+        await call.write(_command_result_message("snapshot-1"))
+        await _wait_until(lambda: sink.cleared, "the held release was not applied")
+
+        assert sink.retries == [False, True]
         await call.done_writing()
     finally:
         await h.stop()
@@ -3268,10 +3348,15 @@ class _RecordingControlPlane(ControlPlaneState):
         self.resolved: list[tuple[str, list[tuple[str, str, str]]]] = []
 
     async def resolve(
-        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+        self,
+        command_id: str,
+        worker_id: WorkerId,
+        result: pb.CommandResult,
+        *,
+        retry: bool = False,
     ) -> None:
         self.resolved.append((command_id, list(self._observed)))
-        await super().resolve(command_id, worker_id, result)
+        await super().resolve(command_id, worker_id, result, retry=retry)
 
 
 async def _write_all(
