@@ -629,6 +629,38 @@ its archive some other way; find out why before you delete it. Then run the
 `deleted: 21 (each audited as backup:delete_dangling)`. The rows drop out of the
 server's backup list, and retention no longer counts them.
 
+**A row the store cannot size stalls its server's retention.** Before it ranks,
+the retention prune sends a HEAD for each `scheduled` row whose size is unknown.
+If that HEAD keeps failing with anything other than "not found", such as an S3
+`403 AccessDenied` or an fs `EACCES`, the server's prune fails on every run, and
+its scheduled backups are no longer pruned. Each run logs this WARNING:
+
+```text
+retention prune of server <server-id> stopped before selecting anything: a NULL-size scheduled backup could not be sized (<error type>: <error>), and the ranking needs its size. The next run retries.
+```
+
+`--delete-dangling` cannot clear such a row: it lists the row as skipped and
+exits 1. To find the rows the prune sends a HEAD for (`mcsd` is the
+`POSTGRES_USER` and `POSTGRES_DB` of `.env`):
+
+```sh
+docker compose exec db psql -U mcsd -d mcsd -c "SELECT id, storage_ref, created_at
+  FROM backup WHERE server_id = '<server-id>' AND source = 'scheduled'
+  AND size_bytes IS NULL"
+```
+
+Then do one of the following:
+
+- Fix the store's permission so the HEAD answers again. The next prune sizes
+  the row and runs.
+- If you have confirmed in the store itself that the row's archive is gone,
+  delete the row by hand. This delete is not audited:
+
+  ```sh
+  docker compose exec db psql -U mcsd -d mcsd -c \
+    "DELETE FROM backup WHERE id = '<backup-id>'"
+  ```
+
 #### Steady-state prevention
 
 Three steady-state mechanisms keep the store from filling in normal operation; this
