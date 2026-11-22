@@ -4,7 +4,9 @@ Pins the :class:`RetentionPolicy` value object (keep-N XOR tiered, validated on
 construction and on the JSON round-trip) and the pure selection function
 :func:`backups_to_prune`: only ``source=scheduled`` rows are ever candidates,
 keep-N keeps the newest N, and the tiered form keeps the newest backup per UTC
-calendar day / ISO week / calendar month over the configured windows.
+calendar day / ISO week / calendar month over the configured windows. Healthy
+rows are chosen as keepers first (issue #1864): a quarantined row keeps only a
+slot or bucket no other row is left to fill.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ def _backup(
     created_at: dt.datetime,
     *,
     source: BackupSource = BackupSource.SCHEDULED,
+    health: BackupHealth = BackupHealth.HEALTHY,
     backup_id: BackupId | None = None,
 ) -> Backup:
     return Backup(
@@ -45,7 +48,7 @@ def _backup(
         storage_ref=f"ref-{uuid.uuid4()}",
         size_bytes=None,
         source=source,
-        health=BackupHealth.HEALTHY,
+        health=health,
         created_by=None,
         created_at=created_at,
     )
@@ -297,3 +300,229 @@ def test_tiered_same_backup_claims_multiple_buckets() -> None:
     older_same_day = _backup(_NOW - dt.timedelta(hours=2))
     pruned = backups_to_prune(policy, [newest, older_same_day], _NOW)
     assert pruned == [older_same_day]
+
+
+# --- health-aware selection (issue #1864) ------------------------------------
+#
+# Healthy rows are chosen as keepers first: a QUARANTINED row keeps a keep-N
+# slot only when too few other rows are left to fill the N, and a tier bucket
+# only when the bucket holds no other row. UNKNOWN (a legacy row the sweep has
+# not read yet) and UNREADABLE (a revisable verdict) rank like HEALTHY.
+
+# One slot or one bucket each, so a single sibling can hold it.
+_SINGLE_SLOT_POLICIES = {
+    "keep_last": RetentionPolicy.from_fields(keep_last=1),
+    "daily": RetentionPolicy.from_fields(daily=1),
+    "weekly": RetentionPolicy.from_fields(weekly=1),
+    "monthly": RetentionPolicy.from_fields(monthly=1),
+}
+
+# Where the candidate sits when it is not the newest row: older than the
+# sibling for keep-N, which ranks rows rather than dating them, and a day / ISO
+# week / month outside the one-wide window for the tiers.
+_OLDER = {
+    "keep_last": _NOW - dt.timedelta(hours=4),
+    "daily": dt.datetime(2026, 7, 9, 12, 0, tzinfo=dt.timezone.utc),  # yesterday
+    "weekly": dt.datetime(2026, 7, 5, 12, 0, tzinfo=dt.timezone.utc),  # ISO week 27
+    "monthly": dt.datetime(2026, 6, 30, 12, 0, tzinfo=dt.timezone.utc),  # June
+}
+
+# health x age x tier -> which of the two rows is pruned. The candidate is the
+# row under test; the sibling sits in the policy's one slot or bucket two hours
+# before _NOW. Keep-N and the tiers part only where an older candidate meets a
+# quarantined sibling: keep-N ranks a non-quarantined candidate ahead of it,
+# while a row outside a tier window is never kept.
+_TRUTH_TABLE = [
+    # candidate, sibling, candidate newest?, pruned under keep-N, under a tier
+    ("healthy", "healthy", True, "sibling", "sibling"),
+    ("unknown", "healthy", True, "sibling", "sibling"),
+    ("unreadable", "healthy", True, "sibling", "sibling"),
+    ("quarantined", "healthy", True, "candidate", "candidate"),
+    ("healthy", "quarantined", True, "sibling", "sibling"),
+    ("unknown", "quarantined", True, "sibling", "sibling"),
+    ("unreadable", "quarantined", True, "sibling", "sibling"),
+    ("quarantined", "quarantined", True, "sibling", "sibling"),
+    ("healthy", "healthy", False, "candidate", "candidate"),
+    ("unknown", "healthy", False, "candidate", "candidate"),
+    ("unreadable", "healthy", False, "candidate", "candidate"),
+    ("quarantined", "healthy", False, "candidate", "candidate"),
+    ("healthy", "quarantined", False, "sibling", "candidate"),
+    ("unknown", "quarantined", False, "sibling", "candidate"),
+    ("unreadable", "quarantined", False, "sibling", "candidate"),
+    ("quarantined", "quarantined", False, "candidate", "candidate"),
+]
+
+
+@pytest.mark.parametrize("tier", list(_SINGLE_SLOT_POLICIES))
+@pytest.mark.parametrize(
+    ("candidate", "sibling", "newest", "pruned_keep_n", "pruned_tiered"),
+    _TRUTH_TABLE,
+)
+def test_health_age_tier_truth_table(
+    tier: str,
+    candidate: str,
+    sibling: str,
+    newest: bool,
+    pruned_keep_n: str,
+    pruned_tiered: str,
+) -> None:
+    rows = {
+        "candidate": _backup(
+            _NOW if newest else _OLDER[tier], health=BackupHealth(candidate)
+        ),
+        "sibling": _backup(_NOW - dt.timedelta(hours=2), health=BackupHealth(sibling)),
+    }
+    pruned_row = pruned_keep_n if tier == "keep_last" else pruned_tiered
+    pruned = backups_to_prune(_SINGLE_SLOT_POLICIES[tier], list(rows.values()), _NOW)
+    assert pruned == [rows[pruned_row]]
+
+
+@pytest.mark.parametrize("tier", list(_SINGLE_SLOT_POLICIES))
+@pytest.mark.parametrize("health", [BackupHealth.UNKNOWN, BackupHealth.UNREADABLE])
+def test_unknown_or_unreadable_row_takes_the_slot_a_quarantined_row_yields(
+    tier: str, health: BackupHealth
+) -> None:
+    # Neither verdict is final, so the row ranks like a healthy one: it takes
+    # the slot ahead of the quarantined newest row and of the healthy oldest.
+    quarantined = _backup(_NOW, health=BackupHealth.QUARANTINED)
+    unverified = _backup(_NOW - dt.timedelta(hours=1), health=health)
+    healthy = _backup(_NOW - dt.timedelta(hours=2))
+    pruned = backups_to_prune(
+        _SINGLE_SLOT_POLICIES[tier], [quarantined, unverified, healthy], _NOW
+    )
+    assert pruned == [quarantined, healthy]
+
+
+@pytest.mark.parametrize("tier", list(_SINGLE_SLOT_POLICIES))
+def test_mixed_health_pruned_rows_stay_newest_first(tier: str) -> None:
+    quarantined = _backup(_NOW, health=BackupHealth.QUARANTINED)
+    kept = _backup(_NOW - dt.timedelta(hours=1))
+    healthy_older = _backup(_NOW - dt.timedelta(hours=2))
+    unreadable = _backup(_NOW - dt.timedelta(hours=3), health=BackupHealth.UNREADABLE)
+    pruned = backups_to_prune(
+        _SINGLE_SLOT_POLICIES[tier],
+        [unreadable, healthy_older, kept, quarantined],
+        _NOW,
+    )
+    assert pruned == [quarantined, healthy_older, unreadable]
+
+
+def test_keep_n_fills_the_slots_healthy_rows_leave_with_the_newest_quarantined() -> (
+    None
+):
+    # Two healthy rows for three slots: the newest quarantined row takes the
+    # third, and the older quarantined rows go.
+    policy = RetentionPolicy.from_fields(keep_last=3)
+    quarantined_newest = _backup(_NOW, health=BackupHealth.QUARANTINED)
+    healthy_1 = _backup(_NOW - dt.timedelta(days=1))
+    quarantined_2 = _backup(
+        _NOW - dt.timedelta(days=2), health=BackupHealth.QUARANTINED
+    )
+    healthy_3 = _backup(_NOW - dt.timedelta(days=3))
+    quarantined_4 = _backup(
+        _NOW - dt.timedelta(days=4), health=BackupHealth.QUARANTINED
+    )
+    pruned = backups_to_prune(
+        policy,
+        [quarantined_newest, healthy_1, quarantined_2, healthy_3, quarantined_4],
+        _NOW,
+    )
+    assert pruned == [quarantined_2, quarantined_4]
+
+
+def test_tiered_bucket_without_a_healthy_row_keeps_its_newest_quarantined() -> None:
+    # Today holds only quarantined rows, so its newest one keeps the day;
+    # yesterday's healthy row displaces the newer quarantined row beside it.
+    policy = RetentionPolicy.from_fields(daily=2)
+    today_newest = _backup(_NOW, health=BackupHealth.QUARANTINED)
+    today_older = _backup(_NOW - dt.timedelta(hours=2), health=BackupHealth.QUARANTINED)
+    yesterday_quarantined = _backup(
+        dt.datetime(2026, 7, 9, 12, 0, tzinfo=dt.timezone.utc),
+        health=BackupHealth.QUARANTINED,
+    )
+    yesterday_healthy = _backup(dt.datetime(2026, 7, 9, 8, 0, tzinfo=dt.timezone.utc))
+    pruned = backups_to_prune(
+        policy,
+        [today_newest, today_older, yesterday_quarantined, yesterday_healthy],
+        _NOW,
+    )
+    assert pruned == [today_older, yesterday_quarantined]
+
+
+def test_quarantined_newest_yields_the_week_and_still_keeps_its_day() -> None:
+    # Yesterday's healthy row takes the current ISO week ahead of today's
+    # quarantined row, which still keeps today: no other row is in that day.
+    policy = RetentionPolicy.from_fields(daily=1, weekly=1)
+    quarantined_today = _backup(_NOW, health=BackupHealth.QUARANTINED)
+    yesterday = _backup(dt.datetime(2026, 7, 9, 12, 0, tzinfo=dt.timezone.utc))
+    pruned = backups_to_prune(policy, [quarantined_today, yesterday], _NOW)
+    assert pruned == []
+
+
+def test_one_healthy_row_takes_two_buckets_from_two_quarantined_rows() -> None:
+    # The accepted case where overlapping tiers keep fewer rows than ignoring
+    # health would: ISO week 27 spans June and July, and the healthy June 29 row
+    # takes both week 27 and June, so neither quarantined row keeps a bucket.
+    # Health-blind, Y would keep week 27 and X June, and Z would go.
+    policy = RetentionPolicy.from_fields(weekly=2, monthly=2)
+    w = _backup(_NOW)  # week 28, July
+    y = _backup(
+        dt.datetime(2026, 7, 3, 12, 0, tzinfo=dt.timezone.utc),  # week 27, July
+        health=BackupHealth.QUARANTINED,
+    )
+    x = _backup(
+        dt.datetime(2026, 6, 30, 12, 0, tzinfo=dt.timezone.utc),  # week 27, June
+        health=BackupHealth.QUARANTINED,
+    )
+    z = _backup(dt.datetime(2026, 6, 29, 12, 0, tzinfo=dt.timezone.utc))  # wk 27, June
+    pruned = backups_to_prune(policy, [w, y, x, z], _NOW)
+    assert pruned == [y, x]
+
+
+@pytest.mark.parametrize(
+    ("policy", "pruned_indexes"),
+    [
+        (RetentionPolicy.from_fields(keep_last=2), [2]),
+        (RetentionPolicy.from_fields(daily=1, weekly=1, monthly=2), [1]),
+    ],
+    ids=["keep_last", "tiered"],
+)
+def test_all_quarantined_rows_keep_what_health_blind_retention_keeps(
+    policy: RetentionPolicy, pruned_indexes: list[int]
+) -> None:
+    # With no other row to prefer, every slot and bucket goes to the newest
+    # quarantined row that fits it, exactly as when health is ignored.
+    rows = [
+        _backup(_NOW, health=BackupHealth.QUARANTINED),
+        _backup(
+            dt.datetime(2026, 7, 9, 12, 0, tzinfo=dt.timezone.utc),
+            health=BackupHealth.QUARANTINED,
+        ),
+        _backup(
+            dt.datetime(2026, 6, 15, 12, 0, tzinfo=dt.timezone.utc),
+            health=BackupHealth.QUARANTINED,
+        ),
+    ]
+    pruned = backups_to_prune(policy, rows, _NOW)
+    assert pruned == [rows[i] for i in pruned_indexes]
+
+
+@pytest.mark.parametrize(
+    "source", [BackupSource.MANUAL, BackupSource.UPLOADED, BackupSource.EVENT]
+)
+@pytest.mark.parametrize("health", [BackupHealth.QUARANTINED, BackupHealth.UNREADABLE])
+def test_non_scheduled_rows_are_never_pruned_whatever_their_health(
+    source: BackupSource, health: BackupHealth
+) -> None:
+    # Retention prunes the displaced quarantined scheduled row, never the row
+    # of another source beside it.
+    policy = RetentionPolicy.from_fields(keep_last=1)
+    other_source = _backup(_NOW, source=source, health=health)
+    quarantined_scheduled = _backup(
+        _NOW - dt.timedelta(hours=1), health=BackupHealth.QUARANTINED
+    )
+    healthy_scheduled = _backup(_NOW - dt.timedelta(hours=2))
+    pruned = backups_to_prune(
+        policy, [other_source, quarantined_scheduled, healthy_scheduled], _NOW
+    )
+    assert pruned == [quarantined_scheduled]

@@ -966,6 +966,24 @@ describe("ServerBackupsTab retention editor (#1843)", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("names Damaged backups in the hint only for a pruning mode", async () => {
+    // Keep-all prunes nothing, so its hint must not say when Damaged backups
+    // are kept; keep-last-N and tiered both do (#1864).
+    routeGet();
+    await openBackups();
+
+    const mode = await modeSelect();
+    const hint = () =>
+      document.querySelector(".backups-retention-hint")?.textContent ?? "";
+    const damaged = t("backups.health.quarantined");
+    expect(hint()).not.toBe("");
+    expect(hint()).not.toContain(damaged);
+    fireEvent.change(mode, { target: { value: "keepLast" } });
+    expect(hint()).toContain(damaged);
+    fireEvent.change(mode, { target: { value: "tiered" } });
+    expect(hint()).toContain(damaged);
+  });
+
   it("sets a keep-last policy via PUT", async () => {
     mockApi.put.mockResolvedValue({ keep_last: 7 });
     routeGet();
