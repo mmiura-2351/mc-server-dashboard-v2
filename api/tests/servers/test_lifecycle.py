@@ -91,6 +91,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.servers.contract_table import worker_message, worker_status
 from tests.servers.fakes import (
+    DatabaseOutageError,
     ExitHookUnitOfWork,
     FakeBedrockTunnelSync,
     FakeClock,
@@ -101,6 +102,7 @@ from tests.servers.fakes import (
     FakeStoreGenerationReader,
     FakeUnitOfWork,
     PlacementSequenceControlPlane,
+    RefusalWriteFailsRepository,
     session_ends_as_step_a_exits,
 )
 
@@ -8303,6 +8305,70 @@ async def test_a_refused_retry_records_the_refusal_again() -> None:
     stored = uow.servers.by_id[ServerId(server_id)]
     assert stored.assigned_worker_id == WorkerId(worker)
     assert stored.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+
+
+_REFUSAL_WRITE_FAILED = "could not record the final-snapshot refusal"
+
+
+@pytest.mark.parametrize("code", list(_REFUSALS), ids=lambda c: c.value)
+@pytest.mark.parametrize("entry", list(_HOLD_ENTRIES))
+async def test_a_failed_write_of_the_refusal_keeps_the_refusal_s_answer(
+    entry: str, code: CommandStatus, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Issue #4103: the write only marks the row. Its failure must not replace
+    # the refusal, which decides what the caller does: the stop that set the
+    # intent still answers, an operator's re-stop answers 409
+    # final_snapshot_refused rather than 500, and the reconciler classifies the
+    # refusal. The row is held all the same, and the next refused retry records
+    # the refusal.
+    community, server_id, worker = _ids()
+    desired, observed, stop_sent = _HOLD_ENTRIES[entry]
+    stop_answer = CommandOutcome(
+        status=(
+            CommandStatus.SERVER_NOT_FOUND
+            if entry.endswith("not-found")
+            else CommandStatus.OK
+        )
+    )
+    cp = _ScriptedSnapshots([_refused(code)], stop=stop_answer)
+    repo = RefusalWriteFailsRepository(DatabaseOutageError("database unreachable"))
+    repo.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=desired,
+            observed=observed,
+            worker_id=worker,
+        )
+    )
+    stop = _stale_clear(FakeUnitOfWork(servers=repo), cp, StopIntentCounter())
+
+    raised: FinalSnapshotRefusedError | None = None
+    result: Server | None = None
+    with caplog.at_level(logging.WARNING):
+        try:
+            result = await _enter(entry, stop, community, server_id)
+        except FinalSnapshotRefusedError as exc:
+            raised = exc
+
+    assert repo.refusal_writes == 1
+    stored = repo.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.final_snapshot_refusal is None
+    [failed] = [r for r in caplog.records if _REFUSAL_WRITE_FAILED in r.getMessage()]
+    assert failed.levelno == logging.WARNING
+    assert failed.exc_info is not None
+    assert isinstance(failed.exc_info[1], DatabaseOutageError)
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    if entry.startswith("direct"):
+        assert raised is None
+        assert result is not None
+        assert result.assigned_worker_id == WorkerId(worker)
+        # The entity reads like the row, which the write did not reach.
+        assert result.final_snapshot_refusal is None
+    else:
+        assert raised is not None
+        assert raised.status is code
 
 
 @pytest.mark.parametrize(

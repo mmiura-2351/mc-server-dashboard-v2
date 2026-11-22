@@ -1157,22 +1157,20 @@ async def test_stale_release_guarded_off_a_newer_report_publishes_nothing(
 async def test_final_snapshot_refusal_publishes_its_frame_after_commit(
     world: _World,
 ) -> None:
-    """A refusal set on a stop holding its Worker, then cleared while it holds."""
+    """A refusal set on a stop holding its Worker."""
 
     worker = uuid.uuid4()
     server = await _wedged_stop(world, worker, "stopped")
     watching = world.watch(server)
 
-    for refusal in (FinalSnapshotRefusal.UNAVAILABLE, None):
-        async with world.uow() as uow:
-            assert await uow.servers.set_final_snapshot_refusal(
-                server.id, WorkerId(worker), refusal
-            )
-            await uow.commit()
+    async with world.uow() as uow:
+        assert await uow.servers.set_final_snapshot_refusal(
+            server.id, WorkerId(worker), FinalSnapshotRefusal.UNAVAILABLE
+        )
+        await uow.commit()
 
     assert [event.payload for event in await _received(watching)] == [
         {"final_snapshot_refusal": "unavailable"},
-        {"final_snapshot_refusal": None},
     ]
     world.assert_published_after_commit()
 

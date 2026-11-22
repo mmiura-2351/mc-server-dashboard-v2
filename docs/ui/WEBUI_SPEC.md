@@ -469,7 +469,9 @@ Worker publishes a `status` frame `{final_snapshot_refusal}` too, after the
 write that made it commits: `busy` or `unavailable` when that Worker refused
 the stop's final snapshot (#4054). A retry left unanswered changes nothing and
 publishes nothing (#4111); the refusal is cleared only by the release, whose
-frame carries the `null`. The same refusal recorded again publishes nothing.
+frame carries the `null`. The same refusal recorded again publishes nothing,
+except from the held retry of a late final-snapshot result, which publishes it
+even when it finds it recorded, as it does the release (#4104).
 
 A client applies each `status` frame by setting the fields it carries, so
 another tab's dashboard offers the actions of the current intent without a

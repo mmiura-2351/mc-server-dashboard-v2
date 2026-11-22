@@ -369,18 +369,24 @@ class ServerRepository(abc.ABC):
         self,
         server_id: ServerId,
         worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
     ) -> bool:
-        """Record how ``worker_id`` last answered the stop's final snapshot (#4054).
+        """Record how ``worker_id`` refused the stop's final snapshot (#4054).
 
-        ``refusal`` is the refusal that keeps the Worker assigned, or ``None``
-        to clear it. A stop clears it only by releasing the row: a retry left
-        unanswered keeps it (issue #4111). The write lands only while the
-        row is ``desired_state=stopped`` and still assigned to ``worker_id``,
-        so it never marks a row a release or a start has moved on. Every
-        release clears the value with the assignment. Returns ``True`` when the
-        row changed, which is announced to live subscribers as a status event
-        once the transaction commits.
+        ``refusal`` is the refusal that keeps the Worker assigned. Nothing here
+        clears it: only a release does, with the assignment, and a retry left
+        unanswered keeps it (issue #4111). The write lands only while the row is
+        ``desired_state=stopped`` and still assigned to ``worker_id``, so it
+        never marks a row a release or a start has moved on. Returns ``True``
+        when the row changed, which is announced to live subscribers as a status
+        event once the transaction commits.
+
+        ``retry`` marks a retry of a late result whose earlier attempt failed.
+        That attempt may have committed with its answer lost, so the same refusal
+        found recorded also counts, under the same guard, and is announced again
+        (issue #4104).
         """
 
     @abc.abstractmethod
