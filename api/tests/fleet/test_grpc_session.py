@@ -27,6 +27,10 @@ import grpc
 import pytest
 from grpc import aio
 
+from mc_server_dashboard_api.core.adapters.database import (
+    create_engine,
+    create_session_factory,
+)
 from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.control_plane import (
     ControlPlaneState,
@@ -48,11 +52,16 @@ from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
 )
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
+from mc_server_dashboard_api.servers.adapters.clock import SystemClock
+from mc_server_dashboard_api.servers.adapters.server_state_sink import (
+    ServersServerStateSink,
+)
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from mcsd.controlplane.v1.control_plane_pb2_grpc import (
     WorkerServiceStub,
     add_WorkerServiceServicer_to_server,
 )
+from tests.core.fakes import black_hole_database
 from tests.fleet.fakes import (
     FakeClock,
     FakeDatabasePing,
@@ -3403,6 +3412,121 @@ async def test_a_hold_purges_the_log_lines_queued_before_it_started(
         await call.done_writing()
     finally:
         await h.stop()
+
+
+class _HangOnceSink(_OutageSink):
+    """The first write waits for an answer that never comes, as on a database that
+    stopped answering; every later one lands."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hung = False
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        if not self.hung:
+            self.hung = True
+            await asyncio.Event().wait()
+        return await super().record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_first_attempt_that_hangs_is_held_while_the_session_lives(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A database that stops answering fails a statement only at its bound, long
+    # after a busy log stream has filled the queue and stopped the reader, which
+    # ends the session (issue #4042). The first attempt is cut at its own
+    # deadline instead, so the hold starts and purges the queue while the
+    # session lives, and the reports land in order once the database answers.
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    sink = _HangOnceSink()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await call.write(_status_message(_SERVER_B, pb.SERVER_STATE_STOPPED))
+        flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+        await _write_all(
+            call, [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+        )
+        beat = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(beat)
+        await call.write(_heartbeat_message())
+
+        await _wait_for_heartbeat_at(h, beat)
+        assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+        assert _logged(caplog, _HOLD_STARTED) != []
+        await _wait_until(lambda: len(sink.observed) == 2, "the reports did not land")
+        assert sink.observed == [
+            (_SERVER_A, _WORKER_ID, "running"),
+            (_SERVER_B, _WORKER_ID, "stopped"),
+        ]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+class _RealWriteSink(FakeServerStateSink):
+    """Registers the Worker as the fake does, and writes its reports through the
+    real sink."""
+
+    def __init__(self, real: ServersServerStateSink) -> None:
+        super().__init__()
+        self._real = real
+
+    async def record_observed_state(
+        self, *, server_id: str, worker_id: str, state: str, **frame: Any
+    ) -> bool:
+        return await self._real.record_observed_state(
+            server_id=server_id, worker_id=worker_id, state=state, **frame
+        )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_connect_that_hangs_is_held_while_the_session_lives(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The real sink's write, its database a host that stopped answering, and no
+    # connect bound of its own: the first attempt's deadline alone starts the
+    # hold, before a log flood behind it can end the session.
+    monkeypatch.setattr(grpc_server, "_FIRST_ATTEMPT_TIMEOUT_SECONDS", 0.2)
+    with black_hole_database() as url:
+        engine = create_engine(url)
+        real = ServersServerStateSink(
+            create_session_factory(engine), clock=SystemClock()
+        )
+        h = _Harness(
+            InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+            FakeClock(_T0),
+            state_sink=_RealWriteSink(real),
+            database_ping=FakeDatabasePing(reachable=False),
+        )
+        try:
+            call = await _registered(await h.start())
+            await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+            flood = grpc_server._INBOUND_QUEUE_MAXSIZE + 100
+            await _write_all(
+                call, [_log_message(_FLOOD_SERVER, str(i)) for i in range(flood)]
+            )
+            beat = _T0 + dt.timedelta(seconds=1)
+            h.clock.set(beat)
+            await call.write(_heartbeat_message())
+
+            await _wait_for_heartbeat_at(h, beat)
+            assert h.registry.list_workers()[0].status is WorkerStatus.ONLINE
+            assert _logged(caplog, _HOLD_STARTED) != []
+        finally:
+            await h.stop()
+            await engine.dispose()
 
 
 @pytest.mark.usefixtures("fast_hold")

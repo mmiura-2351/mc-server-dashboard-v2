@@ -135,6 +135,16 @@ _MAX_CONSECUTIVE_HANDLER_FAILURES = 5
 _HOLD_RETRY_INITIAL_SECONDS = 0.5
 _HOLD_RETRY_MAX_SECONDS = 10.0
 
+# How long a message's first attempt may run before it is cancelled and held
+# (issue #4042). The hold, and its purge of the queue, starts only once the first
+# attempt fails, while a database that stopped answering fails a statement only
+# at ``database.statement_timeout_seconds``. A busy log stream fills the queue
+# within about a second; the reader then stops, and the session ends 10 s later
+# when the Worker's send stalls, or once the heartbeats lapse. The cancel closes
+# the attempt's connection, which takes up to 2 s more, so the hold starts
+# within about 5 s.
+_FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
+
 # Backpressure limit on the queue between the inbound reader task and the
 # processor task (issue #1698). Heartbeats bypass this queue entirely. Every
 # other message is queued in arrival order: StatusChange and CommandResult,
@@ -823,11 +833,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
         error is the message's own, and holding it would block the queue for good.
         However the hold ends, one WARNING counts the log lines and metrics
         dropped meanwhile, those purged from the queue as it started included,
-        if any (issue #4028).
+        if any (issue #4028). A first attempt still running after
+        ``_FIRST_ATTEMPT_TIMEOUT_SECONDS`` is cancelled and held as an outage's
+        failure (issue #4042).
         """
 
         try:
-            await self._handle(worker_id, message)
+            # Expiry raises the bare ``TimeoutError``, which counts as an outage.
+            async with asyncio.timeout(_FIRST_ATTEMPT_TIMEOUT_SECONDS):
+                await self._handle(worker_id, message)
             return
         except Exception as exc:
             if (
