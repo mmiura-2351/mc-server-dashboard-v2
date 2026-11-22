@@ -94,6 +94,11 @@ class Server:
     # ``desired_state=stopped`` and still assigned to that Worker, and clears it
     # with the assignment, so it is ``None`` on every unassigned row.
     final_snapshot_refusal: FinalSnapshotRefusal | None = None
+    # Whether the server's creation has yet to finish (issue #4065). A create
+    # adds the row with it set and clears it once the last write of the
+    # working set has returned, so a create seed or import that failed or was
+    # interrupted leaves it set, and a start refuses the row.
+    creation_incomplete: bool = False
 
     def observe(self, state: ObservedState, at: dt.datetime) -> None:
         """Reflect an observed-state write that landed (issues #292, #3281).

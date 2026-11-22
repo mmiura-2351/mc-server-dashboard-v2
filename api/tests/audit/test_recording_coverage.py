@@ -60,6 +60,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     LifecycleLockLostError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerCreationIncompleteError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId as ServersCommunityId,
@@ -363,6 +364,25 @@ def test_start_server_transition_conflict_records_denied() -> None:
     assert event.outcome is Outcome.DENIED
     assert event.actor_id == user.id.value
     assert event.community_id == _COMMUNITY
+
+
+def test_start_of_a_server_whose_creation_did_not_finish_records_denied() -> None:
+    # Issue #4065: a refusal of the server's state, as a start that was never
+    # going to succeed, so a 409 and a DENIED outcome.
+    recorder = RecordingAuditRecorder()
+    app, _ = _base_app(recorder)
+    app.dependency_overrides[get_start_server] = lambda: _FakeUseCase(
+        error=ServerCreationIncompleteError()
+    )
+    client = _client(app)
+
+    resp = client.post(f"/api/communities/{_COMMUNITY}/servers/{uuid.uuid4()}/start")
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "creation_incomplete"
+    assert [(e.operation, e.outcome) for e in recorder.events] == [
+        (ops.SERVER_START, Outcome.DENIED)
+    ]
 
 
 def test_start_server_no_eligible_worker_records_error() -> None:

@@ -151,6 +151,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     RetiredConfigKeyError,
     ServerAssignedError,
     ServerBusyError,
+    ServerCreationIncompleteError,
     ServerFileStorageUnavailableError,
     ServerFilesUnsettledError,
     ServerNameAlreadyExistsError,
@@ -374,6 +375,10 @@ class ServerResponse(BaseModel):
     # ``busy`` / ``unavailable`` while a stop holds its Worker for that reason,
     # ``None`` otherwise.
     final_snapshot_refusal: str | None = None
+    # Whether the server's create seed or import has yet to finish (issue
+    # #4065): ``True`` while the creation runs, and for good once it failed or
+    # was interrupted, when a start is refused ``creation_incomplete``.
+    creation_incomplete: bool
     # The scheduled-backup retention policy (issue #1841): the raw stored shape
     # (``{"keep_last": N}`` or ``{"daily": D, "weekly": W, "monthly": M}``), or
     # ``None`` while unconfigured. Written via the backups retention endpoints
@@ -426,6 +431,7 @@ class ServerResponse(BaseModel):
                 if server.final_snapshot_refusal is None
                 else server.final_snapshot_refusal.value
             ),
+            creation_incomplete=server.creation_incomplete,
             backup_retention=server.backup_retention,
         )
 
@@ -540,11 +546,11 @@ async def create_server(
         raise _not_found() from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but seeding the working set failed (issue #243). The
-        # server is left in a degraded-but-repairable state (the files API can
-        # write the missing eula.txt/server.properties); the use case WARN-logged
-        # it. Surface a mapped 503 rather than an unmapped 500. The row stands, so
-        # it is audited as the success path does (issue #3483); the 503 tells the
-        # caller the seeding failed.
+        # server is left unable to start (issue #4065): the remedy is to delete it
+        # and create it again. The use case WARN-logged it. Surface a mapped 503
+        # rather than an unmapped 500. The row stands, so it is audited as the
+        # success path does (issue #3483); the 503 tells the caller the seeding
+        # failed.
         await _record(
             recorder,
             ops.SERVER_CREATE,
@@ -593,7 +599,8 @@ async def import_server(
     (#243); ``accept_eula`` is never implied. The archive contents then publish as
     the initial working set through the hardened extraction (zip-slip / size / entry
     caps -> 413 / 422). A publish failure after the row commits is 503
-    ``seed_failed`` (the row is repairable via the files API).
+    ``seed_failed``: the row stands but cannot start, as its working set is only
+    what was written (issue #4065); delete it and import again.
 
     **An archive that does not read (issue #3769).** A body the zip reader fails
     on — not a zip at all, cut short, damage the reader detects in a member, or an
@@ -720,10 +727,11 @@ async def import_server(
         raise _not_found() from exc
     except WorkingSetSeedFailedError as exc:
         # The row committed but publishing the working set failed mid-way: the
-        # server is degraded-but-repairable via the files API (same posture as
-        # create's seeding failure, #243/#252). Surface a mapped 503. Every raise
-        # of this error on import follows the create commit, so the row stands and
-        # is audited as the success path does (issue #3483).
+        # server cannot start, and the remedy is to delete it and import again
+        # (same posture as create's seeding failure, #243/#252, #4065). Surface a
+        # mapped 503. Every raise of this error on import follows the create
+        # commit, so the row stands and is audited as the success path does
+        # (issue #3483).
         await _record(
             recorder,
             ops.SERVER_IMPORT,
@@ -1552,6 +1560,10 @@ _LIFECYCLE_CLASSIFICATION: dict[type[Exception], tuple[Outcome, str]] = {
     InvalidLifecycleTransitionError: (Outcome.DENIED, "invalid_transition"),
     LifecycleTransitionConflictError: (Outcome.DENIED, "transition_conflict"),
     EulaNotAcceptedError: (Outcome.DENIED, "eula_not_accepted"),
+    # A server whose create seed or import did not finish (issue #4065): its
+    # working set is only what was written. No retry clears it; deleting the
+    # server and creating or importing it again does.
+    ServerCreationIncompleteError: (Outcome.DENIED, "creation_incomplete"),
     # StartServer holds the per-server lifecycle lock for its flip; if a gated op
     # holds it past the acquire budget the start is refused as a transient 409
     # ``server_busy`` (issue #876), the same retry-able conflict the gated routes

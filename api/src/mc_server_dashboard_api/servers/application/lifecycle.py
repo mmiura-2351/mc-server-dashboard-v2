@@ -176,6 +176,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidLifecycleTransitionError,
     LifecycleTransitionConflictError,
     NoEligibleWorkerError,
+    ServerCreationIncompleteError,
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotRunningError,
@@ -458,6 +459,13 @@ class StartServer:
         # desired=running and 409, so the slow network launch needs no lock.
         async with self.lifecycle_lock.hold(server_id) as lock, self.uow:
             server = await _load(self.uow, community_id, server_id)
+            if server.creation_incomplete:
+                # A create seed or import that failed or was interrupted (issue
+                # #4065): the working set is only what it wrote, so a hydrate
+                # would launch that. Refused before the EULA write below. Every
+                # other start path needs desired=running, which only this flip
+                # sets, so this is the one check.
+                raise ServerCreationIncompleteError(str(server_id.value))
             if server.desired_state is DesiredState.RUNNING:
                 raise InvalidLifecycleTransitionError(str(server_id.value))
             if server.assigned_worker_id is not None:

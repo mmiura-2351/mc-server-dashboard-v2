@@ -573,7 +573,8 @@ export interface paths {
          *     (#243); ``accept_eula`` is never implied. The archive contents then publish as
          *     the initial working set through the hardened extraction (zip-slip / size / entry
          *     caps -> 413 / 422). A publish failure after the row commits is 503
-         *     ``seed_failed`` (the row is repairable via the files API).
+         *     ``seed_failed``: the row stands but cannot start, as its working set is only
+         *     what was written (issue #4065); delete it and import again.
          *
          *     **An archive that does not read (issue #3769).** A body the zip reader fails
          *     on — not a zip at all, cut short, damage the reader detects in a member, or an
@@ -4395,6 +4396,8 @@ export interface components {
             crash_not_restarted: boolean;
             /** Crash Reason */
             crash_reason: string | null;
+            /** Creation Incomplete */
+            creation_incomplete: boolean;
             /** Desired State */
             desired_state: string;
             /** Final Snapshot Refusal */
