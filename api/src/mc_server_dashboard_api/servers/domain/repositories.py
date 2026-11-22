@@ -275,7 +275,7 @@ class ServerRepository(abc.ABC):
 
     @abc.abstractmethod
     async def clear_assignment_after_final_snapshot(
-        self, server_id: ServerId, worker_id: WorkerId
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
     ) -> bool:
         """Clear ``assigned_worker_id`` after a confirmed-stop snapshot (issue #847).
 
@@ -297,6 +297,11 @@ class ServerRepository(abc.ABC):
         event once the transaction commits (issue #3818). It clears
         ``awaiting_hydrate`` (issue #3890) and ``final_snapshot_refusal`` (issue
         #4054) with the assignment.
+
+        ``retry`` marks a retry of a release whose earlier attempt failed. That
+        attempt may have committed with its answer lost, so the guard then also
+        matches a ``desired_state=stopped`` row already unassigned, and the
+        release is announced again (issue #4062).
         """
 
     @abc.abstractmethod

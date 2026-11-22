@@ -506,7 +506,7 @@ rather than refuses fails a statement only at `database.statement_timeout_second
 silent, and by then a busy log stream behind the message would have filled the
 queue and ended the session, since the Worker drops a stream whose send stalls
 for 10 s. Cancelling the attempt instead could abandon a commit that still
-lands, and its retry would find the row already written and announce nothing.
+lands, and its retry would then apply the message a second time.
 If the attempt then succeeds, the hold ends; if it fails as an outage, the
 retries follow. Only the first attempt has the 3 s deadline. The retries back
 off from 0.5 s, doubling up to 10 s, with no time budget. A held `StatusChange`
@@ -550,7 +550,18 @@ leaves until the hold ends.
 
 The delivery guarantee: a report is applied at least once across transient
 database errors within a session; a report held when the session ends is lost;
-the Worker's sends are not acknowledged.
+the Worker's sends are not acknowledged. The live frame an applied message
+announces (Section 6) is published at least once too (issue #4062). An attempt
+whose commit lands but whose answer is lost with the connection fails as an
+outage. Its retry then finds the write already made: the row at the reported
+state, or, for a late final-snapshot result (Section 5.1), already released. It
+still publishes the frame the attempt would have, and logs the release. An
+attempt can also fail as an outage after it has committed and published: a
+`StatusChange` for a server with a Bedrock port then syncs the server's Bedrock
+tunnel ([`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) Section 3), and that sync
+starts with a database read. Its retry finds the row at the reported state too,
+and publishes the frame again. So a held retry can publish a frame twice, and
+one that repeats the row's state publishes a frame a first attempt would not.
 
 ### 4.3 Heartbeat and liveness
 
@@ -1406,8 +1417,9 @@ and equally the writes the API makes without one, whose frames carry an empty
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —
 publishes nothing, unless it is a `StatusChange` carrying a `detail` or crash
-reason. A report the API drops — it comes from a Worker that no longer owns
-the server, or is no fresher than the state already recorded — is not relayed.
+reason, or the held retry of a `StatusChange` (Section 4.2). A report the API
+drops — it comes from a Worker that no longer owns the server, or is no fresher
+than the state already recorded — is not relayed.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates

@@ -1072,15 +1072,19 @@ class FakeServerRepository(ServerRepository):
         return True
 
     async def clear_assignment_after_final_snapshot(
-        self, server_id: ServerId, worker_id: WorkerId
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
     ) -> bool:
         # Mirror the real adapter's guard (issue #847): clear only a still
-        # desired=stopped row still assigned to worker_id.
+        # desired=stopped row still assigned to worker_id, or, on a retry, one
+        # already unassigned (issue #4062).
         server = self.by_id.get(server_id)
         if (
             server is None
             or server.desired_state is not DesiredState.STOPPED
-            or server.assigned_worker_id != worker_id
+            or (
+                server.assigned_worker_id != worker_id
+                and not (retry and server.assigned_worker_id is None)
+            )
         ):
             return False
         server.assigned_worker_id = None

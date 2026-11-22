@@ -429,7 +429,10 @@ session drops (except a crashed one, which keeps its state) and for each
 in-flight server at API startup, and the state a
 lifecycle operation converges from a command's outcome (CONTROL_PLANE.md
 Section 6). Those API-originated frames have an empty `detail` and `reason`. A
-write that leaves the state as it was publishes nothing.
+write that leaves the state as it was publishes nothing, except the retry of a
+Worker report held through a database outage: the attempt it retries may have
+committed unanswered, so the retry publishes the frame anyway, at the risk of
+a repeat (CONTROL_PLANE.md Section 4.2).
 
 Every change of a server's desired state publishes a `status` frame
 `{desired_state}` too, after the write that made it commits: a start, stop or
@@ -451,7 +454,9 @@ final_snapshot_refusal: null}`, except where the same write converges the
 observed state (a stop left `stopping`, released as `unknown`). Deleting a
 server changes no assignment: the API refuses it while a Worker is assigned.
 A write that changes neither the intent nor the assignment (a restart)
-publishes nothing.
+publishes nothing. The held retry of a late final-snapshot result is the
+exception: it publishes the release even when it finds the server already
+released, for the same reason.
 
 Every change of a server's final-snapshot refusal while a stop still holds its
 Worker publishes a `status` frame `{final_snapshot_refusal}` too, after the

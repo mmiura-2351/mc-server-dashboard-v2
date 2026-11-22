@@ -143,8 +143,8 @@ _HOLD_RETRY_MAX_SECONDS = 10.0
 # ends 10 s later when the Worker's send stalls, or once the heartbeats lapse. So
 # the hold, and its purge of the queue, starts at this deadline, under a third of
 # the Worker's limit, while the attempt goes on: cancelling it could abandon a
-# commit that still lands, whose frame the retry would not stage again (review r1
-# of #4049). The driver's bounds end the attempt.
+# commit that still lands, which the retry would then apply a second time (review
+# r1 of #4049). The driver's bounds end the attempt.
 _FIRST_ATTEMPT_TIMEOUT_SECONDS = 3.0
 
 # Backpressure limit on the queue between the inbound reader task and the
@@ -834,6 +834,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
         does. Any other failure is raised, and so is an outage's failure on a
         retry the database answered a ping both just before and just after: that
         error is the message's own, and holding it would block the queue for good.
+        Each retry is handled as one (:meth:`_handle`'s ``retry``): a failed
+        attempt may have committed, so its retry publishes the frame of a write
+        it finds already made (issue #4062).
         However the hold ends, one WARNING counts the log lines and metrics
         dropped meanwhile, those purged from the queue as it started included,
         if any (issue #4028). The hold also starts while a first attempt is
@@ -896,7 +899,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     return
                 attempts += 1
                 try:
-                    await self._handle(worker_id, message)
+                    await self._handle(worker_id, message, retry=True)
                 except Exception as exc:
                     if last:
                         _LOG.info(
@@ -1070,7 +1073,16 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         return worker_id, first.correlation_id, session, checked_ids
 
-    async def _handle(self, worker_id: WorkerId, message: pb.WorkerMessage) -> None:
+    async def _handle(
+        self, worker_id: WorkerId, message: pb.WorkerMessage, *, retry: bool = False
+    ) -> None:
+        """Apply ``message``; ``retry`` when an earlier attempt of it failed.
+
+        That attempt may have committed with its answer lost, so a retry tells
+        the sinks to publish the frame of a write they find already made (issue
+        #4062).
+        """
+
         payload = message.WhichOneof("payload")
         if payload == "command_result":
             # Match the result to its in-flight command by command_id, carried as
@@ -1081,7 +1093,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # through the late-snapshot sink (issue #891); the common match path is
             # still synchronous dict work that returns without awaiting.
             await self._control_plane.resolve(
-                message.correlation_id, worker_id, message.command_result
+                message.correlation_id, worker_id, message.command_result, retry=retry
             )
             return
         if payload != "event":
@@ -1092,14 +1104,21 @@ class WorkerSessionServicer(WorkerServiceServicer):
         emitted_at = _emitted_at_from_proto(message)
         event = message.event.WhichOneof("event")
         if event == "status_change":
-            await self._reconcile_status(worker_id, message.event, emitted_at)
+            await self._reconcile_status(
+                worker_id, message.event, emitted_at, retry=retry
+            )
         elif event == "log_line":
             self._relay_log(message.event, emitted_at)
         elif event == "metrics":
             self._relay_metrics(message.event, emitted_at)
 
     async def _reconcile_status(
-        self, worker_id: WorkerId, event: pb.Event, emitted_at: dt.datetime | None
+        self,
+        worker_id: WorkerId,
+        event: pb.Event,
+        emitted_at: dt.datetime | None,
+        *,
+        retry: bool,
     ) -> None:
         state = _STATE_BY_PROTO.get(event.status_change.state)
         if state is None or not event.server_id:
@@ -1115,6 +1134,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             detail=event.status_change.detail,
             reason=_CRASH_REASON_BY_PROTO.get(event.status_change.crash_reason, ""),
             emitted_at=emitted_at,
+            retry=retry,
         )
 
     def _relay_log(self, event: pb.Event, emitted_at: dt.datetime | None) -> None:

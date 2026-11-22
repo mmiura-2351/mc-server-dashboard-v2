@@ -129,6 +129,7 @@ class FakeServerStateSink(ServerStateSink):
         detail: str = "",
         reason: str = "",
         emitted_at: dt.datetime | None = None,
+        retry: bool = False,
     ) -> bool:
         if self._always_fail_observed:
             raise RuntimeError("observed-state sink unavailable")

@@ -128,6 +128,7 @@ class ServersServerStateSink(ServerStateSink):
         detail: str = "",
         reason: str = "",
         emitted_at: dt.datetime | None = None,
+        retry: bool = False,
     ) -> bool:
         parsed = _parse_id(server_id, kind="server_id")
         parsed_worker = _parse_id(worker_id, kind="worker_id")
@@ -191,6 +192,7 @@ class ServersServerStateSink(ServerStateSink):
                 # unclassified crash (CONTROL_PLANE.md Section 6).
                 reason=CrashReason(reason) if reason else None,
                 emitted_at=emitted_at,
+                retry=retry,
             )
             require_status_events_wired(repo, self._real_time_events)
             await session.commit()

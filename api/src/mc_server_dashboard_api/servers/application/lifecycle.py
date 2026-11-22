@@ -3092,6 +3092,7 @@ class StopServer:
         worker_id: WorkerId,
         succeeded: bool,
         message: str | None,
+        retry: bool = False,
     ) -> None:
         """``_clear_assignment_after_late_snapshot``, unless anything is in flight.
 
@@ -3121,6 +3122,7 @@ class StopServer:
                 worker_id=worker_id,
                 succeeded=succeeded,
                 message=message,
+                retry=retry,
             )
 
     async def _clear_assignment_after_late_snapshot(
@@ -3130,6 +3132,7 @@ class StopServer:
         worker_id: WorkerId,
         succeeded: bool,
         message: str | None,
+        retry: bool,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (issue #891).
 
@@ -3173,6 +3176,13 @@ class StopServer:
         Worker cannot reach (#2595), an auth error, a storage outage — and NOT the
         transfer bound this line used to assert for every late failure, which sent
         the operator after a cause nobody observed (issue #2766).
+
+        ``retry`` marks the servicer's retry of a result whose earlier attempt
+        failed (issue #4062). That attempt may have committed the release with
+        its answer lost, so a retry also takes a row it finds already unassigned,
+        under the same stopped intent, as released, and announces and logs the
+        release that attempt could not. That log line says the server was found
+        already released, since another flow may have made the release.
         """
 
         # The late result says the upload settled. If the write fails, record it for
@@ -3186,13 +3196,26 @@ class StopServer:
                     or server.desired_state is not DesiredState.STOPPED
                     or server.observed_state
                     not in (ObservedState.STOPPED, ObservedState.CRASHED)
-                    or server.assigned_worker_id != worker_id
+                    or (
+                        server.assigned_worker_id != worker_id
+                        # A retry's earlier attempt may have released the row, its
+                        # commit landing unanswered (issue #4062).
+                        and not (retry and server.assigned_worker_id is None)
+                    )
                 ):
                     # The row moved since the snapshot was dispatched (a racing start
                     # re-placed it, or it is no longer a held triple): nothing to do.
                     return
+                # Only a retry gets here with the row unassigned. It did not make
+                # the release it logs: its earlier attempt or another flow did.
+                found_released = (
+                    " (held retry: found the server already released, by an "
+                    "earlier attempt of this result or by another flow)"
+                    if server.assigned_worker_id is None
+                    else ""
+                )
                 cleared = await self.uow.servers.clear_assignment_after_final_snapshot(
-                    server_id, worker_id
+                    server_id, worker_id, retry=retry
                 )
                 await self.uow.commit()
         if not cleared:
@@ -3203,9 +3226,10 @@ class StopServer:
                 "snapshot: the publish landed but its result arrived after the "
                 "dispatch was abandoned (timed out or cancelled), so the held "
                 "assignment is cleared now instead of waiting out the stale-stop "
-                "arm (#891/#901)",
+                "arm (#891/#901)%s",
                 worker_id.value,
                 server_id.value,
+                found_released,
             )
         else:
             _LOG.warning(
@@ -3217,10 +3241,11 @@ class StopServer:
                 "recovery: this result cannot distinguish a failed publish from a "
                 "lost publish response. A same-worker start reuses the retained "
                 "scratch (#767). Cleared now instead of waiting out the stale-stop "
-                "arm (#891)",
+                "arm (#891)%s",
                 worker_id.value,
                 server_id.value,
                 message,
+                found_released,
             )
 
 

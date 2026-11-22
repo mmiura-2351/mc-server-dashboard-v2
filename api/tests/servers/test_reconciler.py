@@ -1247,10 +1247,12 @@ class _OutageServerRepository(FakeServerRepository):
         )
 
     async def clear_assignment_after_final_snapshot(
-        self, server_id: ServerId, worker_id: WorkerId
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
     ) -> bool:
         self._fail_if_down("clear_assignment_after_final_snapshot")
-        return await super().clear_assignment_after_final_snapshot(server_id, worker_id)
+        return await super().clear_assignment_after_final_snapshot(
+            server_id, worker_id, retry=retry
+        )
 
     async def clear_stale_assignment(
         self,

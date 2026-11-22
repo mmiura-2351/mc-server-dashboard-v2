@@ -334,7 +334,12 @@ class ControlPlaneState:
             self._late_snapshots[command_id] = snapshot
 
     async def resolve(
-        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+        self,
+        command_id: str,
+        worker_id: WorkerId,
+        result: pb.CommandResult,
+        *,
+        retry: bool = False,
     ) -> None:
         """Resolve the future waiting on ``command_id`` with ``result``.
 
@@ -351,6 +356,9 @@ class ControlPlaneState:
         sink's non-owning-worker guard (defense-in-depth, issue #789). A fresh
         uuid4 ``command_id`` is never shared across workers, so this only fires
         on a forged report; the owning worker's later result still resolves.
+
+        ``retry`` marks the servicer's retry of a result whose earlier attempt
+        failed; it reaches the late-snapshot sink (issue #4062).
         """
 
         entry = self._pending.get(command_id)
@@ -358,7 +366,9 @@ class ControlPlaneState:
             # No pending future: either an already-resolved/forged command, or a
             # late final-snapshot result for a dispatch that timed out or was
             # cancelled (#891/#901).
-            await self._clear_on_late_snapshot(command_id, worker_id, result)
+            await self._clear_on_late_snapshot(
+                command_id, worker_id, result, retry=retry
+            )
             return
         owning_worker, future, _ = entry
         if owning_worker != worker_id:
@@ -381,10 +391,17 @@ class ControlPlaneState:
         # so the late-snapshot sink can release the held assignment.
         if future.cancelled() and snapshot is not None:
             self._late_snapshots[command_id] = snapshot
-            await self._clear_on_late_snapshot(command_id, worker_id, result)
+            await self._clear_on_late_snapshot(
+                command_id, worker_id, result, retry=retry
+            )
 
     async def _clear_on_late_snapshot(
-        self, command_id: str, worker_id: WorkerId, result: pb.CommandResult
+        self,
+        command_id: str,
+        worker_id: WorkerId,
+        result: pb.CommandResult,
+        *,
+        retry: bool,
     ) -> None:
         """Release a held assignment on a late final-snapshot result (#891).
 
@@ -411,7 +428,9 @@ class ControlPlaneState:
         The record is kept, no longer outstanding, until the release is written
         (issue #4023). A write that fails because the database is down leaves it
         for the servicer's held retry of this result, which applies the release as
-        this attempt would have. Any other failure drops it, with the result.
+        this attempt would have, and announces it even if this attempt's commit
+        landed unanswered (``retry``, issue #4062). Any other failure drops it,
+        with the result.
         """
 
         snapshot = self._late_snapshots.get(command_id)
@@ -442,6 +461,7 @@ class ControlPlaneState:
                 worker_id=worker_id.value,
                 succeeded=result.success,
                 message=_failure_detail(result),
+                retry=retry,
             )
         except Exception as exc:
             if not is_transient_database_error(exc):

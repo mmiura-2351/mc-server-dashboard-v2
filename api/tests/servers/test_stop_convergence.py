@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime as dt
+import logging
 import uuid
 
 import pytest
@@ -76,6 +77,11 @@ from tests.servers.fakes import (
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
+_LIFECYCLE_LOGGER = "mc_server_dashboard_api.servers.application.lifecycle"
+_FOUND_RELEASED = (
+    " (held retry: found the server already released, by an earlier attempt of "
+    "this result or by another flow)"
+)
 _LONG_AGO = _NOW - dt.timedelta(hours=1)
 _FAILED = CommandOutcome(
     status=CommandStatus.TRANSFER_FAILED, message="upload aborted by transfer bound"
@@ -322,17 +328,17 @@ class _HeldFirstClear(FakeServerRepository):
         self._gate.set()
 
     async def clear_assignment_after_final_snapshot(
-        self, server_id: ServerId, worker_id: WorkerId
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
     ) -> bool:
         self._clears += 1
         if self._clears > 1:
             return await super().clear_assignment_after_final_snapshot(
-                server_id, worker_id
+                server_id, worker_id, retry=retry
             )
         self.first_started.set()
         await self._gate.wait()
         cleared = await super().clear_assignment_after_final_snapshot(
-            server_id, worker_id
+            server_id, worker_id, retry=retry
         )
         self.first_done.set()
         return cleared
@@ -427,9 +433,9 @@ class _Worker:
             ),
         )
 
-    async def report_ok(self, command_id: str) -> None:
+    async def report_ok(self, command_id: str, *, retry: bool = False) -> None:
         await self.state.resolve(
-            command_id, self.fleet_id, pb.CommandResult(success=True)
+            command_id, self.fleet_id, pb.CommandResult(success=True), retry=retry
         )
 
     def reconnect(self) -> None:
@@ -453,7 +459,13 @@ class _Sink(LateSnapshotResultSink):
         self._repo = repo
 
     async def clear_held_assignment_on_late_snapshot(
-        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+        self,
+        *,
+        server_id: str,
+        worker_id: str,
+        succeeded: bool,
+        message: str | None,
+        retry: bool = False,
     ) -> None:
         await _stop_server(
             self._repo, self._worker.cp, self._worker.guard
@@ -462,6 +474,7 @@ class _Sink(LateSnapshotResultSink):
             worker_id=WorkerId(uuid.UUID(worker_id)),
             succeeded=succeeded,
             message=message,
+            retry=retry,
         )
 
 
@@ -697,11 +710,13 @@ class _FailingClears(FakeServerRepository):
         self._errors = list(errors)
 
     async def clear_assignment_after_final_snapshot(
-        self, server_id: ServerId, worker_id: WorkerId
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
     ) -> bool:
         if self._errors:
             raise self._errors.pop(0)("scripted write failure")
-        return await super().clear_assignment_after_final_snapshot(server_id, worker_id)
+        return await super().clear_assignment_after_final_snapshot(
+            server_id, worker_id, retry=retry
+        )
 
 
 async def test_a_held_retry_of_a_late_result_releases_at_once() -> None:
@@ -752,6 +767,122 @@ async def test_a_late_result_whose_release_fails_otherwise_is_dropped(
     assert not worker.guard.in_flight(server.id)
     await worker.report_failed(abandoned)
     assert _assigned(repo, server) == server.assigned_worker_id
+
+
+class _ReleasedThenLost(FakeServerRepository):
+    """The first assignment clear lands, then fails as an outage: its commit
+    applied, and its answer was lost with the connection."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lost = False
+
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId, *, retry: bool = False
+    ) -> bool:
+        cleared = await super().clear_assignment_after_final_snapshot(
+            server_id, worker_id, retry=retry
+        )
+        if not self._lost:
+            self._lost = True
+            raise ConnectionResetError("connection was closed mid-operation")
+        return cleared
+
+
+def _late_releases(caplog: pytest.LogCaptureFixture, server: Server) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == _LIFECYCLE_LOGGER
+        and r.getMessage().startswith("released worker ")
+        and str(server.id.value) in r.getMessage()
+    ]
+
+
+@pytest.mark.parametrize(
+    ("retry", "releases"), [(True, 1), (False, 0)], ids=["held_retry", "no_retry"]
+)
+async def test_a_late_result_finding_its_release_made_announces_it_only_on_retry(
+    caplog: pytest.LogCaptureFixture, retry: bool, releases: int
+) -> None:
+    # Issue #4062: the release committed, but its answer was lost with the
+    # connection, so the attempt failed as an outage and logged nothing. Its held
+    # retry finds the row already released, and still releases it, which
+    # announces the release and logs it, once. A delivery that is no retry finds
+    # nothing to do, as before.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = _ReleasedThenLost()
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    abandoned = await _abandon_a_final_snapshot(repo, server, worker)
+    with pytest.raises(ConnectionResetError):
+        await worker.report_ok(abandoned)
+    assert _assigned(repo, server) is None
+    assert _late_releases(caplog, server) == []
+
+    await worker.report_ok(abandoned, retry=retry)
+
+    lines = _late_releases(caplog, server)
+    assert len(lines) == releases
+    # The retry did not make the release it logs, and the line says so.
+    assert all(line.endswith(_FOUND_RELEASED) for line in lines)
+    assert _assigned(repo, server) is None
+
+
+@pytest.mark.parametrize("succeeded", [True, False], ids=["succeeded", "failed"])
+async def test_a_held_retry_finding_the_row_released_says_so(
+    caplog: pytest.LogCaptureFixture, succeeded: bool
+) -> None:
+    # Issue #4062: a retry that finds the server already released did not make
+    # the release it logs, for a successful or a failed result alike: its
+    # earlier attempt or another flow did. Its release line says so.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    assert server.assigned_worker_id is not None
+    repo = FakeServerRepository()
+    repo.seed(server)
+    repo.by_id[server.id].assigned_worker_id = None
+
+    await _stop_server(
+        repo, FakeControlPlane(), StopConvergenceGuard()
+    ).clear_assignment_after_late_snapshot(
+        server_id=server.id,
+        worker_id=server.assigned_worker_id,
+        succeeded=succeeded,
+        message=None if succeeded else "upload aborted by transfer bound",
+        retry=True,
+    )
+
+    [line] = _late_releases(caplog, server)
+    assert line.endswith(_FOUND_RELEASED)
+
+
+async def test_a_held_retry_leaves_a_row_another_worker_holds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #4062: a retry also takes an unassigned row as released, and no
+    # other. The retried late result finds the server held at (stopped,
+    # stopped) by another Worker, whose release waits on that Worker's own final
+    # snapshot: that Worker keeps the row, and nothing is logged.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    holder = server.assigned_worker_id
+    repo = FakeServerRepository()
+    repo.seed(server)
+
+    await _stop_server(
+        repo, FakeControlPlane(), StopConvergenceGuard()
+    ).clear_assignment_after_late_snapshot(
+        server_id=server.id,
+        worker_id=WorkerId(uuid.uuid4()),
+        succeeded=False,
+        message="upload aborted by transfer bound",
+        retry=True,
+    )
+
+    assert _assigned(repo, server) == holder
+    assert _late_releases(caplog, server) == []
 
 
 async def test_a_duplicate_late_result_does_not_release_a_later_hold() -> None:
