@@ -265,6 +265,9 @@ async def test_a_lost_lock_skips_that_server_and_the_pass_goes_on(
         record.levelno == logging.WARNING
         and "lost" in record.getMessage()
         and str(lost.id.value) in record.getMessage()
+        # With the traceback of the loss.
+        and record.exc_info is not None
+        and record.exc_info[0] is LifecycleLockLostError
         for record in caplog.records
     )
 
@@ -282,11 +285,16 @@ def _fail_next_call(owner: object, method: str) -> None:
     setattr(owner, method, failing)
 
 
-def _ended_with_a_warning(caplog: pytest.LogCaptureFixture) -> bool:
+def _ended_with_a_warning(caplog: pytest.LogCaptureFixture, *, what: str) -> bool:
+    """Whether the pass logged a WARNING naming ``what``, the read that failed,
+    with the failure's traceback."""
+
     return any(
         record.levelno == logging.WARNING
-        and "database" in record.getMessage()
+        and f"could not read {what}" in record.getMessage()
         and "DatabaseOutageError" in record.getMessage()
+        and record.exc_info is not None
+        and record.exc_info[0] is DatabaseOutageError
         for record in caplog.records
     )
 
@@ -303,7 +311,7 @@ async def test_a_database_error_reading_the_servers_ends_the_pass_with_a_warning
         await env.reclaim()
 
     assert env.deleted() == set()
-    assert _ended_with_a_warning(caplog)
+    assert _ended_with_a_warning(caplog, what="the servers")
 
 
 async def test_a_database_error_reading_a_servers_rows_ends_the_pass_with_a_warning(
@@ -321,26 +329,53 @@ async def test_a_database_error_reading_a_servers_rows_ends_the_pass_with_a_warn
         await env.reclaim()
 
     assert env.deleted() == set()
-    assert _ended_with_a_warning(caplog)
+    assert _ended_with_a_warning(
+        caplog, what=f"the backup rows of server {first.id.value}"
+    )
 
 
+class _FailsAtAcquire(FakeLifecycleLock):
+    """Fails the next ``uow.<repository>.<method>`` call once the pass waits for
+    the lock: the first such read under it, of the re-read."""
+
+    def __init__(self, repository: str, method: str) -> None:
+        super().__init__()
+        self.repository = repository
+        self.method = method
+        self.uow: SessionTrackingUnitOfWork | None = None
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
+        assert self.uow is not None
+        _fail_next_call(getattr(self.uow, self.repository), self.method)
+        async with super().hold(server_id) as held:
+            yield held
+
+
+@pytest.mark.parametrize(
+    ("repository", "method", "what"),
+    [
+        ("servers", "get_by_id", "the row of server"),
+        ("backups", "list_for_server", "the backup rows of server"),
+    ],
+)
 async def test_a_database_error_rereading_under_the_lock_ends_the_pass_with_a_warning(
-    caplog: pytest.LogCaptureFixture,
+    caplog: pytest.LogCaptureFixture, repository: str, method: str, what: str
 ) -> None:
     first, second = _server(), _server()
-    lock = FakeLifecycleLock()
+    lock = _FailsAtAcquire(repository, method)
     env = _Env([first, second], lifecycle_lock=lock)
+    lock.uow = env.uow
     env.archive(first, "first-leftover", age=_OLD)
     env.archive(second, "second-leftover", age=_OLD)
-    # Only the re-read under the lock reads the server row back.
-    _fail_next_call(env.uow.servers, "get_by_id")
 
     with caplog.at_level(logging.WARNING, logger=_LOGGER):
         await env.reclaim()
 
     assert env.deleted() == set()
     assert lock.events == [(first.id, "acquire"), (first.id, "release")]
-    assert _ended_with_a_warning(caplog)
+    # The WARNING names the read that failed.
+    assert _ended_with_a_warning(caplog, what=f"{what} {first.id.value}")
 
 
 class _RowLandsAtAcquire(FakeLifecycleLock):

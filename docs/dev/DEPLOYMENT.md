@@ -599,12 +599,15 @@ no archive bytes and does not run the integrity sweep.
   (7 days by default). The grace counts from when the store wrote the archive,
   not from the `--apply`, so the archive of a backup older than the grace gets
   no window at all. One left under a server that has since been deleted is not
-  reclaimed; issue #4165 tracks those. To keep the archives of the rows the dry
-  run lists, do one of these before the `--apply`:
+  reclaimed; issue #4165 tracks those. Copying the archives of the rows the dry
+  run lists out of the store is the only way to keep them. Before the
+  `--apply`, do one of these:
   - copy them out of `communities/<community-id>/servers/<server-id>/backups/`;
   - set `storage_sweep.rowless_archive_grace_seconds` above the age of the
     oldest of them, restart the API, and only then run the `--apply`. A
-    running API keeps the grace it started with.
+    running API keeps the grace it started with. This only delays the
+    reclaim: the archive goes at the first pass after it is older than the
+    new grace. Copy it out within that time.
 - **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
 - **`--apply` checks the store first.** It refuses with exit 2 unless the store
   owner marker names this database's installation (STORAGE.md Section 4.3). A

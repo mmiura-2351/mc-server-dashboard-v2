@@ -37,7 +37,9 @@ delete one, ends that server's pass with a WARNING, and the pass goes on with th
 next server. So does a lifecycle lock lost before a delete: the deletes stop
 there, and the next pass retries. A database read that fails, of the servers or
 of a server's rows, ends the whole pass with a WARNING: the database is what
-every later server would read too. The next pass retries.
+every later server would read too. The next pass retries. A database failure in
+the lifecycle lock's own acquire is not caught: it propagates to the caller,
+which logs it at ERROR.
 """
 
 from __future__ import annotations
@@ -126,15 +128,15 @@ class ReclaimRowlessBackupArchives:
                 # left, and DeleteServer keeps one of its archives on purpose
                 # (issue #4165). It commits under this lock, so a row read here
                 # is a live server's.
+                reading = f"the row of server {server.id.value}"
                 try:
                     async with self.uow:
                         if await self.uow.servers.get_by_id(server.id) is None:
                             return True
+                        reading = f"the backup rows of server {server.id.value}"
                         rows = await self.uow.backups.list_for_server(server.id)
                 except Exception as exc:  # noqa: BLE001 - logged; next pass retries
-                    _log_rows_unreadable(
-                        f"the backup rows of server {server.id.value}", exc
-                    )
+                    _log_rows_unreadable(reading, exc)
                     return False
                 named = {row.storage_ref for row in rows}
                 for archive in leftovers:

@@ -1008,7 +1008,8 @@ reads the backup rows. For each server row:
    the wait budget is skipped until the next pass. A delete that fails, or a lock
    found lost before a delete, ends that server's pass with a WARNING, and the
    pass goes on with the next server. A re-read that fails ends the whole pass
-   with a WARNING, as in step 2.
+   with a WARNING, as in step 2. A database failure in the lock's own acquire
+   is not caught: it propagates to the caller, which logs it at ERROR.
 
 Each reclaimed archive is logged at INFO with its server, its ref and its age.
 The pass asks the owner marker first, as every GC does (below), and a refusal
@@ -2195,7 +2196,8 @@ no row rather than deleting it. The row-less archive reclaim (Section 4.3) then
 deletes that archive at the next API start or sweep pass, unless the archive is
 younger than the grace: the grace counts from when the store wrote the archive,
 not from the repair. DEPLOYMENT.md (Storage-capacity incident runbook) says how
-to keep it. Only a NotFound answer condemns a row: a HEAD
+to copy it out first, the only way to keep it, and how to delay the reclaim
+until then. Only a NotFound answer condemns a row: a HEAD
 that fails any other way skips it, and the command then exits 1. `--apply` runs
 only while the owner marker (Section 4.3) names this database's installation,
 since a store that is not this database's answers NotFound for every row. It
