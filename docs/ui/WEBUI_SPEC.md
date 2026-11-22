@@ -841,7 +841,19 @@ bar, like an org switcher). Admin pages appear only for platform admins.
   (`409 server_assigned`). While a Worker is assigned, Delete shows disabled
   with "Stop the server and wait for it to be released before deleting it."
   beside it, and the release frame frees it. A `409 server_assigned` that a
-  stale cache let through toasts the same words.
+  stale cache let through toasts the message the at-rest writes below show
+  for that reason (7.4).
+- The at-rest writes (the Files writes, the plugin and resource-pack changes,
+  a backup restore and the Settings save) need the server at rest and
+  released, for the same reason: the API refuses them until the release
+  (`409 server_assigned`, Section 2.3 "A stopped server a Worker still
+  holds"). So while a server at rest still has a Worker assigned, each shows
+  disabled with "The server is still assigned to a Worker. Wait for it to be
+  released, then try again." beside it, until the release frame frees it
+  (#4003). A server not at rest keeps each surface's own stop-the-server
+  rule; a running server is always assigned, and waiting for a release is not
+  its remedy. One rule in `serverState.ts`, `atRestWriteRefusal`, decides it
+  for every surface.
 - Metrics strip: CPU / memory / players from the `metrics` stream (sparkline,
   last N samples, client-side only).
 - Log tail: last ~200 lines, link to Console tab.
@@ -866,6 +878,14 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Edits against a running server show "live working set — may need restart"
   notice (Section 6.9 semantics). Creating a new file works while running too
   (create-through to the live working set).
+- While a server at rest still has a Worker assigned (6.4), the tab shows the
+  release reason in place of that notice, and every write is held: the
+  editor's Save and the rollback confirm show disabled with the reason, the
+  bulk delete and move are disabled with it as their tooltip, and the context
+  menu, the drop zone and the Delete / F2 / paste keys offer no edit. The
+  reads stay: browsing, opening, the downloads, Copy and the history. A
+  draft typed while held is kept for the save once the release frame frees
+  it.
 - File-API failure reasons (see `CONTROL_PLANE.md` Section 7.2 for the
   authoritative catalog). The client switches on the `reason` field; the set is
   additive — handle unknown reasons gracefully.
@@ -895,7 +915,9 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 - Table: created_at, source (`manual` / `scheduled` / `event` / `uploaded`), size, health (`healthy` / `quarantined` / `unreadable` / `unknown`), creator;
   actions: download, restore, delete.
 - Restore: blocked with explanation while running (offer "stop now then
-  restore" two-step); typed-confirm dialog. A `quarantined` backup requires a
+  restore" two-step); typed-confirm dialog. While the stopped server still
+  has a Worker assigned (6.4), the dialog's confirm shows disabled with the
+  release reason until the release frame frees it. A `quarantined` backup requires a
   second force-acknowledge confirmation before the `?force=true` restore is
   issued. An `unreadable` backup (its archive could not be read back from
   storage) cannot be restored at all: its restore action is disabled with a
@@ -949,6 +971,12 @@ bar, like an org switcher). Admin pages appear only for platform admins.
 ### 6.9 Server detail — Settings
 - Rename, game-port edit (with availability check), `config` key/value
   editor; execution backend displayed read-only (immutable post-create).
+  While a server at rest still has a Worker assigned (6.4), Save and the
+  resource pack's Assign / Change / Remove show disabled with the release
+  reason. Save is not held while the server runs: a safe-keys-only edit
+  passes then, and the API answers any other edit `409 server_not_stopped`.
+  While held, Save is held for a safe-keys-only edit too, which the API
+  would accept.
 - Danger zone: delete server (typed confirm; held while a Worker is assigned,
   6.4), export ZIP.
 
@@ -1068,8 +1096,9 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   inline note links to Floodgate setup.
 - Server-state gating: reads render anytime, but **every mutation requires the
   server at rest** (`desired_state` stopped and `observed_state` one of
-  stopped / crashed / unknown). While not at rest a
-  notice shows and all install / enable / disable / update / remove / side /
+  stopped / crashed / unknown) **and released** (no Worker assigned, 6.4).
+  While not at rest, or at rest with a Worker still assigned, a notice names
+  which, and all install / enable / disable / update / remove / side /
   resolve controls are disabled; a server-busy API reason (e.g.
   `server_not_stopped`) surfaces as an error toast.
 - Permission gating (7.3): the tab body needs `plugin:read` (a member without it
@@ -1368,9 +1397,11 @@ backend support; the tab body also self-guards with an "unsupported" notice).
   server must be stopped, on every surface that can receive it;
   `worker_busy` / `server_busy` say another operation on the server is still
   running and the request was refused without being applied, so the operator
-  retries in a moment; `server_assigned` on a delete says to stop the server
-  and wait for it to be released before deleting it, since the hold can outlast
-  a retry (6.4); the sanitized start/restart-failure categories
+  retries in a moment; `server_assigned` on the Files, Backups, Plugins and
+  Settings tabs (the resource pack and a delete included, 6.4) says the
+  server is still assigned to a Worker and to wait for it to be released
+  before trying again, since the hold can outlast a retry; the sanitized
+  start/restart-failure categories
   `port_conflict` / `image_missing` name the cause the Worker classified, and
   `server_properties_unreadable` says the server's `server.properties` is not a
   regular file or is too large and must be restored (Section 2, "A refused

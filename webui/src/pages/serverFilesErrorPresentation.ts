@@ -44,6 +44,10 @@ export function fileOperationErrorPresentation(
           return { key: "files.error.serverMustBeStopped" };
         case "server_busy":
           return { key: "files.error.serverBusy" };
+        // A write the stop's Worker still holds the server for (#3998):
+        // waiting for the release is the remedy, not stopping it (#4003).
+        case "server_assigned":
+          return { key: "common.serverAssigned" };
         default:
           return { key: "files.error.conflict" };
       }
