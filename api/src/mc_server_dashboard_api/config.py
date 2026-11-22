@@ -334,6 +334,15 @@ class DatabaseSettings(_Section):
     # change until an operator explicitly tunes them.
     pool_size: int = Field(default=5, gt=0)
     max_overflow: int = Field(default=10, ge=0)
+    # The driver's bounds on a database that hangs rather than refuses (issue
+    # #4042): a new connection, its authentication included, and each exchange
+    # with the server on one. Explicit so a hang fails as an outage within a known
+    # ceiling, rather than after asyncpg's 60 s connect default or, for a
+    # statement, never. A connection gone silent fails at up to twice the
+    # statement bound: the driver waits the bound once more for the server to
+    # confirm its cancel. Migrations are held to neither (migrations/env.py).
+    connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    statement_timeout_seconds: float = Field(default=60.0, gt=0)
 
     # ``url`` is required and carries the DB password; a blank value (a blank
     # ``${MCD_API_DATABASE__URL}`` interpolation) passes the presence check but

@@ -23,10 +23,12 @@ command logs through the API's handler (issue #3942).
 Exit status: 0 when the pass completed; 1 when the object store could not serve
 an archive read; 2 on a bad argument or configuration, with one line; 3 when the
 database failed or a server's lifecycle lock was lost. The database fails when it
-refuses a connection, at the start or mid-pass, or the driver raises an error
-(SQLAlchemy ``DBAPIError``, such as a dropped connection or a terminated
-backend). A 1 or a 3 stops the pass with a one-line message: verdicts already
-written this run are committed, and the sweep is safe to re-run.
+refuses a connection, at the start or mid-pass, when it does not answer within
+``database.connect_timeout_seconds`` or ``database.statement_timeout_seconds``,
+or when the driver raises an error (SQLAlchemy ``DBAPIError``, such as a dropped
+connection or a terminated backend). A 1 or a 3 stops the pass with a one-line
+message: verdicts already written this run are committed, and the sweep is safe
+to re-run.
 ``log.level=debug`` logs the traceback of a 3. Any other error, a full disk on
 the store for one, ends in a traceback, and Python exits 1 for it too, so a 1
 alone does not prove a store outage.
@@ -48,6 +50,7 @@ from mc_server_dashboard_api.audit.adapters.clock import SystemClock as AuditSys
 from mc_server_dashboard_api.audit.adapters.recorder import LoggingAuditRecorder
 from mc_server_dashboard_api.audit.adapters.writer import SqlAlchemyAuditWriter
 from mc_server_dashboard_api.config import (
+    DatabaseSettings,
     Settings,
     describe_settings_error,
     load_settings,
@@ -78,15 +81,24 @@ from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 _LOG = logging.getLogger(__name__)
 
 
-def _engine(url: str, *, pool_size: int, max_overflow: int) -> AsyncEngine:
+def _engine(
+    database: DatabaseSettings, *, pool_size: int, max_overflow: int
+) -> AsyncEngine:
     """An engine whose connect outage is a :class:`DatabaseConnectError`.
 
     asyncpg raises a refused connect as the raw ``OSError`` a store read can also
     raise, so ``main`` could not tell a database outage from a disk fault by type
-    (issue #3942). Both of the sweep's engines are built here.
+    (issue #3942). Both of the sweep's engines are built here, held to the
+    configured connect and statement bounds (issue #4042).
     """
 
-    engine = create_engine(url, pool_size=pool_size, max_overflow=max_overflow)
+    engine = create_engine(
+        database.url,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        connect_timeout=database.connect_timeout_seconds,
+        statement_timeout=database.statement_timeout_seconds,
+    )
     translate_connect_outages(engine)
     return engine
 
@@ -96,8 +108,8 @@ def _is_database_failure(exc: Exception) -> bool:
 
     A bare ``OSError`` never does: the fs adapter keeps a full disk or a permission
     fault raw (STORAGE.md Section 7.3), and the database's own connect failure
-    arrives typed (``_engine``). The rest of what the app counts as a database
-    outage, and every ``DBAPIError``, can only be the database's.
+    and timeout arrive typed (``_engine``). The rest of what the app counts as a
+    database outage, and every ``DBAPIError``, can only be the database's.
     """
 
     if isinstance(exc, OSError):
@@ -109,7 +121,7 @@ def _is_database_failure(exc: Exception) -> bool:
 
 async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary:
     engine = _engine(
-        settings.database.url,
+        settings.database,
         pool_size=settings.database.pool_size,
         max_overflow=settings.database.max_overflow,
     )
@@ -118,7 +130,7 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
     # own engine rather than a slot in the configured pool, leaving that pool
     # whole for the sweep's work. One connection is enough: the sweep holds one
     # lock at a time.
-    lock_engine = _engine(settings.database.url, pool_size=1, max_overflow=0)
+    lock_engine = _engine(settings.database, pool_size=1, max_overflow=0)
     try:
         session_factory = create_session_factory(engine)
         # The integrity sweep only reads the store, so it needs no owner marker

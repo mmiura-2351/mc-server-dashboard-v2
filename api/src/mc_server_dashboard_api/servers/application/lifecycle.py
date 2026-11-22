@@ -627,8 +627,12 @@ class StartServer:
         if skip_hydrate and jar_changed:
             # The JAR updated but the Worker holds a fresh working set (issue
             # #1676).  World safety wins: skipping hydrate avoids rolling back
-            # region data.  The new JAR will be delivered on the next full hydrate
-            # (after the next snapshot publishes).
+            # region data.  The row records the new key, and only a hydrate
+            # delivers it: one comes once the scratch is gone (a clean stop's final
+            # snapshot removes it), on another Worker, or after a store write moves
+            # the store past the held set before a start.  A publish from the
+            # running set does not do it: the Worker declares the generation it
+            # published, so held still equals store (issue #4046).
             _LOG.warning(
                 "server %s JAR updated (%s -> %s) but skip-hydrate is active "
                 "(held generation %s >= store %s); the new JAR will not be "
