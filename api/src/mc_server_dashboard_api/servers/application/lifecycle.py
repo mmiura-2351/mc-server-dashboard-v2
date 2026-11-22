@@ -1697,16 +1697,15 @@ class StartServer:
         before the mark, so the row goes back to that. ``marked`` is the row as
         the start read it when its mark changed it.
 
-        The clear lands only while the mark is still this start's: while the row
-        is as the start marked it, or while the one stop that withdrew the
-        start's intent holds it for its final snapshot. That stop is the only
-        withdrawal since (the count moved exactly once), and the row still
-        carries the ``updated_at`` its flip wrote, which its bump recorded. Any
-        other row may carry a newer placement on this Worker, made after a
-        release, whose own hydrate has not landed, and its mark stays. That
-        includes a newer placement a second stop has just stopped: its flip is
-        visible before its commit returns and it bumps, but it wrote a stamp of
-        its own.
+        The clear lands only while the mark is still this start's: while the row is as
+        the start marked it, or while the one stop or drain that withdrew the start's
+        intent holds it for its final snapshot. That stop or drain is the only
+        withdrawal since (the count moved exactly once), and the row still carries the
+        ``updated_at`` its flip wrote, which its bump recorded. Any other row may carry
+        a newer placement on this Worker, made after a release, whose own hydrate has
+        not landed, and its mark stays. That includes a newer placement a second stop
+        has just stopped: its flip is visible before its commit returns and it bumps,
+        but it wrote a stamp of its own.
 
         This is best effort for a stop: the stop reads the mark for its final
         snapshot once the Worker has answered it, which can come before the wait
@@ -3224,7 +3223,7 @@ class StopServersAssignedToWorker:
     stop_intents: StopIntentCounter = field(default_factory=StopIntentCounter)
 
     async def __call__(self, *, worker_id: WorkerId) -> list[ServerId]:
-        stopped: list[ServerId] = []
+        stopped: list[Server] = []
         async with self.uow:
             assigned = [
                 server
@@ -3233,18 +3232,19 @@ class StopServersAssignedToWorker:
             ]
             for server in assigned:
                 if await _mark_stopped(self.uow, server, at=self.clock.now()):
-                    stopped.append(server.id)
+                    stopped.append(server)
             # Withdrawn, as in ``StopServer`` (issue #3739): a start of one of these
             # intents that has not sent yet sees it, and one that has is ahead of
             # the stop the reconciler sends. A commit that raises may have landed,
             # so it bumps too, at the same cost: if it truly failed, an in-flight
-            # start is refused and waits for the reconciler's re-send.
+            # start is refused and waits for the reconciler's re-send. Each bump
+            # records the stamp its flip wrote, as a stop's does (issue #4024).
             try:
                 await self.uow.commit()
             finally:
-                for server_id in stopped:
-                    self.stop_intents.bump(server_id)
-        return stopped
+                for server in stopped:
+                    self.stop_intents.bump(server.id, flipped_at=server.updated_at)
+        return [server.id for server in stopped]
 
 
 @dataclass(frozen=True)

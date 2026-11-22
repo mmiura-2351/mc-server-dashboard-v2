@@ -728,6 +728,35 @@ async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot() ->
     assert world.stored() == (DesiredState.STOPPED, None)
 
 
+async def test_a_drain_during_a_re_sent_starts_wait_leaves_the_final_snapshot() -> None:
+    # Issue #4024. A drain of the Worker withdraws the re-sent start's intent
+    # during its wait, a second later, so its flip stamps the row anew. The start
+    # answers the conflict without sending its hydrate, and finds the row by the
+    # stamp the drain's bump recorded, so it puts the mark back. The stop sent
+    # after the drain then takes the final snapshot.
+    world = _World(desired=DesiredState.RUNNING, assigned=True)
+    drain = StopServersAssignedToWorker(
+        uow=FakeUnitOfWork(servers=world.repo),
+        clock=FakeClock(_NOW + dt.timedelta(seconds=1)),
+        stop_intents=world.intents,
+    )
+
+    async def drained() -> None:
+        assert await drain(worker_id=world.worker) == [world.server_id]
+
+    start = replace(world.start_server(), store_generation=_StopDuringTheWait(drained))
+
+    with pytest.raises(LifecycleTransitionConflictError):
+        await start.redispatch_start(
+            community_id=world.community, server_id=world.server_id
+        )
+    assert world.repo.by_id[world.server_id].awaiting_hydrate is False
+    await world.stop()
+
+    assert world.kinds() == ["stop", "snapshot"]
+    assert world.stored() == (DesiredState.STOPPED, None)
+
+
 async def test_a_stop_after_a_re_sent_starts_hydrate_takes_no_final_snapshot() -> None:
     # Issue #4024. The same stop, but it commits once the re-sent start's hydrate
     # has landed, as the start re-reads the row before it sends. The start

@@ -67,9 +67,9 @@ failed start's or placement's revert of its own intent (``_compensate``,
 ``_unassign``), which also bumps when its commit raises, and the two stop
 convergences above. A revert sends no stop, so a re-sent start of that same
 intent already enqueued when the revert lands is not caught. The final-snapshot
-clears do not bump: the flow that took the snapshot already did. A stop's bump
-also records the ``updated_at`` its flip wrote, so that a re-sent start can tell
-the row that stop holds from a later write (issue #4024).
+clears do not bump: the flow that took the snapshot already did. A stop's and a
+drain's bump also record the ``updated_at`` their flip wrote, so that a re-sent
+start can tell the row that stop or drain holds from a later write (issue #4024).
 
 The value a start reads also identifies its intent: an unchanged count means no
 write in this process has withdrawn the intent since. A failed start's revert

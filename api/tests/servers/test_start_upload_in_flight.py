@@ -553,8 +553,9 @@ async def test_a_resent_start_puts_the_mark_back_when_its_adoption_is_not_writte
 ):
     # Issue #4024. The Worker refused the hydrate INVALID_STATE, so an instance of
     # the server runs there and its working set is the server's. Recording it
-    # running clears the mark, but that write can be dropped: the row was
-    # observed at the same instant, or later after a wall-clock step back. The
+    # running clears the mark, but the monotonic guard drops that write when the
+    # row was observed at or after its stamp: a Worker report the sink stamped on
+    # receipt between the start's clock read and its write is enough. The
     # hydrate replaced nothing all the same, so the start puts back the mark it
     # found, and the instance's snapshots publish.
     server = _server(desired=DesiredState.RUNNING, on_worker=True)

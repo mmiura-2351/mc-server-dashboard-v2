@@ -868,21 +868,26 @@ Notes:
   Worker the server is assigned to marks it too when it is about to hydrate that
   Worker, before it waits for the Worker's uploads (next note): the Worker does
   not hold the store's working set either (issue #4024). It marks the server
-  only while the start's intent is still the server's, so it never marks again
-  a newer placement on the same Worker whose hydrate has landed. When its
-  hydrate cannot have replaced the Worker's working set, the re-sent start puts
-  the mark back as it found it: the Worker refused the hydrate before the pull
-  (`BUSY`, `UNAVAILABLE` or `EXPIRED`, or `INVALID_STATE`, which clears the mark
-  anyway, below), or the hydrate was never sent: the wait ran out, the start's
-  intent was withdrawn, or the Worker had no session to send it on. A hydrate
-  that failed, timed out, or lost its session while it awaited its answer may
-  have swapped the new tree in, as the Worker can report a failed transfer after
-  its swap, so the mark stays until a hydrate lands. The start puts the mark back
-  only while it is still its own: while the row is as the start marked it, or
-  while the one stop that withdrew the start holds it, as that stop's flip left
-  it. For that stop the put-back is best effort: the stop reads the mark for its
-  final snapshot as soon as the Worker answers it, and if that comes before the
-  start's wait ends, the stop takes no final snapshot. While the mark is set:
+  only while the start's intent is still the server's, so it never marks again a
+  newer placement on the same Worker whose hydrate has landed. When its hydrate
+  cannot have replaced the Worker's working set, the re-sent start puts the mark
+  back as it found it: the Worker refused the hydrate before the pull (`BUSY`,
+  `UNAVAILABLE` or `EXPIRED`, or `INVALID_STATE`, which clears the mark anyway,
+  below), or the hydrate was never sent: the wait ran out, the start's intent
+  was withdrawn, the Worker had no session to send it on, or the API has no
+  data-plane URL or Worker credential to send it with. A hydrate that failed,
+  timed out, or lost its session while it awaited its answer may have swapped
+  the new tree in, as the Worker can report a failed transfer after its swap, so
+  the mark stays until a hydrate lands. The start puts the mark back only while
+  it is still its own: while the row is as the start marked it, or while the one
+  stop or drain that withdrew the start holds it, as its flip left it. For that
+  stop the put-back is best effort: the stop reads the mark for its final
+  snapshot as soon as the Worker answers it, and if that comes before the
+  start's wait ends, the stop takes no final snapshot. Any other write to the
+  row between the mark and the put-back keeps the mark, and so does an error the
+  start does not handle, a cancellation, or an API restart before the hydrate:
+  each errs on the safe side, and the mark waits for the next hydrate that
+  lands. While the mark is set:
   - the periodic snapshot skips the server but keeps it due, so the first tick
     after the mark clears takes it;
   - a final snapshot is not taken, whether a stop, a replayed stop or the
