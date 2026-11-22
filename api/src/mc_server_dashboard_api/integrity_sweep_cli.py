@@ -39,7 +39,8 @@ with a HEAD per row rather than a full read, and deletes nothing. ``--apply``
 deletes the rows it lists, each audited as ``backup:delete_dangling``; it runs
 only while the store owner marker names this database's installation
 (STORAGE.md Section 4.3), since a store that is not this database's answers
-NotFound for every row. ``--server`` scopes it the same way::
+NotFound for every row. The marker is checked before the pass and again before
+each deletion. ``--server`` scopes it the same way::
 
     cd api && uv run python -m mc_server_dashboard_api.integrity_sweep_cli \
         --delete-dangling [--apply] [--server <server-uuid>]
@@ -49,8 +50,9 @@ completed but skipped a row the store could not answer for (an outage, a
 timeout), or stopped when deleting an archive met an outage; 2 on a bad
 argument, ``--apply`` without ``--delete-dangling`` among them, on a bad
 configuration, or when ``--apply`` refuses a store not marked for this
-database; 3 when the database failed or a lifecycle lock was lost. Rows already
-deleted stay deleted, so a re-run is safe.
+database, before the pass or mid-pass; 3 when the database failed or a
+lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
+safe.
 """
 
 from __future__ import annotations
@@ -212,8 +214,9 @@ async def run_delete_dangling(
     installation (STORAGE.md Section 4.3), and raises
     :class:`StoreNotOwnedError` otherwise: a store that is not this database's,
     a wrong bucket or fs root, answers NotFound for every row, so the pass
-    would delete them all. A dry run deletes nothing, so it runs without the
-    check.
+    would delete them all. The pass checks it again before each deletion
+    (:class:`DeleteDanglingBackups`). A dry run deletes nothing, so it runs
+    without the check.
     """
 
     engine = _engine(

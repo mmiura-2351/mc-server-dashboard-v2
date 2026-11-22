@@ -2139,9 +2139,10 @@ each listed row is deleted through the backup delete path and audited as
 `backup:delete_dangling`. Only a NotFound answer condemns a row: a HEAD that
 fails any other way skips it, and the command then exits 1. `--apply` runs only
 while the owner marker (Section 4.3) names this database's installation, since
-a store that is not this database's answers NotFound for every row. The
-procedure and a worked example are in DEPLOYMENT.md (Storage-capacity incident
-runbook).
+a store that is not this database's answers NotFound for every row. It checks
+the marker before the pass and again before each deletion, so a store that
+stops being this database's mid-pass stops it. The procedure and a worked
+example are in DEPLOYMENT.md (Storage-capacity incident runbook).
 
 **Sweep log.** The sweep logs through the API's handler, in `log.format` (JSON
 by default), at `log.level`. The per-backup verdict line of a healthy or

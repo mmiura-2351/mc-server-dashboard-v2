@@ -15,6 +15,7 @@ import asyncio
 import datetime as dt
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,66 @@ async def test_apply_refuses_a_store_this_database_has_not_marked(
         )
 
     assert await _row_ids(engine) == {sound.id, dangling.id}
+
+
+@pytest.mark.timeout(6 * 10 + 30)
+@pytest.mark.usefixtures("app_log_handler_restored")
+async def test_apply_stops_when_the_store_stops_being_this_databases_mid_pass(
+    engine: AsyncEngine,  # noqa: F811
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The fs root's mount drops after the first deletion and leaves the empty
+    # mount point, so every later HEAD answers NotFound, the sound row's too.
+    # The marker went with the mount: the check before the next deletion
+    # refuses, the command exits 2, and the sound row is kept.
+    root = tmp_path / "root"
+    root.mkdir()
+    community, server = await _seed_server(engine)
+    ref = await _put_backup(FsStorage(root), community, server, _WORLD)
+    # Newest first: the dangling row is checked, and deleted, before the sound one.
+    dangling = _row(server, "no-such-archive")
+    sound = replace(_row(server, ref), created_at=_NOW - dt.timedelta(days=1))
+    factory = create_session_factory(engine)
+    async with ServersUnitOfWork(factory) as uow:
+        await uow.backups.add(dangling)
+        await uow.backups.add(sound)
+        await uow.commit()
+    installation = await read_installation_id(factory)
+    (root / ownership.OWNER_MARKER).write_text(
+        json.dumps({"installation_id": str(installation)})
+    )
+    _point_the_command_at(monkeypatch, root)
+
+    unmounted = tmp_path / "unmounted"
+
+    class _MountDropsAfterTheFirstDelete(StorageBackupStoreAdapter):
+        async def delete(
+            self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+        ) -> None:
+            await super().delete(
+                community_id=community_id, server_id=server_id, storage_ref=storage_ref
+            )
+            if not unmounted.exists():
+                root.rename(unmounted)
+                root.mkdir()
+
+    monkeypatch.setattr(
+        integrity_sweep_cli,
+        "StorageBackupStoreAdapter",
+        _MountDropsAfterTheFirstDelete,
+    )
+
+    # ``main`` runs its own event loop, so it runs in a thread of its own.
+    status = await asyncio.to_thread(
+        integrity_sweep_cli.main,
+        ["--delete-dangling", "--apply", "--server", str(server.value)],
+    )
+
+    assert status == 2
+    assert await _row_ids(engine) == {sound.id}
+    assert "dangling backups: refusing to delete: " in capsys.readouterr().err
 
 
 async def test_a_backup_whose_delete_is_between_its_removals_is_skipped_busy(

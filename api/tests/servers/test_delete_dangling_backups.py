@@ -16,6 +16,7 @@ import errno
 import logging
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import replace
 
 import pytest
 
@@ -38,6 +39,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
     ServerBusyError,
+    StoreNotOwnedError,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
     HeldLifecycleLock,
@@ -96,6 +98,45 @@ def _backup(server_id: ServerId, ref: str, *, minutes: int = 0) -> Backup:
     )
 
 
+class _HeadRecordingStore(FakeBackupArchiveStore):
+    """A :class:`FakeBackupArchiveStore` that puts each size HEAD on ``events``."""
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        self.events.append((server_id, "head-archive"))
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
+
+
+class _OwnerMarker:
+    """The store owner marker, as the pass's ``StoreOwnership`` port reads it.
+
+    It names this database's installation until ``store`` has deleted
+    ``lost_after`` archives, as when the fs root's mount drops or the bucket
+    goes mid-pass. Each check is put on the store's ``events``, so a test can
+    place it on the timeline.
+    """
+
+    def __init__(
+        self,
+        server_id: ServerId,
+        store: FakeBackupArchiveStore,
+        *,
+        lost_after: int | None = None,
+    ) -> None:
+        self.server_id = server_id
+        self.store = store
+        self.lost_after = lost_after
+
+    async def refusal(self) -> str | None:
+        self.store.events.append((self.server_id, "owner-check"))
+        if self.lost_after is not None and len(self.store.deleted) >= self.lost_after:
+            return "the store owner marker is gone"
+        return None
+
+
 class _Env:
     """Servers, their rows, and a store holding an archive for each row but those
     named in ``missing``."""
@@ -113,7 +154,7 @@ class _Env:
             self.uow.servers.seed(server)
         for backup in backups:
             self.uow.backups.seed(backup)
-        self.store = FakeBackupArchiveStore()
+        self.store = _HeadRecordingStore()
         for backup in backups:
             if backup.storage_ref not in missing:
                 self.store.archives.add(backup.storage_ref)
@@ -170,7 +211,8 @@ async def test_apply_deletes_each_dangling_row_under_the_lock_and_audits_it() ->
     sound = _backup(sid, "kept", minutes=-10)
     env = _Env([_server(sid)], [first, second, sound], missing={"gone-1", "gone-2"})
     assert isinstance(env.lock, FakeLifecycleLock)
-    # One timeline for the lock, the store and the rows (issue #2515).
+    env.delete = replace(env.delete, ownership=_OwnerMarker(sid, env.store))
+    # One timeline for the lock, the store, the marker and the rows (#2515).
     events: list[tuple[ServerId, str]] = []
     env.lock.events = events
     env.store.events = events
@@ -180,16 +222,20 @@ async def test_apply_deletes_each_dangling_row_under_the_lock_and_audits_it() ->
 
     assert [b.id for b in report.dangling] == [first.id, second.id]
     assert env.rows() == {sound.id}
-    # Each deletion falls inside a hold of its own, after a check that the lock
-    # is still held; the sound row's hold deletes nothing.
+    # Each row is HEADed inside a hold of its own. Each deletion falls in that
+    # hold, after a check that the store is still this database's and a check
+    # that the lock is still held; the sound row's hold deletes nothing.
     deletion = [
         (sid, "acquire"),
+        (sid, "head-archive"),
+        (sid, "owner-check"),
         (sid, "check"),
         (sid, "delete-archive"),
         (sid, "delete-row"),
         (sid, "release"),
     ]
-    assert events == [*deletion, *deletion, (sid, "acquire"), (sid, "release")]
+    sound_hold = [(sid, "acquire"), (sid, "head-archive"), (sid, "release")]
+    assert events == [*deletion, *deletion, *sound_hold]
     assert [e.target_id for e in env.audit.events] == [first.id.value, second.id.value]
     for event in env.audit.events:
         assert event.operation == BACKUP_DELETE_DANGLING
@@ -197,6 +243,27 @@ async def test_apply_deletes_each_dangling_row_under_the_lock_and_audits_it() ->
         assert event.actor_id is None
         assert event.community_id == _COMMUNITY.value
         assert event.target_type == TARGET_BACKUP
+
+
+async def test_a_store_that_stops_being_this_databases_mid_pass_stops_it() -> None:
+    # A store that stops being this database's mid-pass (the fs root's mount
+    # drops, the bucket goes) answers NotFound for every later HEAD, whether the
+    # archive exists or not. So the marker is checked again before each
+    # deletion, and the first refusal stops the pass; what it deleted before
+    # stays deleted.
+    sid = ServerId.new()
+    first = _backup(sid, "gone-1")
+    second = _backup(sid, "gone-2", minutes=-5)
+    env = _Env([_server(sid)], [first, second], missing={"gone-1", "gone-2"})
+    env.delete = replace(
+        env.delete, ownership=_OwnerMarker(sid, env.store, lost_after=1)
+    )
+
+    with pytest.raises(StoreNotOwnedError, match="the store owner marker is gone"):
+        await env.delete(apply=True)
+
+    assert env.rows() == {second.id}
+    assert [e.target_id for e in env.audit.events] == [first.id.value]
 
 
 async def test_a_row_the_store_could_not_answer_for_is_skipped(

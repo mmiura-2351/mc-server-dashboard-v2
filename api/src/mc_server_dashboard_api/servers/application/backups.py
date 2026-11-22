@@ -136,6 +136,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotStoppedError,
+    StoreNotOwnedError,
     UnsupportedPluginServerTypeError,
     WorkingSetSeedFailedError,
 )
@@ -1223,6 +1224,13 @@ class DeleteDanglingBackups:
     delete is a no-op for an archive already gone. Each deletion is audited
     post-commit as ``backup:delete_dangling`` with ``actor_id``, ``None`` when
     run headless, as the sweep audits its verdicts.
+
+    Before each deletion, in the same hold, ``ownership`` is asked whether the
+    store is still this database's (STORAGE.md Section 4.3). A store that stops
+    being it mid-pass, an fs root whose mount drops or a bucket that goes,
+    answers NotFound for every later HEAD, whether the archive exists or not.
+    A refusal stops the pass with :class:`StoreNotOwnedError`; the rows already
+    deleted stay deleted.
     """
 
     uow: UnitOfWork
@@ -1304,6 +1312,11 @@ class DeleteDanglingBackups:
         backup: Backup,
         actor_id: uuid.UUID | None,
     ) -> None:
+        # A store that stops being this database's mid-pass answers NotFound for
+        # every later HEAD, so the marker is checked again before each deletion.
+        refusal = await self.ownership.refusal()
+        if refusal is not None:
+            raise StoreNotOwnedError(refusal)
         await _delete_archive_then_row(
             self.uow,
             self.backup_store,

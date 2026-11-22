@@ -595,6 +595,11 @@ no archive bytes and does not run the integrity sweep.
   owner marker names this database's installation (STORAGE.md Section 4.3). A
   store that is not this database's, such as a wrong bucket or fs root, holds
   none of its archives, so every row would look dangling.
+- **`--apply` checks the store again before each deletion.** If the store stops
+  being this database's mid-pass, as when the fs root's mount drops or the
+  bucket goes, the command stops with exit 2 and the same refusal. The rows it
+  deleted before stay deleted; each is in the log and the audit trail. Fix the
+  store, then re-run.
 
 The other exit statuses are the command's usual ones: 3 when the database failed
 or a lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
