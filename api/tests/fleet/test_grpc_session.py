@@ -43,6 +43,9 @@ from mc_server_dashboard_api.fleet.domain.control_plane import (
     ReclaimDeletedServerCommand,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
+from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
+    LateSnapshotResultSink,
+)
 from mc_server_dashboard_api.fleet.domain.real_time_events import EventStream
 from mc_server_dashboard_api.fleet.domain.value_objects import WorkerId
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
@@ -3156,5 +3159,57 @@ async def test_a_held_report_gets_a_last_attempt_when_the_worker_closes_the_stre
             (_SERVER_B, _WORKER_ID, "running"),
         ]
         assert sink.attempts == {_SERVER_A: 2, _SERVER_B: 1}
+    finally:
+        await h.stop()
+
+
+class _OutageLateSnapshotSink(LateSnapshotResultSink):
+    """Fails the first clear with an outage, then records each server it clears."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.cleared: list[str] = []
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+    ) -> None:
+        self.attempts += 1
+        if self.attempts == 1:
+            raise _OUTAGE("connect call failed")
+        self.cleared.append(server_id)
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_held_late_final_snapshot_result_releases_on_its_retry() -> None:
+    # Issue #4023: the release a late final-snapshot result drives fails while
+    # the database is down, so the result is held like any report. Its retry
+    # must apply the release, rather than find nothing to release.
+    sink = _OutageLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        control_plane=state,
+        database_ping=FakeDatabasePing(reachable=False),
+    )
+    try:
+        call = await _registered(await h.start())
+        # An abandoned final snapshot of this session: its record is made after
+        # the registration, whose open_session drops the Worker's earlier ones.
+        state.register_pending(
+            "snapshot-1", WorkerId(_WORKER_ID), snapshot_server_id=_SERVER_A
+        )
+        state.discard_pending("snapshot-1")
+        await call.write(
+            pb.WorkerMessage(
+                correlation_id="snapshot-1",
+                command_result=pb.CommandResult(success=True),
+            )
+        )
+        await _wait_until(lambda: sink.cleared, "the held release was not applied")
+
+        assert sink.cleared == [_SERVER_A]
+        assert sink.attempts == 2
+        await call.done_writing()
     finally:
         await h.stop()

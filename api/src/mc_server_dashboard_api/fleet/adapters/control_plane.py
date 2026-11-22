@@ -28,6 +28,9 @@ import uuid
 from google.protobuf.duration_pb2 import Duration
 from google.protobuf.timestamp_pb2 import Timestamp
 
+from mc_server_dashboard_api.core.adapters.database import (
+    is_transient_database_error,
+)
 from mc_server_dashboard_api.fleet.domain.clock import Clock
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     EXPIRY_MARGIN_SECONDS,
@@ -208,6 +211,13 @@ class ControlPlaneState:
         # is popped when its late result arrives (a fresh uuid4 command_id never
         # collides).
         self._late_snapshots: dict[str, tuple[WorkerId, str]] = {}
+        # command_id -> (dispatched worker, server id) for a late final-snapshot
+        # result whose release is being written (issue #4023). The record moves
+        # here from ``_late_snapshots`` as the result arrives, so it no longer
+        # counts as outstanding, and stays until the write commits: a write that
+        # fails because the database is down is retried with the same result
+        # (issue #3614), and the retry must still find the record.
+        self._clearing_snapshots: dict[str, tuple[WorkerId, str]] = {}
         self._late_snapshot_sink = late_snapshot_sink
         # Monotonic high-water mark of the latest session token opened per worker
         # (issue #1694). A stale session that resumes its awaits after a newer one
@@ -379,8 +389,9 @@ class ControlPlaneState:
         """Release a held assignment on a late final-snapshot result (#891).
 
         Acts only when ``command_id`` is a snapshot whose dispatch timed out or
-        was cancelled (its record survives in ``_late_snapshots``); any other
-        unmatched result is dropped, as before. The #789 ownership guard: the
+        was cancelled (its record survives in ``_late_snapshots``, or in
+        ``_clearing_snapshots`` for a held retry); any other unmatched result is
+        dropped, as before. The #789 ownership guard: the
         reporting worker must be the worker the snapshot was dispatched to — a
         report from any other worker
         leaves the record in place and is ignored, so a forged late result cannot
@@ -396,9 +407,16 @@ class ControlPlaneState:
         The Worker's failure detail rides along with the outcome (issue #2766): it
         is the only text that names why the snapshot failed, and this is the seam
         where it would otherwise be dropped, leaving the consumer to guess a cause.
+
+        The record is kept, no longer outstanding, until the release is written
+        (issue #4023). A write that fails because the database is down leaves it
+        for the servicer's held retry of this result, which applies the release as
+        this attempt would have. Any other failure drops it, with the result.
         """
 
         snapshot = self._late_snapshots.get(command_id)
+        if snapshot is None:
+            snapshot = self._clearing_snapshots.get(command_id)
         if snapshot is None:
             return
         dispatched_worker, server_id = snapshot
@@ -412,15 +430,24 @@ class ControlPlaneState:
                 },
             )
             return
-        del self._late_snapshots[command_id]
+        self._late_snapshots.pop(command_id, None)
         if self._late_snapshot_sink is None:
             return
-        await self._late_snapshot_sink.clear_held_assignment_on_late_snapshot(
-            server_id=server_id,
-            worker_id=worker_id.value,
-            succeeded=result.success,
-            message=_failure_detail(result),
-        )
+        self._clearing_snapshots[command_id] = snapshot
+        # The session can end during the write and drop the record, so it is only
+        # ever popped from here on.
+        try:
+            await self._late_snapshot_sink.clear_held_assignment_on_late_snapshot(
+                server_id=server_id,
+                worker_id=worker_id.value,
+                succeeded=result.success,
+                message=_failure_detail(result),
+            )
+        except Exception as exc:
+            if not is_transient_database_error(exc):
+                self._clearing_snapshots.pop(command_id, None)
+            raise
+        self._clearing_snapshots.pop(command_id, None)
 
     def fail_worker_pending(
         self, worker_id: WorkerId, session: SessionToken, error: BaseException
@@ -461,11 +488,13 @@ class ControlPlaneState:
         # session ended, so no late result will arrive to consume them. Clearing
         # them keeps the map from accreting one entry per disconnect-after-timeout
         # (issue #891), and a leftover would hold the server's stop convergence in
-        # flight for good (issue #3491).
-        for command_id in [
-            cid for cid, (wid, _) in self._late_snapshots.items() if wid == worker_id
-        ]:
-            del self._late_snapshots[command_id]
+        # flight for good (issue #3491). A record kept for a held retry goes too:
+        # the hold ends with the session (issue #4023).
+        for records in (self._late_snapshots, self._clearing_snapshots):
+            for command_id in [
+                cid for cid, (wid, _) in records.items() if wid == worker_id
+            ]:
+                del records[command_id]
 
     def discard_if_stale(self, command_id: str) -> bool:
         """Return True when ``command_id``'s dispatch was abandoned (issue #1697).
@@ -529,7 +558,10 @@ class ControlPlaneState:
         follow any more: the result arrived, the Worker's session ended or was
         superseded, or the command was dropped unsent as stale. A server's stop
         convergence counts as in flight while this holds (issue #3491), so one
-        flow's release cannot land under another flow's unsettled upload.
+        flow's release cannot land under another flow's unsettled upload. A late
+        result's record waits in ``_clearing_snapshots`` while its release is
+        written, and this does not read it: that snapshot has settled, and the
+        release would otherwise refuse itself (issue #4023).
         """
 
         return any(

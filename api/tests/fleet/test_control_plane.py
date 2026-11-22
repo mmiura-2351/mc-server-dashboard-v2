@@ -1125,6 +1125,92 @@ async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> N
     assert sink.calls == []
 
 
+class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
+    """Records each clear call, failing every one as a database outage."""
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+    ) -> None:
+        await super().clear_held_assignment_on_late_snapshot(
+            server_id=server_id,
+            worker_id=worker_id,
+            succeeded=succeeded,
+            message=message,
+        )
+        raise ConnectionRefusedError("connect call failed")
+
+
+async def test_reconnect_sweeps_a_late_snapshot_whose_release_is_held() -> None:
+    # A late result's release failed with an outage, so its record is kept for
+    # the servicer's held retry (issue #4023). The hold ends with the session, so
+    # the superseding session's open_session drops the record too: a result for
+    # the old command routes nowhere after it.
+    sink = _DownLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    state.open_session(owner, 1)
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")
+    with pytest.raises(ConnectionRefusedError):
+        await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    state.open_session(owner, 2)
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert len(sink.calls) == 1
+
+
+class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
+    """A newer session of the Worker opens while each release is written."""
+
+    def __init__(
+        self, state: ControlPlaneState, owner: WorkerId, error: type[Exception] | None
+    ) -> None:
+        super().__init__()
+        self._state = state
+        self._owner = owner
+        self._error = error
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+    ) -> None:
+        await super().clear_held_assignment_on_late_snapshot(
+            server_id=server_id,
+            worker_id=worker_id,
+            succeeded=succeeded,
+            message=message,
+        )
+        self._state.open_session(self._owner, 2)
+        if self._error is not None:
+            raise self._error("scripted write failure")
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError], ids=["committed", "failed"])
+async def test_a_release_written_while_a_newer_session_opens_ends_as_written(
+    error: type[Exception] | None,
+) -> None:
+    # A superseding session's open_session can sweep a late result's record
+    # while its release is being written (issue #4023). The write then ends as
+    # it would have without the sweep, a committed release returning and a
+    # failed one raising its own error, and the record stays gone.
+    state = ControlPlaneState()
+    owner = WorkerId(_WORKER)
+    sink = _SupersededDuringWriteSink(state, owner, error)
+    state.set_late_snapshot_sink(sink)
+    state.open_session(owner, 1)
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")
+
+    if error is None:
+        await state.resolve("cmd-1", owner, _failed_transfer_result())
+    else:
+        with pytest.raises(error):
+            await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert len(sink.calls) == 1
+
+
 async def test_register_ack_echoes_correlation_id_and_sets_sent_at(
     harness: _Harness,
 ) -> None:
