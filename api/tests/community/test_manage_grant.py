@@ -21,7 +21,7 @@ from mc_server_dashboard_api.community.application.manage_grant import (
     RevokeGrant,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
-from mc_server_dashboard_api.community.domain.entities import Membership
+from mc_server_dashboard_api.community.domain.entities import Membership, ResourceGrant
 from mc_server_dashboard_api.community.domain.errors import (
     GrantResourceNotFoundError,
     GrantTargetNotMemberError,
@@ -36,7 +36,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     ResourceGrantId,
     UserId,
 )
-from tests.community.fakes import FakeAuthzUnitOfWork
+from tests.community.fakes import FakeAuthzUnitOfWork, FakeResourceGrantRepository
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
 
@@ -255,6 +255,32 @@ async def test_revoke_unknown_grant_is_not_found() -> None:
         await RevokeGrant(uow=uow)(
             community_id=CommunityId.new(), grant_id=ResourceGrantId.new()
         )
+
+
+class _DeleteOnReadResourceGrantRepository(FakeResourceGrantRepository):
+    """Commits a concurrent deletion right after a read hands the grant out."""
+
+    async def get_by_id(self, grant_id: ResourceGrantId) -> ResourceGrant | None:
+        grant = await super().get_by_id(grant_id)
+        self.by_id.pop(grant_id, None)
+        return grant
+
+
+async def test_revoke_grant_deleted_since_its_read_is_not_found() -> None:
+    # The DELETE matches nothing, which is the grant's 404, not a 204 (#4033).
+    uow = FakeAuthzUnitOfWork()
+    uow.resource_grants = _DeleteOnReadResourceGrantRepository()
+    community = CommunityId.new()
+    grant_id = uow.add_grant(
+        UserId(uuid.uuid4()),
+        community,
+        "server",
+        uuid.uuid4(),
+        {Permission("server:start")},
+    )
+    with pytest.raises(ResourceGrantNotFoundError):
+        await RevokeGrant(uow=uow)(community_id=community, grant_id=grant_id)
+    assert uow.commits == 0
 
 
 async def test_list_grants_scopes_to_community_and_optional_user() -> None:
