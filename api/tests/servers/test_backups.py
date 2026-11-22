@@ -1815,9 +1815,11 @@ def _valid_tar_gz() -> bytes:
 # --- Archive-before-row ordering (issue #4086) -------------------------------
 #
 # A backup row is recorded only once its archive exists, with its size; a failure
-# after the archive deletes it again. On 2026-10-15 a create that committed its
-# row first left 21 rows with no archive behind: the store refused each archive
-# and the database went down with it, so no row could be deleted again.
+# after the archive and before the row's COMMIT is sent deletes it again (the
+# tests at the end of this section pin what happens after). On 2026-10-15 a
+# create that committed its row first left 21 rows with no archive behind: the
+# store refused each archive and the database went down with it, so no row could
+# be deleted again.
 
 
 class _FailsAndTakesTheDatabaseDown(FakeBackupArchiveStore):
