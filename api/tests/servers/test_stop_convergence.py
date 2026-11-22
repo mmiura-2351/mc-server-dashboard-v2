@@ -830,6 +830,34 @@ async def test_a_late_result_finding_its_release_made_announces_it_only_on_retry
     assert _assigned(repo, server) is None
 
 
+@pytest.mark.parametrize("succeeded", [True, False], ids=["succeeded", "failed"])
+async def test_a_held_retry_finding_the_row_released_says_so(
+    caplog: pytest.LogCaptureFixture, succeeded: bool
+) -> None:
+    # Issue #4062: a retry that finds the server already released did not make
+    # the release it logs, for a successful or a failed result alike: its
+    # earlier attempt or another flow did. Its release line says so.
+    caplog.set_level(logging.INFO, logger=_LIFECYCLE_LOGGER)
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    assert server.assigned_worker_id is not None
+    repo = FakeServerRepository()
+    repo.seed(server)
+    repo.by_id[server.id].assigned_worker_id = None
+
+    await _stop_server(
+        repo, FakeControlPlane(), StopConvergenceGuard()
+    ).clear_assignment_after_late_snapshot(
+        server_id=server.id,
+        worker_id=server.assigned_worker_id,
+        succeeded=succeeded,
+        message=None if succeeded else "upload aborted by transfer bound",
+        retry=True,
+    )
+
+    [line] = _late_releases(caplog, server)
+    assert line.endswith(_FOUND_RELEASED)
+
+
 async def test_a_held_retry_leaves_a_row_another_worker_holds(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
