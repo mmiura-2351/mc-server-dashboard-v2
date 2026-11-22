@@ -43,6 +43,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
+    StoreNotOwnedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
 from mc_server_dashboard_api.storage.adapters import ownership
@@ -702,7 +703,7 @@ def test_a_busy_row_alone_does_not_fail_the_pass(
     ("error", "status", "line"),
     [
         (
-            integrity_sweep_cli.StoreNotOwnedError("the marker names another"),
+            StoreNotOwnedError("the marker names another"),
             2,
             "dangling backups: refusing to delete: the marker names another\n",
         ),
@@ -778,7 +779,7 @@ async def test_apply_refuses_a_store_not_marked_for_this_database(
 
     monkeypatch.setattr(integrity_sweep_cli, "read_installation_id", _installation)
 
-    with pytest.raises(integrity_sweep_cli.StoreNotOwnedError, match=OWNER_MARKER):
+    with pytest.raises(StoreNotOwnedError, match=OWNER_MARKER):
         await integrity_sweep_cli.run_delete_dangling(
             load_settings(config_file=None), server_id=None, apply=True
         )

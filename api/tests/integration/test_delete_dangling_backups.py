@@ -45,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
+from mc_server_dashboard_api.servers.domain.errors import StoreNotOwnedError
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.storage.adapters import ownership
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -56,6 +57,7 @@ from tests.integration.test_integrity_sweep import (  # noqa: F401
     engine,
 )
 from tests.storage.helpers import healthy_region_bytes
+from tests.store_ownership import FakeStoreOwnership
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
 
@@ -180,7 +182,7 @@ async def test_apply_refuses_a_store_this_database_has_not_marked(
     _, _, sound, dangling = await _seed(engine, tmp_path)
     _point_the_command_at(monkeypatch, tmp_path)
 
-    with pytest.raises(integrity_sweep_cli.StoreNotOwnedError):
+    with pytest.raises(StoreNotOwnedError):
         await integrity_sweep_cli.run_delete_dangling(
             load_settings(None), server_id=None, apply=True
         )
@@ -214,6 +216,7 @@ async def test_a_backup_whose_delete_is_between_its_removals_is_skipped_busy(
         uow=ServersUnitOfWork(factory),
         backup_store=StorageBackupStoreAdapter(storage=storage),
         audit=audit,
+        ownership=FakeStoreOwnership(),
         lifecycle_lock=lock,
     )
 

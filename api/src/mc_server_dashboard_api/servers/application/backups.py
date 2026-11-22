@@ -158,6 +158,7 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     apply_platform_properties,
     new_rcon_password,
 )
+from mc_server_dashboard_api.servers.domain.store_ownership import StoreOwnership
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
@@ -1227,6 +1228,7 @@ class DeleteDanglingBackups:
     uow: UnitOfWork
     backup_store: BackupArchiveStore
     audit: AuditRecorder
+    ownership: StoreOwnership
     lifecycle_lock: LifecycleLock = NullLifecycleLock()
 
     async def __call__(

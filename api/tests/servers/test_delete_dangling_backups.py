@@ -58,6 +58,7 @@ from tests.servers.fakes import (
     FakeLifecycleLock,
     SessionTrackingUnitOfWork,
 )
+from tests.store_ownership import FakeStoreOwnership
 
 _NOW = dt.datetime(2026, 10, 15, 12, 19, tzinfo=dt.timezone.utc)
 _COMMUNITY = CommunityId(uuid.uuid4())
@@ -123,6 +124,7 @@ class _Env:
             uow=self.uow,
             backup_store=self.store,
             audit=self.audit,
+            ownership=FakeStoreOwnership(),
             lifecycle_lock=self.lock,
         )
 
@@ -298,6 +300,7 @@ async def test_a_row_deleted_before_its_lock_is_taken_is_not_reported() -> None:
         uow=env.uow,
         backup_store=env.store,
         audit=env.audit,
+        ownership=FakeStoreOwnership(),
         lifecycle_lock=_DeletedFirst(),
     )
 

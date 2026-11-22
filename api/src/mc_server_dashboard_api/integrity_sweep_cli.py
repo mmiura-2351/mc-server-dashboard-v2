@@ -60,6 +60,7 @@ import asyncio
 import logging
 import sys
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -100,8 +101,13 @@ from mc_server_dashboard_api.servers.domain.backup import Backup
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
     LifecycleLockLostError,
+    StoreNotOwnedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import ServerId
+from mc_server_dashboard_api.storage.adapters.ownership import (
+    FsStoreOwnership,
+    ObjectStoreOwnership,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -180,8 +186,20 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
         await engine.dispose()
 
 
-class StoreNotOwnedError(Exception):
-    """The store's owner marker does not name this database's installation."""
+@dataclass(frozen=True)
+class _MarkedForThisDatabase:
+    """The ``StoreOwnership`` port for a command that never claims the store.
+
+    The store's own ``refusal`` always refuses in a process that never called
+    ``claim``, so this asks whether the marker names ``installation_id``, the
+    installation of the database the command was pointed at (issue #4107).
+    """
+
+    ownership: FsStoreOwnership | ObjectStoreOwnership
+    installation_id: uuid.UUID
+
+    async def refusal(self) -> str | None:
+        return await self.ownership.refusal_for(self.installation_id)
 
 
 async def run_delete_dangling(
@@ -207,10 +225,11 @@ async def run_delete_dangling(
     try:
         session_factory = create_session_factory(engine)
         storage, ownership = _build_storage(settings)
+        marked = _MarkedForThisDatabase(
+            ownership, await read_installation_id(session_factory)
+        )
         if apply:
-            refusal = await ownership.refusal_for(
-                await read_installation_id(session_factory)
-            )
+            refusal = await marked.refusal()
             if refusal is not None:
                 raise StoreNotOwnedError(refusal)
         delete_dangling = DeleteDanglingBackups(
@@ -219,6 +238,7 @@ async def run_delete_dangling(
             audit=LoggingAuditRecorder(
                 SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
             ),
+            ownership=marked,
             lifecycle_lock=PgLifecycleLock(engine=lock_engine),
         )
         return await delete_dangling(apply=apply, server_id=server_id)

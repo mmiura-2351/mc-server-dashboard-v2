@@ -236,6 +236,15 @@ class LifecycleLockLostError(ServerError):
     """
 
 
+class StoreNotOwnedError(ServerError):
+    """The store's owner marker does not name this database's installation.
+
+    Raised by an operator command's destructive pass (issue #4107), which deletes
+    only while the marker (STORAGE.md Section 4.3) names the installation of the
+    database it was pointed at. The message is the marker check's refusal.
+    """
+
+
 class ServerAssignedError(ServerError):
     """The server is at rest but still assigned to a Worker.
 
