@@ -718,6 +718,36 @@ def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
     assert recorder.events[0].actor_id is not None
 
 
+def test_create_that_lost_the_lock_before_its_row_is_503_lifecycle_lock_lost() -> None:
+    # The creation's lifecycle lock was lost before the row's commit (issues
+    # #3927, #4045): no server was created, so nothing is audited, and the
+    # caller retries a transient fault.
+    uow = FakeUnitOfWork()
+    lock = FakeLifecycleLock()
+    lock.checks_before_loss = 0
+    recorder = RecordingAuditRecorder()
+    app = _app(
+        member=True,
+        allow=True,
+        create=CreateServer(
+            uow=uow,
+            clock=FakeClock(_NOW),
+            version_validator=FakeVersionValidator(),
+            file_store=FakeFileStore(),
+            port_range=PortRange(start=25565, end=25664),
+            lifecycle_lock=lock,
+        ),
+        recorder=recorder,
+    )
+    resp = _client(app).post(
+        f"/api/communities/{uuid.uuid4()}/servers", json=_create_body()
+    )
+    assert resp.status_code == 503
+    assert resp.json()["reason"] == "lifecycle_lock_lost"
+    assert uow.commits == 0
+    assert recorder.events == []
+
+
 # Every door that names a server refuses a name with a control character or a
 # lone surrogate (issue #3957). A JSON escape delivers either one.
 @pytest.mark.parametrize(

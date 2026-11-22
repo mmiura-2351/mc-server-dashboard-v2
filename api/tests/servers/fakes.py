@@ -887,6 +887,7 @@ class FakeServerRepository(ServerRepository):
         self.by_id[server.id] = self._copy(server)
 
     async def add(self, server: Server) -> None:
+        self.events.append((server.id, "add-server"))
         self.by_id[server.id] = self._copy(server)
 
     async def get_by_id(self, server_id: ServerId) -> Server | None:

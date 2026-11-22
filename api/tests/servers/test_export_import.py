@@ -28,8 +28,9 @@ import json
 import threading
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -41,6 +42,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
     ImportServer,
     ResolveServerExport,
 )
+from mc_server_dashboard_api.servers.application.files import _archive_entries
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -683,14 +685,14 @@ async def test_import_publish_failure_is_seed_failed() -> None:
     [
         pytest.param("_parse_metadata", 1, id="the-metadata-read"),
         pytest.param("_archive_entries", 1, id="the-dry-run"),
-        pytest.param("_archive_entries", 2, id="the-pass-that-publishes-the-entries"),
+        pytest.param("_archive_entries", 2, id="the-read-of-the-entries-to-publish"),
     ],
 )
 async def test_imports_reading_together_leave_the_default_executor_free(
     monkeypatch: pytest.MonkeyPatch, reader: str, slow_call: int
 ) -> None:
     # An import reads the archive three times: the metadata, the dry run before
-    # the row is created, and the pass that publishes the entries. A crafted
+    # the row is created, and the read of the entries to publish. A crafted
     # archive costs as much in each, so all three run on the archive-validation
     # pool (issue #3912): on the default executor, a few imports reading for
     # minutes would take every worker from the fs Storage calls, the sweep and
@@ -1272,11 +1274,12 @@ async def test_import_geyser_does_not_clobber_concurrent_patch() -> None:
 
 
 async def test_import_plugins_takes_lifecycle_lock() -> None:
-    """_import_plugins acquires the per-server lifecycle lock around its work.
+    """_import_plugins runs inside the per-server lifecycle lock.
 
     Mirrors the InstallPlugin / RemovePlugin lock-adoption tests: a recording
     FakeLifecycleLock asserts the lock is acquired and released for the
-    imported server's id.
+    imported server's id. The hold is the one the composed CreateServer takes
+    (issue #4045).
     """
 
     community = uuid.uuid4()
@@ -1291,10 +1294,9 @@ async def test_import_plugins_takes_lifecycle_lock() -> None:
     # [acquire, release] cannot see the insert land between them.
     dst_uow.plugins.events = lock.events
     imp = ImportServer(
-        create_server=_create_server(dst_uow, dst_store),
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
         file_store=dst_store,
         bedrock_port_range=_BEDROCK_RANGE,
-        lifecycle_lock=lock,
     )
     server = await imp(
         community_id=CommunityId(community),
@@ -1324,23 +1326,127 @@ async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> Non
     async def _import(dst_uow: FakeUnitOfWork, lock: FakeLifecycleLock) -> None:
         dst_store = FakeFileStore()
         await ImportServer(
-            create_server=_create_server(dst_uow, dst_store),
+            create_server=replace(
+                _create_server(dst_uow, dst_store), lifecycle_lock=lock
+            ),
             file_store=dst_store,
             bedrock_port_range=_BEDROCK_RANGE,
-            lifecycle_lock=lock,
         )(community_id=CommunityId(community), name="imported", content=archive)
 
     held_uow = FakeUnitOfWork()
     await _import(held_uow, FakeLifecycleLock())
     lost_uow = FakeUnitOfWork()
     lost = FakeLifecycleLock()
-    lost.checks_before_loss = 0
+    # The row commit's and the seed's checks pass (the archive has no member to
+    # publish); the plugin commit's is lost.
+    lost.checks_before_loss = 2
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await _import(lost_uow, lost)
 
     assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
     # The import's last commit, the plugin rows', is the one the loss stops.
     assert lost_uow.commits == held_uow.commits - 1
+
+
+async def test_import_publishes_inside_the_lock_its_create_took() -> None:
+    # Issue #4045: each member's write publishes on its own, so a start admitted
+    # mid-publish would hydrate the archive half-written. The publish runs in
+    # the hold the composed CreateServer took before its row committed, with no
+    # release in between, and confirms the lock before each write (#3927).
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    dst_uow.servers.events = lock.events
+    dst_store.events = lock.events
+    imp = ImportServer(
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
+        file_store=dst_store,
+    )
+    archive = _zip(
+        {
+            EXPORT_METADATA_FILENAME: _metadata(),
+            "world/level.dat": b"level",
+            "world/region/r.0.0.mca": b"region",
+        }
+    )
+
+    server = await imp(
+        community_id=CommunityId(community), name="fresh", content=archive
+    )
+
+    ev = lock.events
+    assert [e for e in ev if e[1] in {"acquire", "release"}] == [
+        (server.id, "acquire"),
+        (server.id, "release"),
+    ], ev
+    acquire_at = ev.index((server.id, "acquire"))
+    release_at = ev.index((server.id, "release"))
+    assert acquire_at < ev.index((server.id, "add-server")), ev
+    writes = [i for i, e in enumerate(ev) if e == (server.id, "write-file")]
+    # The create's server.properties seed, then the two members.
+    assert len(writes) == 3, ev
+    assert writes[-1] < release_at, ev
+    assert all(ev[i - 1] == (server.id, "check") for i in writes), ev
+
+
+async def test_import_reads_its_entries_before_the_lock_and_the_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read of the entries to publish can wait for the archive-validation
+    # pool (issue #3912), so it runs before the creation takes the lifecycle
+    # lock and its pooled connection (issue #4045), and a failure of it leaves
+    # no row. Each read of the entries notes how far the lock's timeline had got
+    # when it finished.
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    dst_uow.servers.events = lock.events
+    reads_done_at: list[int] = []
+
+    def entries(*args: Any, **kwargs: Any) -> Iterator[tuple[str, bytes]]:
+        yield from _archive_entries(*args, **kwargs)
+        reads_done_at.append(len(lock.events))
+
+    monkeypatch.setattr(export_import, "_archive_entries", entries)
+    imp = ImportServer(
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
+        file_store=dst_store,
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"x"})
+
+    server = await imp(
+        community_id=CommunityId(community), name="fresh", content=archive
+    )
+
+    # The dry run and the read of the entries to publish, both before acquire.
+    acquire_at = lock.events.index((server.id, "acquire"))
+    assert len(reads_done_at) == 2, reads_done_at
+    assert all(at <= acquire_at for at in reads_done_at), (reads_done_at, lock.events)
+
+
+async def test_import_that_lost_the_lock_before_its_publish_writes_no_member() -> None:
+    # A lock lost after the seed stops the publish before its first member's
+    # write (issue #3927); the row stands, so it is the seed failure.
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    # The row commit's and the seed's checks pass; the first member's is lost.
+    lock.checks_before_loss = 2
+    imp = ImportServer(
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
+        file_store=dst_store,
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"x"})
+
+    with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+        await imp(community_id=CommunityId(community), name="fresh", content=archive)
+
+    assert isinstance(exc_info.value.__cause__, LifecycleLockLostError)
+    assert set(dst_store.files) == {"server.properties"}
+    assert len(dst_uow.servers.by_id) == 1
 
 
 # --- no directory at the root server.properties path (issue #2869) ---------
