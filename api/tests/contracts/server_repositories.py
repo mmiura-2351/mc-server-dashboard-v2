@@ -71,6 +71,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -334,6 +335,7 @@ class ServerRepositoryContract:
         changed.assigned_worker_id = None
         changed.backup_retention = {"nested": {"keep": 7}}
         changed.awaiting_hydrate = True
+        changed.final_snapshot_refusal = FinalSnapshotRefusal.BUSY
         async with server_repository_harness.open() as tx:
             await tx.repository.update(changed)
             await tx.commit()
@@ -357,6 +359,7 @@ class ServerRepositoryContract:
         assert stored.assigned_worker_id == item.assigned_worker_id
         assert stored.backup_retention == {"nested": {"keep": 2}}
         assert stored.awaiting_hydrate is False
+        assert stored.final_snapshot_refusal is None
 
     async def test_lifecycle_update_is_guarded_and_writes_only_lifecycle_fields(
         self,
@@ -1078,6 +1081,162 @@ class ServerRepositoryContract:
             row = await tx.repository.get_by_id(item.id)
         assert row is not None
         assert (row.assigned_worker_id, row.awaiting_hydrate) == (None, False)
+
+    @pytest.mark.parametrize(
+        ("desired", "holder", "stored", "refusal", "applies"),
+        [
+            (DesiredState.STOPPED, "w1", None, FinalSnapshotRefusal.BUSY, True),
+            (DesiredState.STOPPED, "w1", None, FinalSnapshotRefusal.UNAVAILABLE, True),
+            (
+                DesiredState.STOPPED,
+                "w1",
+                FinalSnapshotRefusal.BUSY,
+                FinalSnapshotRefusal.UNAVAILABLE,
+                True,
+            ),
+            (
+                DesiredState.STOPPED,
+                "w1",
+                FinalSnapshotRefusal.BUSY,
+                FinalSnapshotRefusal.BUSY,
+                False,
+            ),
+            (DesiredState.STOPPED, "w1", FinalSnapshotRefusal.BUSY, None, True),
+            (DesiredState.STOPPED, "w1", None, None, False),
+            (DesiredState.RUNNING, "w1", None, FinalSnapshotRefusal.BUSY, False),
+            (DesiredState.STOPPED, "w2", None, FinalSnapshotRefusal.BUSY, False),
+            (DesiredState.STOPPED, None, None, FinalSnapshotRefusal.BUSY, False),
+        ],
+        ids=[
+            "busy",
+            "unavailable",
+            "changed",
+            "unchanged",
+            "cleared",
+            "already-clear",
+            "running",
+            "other-worker",
+            "unassigned",
+        ],
+    )
+    async def test_a_final_snapshot_refusal_lands_only_on_a_stop_holding_the_worker(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        desired: DesiredState,
+        holder: str | None,
+        stored: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal | None,
+        applies: bool,
+    ) -> None:
+        # Issue #4054: worker w1 refused the final snapshot of a stop that still
+        # holds it, or a later attempt was no longer refused. Only a change counts.
+        workers = {"w1": WorkerId(uuid.uuid4()), "w2": WorkerId(uuid.uuid4())}
+        item = server(contract_community_id)
+        item.desired_state = desired
+        item.observed_state = ObservedState.STOPPED
+        item.assigned_worker_id = None if holder is None else workers[holder]
+        item.final_snapshot_refusal = stored
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            changed = await tx.repository.set_final_snapshot_refusal(
+                item.id, workers["w1"], refusal
+            )
+            await tx.commit()
+        assert changed is applies
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert row.final_snapshot_refusal is (refusal if applies else stored)
+
+    @pytest.mark.parametrize(
+        "release", ["lifecycle", "observed-unassign", "final-snapshot", "stale"]
+    )
+    async def test_every_release_clears_the_final_snapshot_refusal(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        release: str,
+    ) -> None:
+        # Issue #4054: the refusal is about the assignment, so it goes with it.
+        item = server(contract_community_id)
+        item.desired_state = DesiredState.STOPPED
+        item.observed_state = ObservedState.STOPPED
+        item.final_snapshot_refusal = FinalSnapshotRefusal.UNAVAILABLE
+        worker = item.assigned_worker_id
+        assert worker is not None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            repo = tx.repository
+            if release == "lifecycle":
+                # Built from the read, so it still carries the refusal.
+                released = deepcopy(item)
+                released.assigned_worker_id = None
+                released.updated_at = _LATER
+                cleared = await repo.update_lifecycle(
+                    released,
+                    expected_from=DesiredState.STOPPED,
+                    expected_assigned_worker_id=worker,
+                )
+            elif release == "observed-unassign":
+                cleared = await repo.record_observed_state(
+                    item.id,
+                    ObservedState.STOPPED,
+                    _LATER,
+                    unassign=True,
+                    expected_worker=worker,
+                )
+            elif release == "final-snapshot":
+                cleared = await repo.clear_assignment_after_final_snapshot(
+                    item.id, worker
+                )
+            else:
+                cleared = await repo.clear_stale_assignment(
+                    item.id, worker, observed_at=item.observed_at
+                )
+            await tx.commit()
+        assert cleared
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.assigned_worker_id, row.final_snapshot_refusal) == (None, None)
+
+    @pytest.mark.parametrize("write", ["running-report", "disconnect"])
+    async def test_a_write_that_keeps_the_worker_keeps_the_final_snapshot_refusal(
+        self,
+        server_repository_harness: RepositoryHarness[ServerRepository],
+        contract_community_id: CommunityId,
+        write: str,
+    ) -> None:
+        # Issue #4054: a held row whose Worker reports or drops is still held.
+        item = server(contract_community_id)
+        item.desired_state = DesiredState.STOPPED
+        item.observed_state = ObservedState.STOPPED
+        item.final_snapshot_refusal = FinalSnapshotRefusal.BUSY
+        worker = item.assigned_worker_id
+        assert worker is not None
+        async with server_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            if write == "running-report":
+                assert await tx.repository.record_observed_state(
+                    item.id, ObservedState.RUNNING, _LATER, expected_worker=worker
+                )
+            else:
+                await tx.repository.mark_worker_servers_unknown(worker, _LATER)
+            await tx.commit()
+        async with server_repository_harness.open() as tx:
+            row = await tx.repository.get_by_id(item.id)
+        assert row is not None
+        assert (row.assigned_worker_id, row.final_snapshot_refusal) == (
+            worker,
+            FinalSnapshotRefusal.BUSY,
+        )
 
     async def test_missing_updates_do_not_insert(
         self,

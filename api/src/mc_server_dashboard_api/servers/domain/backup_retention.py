@@ -10,6 +10,14 @@ retains. It is a union type — exactly one of two forms (owner-confirmed):
   ``now`` and including the current day/week/month. Tiers are each ``>= 0`` with
   at least one ``> 0``; a backup kept by *any* tier bucket survives.
 
+Healthy rows are chosen as keepers first (issue #1864): a ``QUARANTINED`` row
+keeps a keep-N slot only when too few non-quarantined scheduled rows are left
+to fill the N, and a tier bucket only when the bucket holds no non-quarantined
+row. Keep-N therefore
+keeps as many rows as it would ignoring health, every bucket stays filled, and
+an all-quarantined set keeps exactly the health-blind selection. ``UNKNOWN`` and
+``UNREADABLE`` rank like ``HEALTHY``.
+
 :func:`backups_to_prune` is the pure selection: given a policy, a server's
 backup rows, and ``now``, it returns the rows the policy prunes. Only
 ``source=scheduled`` rows are ever candidates — manual / uploaded / event rows
@@ -28,7 +36,11 @@ import datetime as dt
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from mc_server_dashboard_api.servers.domain.backup import Backup, BackupSource
+from mc_server_dashboard_api.servers.domain.backup import (
+    Backup,
+    BackupHealth,
+    BackupSource,
+)
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidRetentionPolicyError,
 )
@@ -141,6 +153,15 @@ def _newest_first(backups: list[Backup]) -> list[Backup]:
     return sorted(backups, key=lambda b: (b.created_at, str(b.id.value)), reverse=True)
 
 
+def _quarantined_last(backup: Backup) -> bool:
+    # Only QUARANTINED ranks behind the other rows (issue #1864): a check found
+    # the world inside it corrupt. UNKNOWN is a legacy row no check has read
+    # yet. UNREADABLE has documented false positives: a half-up backend or a
+    # read limit marks an intact archive unreadable (STORAGE.md), so retention
+    # stays health-blind for it.
+    return backup.health is BackupHealth.QUARANTINED
+
+
 def _window_days(now_date: dt.date, days: int) -> set[dt.date]:
     return {now_date - dt.timedelta(days=i) for i in range(days)}
 
@@ -168,39 +189,42 @@ def backups_to_prune(
 
     Pure: no I/O, no clock — ``now`` anchors the tiered windows (UTC
     boundaries). Manual / uploaded / event rows are never candidates. Keep-N
-    keeps the newest N scheduled rows; tiered keeps the newest scheduled row
-    per day/week/month bucket inside the configured windows, and prunes every
-    scheduled row no bucket kept.
+    keeps the newest N scheduled rows and tiered the newest scheduled row per
+    day/week/month bucket inside the configured windows, in both cases choosing
+    a quarantined row only where no other row is left; every scheduled row no
+    slot or bucket kept is pruned.
     """
 
     scheduled = _newest_first(
         [b for b in backups if b.source is BackupSource.SCHEDULED]
     )
+    # A stable sort: the quarantined rows move behind the rest, each group still
+    # newest-first, so the first claimant of a slot or bucket is its newest
+    # non-quarantined row, else its newest quarantined one.
+    ranked = sorted(scheduled, key=_quarantined_last)
     if policy.keep_last is not None:
-        return scheduled[policy.keep_last :]
+        kept = {b.id for b in ranked[: policy.keep_last]}
+        return [b for b in scheduled if b.id not in kept]
 
     now_date = now.astimezone(dt.timezone.utc).date()
     days = _window_days(now_date, policy.daily)
     weeks = _window_weeks(now_date, policy.weekly)
     months = _window_months(now_date, policy.monthly)
+    kept = set()
     claimed_days: set[dt.date] = set()
     claimed_weeks: set[tuple[int, int]] = set()
     claimed_months: set[tuple[int, int]] = set()
-    pruned: list[Backup] = []
-    for backup in scheduled:  # newest first, so the first claimant is the newest
+    for backup in ranked:
         created = backup.created_at.astimezone(dt.timezone.utc).date()
-        kept = False
         if created in days and created not in claimed_days:
             claimed_days.add(created)
-            kept = True
+            kept.add(backup.id)
         week = created.isocalendar()[:2]
         if week in weeks and week not in claimed_weeks:
             claimed_weeks.add(week)
-            kept = True
+            kept.add(backup.id)
         month = (created.year, created.month)
         if month in months and month not in claimed_months:
             claimed_months.add(month)
-            kept = True
-        if not kept:
-            pruned.append(backup)
-    return pruned
+            kept.add(backup.id)
+    return [b for b in scheduled if b.id not in kept]

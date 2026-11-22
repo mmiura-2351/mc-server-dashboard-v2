@@ -907,8 +907,10 @@ keeps an id for it whose container the daemon still knows or cannot inspect
 within 10 s, lists a running container of it, or cannot list its containers
 within 10 s. A hydrate first deals with the kept ids the way the next
 start would, so a container's shutdown save lands before the pull replaces the
-working set, and it is refused if the server still is. A snapshot of a
-stopped server is refused too, and stops nothing. Both refusals, and a start the
+working set, and it is refused if the server still is. A stop's final
+snapshot of a stopped server deals with them the same way before it packs, and a
+periodic or on-demand one is refused while the server is busy and stops nothing
+(issue #4053). These refusals, and a start the
 driver refuses for a kept id or a running container, or whose create or start
 call the daemon did not answer in time, answer `UNAVAILABLE`
 ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 7). Unlike `BUSY`, the

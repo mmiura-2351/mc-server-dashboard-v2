@@ -1086,8 +1086,8 @@ type redialer interface {
 
 // snapshotContext derives the one deadline a snapshot command runs under (issue
 // #3511): the transfer deadline the API advertised in RegisterAck, measured from the
-// command's start, so the quiesce, the pre-pack fsck, the pack and the upload share
-// it. Before, it bounded only the pack and upload, and the pack ignored it, so a
+// command's start, so a stopped server's leftover guard (issue #4053), the quiesce,
+// the pre-pack fsck, the pack and the upload share it. Before, it bounded only the pack and upload, and the pack ignored it, so a
 // stuck pack or fsck held the command past it while heartbeats kept the session up.
 //
 // A running server's snapshot also owes the save-on restore, which runs detached
@@ -1590,19 +1590,6 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 		if ok, code, msg := m.reserve(cmd.ServerID, legNone); !ok {
 			return fail(cmd.CommandID, code, msg)
 		}
-		// The reservation rules out only the processes the Worker tracks; a start the
-		// daemon did not answer may have left its container running against the set
-		// (issue #3672). Packing a set it is writing is a mixed capture, so the
-		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
-		// the driver cannot rule one out. It does not end the container: the
-		// snapshot is no precondition of the start that does, and what it packed
-		// would be that container's shutdown save. A guard error the command's own
-		// cancellation caused is UNAVAILABLE too, as in handleHydrate: nothing was
-		// ruled out, and the answer reaches no caller.
-		if err := m.untrackedBusy(ctx, cmd.ServerID); err != nil {
-			m.release(cmd.ServerID)
-			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
-		}
 		release = func() { m.release(cmd.ServerID) }
 	}
 	// One deadline bounds the whole command (issue #3511, snapshotContext). The body
@@ -1612,13 +1599,50 @@ func (m *Manager) handleSnapshot(ctx context.Context, cmd session.Command) sessi
 	// attempt keeps the id's claim — the reservation of a stopped id, the
 	// runningSnapshots mark of a running one — until both the body has exited and
 	// the handler's save-on recovery has finished, and an abandoned body skips its
-	// destructive tail (snapshotAttempt). Close does not wait for either.
+	// destructive tail (snapshotAttempt). Close does not wait for either. The
+	// deadline is taken once the id is claimed, so it also bounds the leftover guard
+	// below, and with it the ending of a stopped server's leftovers.
 	newContext := m.snapshotContext
 	if hook := m.snapshotContextHook; hook != nil {
 		newContext = hook
 	}
 	cmdCtx, cancel := newContext(ctx, running)
 	defer cancel()
+	if !running {
+		// The reservation rules out only the processes the Worker tracks; a start the
+		// daemon did not answer may have left its container running against the set
+		// (issue #3672). Packing a set it is writing is a mixed capture, so the
+		// snapshot is refused as UNAVAILABLE, as the hydrate is (issue #3678), while
+		// the driver cannot rule one out.
+		//
+		// A stop's final snapshot (cmd.Final, issue #4053) first ends those
+		// containers, as the hydrate does, before the working-set check, the fsck and
+		// the pack. What it then packs is their shutdown save over the set: the
+		// progression the stop's snapshot exists to keep. Nothing else ends them while
+		// the server stays stopped, and the snapshot would otherwise be refused every
+		// time. A periodic or on-demand snapshot ends nothing: a stopped id does
+		// not tell the Worker that the server is meant to stay stopped, and under a
+		// running intent the re-sent start's hydrate ends the leftover. Either way a
+		// container that is not ended, or that the driver cannot rule out, refuses
+		// before anything is read.
+		//
+		// The guard runs under the command's deadline. The driver bounds ending each
+		// recorded container at about 90 s, summed from its constants and not
+		// measured: an inspect and a removal of 10 s each, and a graceful stop of
+		// 30 + 10 + 30 s (unremovedStopTimeout). A guard error the deadline or the
+		// command's own cancellation caused is UNAVAILABLE too, as in handleHydrate:
+		// nothing was ruled out, and a cancelled command's answer reaches no caller.
+		var err error
+		if cmd.Final {
+			err = m.endLeftovers(cmdCtx, cmd.ServerID, filepath.Join(m.scratchDir, cmd.ServerID))
+		} else {
+			err = m.untrackedBusy(cmdCtx, cmd.ServerID)
+		}
+		if err != nil {
+			release()
+			return fail(cmd.CommandID, session.CommandErrorUnavailable, fmt.Sprintf(untrackedRefusalMsg, "snapshot", err))
+		}
+	}
 	att := newSnapshotAttempt(func() {
 		release()
 		if hook := m.snapshotReleased; hook != nil {
@@ -4857,7 +4881,8 @@ func (m *Manager) untrackedBusy(ctx context.Context, serverID string) error {
 // workingDir, then a removal (issue #3672). It then answers as untrackedBusy. A
 // command that is a precondition of that start, the hydrate, uses it rather than
 // untrackedBusy alone: a refusal there would hold back the start that ends the
-// leftover.
+// leftover. So does a stop's final snapshot (issue #4053): no start follows it, so
+// a refusal there would leave the leftover running and the snapshot refused.
 func (m *Manager) endLeftovers(ctx context.Context, serverID, workingDir string) error {
 	for _, d := range m.drivers {
 		if g, ok := d.(execution.LeftoverGuard); ok {
