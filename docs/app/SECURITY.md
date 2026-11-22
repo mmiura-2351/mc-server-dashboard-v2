@@ -897,7 +897,9 @@ before each registration, and the snapshot's base generation
 outside every working set, and a container is given its own working set only,
 so no server's code can read it. A marker that does not verify reads as
 generation 0, and the worker logs `generation marker failed verification` at
-`WARN`, once per server per process. That covers a number the server wrote, a
+`WARN`, once per server until it next signs a marker for that server, so a
+forgery after a genuine stamp is warned about again. That covers a number the
+server wrote, a
 marker it copied from another server's working set, and one whose generation
 it edited. Generation 0 makes the API hydrate that server once the store has
 published, which is the direction that cannot keep a stale working set. The

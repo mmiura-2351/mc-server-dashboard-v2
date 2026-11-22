@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,7 +42,8 @@ const generationMarkerVersion = "v2"
 const generationKeyFile = ".generation-key"
 
 // generationKeyTemp is the name a new key is written under before it is linked to
-// generationKeyFile, so the key's name never holds a partial key.
+// generationKeyFile, so the key's name never holds a partial key. A crash can leave it
+// behind, as a partial key or as a second name of the whole one; every load removes it.
 const generationKeyTemp = ".generation-key.tmp"
 
 // generationKeySize is the key's length: HMAC-SHA256's block size would allow more,
@@ -56,9 +58,12 @@ const maxWarnedUnverified = 256
 // GenerationKey is the key the Worker signs and verifies its generation markers with.
 // A key that could not be loaded is UNUSABLE: no marker verifies under it, so every
 // held set is advertised at generation 0 and hydrates, and a marker written under it is
-// still written — the launch guard needs one — but in a form that never verifies. One GenerationKey serves the whole
-// process, so the warning about a marker that fails verification is logged once per
-// server.
+// still written — the launch guard needs one — but in a form that never verifies.
+//
+// One GenerationKey serves the whole process, so the warning about a marker that fails
+// verification is logged once per server, until the Worker next signs a marker for that
+// server: a marker that fails again after that is a new event, and is warned about
+// again.
 type GenerationKey struct {
 	key []byte // nil when unusable
 
@@ -67,34 +72,57 @@ type GenerationKey struct {
 	order  []string // warned, oldest first
 }
 
+// The classes an unusable key falls in, each with its own remedy (keyRemedy).
+var (
+	// errKeyMalformed: something is at the key's name, but not a key — a link, a
+	// directory or a FIFO, or a file that is not generationKeySize bytes.
+	errKeyMalformed = errors.New("is not a generation key")
+	// errKeyNotCreated: there was no key, and none could be created.
+	errKeyNotCreated = errors.New("could not be created")
+)
+
 // LoadGenerationKey returns the key under scratchDir, creating it when absent. It
-// never fails: a key that exists but cannot be used — unreadable, not a regular file,
-// not exactly generationKeySize bytes — is logged at ERROR and left in place, and the
-// key returned is unusable. It is not replaced, because a fresh key would silently
-// invalidate every marker and leave the operator nothing to inspect; removing the file
-// and restarting the Worker is the remedy, and it costs every held server one hydrate
-// (STORAGE.md Section 8). A missing scratch root is created, as on a first boot.
+// never fails: a key that exists but cannot be used, or one that cannot be created, is
+// logged at ERROR with its remedy (keyRemedy), and the key returned is unusable. An
+// existing key is never replaced: a fresh one would silently invalidate every marker
+// and leave the operator nothing to inspect (STORAGE.md Section 8). A missing scratch
+// root is created, as on a first boot.
 func LoadGenerationKey(scratchDir string, log *slog.Logger) *GenerationKey {
 	key, err := loadOrCreateGenerationKey(scratchDir)
 	if err != nil {
 		if log != nil {
 			log.Error("generation key unusable: no generation marker is believed, so every held "+
-				"server is advertised at generation 0 and hydrates; the key is left as it is (remove "+
-				"it and restart the Worker to make a new one, see STORAGE.md Section 8)",
-				"path", filepath.Join(scratchDir, generationKeyFile), "error", err)
+				"server is advertised at generation 0 and hydrates; the key is left as it is "+
+				"(STORAGE.md Section 8)",
+				"path", filepath.Join(scratchDir, generationKeyFile), "remedy", keyRemedy(err), "error", err)
 		}
 		return &GenerationKey{}
 	}
 	return &GenerationKey{key: key}
 }
 
+// keyRemedy is what the operator does about an unusable key, by why it is unusable.
+func keyRemedy(err error) string {
+	switch {
+	case errors.Is(err, errKeyMalformed):
+		return "remove the file and restart the Worker; the new key it creates costs every " +
+			"held server one hydrate"
+	case errors.Is(err, errKeyNotCreated):
+		return "there is no key and none could be created; fix the cause and restart the Worker"
+	default:
+		return "the key could not be read; restore access to it and restart the Worker, and " +
+			"every marker signed under it verifies again"
+	}
+}
+
 // loadOrCreateGenerationKey reads the key in scratchDir, or creates it when there is
 // none. Both are done relative to the scratch root's descriptor, and the key's name is
 // never followed as a link. The root itself is the operator's configured path, so a
-// link to it is followed, as the edit staging's open of it does.
+// link to it is followed, as the edit staging's open of it does. A temp an earlier
+// creation left is removed first: only the Worker writes the scratch root.
 func loadOrCreateGenerationKey(scratchDir string) ([]byte, error) {
 	if err := os.MkdirAll(scratchDir, 0o750); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s %w: %w", generationKeyFile, errKeyNotCreated, err)
 	}
 	dirFd, err := nofollow.OpenAt(unix.AT_FDCWD, scratchDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -102,23 +130,32 @@ func loadOrCreateGenerationKey(scratchDir string) ([]byte, error) {
 	}
 	defer func() { _ = unix.Close(dirFd) }()
 
+	_ = unix.Unlinkat(dirFd, generationKeyTemp, 0)
 	key, err := readGenerationKey(dirFd)
 	if !errors.Is(err, os.ErrNotExist) {
 		return key, err
 	}
-	return createGenerationKey(dirFd)
+	if key, err = createGenerationKey(dirFd); err != nil {
+		return nil, fmt.Errorf("%s %w: %w", generationKeyFile, errKeyNotCreated, err)
+	}
+	return key, nil
 }
 
 // readGenerationKey reads the key behind dirFd. An absent key satisfies
-// errors.Is(err, os.ErrNotExist); anything else that is not generationKeySize bytes in
-// a regular file is an error.
+// errors.Is(err, os.ErrNotExist); anything at the name that is not generationKeySize
+// bytes in a regular file is errKeyMalformed, and a failure to read it is returned as
+// it is.
 func readGenerationKey(dirFd int) ([]byte, error) {
 	data, err := nofollow.ReadFileAt(dirFd, generationKeyFile, generationKeySize)
-	if err != nil {
+	switch {
+	case errors.Is(err, nofollow.ErrSymlink), errors.Is(err, nofollow.ErrNotRegular),
+		errors.Is(err, nofollow.ErrTooLarge):
+		return nil, fmt.Errorf("%s %w: %w", generationKeyFile, errKeyMalformed, err)
+	case err != nil:
 		return nil, err
-	}
-	if len(data) != generationKeySize {
-		return nil, fmt.Errorf("%s holds %d bytes, want %d", generationKeyFile, len(data), generationKeySize)
+	case len(data) != generationKeySize:
+		return nil, fmt.Errorf("%s %w: it holds %d bytes, want %d",
+			generationKeyFile, errKeyMalformed, len(data), generationKeySize)
 	}
 	return data, nil
 }
@@ -127,14 +164,12 @@ func readGenerationKey(dirFd int) ([]byte, error) {
 // fsynced under generationKeyTemp, then linked to generationKeyFile: the link fails if
 // that name exists, so the create is exclusive, and a crash at any point leaves either
 // no key or the whole key, never a partial one, which would read as unusable at every
-// later boot. A temp a crash left is removed first; only the Worker writes the scratch
-// root.
+// later boot.
 func createGenerationKey(dirFd int) ([]byte, error) {
 	key := make([]byte, generationKeySize)
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	_ = unix.Unlinkat(dirFd, generationKeyTemp, 0)
 	fd, err := nofollow.OpenAt(dirFd, generationKeyTemp,
 		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
@@ -172,20 +207,29 @@ func (k *GenerationKey) seal(serverID string, gen uint64) []byte {
 }
 
 // open returns the generation data records for serverID, and false when data is not a
-// marker this key signed for serverID.
+// marker this key signed for serverID. Only the exact form seal writes is read: single
+// spaces, the generation in decimal without leading zeros, the MAC in lowercase hex,
+// and nothing before or after.
 func (k *GenerationKey) open(serverID string, data []byte) (uint64, bool) {
 	if !k.usable() {
 		return 0, false
 	}
-	fields := strings.Fields(string(data))
-	if len(fields) != 3 || fields[0] != generationMarkerVersion {
+	version, rest, ok := strings.Cut(string(data), " ")
+	if !ok || version != generationMarkerVersion {
 		return 0, false
 	}
-	gen, err := strconv.ParseUint(fields[1], 10, 64)
-	if err != nil {
+	genText, macText, ok := strings.Cut(rest, " ")
+	if !ok {
 		return 0, false
 	}
-	mac, err := hex.DecodeString(fields[2])
+	gen, err := strconv.ParseUint(genText, 10, 64)
+	if err != nil || strconv.FormatUint(gen, 10) != genText {
+		return 0, false
+	}
+	if len(macText) != 2*sha256.Size || strings.Trim(macText, "0123456789abcdef") != "" {
+		return 0, false
+	}
+	mac, err := hex.DecodeString(macText)
 	if err != nil {
 		return 0, false
 	}
@@ -225,4 +269,16 @@ func (k *GenerationKey) firstUnverified(serverID string) bool {
 		k.order = k.order[1:]
 	}
 	return true
+}
+
+// signed forgets that serverID's marker was warned about: the Worker has just signed
+// one for it, so a marker that fails verification after this is a new event.
+func (k *GenerationKey) signed(serverID string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, seen := k.warned[serverID]; !seen {
+		return
+	}
+	delete(k.warned, serverID)
+	k.order = slices.DeleteFunc(k.order, func(id string) bool { return id == serverID })
 }

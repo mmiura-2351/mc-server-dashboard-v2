@@ -216,13 +216,13 @@ func TestReadGenerationMarkerReportsAnAbsentMarkerAsZeroWithoutAnError(t *testin
 	}
 }
 
-// The largest generation there is, signed and with a trailing newline, fits the cap.
+// The largest generation there is, signed, fits the cap.
 func TestReadGenerationMarkerAcceptsTheLargestGeneration(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), s1)
 	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	marker := append(testGenerationKey.seal(s1, 1<<64-1), '\n')
+	marker := testGenerationKey.seal(s1, 1<<64-1)
 	if err := os.WriteFile(filepath.Join(dir, generationFile), marker, 0o600); err != nil {
 		t.Fatal(err)
 	}

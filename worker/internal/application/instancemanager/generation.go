@@ -162,6 +162,9 @@ func writeGenerationGuarded(key *GenerationKey, workingDir, serverID string, gen
 	if guard != nil && !guard() {
 		return errWorkingDirReplaced
 	}
+	if key.usable() {
+		key.signed(serverID)
+	}
 	sweepGenerationTemps(dirFd)
 	// fsync the dir so the rename (the marker's appearance) is itself durable, not
 	// just the file contents: the ordering guarantee (issue #787) requires the
@@ -379,8 +382,8 @@ func fsyncDir(dir string) error {
 }
 
 // maxGenerationMarkerBytes is the largest marker a read accepts. A signed marker is
-// "v2 ", at most 20 decimal digits, a space and 64 hex digits — 88 bytes — so 128
-// leaves room for a trailing newline and nothing a marker needs.
+// "v2 ", at most 20 decimal digits, a space and 64 hex digits — at most 88 bytes — so
+// anything over 128 is refused before it is read whole.
 const maxGenerationMarkerBytes = 128
 
 // errGenerationUnverified reports a marker that is a readable regular file but not one

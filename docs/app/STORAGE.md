@@ -2395,10 +2395,20 @@ generation. A marker that does not verify reads as generation 0, which makes
 the next start hydrate. That covers a bare number (every marker written before
 this format, or one written by hand), a marker copied from another server's
 working set, and one whose generation was edited. The Worker logs
-`generation marker failed verification` at `WARN`, once per server per
-process. A genuine older marker of the same server can only name a generation
-the Worker really stamped, which is never above the store's, so replaying one
-also leads to a hydrate.
+`generation marker failed verification` at `WARN`, once per server until the
+Worker next signs a marker for that server, so a forgery after a genuine
+stamp is warned about again. A genuine older marker of the same server can
+only name a generation the Worker really stamped, which is never above the
+store's, so replaying one also leads to a hydrate. The marker is read
+strictly: single spaces, the generation in decimal without leading zeros, the
+MAC in lowercase hex, and nothing before or after.
+
+A marker that does not verify is also the base generation the server's next
+snapshot declares: 0, so the Worker sends no
+`X-Working-Set-Base-Generation` and the publish-time stale-base refusal
+(`409 stale_generation`, issue #847) cannot fire for that publish. That is the
+same as with an absent marker. The assignment fences
+(`publisher_awaiting_hydrate`, `publisher_not_assigned`) still apply.
 
 The key is 32 random bytes at `<worker.scratch_dir>/.generation-key`, mode
 `0600`. It lies outside every `<id>` directory, so no container can read it, and
@@ -2412,18 +2422,48 @@ name never holds a partial key.
   new key, and each held server hydrates once. A retained working set holding
   unpublished progression is replaced by the store's copy; the hydrate parks the
   replaced tree aside as it does any other (Section 4.6).
-- **An unusable key** is one that exists but is not a regular file of exactly
-  32 bytes, or cannot be read. The Worker logs an `ERROR` naming the path and
-  keeps running. It believes no marker, so every registration advertises each
-  held server at generation 0, which makes its next start hydrate. It never
-  replaces the key, so the file stays as it was for inspection. It still writes
-  markers, which keeps the launch guard satisfied, but declares no held
-  generation to the API. Within one session the API may still skip a later
-  start's hydrate on the store generation it read for the hydrate before. The
-  remedy is to remove the file and restart the Worker, which creates a new key
-  at the cost above.
+- **An unusable key** is one the Worker cannot use: something at its name that
+  is not a regular file of exactly 32 bytes, a key it cannot read, or no key and
+  none it could create. The Worker logs an `ERROR` naming the path and the
+  remedy, and keeps running. It believes no marker, so every registration
+  advertises each held server at generation 0, which makes its next start
+  hydrate. It never replaces the key, so the file stays as it was for
+  inspection. It still writes markers, which keeps the launch guard satisfied,
+  but declares no held generation to the API. Within one session the API may
+  still skip a later start's hydrate on the store generation it read for the
+  hydrate before. Every snapshot from that Worker declares base 0, so the
+  stale-base refusal above cannot fire for any of its publishes. The remedy
+  depends on the cause:
+  - *Something that is not a key* (a link, a directory, a file of the wrong
+    size): remove it and restart the Worker. The new key it creates costs the
+    cost above.
+  - *A key the Worker cannot read* (permissions, an I/O error): restore access
+    and restart the Worker. Every marker signed under that key verifies again,
+    and nothing hydrates.
+  - *No key, and none could be created* (the scratch root is not writable, or
+    the disk is full): there is no file to remove. Fix the cause and restart
+    the Worker.
 - **Upgrading** a Worker from a version that wrote bare-number markers
-  invalidates them all in the same way: each held server hydrates once.
+  invalidates every marker in the same way, and costs more than one hydrate per
+  server for the servers that are running at the time:
+  - A Worker restart stops every server it runs. Before this change, a server
+    whose marker matched the store's generation was started again on its own
+    working set. On the upgrade boot every marker reads as 0, so each server is
+    hydrated from its last published snapshot instead. It loses what it wrote
+    since then: up to one snapshot interval of play
+    (`snapshot.default_interval_seconds`, 3600 s by default). Its re-dispatch
+    also waits out `reconciler.grace_seconds` rather than the shorter held-start
+    grace ([`CONFIGURATION.md`](CONFIGURATION.md)).
+  - The replaced working set is parked at `.displaced-<id>` only while that slot
+    is free (oldest-wins, Section 4.6), and the server's next successful
+    snapshot reclaims it. It is a short-lived recovery copy, not a backup.
+  - To avoid the loss, stop every server before upgrading the Worker. A stop
+    publishes the server's final snapshot and removes its scratch, so nothing
+    is held when the new Worker boots. Alternatively, take an on-demand backup
+    of each running server just before the upgrade: for a running server it
+    publishes a quiesced snapshot first (Section 3.3).
+  - Rolling the Worker back to a version from before this change costs the
+    same again: that version reads a `v2` marker as no generation at all.
 
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
