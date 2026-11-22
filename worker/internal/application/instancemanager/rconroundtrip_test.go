@@ -97,6 +97,23 @@ func (l *jsonLog) Write(p []byte) (int, error) {
 	return l.buf.Write(p)
 }
 
+// has reports whether a line's message is msg.
+func (l *jsonLog) has(t *testing.T, msg string) bool {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for line := range bytes.Lines(l.buf.Bytes()) {
+		var rec map[string]any
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec["msg"] == msg {
+			return true
+		}
+	}
+	return false
+}
+
 // roundTrips returns the round-trip fields of the first line whose message is msg.
 func (l *jsonLog) roundTrips(t *testing.T, msg string) map[string]int64 {
 	t.Helper()
@@ -134,7 +151,10 @@ type roundTripCase struct {
 	syncErr error
 	// retryDelay is the save-on restore's back-off before it redials.
 	retryDelay time.Duration
-	want       map[string]map[string]int64
+	// closing seals the save-on ledger first, as a closing Worker has, so the flush
+	// skips its save-off.
+	closing bool
+	want    map[string]map[string]int64
 }
 
 func (tc roundTripCase) check(t *testing.T, log *jsonLog) {
@@ -184,6 +204,20 @@ func TestQuiesceLogsItsRCONRoundTrips(t *testing.T) {
 			want: map[string]map[string]int64{
 				"snapshot save-all failed": {"save_off_ms": 1200, "save_all_ms": 30000},
 				quiesceRefused:             {"save_off_ms": 1200, "save_all_ms": 30000},
+			},
+		},
+		{
+			// The save-on meets the poisoned connection, and its redial fails, so it
+			// never goes out.
+			name:  "a save-all that fails, with no redial left",
+			conns: []*clockedControl{failsAfter("save-all", 30*time.Second)},
+			want: map[string]map[string]int64{
+				"snapshot save-on failed on the quiesce connection; redialing": {
+					"save_off_ms": 1200, "save_all_ms": 30000,
+				},
+				"snapshot save-on NOT restored; redial failed, server left with auto-save disabled": {
+					"save_off_ms": 1200, "save_all_ms": 30000,
+				},
 			},
 		},
 		{
@@ -257,13 +291,25 @@ func TestQuiesceLogsItsRCONRoundTrips(t *testing.T) {
 }
 
 func TestStopFlushLogsItsRCONRoundTrips(t *testing.T) {
-	const settleTimedOut = "stop flush: working set did not settle within budget; stopping anyway"
+	const (
+		settled        = "stop flush: working set settled"
+		settleTimedOut = "stop flush: working set did not settle within budget; stopping anyway"
+		saveAllFailed  = "stop flush: save-all failed; stopping without a final save"
+	)
 	for _, tc := range []roundTripCase{
 		{
 			name:  "a clean flush",
 			conns: []*clockedControl{{}},
 			want: map[string]map[string]int64{
-				"stop flush: working set settled": {"save_off_ms": 1200, "save_all_ms": 3400},
+				settled: {"save_off_ms": 1200, "save_all_ms": 3400},
+			},
+		},
+		{
+			name:    "a clean flush by a closing Worker, which skips the save-off",
+			conns:   []*clockedControl{{}},
+			closing: true,
+			want: map[string]map[string]int64{
+				settled: {"save_all_ms": 3400},
 			},
 		},
 		{
@@ -285,10 +331,19 @@ func TestStopFlushLogsItsRCONRoundTrips(t *testing.T) {
 			},
 		},
 		{
+			// The save-all meets the poisoned connection, and its redial fails, so it
+			// never goes out.
+			name:  "a save-off that fails, with no redial left",
+			conns: []*clockedControl{failsAfter("save-off", 30*time.Second)},
+			want: map[string]map[string]int64{
+				saveAllFailed: {"save_off_ms": 30000},
+			},
+		},
+		{
 			name:  "a save-all that fails",
 			conns: []*clockedControl{failsAfter("save-all", 30*time.Second)},
 			want: map[string]map[string]int64{
-				"stop flush: save-all failed; stopping without a final save": {"save_off_ms": 1200, "save_all_ms": 30000},
+				saveAllFailed: {"save_off_ms": 1200, "save_all_ms": 30000},
 			},
 		},
 	} {
@@ -297,10 +352,17 @@ func TestStopFlushLogsItsRCONRoundTrips(t *testing.T) {
 			m := newManager(t, &fakeDriver{}, nil).WithLogger(slog.New(slog.NewJSONHandler(log, nil)))
 			clk, _ := onSettleClock(m, tc.settleAfter)
 			dialing(m, clk, tc.conns)
+			if tc.closing {
+				m.sealPendingSaveOn()
+			}
 
 			m.flushBeforeStopWithDriver(context.Background(), s1, "container", "")
 
 			tc.check(t, log)
+			// The settled line is a clean flush's alone.
+			if _, clean := tc.want[settled]; !clean && log.has(t, settled) {
+				t.Errorf("%q logged by a flush that did not settle", settled)
+			}
 		})
 	}
 }
