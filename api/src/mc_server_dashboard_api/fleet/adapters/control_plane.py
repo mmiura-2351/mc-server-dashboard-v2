@@ -773,7 +773,6 @@ class GrpcControlPlane(ControlPlane):
         server_id: str,
         command: Command,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandResult:
         queue = self._state.outbound_for(worker_id)
         if queue is None:
@@ -787,8 +786,8 @@ class GrpcControlPlane(ControlPlane):
         # or cancellation that discards the future still lets a late result — a
         # failure, canonically a TRANSFER_FAILED once the worker's transfer bound
         # aborts the upload (#874/#890) but potentially any failure, or a SUCCESS —
-        # be matched to the held assignment (#891/#901). Only the
-        # stop-flow final snapshot is tracked: it is the sole command whose stop
+        # be matched to the held assignment (#891/#901). Only the stop-flow final
+        # snapshot (``final``) is tracked: it is the sole command whose stop
         # wedges the row at (stopped, stopped, assigned) for the held-snapshot
         # window. Periodic and on-demand snapshots share the command type but take
         # no worker reservation (running-id snapshots are reservation-free), so a
@@ -796,7 +795,7 @@ class GrpcControlPlane(ControlPlane):
         # hold — they are untracked.
         snapshot_server_id = (
             server_id
-            if snapshot_is_final and isinstance(command, SnapshotCommand)
+            if isinstance(command, SnapshotCommand) and command.final
             else None
         )
         # Every other command is sent with what is left of this budget as its

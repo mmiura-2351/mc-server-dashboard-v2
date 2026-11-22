@@ -112,7 +112,6 @@ class _OkFleetControlPlane(FleetControlPlane):
         server_id: str,
         command: FleetCommand,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandResult:
         return CommandResult(code=CommandResultCode.OK)
 

@@ -440,7 +440,6 @@ class FleetControlPlaneAdapter(ControlPlane):
                 transfer_url=url, transfer_token=self._token(), final=final
             ),
             timeout_override=self._snapshot_timeout_seconds,
-            snapshot_is_final=final,
         )
         # Mirror the Worker's retention declaration into the held inventory (issue
         # #2481). Every snapshot dispatch — the periodic cadence tick, the on-demand
@@ -542,7 +541,6 @@ class FleetControlPlaneAdapter(ControlPlane):
         | ListFilesCommand,
         *,
         timeout_override: float | None = None,
-        snapshot_is_final: bool = False,
     ) -> CommandOutcome:
         try:
             result = await self._control_plane.dispatch(
@@ -550,7 +548,6 @@ class FleetControlPlaneAdapter(ControlPlane):
                 server_id=str(server_id.value),
                 command=command,
                 timeout_override=timeout_override,
-                snapshot_is_final=snapshot_is_final,
             )
         except (WorkerNotConnectedError, CommandTimedOutError) as exc:
             # Thread the cause across the seam without leaking a fleet type into
