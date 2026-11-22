@@ -405,7 +405,7 @@ other unexpected stop, which the reconciler restarts after its grace (CONFIGURAT
 Section 5.6).
 
 No resync report is queued behind a newer event for the same server (#3587). The API
-stamps each `StatusChange` on receipt, so a report queued after the event that
+stamps each `StatusChange` as its write lands, so a report queued after the event that
 superseded it, such as a stop's `STOPPED` that landed between the Worker reading the
 state and sending the report, would set the row back to the older state until the
 reconciler's slow path. The Worker reads each server's state and queues its report in
@@ -498,19 +498,29 @@ they arrive, except heartbeats, which it records as it reads them (Section 4.3).
 When handling a message fails because the database is unavailable, the API holds
 the message and retries it in place, and the messages behind it wait (issue
 #3614). The retries back off from 0.5 s, doubling up to 10 s, with no time
-budget. The hold ends when the message is applied, or when the session ends,
-which loses the message: the Worker closes the stream, a newer session replaces
-this one, or its heartbeats lapse. If the database answered its liveness probe
-just before a retry and the message still fails as if the database were down,
-the error is the message's own, and the message is dropped. A failure of any
-other kind drops the message too. When more than five drops follow one another,
-the API ends the session; a held message's failures do not count toward them.
+budget. A held `StatusChange` is stamped when its write lands, not when it
+arrived. The hold ends when the message is applied, or when the session ends:
+
+- When the Worker closes the stream, the held message gets one last attempt,
+  and so does each message queued behind it. Any failure then drops the message.
+- When a newer session replaces this one, the held message and everything still
+  queued behind it are dropped unapplied, so nothing from the old session lands
+  after the new session's reports.
+- When the heartbeats lapse or the transport drops, the held message and the
+  queue behind it are lost.
+
+If the database answered its liveness probe both just before a retry and just
+after the retry failed as if the database were down, the error is the message's
+own, and the message is dropped. A failure of any other kind drops the message
+too. When more than five drops follow one another, the API ends the session. A
+held message's failures do not count toward them; a drop after the Worker closed
+the stream does.
 
 Log lines and metrics wait in the same queue, so a hold delays them, and they
-are lost if the session ends first. At most 1024 messages wait. Once that many
-do, the API stops reading the stream, heartbeats included, until the hold ends:
-a long outage under a busy log stream ends the session when its heartbeats
-lapse.
+share the queue's fate when the session ends. At most 1024 messages wait. Once
+that many do, the API stops reading the stream, heartbeats included, until the
+hold ends: a long outage under a busy log stream ends the session when its
+heartbeats lapse.
 
 The delivery guarantee: a report is applied at least once across transient
 database errors within a session; a report held when the session ends is lost;
