@@ -2408,9 +2408,14 @@ async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_g
     )
     state.discard_pending("final-snapshot")
     outage.down = True
+    # Read after the stop that held the row, as a late result always is: the
+    # release's record carries this instant (issue #4117).
     with pytest.raises(OSError):
         await state.resolve(
-            "final-snapshot", reporter, pb.CommandResult(success=True), received_at=_NOW
+            "final-snapshot",
+            reporter,
+            pb.CommandResult(success=True),
+            received_at=clock.now(),
         )
     outage.down = False
     assert not state.final_snapshot_outstanding(str(server_id.value))
