@@ -391,9 +391,12 @@ async def test_grant_committed_after_its_community_was_deleted_reports_not_found
     engine: AsyncEngine,
 ) -> None:
     # Not reachable through CreateGrant (see the module docstring), so staged
-    # directly: the INSERT's community key is checked before its membership key
-    # and fails first. The server lives in another community, which a community
-    # holding one could not be deleted without.
+    # directly. The INSERT fails both its community key and its membership key
+    # (the membership went with the community); PostgreSQL checks them in its
+    # constraint triggers' name order, which embeds their OIDs, so either may
+    # be the one reported, and both answer the same 404. The server lives in
+    # another community, which a community holding one could not be deleted
+    # without.
     world = await _world(engine)
     async with SqlAlchemyUnitOfWork(world.factory) as uow:
         membership = await uow.memberships.get_by_user_and_community(
@@ -430,7 +433,7 @@ async def test_grant_committed_after_its_community_was_deleted_reports_not_found
         created_at=now,
         updated_at=now,
     )
-    with pytest.raises(CommunityNotFoundError):
+    with pytest.raises((CommunityNotFoundError, GrantTargetNotMemberError)):
         async with SqlAlchemyUnitOfWork(world.factory) as uow:
             await uow.resource_grants.add(grant)
             await uow.commit()

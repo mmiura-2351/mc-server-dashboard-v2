@@ -84,11 +84,8 @@ a community deletion refused because it still holds a server -- is a statement
 of the community context and is mapped there);
 ``fk_membership_community_id_community``,
 ``fk_role_community_id_community`` and ``fk_resource_grant_community_id_community``
-(all 0004) belong to the *community* context and stay unmapped, named with their
-reason in ``community/adapters/integrity.py``'s own partial-map note -- each
-would need a typed error and an HTTP status for "the community vanished
-mid-write" that none of those routes maps today, a decision per constraint rather
-than a map entry.
+(all 0004) belong to the *community* context, which maps them to its own
+not-found in ``community/adapters/integrity.py`` (issue #2967).
 
 Shared by two kinds of call site, because *when* a violation surfaces depends on
 the statement shape: an INSERT staged via ``session.add`` (create) flushes at

@@ -83,11 +83,11 @@ would hold the actor's membership first, is then not consulted). The grant's is
 not reachable through ``CreateGrant``: it holds the recipient's membership from
 before its INSERT, so the deletion's cascade waits for it, and the grant either
 commits first or the two deadlock. It is mapped all the same, so that the three
-writes answer alike: an INSERT run after the deletion is checked against this
-key before its membership key, and fails on it. A write that holds the actor's
-membership before its INSERT meets the deletion there instead, and
-``lock_actor_ceiling`` raises the same error when it finds the membership gone
-with its community.
+writes answer alike: a grant INSERT run after the deletion fails this key and
+its membership key both, and reports whichever PostgreSQL checks first, which
+maps to the same 404 either way. A write that holds the actor's membership
+before its INSERT meets the deletion there instead, and ``lock_actor_ceiling``
+raises the same error when it finds the membership gone with its community.
 
 **The other foreign keys are deliberately absent, and their absence is not a
 claim that they are unreachable.** The rest of migration 0004 --
