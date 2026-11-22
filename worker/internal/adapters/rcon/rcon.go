@@ -43,11 +43,16 @@ var ErrAuthFailed = errors.New("rcon: authentication failed")
 // defaultExecuteTimeout is the per-leg ceiling: the TCP connect, the AUTH
 // handshake and each Execute round trip are each bounded by it, or by the time
 // the caller's ctx has left when that is shorter, whatever deadline ctx carries
-// (issue #4031). In practice RCON replies are sub-second; 30s is a generous
-// ceiling that still guarantees a hung server (one that accepts the TCP connect
-// but never replies) fails one leg within it rather than wedging the call — and
-// thus the lane or a global concurrency slot — for the whole of a long context,
-// or forever on one with no deadline. A var (not a const) so tests can shrink it.
+// (issue #4031). The server sends a command's reply once the command has
+// finished on its server thread, not once the disk writes it started are done:
+// a plain save-all queues its region writes and answers before they land, which
+// is why the quiesce and the stop flush wait for the save to settle afterwards.
+// A reply is therefore normally sub-second, and one that takes longer than 30s
+// means the server thread is stalled, not that the disk is slow. The ceiling
+// makes such a server, or one that accepts the TCP connect but never replies,
+// fail one leg within 30s rather than wedge the call — and thus the lane or a
+// global concurrency slot — for the whole of a long context, or forever on one
+// with no deadline. A var (not a const) so tests can shrink it.
 var defaultExecuteTimeout = 30 * time.Second
 
 // maxResponseSize bounds the total reassembled response body. A misbehaving
