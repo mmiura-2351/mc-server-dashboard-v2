@@ -1381,4 +1381,87 @@ describe("ServerBackupsTab keep-all retention warning (#4084)", () => {
       await screen.findByLabelText(t("backups.retention.modeLabel")),
     ).toBeInTheDocument();
   });
+
+  it("reads no schedules and shows no warning without schedule:read", async () => {
+    mockCan = (code) => code !== "schedule:read";
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    await openBackups();
+
+    expect((await screen.findAllByText("1.5 GiB")).length).toBe(2);
+    expect(
+      mockApi.get.mock.calls.some((call) =>
+        (call[0] as string).endsWith("/schedules"),
+      ),
+    ).toBe(false);
+    expect(warning()).not.toBeInTheDocument();
+  });
+
+  // The Schedules tab's create dialog sets the policy; the server read that
+  // follows is what clears the warning. The fixture flips inside the PUT, so
+  // the dialog's own read before the PUT still finds no policy.
+  async function createWithDefaultRetention(onPut: () => Promise<unknown>) {
+    routeGet({ srv: KEEP_ALL, schedules: [schedule()] });
+    mockApi.post.mockImplementation((path: string) =>
+      Promise.resolve(
+        path.includes("/preview")
+          ? { next_runs: [] }
+          : schedule({ id: "sch2", name: "hourly backup" }),
+      ),
+    );
+    mockApi.put.mockImplementation(() => {
+      routeGet({
+        srv: { backup_retention: { keep_last: 7 } },
+        schedules: [
+          schedule(),
+          schedule({ id: "sch2", name: "hourly backup" }),
+        ],
+      });
+      return onPut();
+    });
+    renderPage();
+    await screen.findByText("survival");
+    fireEvent.click(
+      screen.getByRole("tab", { name: t("serverDetail.tab.schedules") }),
+    );
+    expect(
+      await screen.findByText(t("backups.retention.unboundedWarning")),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: t("schedules.create") }),
+    );
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.nameLabel")), {
+      target: { value: "hourly backup" },
+    });
+    fireEvent.change(screen.getByLabelText(t("schedules.dialog.actionLabel")), {
+      target: { value: "backup" },
+    });
+    const create = screen.getByRole("button", {
+      name: t("schedules.dialog.create"),
+    });
+    // The fixture's one manual backup leaves nothing to prune, so no
+    // confirmation is asked for once the list is read.
+    await waitFor(() => expect(create).toBeEnabled());
+    fireEvent.click(create);
+  }
+
+  it("clears the Schedules tab's warning once its create step sets the policy", async () => {
+    await createWithDefaultRetention(() => Promise.resolve({ keep_last: 7 }));
+
+    expect(await screen.findByText("hourly backup")).toBeInTheDocument();
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+    expect(mockApi.put).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the warning when a retention write that reported failure had landed", async () => {
+    // The response was lost after the API stored the policy.
+    await createWithDefaultRetention(() =>
+      Promise.reject(new TypeError("Failed to fetch")),
+    );
+
+    expect(
+      await screen.findByText(t("schedules.error.retentionNotSet")),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(warning()).not.toBeInTheDocument());
+    expect(mockApi.put).toHaveBeenCalledTimes(1);
+  });
 });

@@ -867,9 +867,21 @@ export const en = {
   "schedules.dialog.onlyWhenRunningHint":
     "If the server is stopped at the scheduled time, the run is recorded as skipped instead of taking a backup.",
   // Create only, for a backup schedule on a server with no retention policy
-  // (#4084): keep the last N (prefilled 7) or opt out to keep all.
-  "schedules.dialog.retentionHint":
-    "This server has no retention policy, so every scheduled backup is kept. Keeping the last N sets one when the schedule is created and deletes the older scheduled backups beyond that number, existing ones included. Manual, uploaded and event backups are never deleted.",
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
+  // follows the choice.
+  "schedules.dialog.retentionKeepLastHint":
+    "This server has no retention policy yet. Creating the schedule sets it to keep the last N scheduled backups, and the older scheduled backups beyond that number are deleted, existing ones included. Manual, uploaded and event backups are never deleted.",
+  "schedules.dialog.retentionKeepAllHint":
+    "This server has no retention policy, so every scheduled backup is kept until it is deleted or a policy is set on the Backups tab.",
+  // Keep-last N prunes at once: the count of existing scheduled backups it
+  // deletes, or a generic line when the backups list cannot be read; either
+  // gates Create behind the acknowledgement.
+  "schedules.dialog.retentionPrune":
+    "This deletes {count} existing scheduled backup(s) now.",
+  "schedules.dialog.retentionPruneUnknown":
+    "The existing scheduled backups could not be counted, so this may delete some of them now.",
+  "schedules.dialog.retentionPruneAck":
+    "I understand that the existing scheduled backups beyond this number are deleted.",
   "schedules.dialog.warningsLabel": "Player warnings",
   "schedules.dialog.warningsHint":
     "Broadcast a message this many minutes before the action (up to 5 steps).",

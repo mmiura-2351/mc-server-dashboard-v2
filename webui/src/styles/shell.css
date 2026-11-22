@@ -1260,6 +1260,13 @@ button.link:focus-visible {
   color: var(--amber);
   font-size: 13px;
 }
+/* The schedule dialog's retention step: what keep-last N deletes at once
+ * (#4084), above the acknowledgement that gates Create. */
+.schedule-prune-warning {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--red);
+}
 /* Scheduled-backup settings card: the moved-to-Schedules note plus the
  * retention policy editor (#1843), both backup:schedule-gated. */
 .backups-retention {

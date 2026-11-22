@@ -18,6 +18,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router";
+import { backupStatsKey, backupsKey } from "../api/backupQueryKeys.ts";
 import { ApiError, api } from "../api/client.ts";
 import {
   MAX_CONSOLE_LINE_BYTES,
@@ -463,6 +464,7 @@ export function ServerSchedulesTab({
           serverId={serverId}
           permittedActions={permittedActions}
           retentionUnset={server.backup_retention == null}
+          canReadBackups={can("backup:read", { serverId })}
           existing={dialog.mode === "edit" ? dialog.schedule : null}
           onDone={refresh}
           onClose={() => setDialog(null)}
@@ -533,6 +535,7 @@ function ScheduleDialog({
   serverId,
   permittedActions,
   retentionUnset,
+  canReadBackups,
   existing,
   onDone,
   onClose,
@@ -541,6 +544,7 @@ function ScheduleDialog({
   serverId: string;
   permittedActions: readonly ScheduleAction[];
   retentionUnset: boolean;
+  canReadBackups: boolean;
   existing: ScheduleResponse | null;
   onDone: () => void;
   onClose: () => void;
@@ -609,6 +613,51 @@ function ScheduleDialog({
     "keepLast",
   );
   const [keepLast, setKeepLast] = useState("7");
+  // A whole number of 1 or more, or null for any other input.
+  const keepLastN =
+    keepLast.trim() !== "" &&
+    Number.isInteger(Number(keepLast)) &&
+    Number(keepLast) >= 1
+      ? Number(keepLast)
+      : null;
+  // Keep-last N deletes the server's scheduled backups beyond N as soon as it
+  // is set, so the step counts them from the backups list (backup:read) and
+  // asks for a confirmation unless it knows nothing is deleted. Without the
+  // permission, while the list loads, or when it fails, the count is unknown
+  // (null) and the confirmation is still asked for.
+  const backupsQuery = useQuery({
+    queryKey: backupsKey(communityId, serverId),
+    enabled: showRetention && canReadBackups,
+    queryFn: ({ signal }) =>
+      api.get(
+        apiPath("/api/communities/{community_id}/servers/{server_id}/backups", {
+          community_id: communityId,
+          server_id: serverId,
+        }),
+        { signal },
+      ),
+  });
+  const scheduledBackups =
+    canReadBackups && backupsQuery.data !== undefined
+      ? backupsQuery.data.backups.filter(
+          (backup) => backup.source === "scheduled",
+        ).length
+      : null;
+  const pruneCount =
+    scheduledBackups === null || keepLastN === null
+      ? null
+      : Math.max(0, scheduledBackups - keepLastN);
+  const confirmPrune =
+    showRetention &&
+    retentionMode === "keepLast" &&
+    keepLastN !== null &&
+    pruneCount !== 0;
+  // The confirmation holds only for the count it was given: a new count, or a
+  // new number to keep, asks again.
+  const [pruneConfirmedFor, setPruneConfirmedFor] = useState<
+    number | "unknown" | null
+  >(null);
+  const pruneConfirmed = pruneConfirmedFor === (pruneCount ?? "unknown");
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [cadenceError, setCadenceError] = useState<string | null>(null);
@@ -724,7 +773,7 @@ function ScheduleDialog({
   };
 
   const save = useMutation({
-    mutationFn: async (): Promise<"none" | "set" | "failed"> => {
+    mutationFn: async (): Promise<"none" | "set" | "kept" | "failed"> => {
       const cadence = buildCadence();
       if (editing) {
         const body: UpdateScheduleRequest = {
@@ -775,15 +824,29 @@ function ScheduleDialog({
       // create: the dialog would stay open and a retry would refuse its own
       // name (409). It is reported on its own and the schedule is kept.
       try {
+        // The policy shown came from the cached server read, and nothing
+        // announces one set from another session since: read it afresh and
+        // leave a policy that now exists in place.
+        const current = await api.get(
+          apiPath("/api/communities/{community_id}/servers/{server_id}", {
+            community_id: communityId,
+            server_id: serverId,
+          }),
+        );
+        if (current.backup_retention != null) {
+          return "kept";
+        }
         await api.put(
           apiPath(
             "/api/communities/{community_id}/servers/{server_id}/backups/retention",
             { community_id: communityId, server_id: serverId },
           ),
-          { body: JSON.stringify({ keep_last: Number(keepLast) }) },
+          { body: JSON.stringify({ keep_last: keepLastN }) },
         );
         return "set";
-      } catch {
+      } catch (error) {
+        // A 403 means the cached capabilities are stale (WEBUI_SPEC.md 7.3).
+        onForbidden(error);
         return "failed";
       }
     },
@@ -792,13 +855,24 @@ function ScheduleDialog({
         t(editing ? "schedules.updated" : "schedules.created"),
         "success",
       );
-      if (retention === "set") {
-        // The policy is read from the server, so the warning clears on refetch.
+      if (retention !== "none") {
+        // The warning reads the policy from the server, so refetch it whatever
+        // the outcome: a write reported as failed may still have landed (its
+        // response lost), and "kept" found a policy the cache does not hold.
         queryClient.invalidateQueries({
           queryKey: serverKey(communityId, serverId),
         });
         queryClient.invalidateQueries({ queryKey: serversKey(communityId) });
-      } else if (retention === "failed") {
+        // The PUT prunes scheduled backups before it responds, so the backups
+        // table and stats strip refetch too, as after the Backups tab's editor.
+        queryClient.invalidateQueries({
+          queryKey: backupsKey(communityId, serverId),
+        });
+        queryClient.invalidateQueries({
+          queryKey: backupStatsKey(communityId, serverId),
+        });
+      }
+      if (retention === "failed") {
         showToast(t("schedules.error.retentionNotSet"), "error");
       }
       onDone();
@@ -841,12 +915,9 @@ function ScheduleDialog({
       );
       return;
     }
-    if (showRetention && retentionMode === "keepLast") {
-      const n = Number(keepLast);
-      if (keepLast.trim() === "" || !Number.isInteger(n) || n < 1) {
-        setRetentionError(t("backups.retention.error.keepLast"));
-        return;
-      }
+    if (showRetention && retentionMode === "keepLast" && keepLastN === null) {
+      setRetentionError(t("backups.retention.error.keepLast"));
+      return;
     }
     save.mutate();
   };
@@ -879,7 +950,11 @@ function ScheduleDialog({
           <button
             type="button"
             className="btn primary"
-            disabled={save.isPending || noDaysSelected}
+            disabled={
+              save.isPending ||
+              noDaysSelected ||
+              (confirmPrune && !pruneConfirmed)
+            }
             onClick={submit}
           >
             {t(editing ? "schedules.dialog.save" : "schedules.dialog.create")}
@@ -1172,9 +1247,10 @@ function ScheduleDialog({
             <select
               value={retentionMode}
               aria-label={t("backups.retention.modeLabel")}
-              onChange={(e) =>
-                setRetentionMode(e.target.value as "keepLast" | "none")
-              }
+              onChange={(e) => {
+                setRetentionMode(e.target.value as "keepLast" | "none");
+                setPruneConfirmedFor(null);
+              }}
             >
               <option value="keepLast">
                 {t("backups.retention.mode.keepLast")}
@@ -1189,14 +1265,44 @@ function ScheduleDialog({
                 type="number"
                 min={1}
                 value={keepLast}
-                onChange={(e) => setKeepLast(e.target.value)}
+                onChange={(e) => {
+                  setKeepLast(e.target.value);
+                  setPruneConfirmedFor(null);
+                }}
               />
               {retentionError !== null && (
                 <span className="field-error">{retentionError}</span>
               )}
             </label>
           )}
-          <p className="sub">{t("schedules.dialog.retentionHint")}</p>
+          <p className="sub">
+            {t(
+              retentionMode === "keepLast"
+                ? "schedules.dialog.retentionKeepLastHint"
+                : "schedules.dialog.retentionKeepAllHint",
+            )}
+          </p>
+          {confirmPrune && (
+            <div className="field">
+              <p className="schedule-prune-warning">
+                {pruneCount === null
+                  ? t("schedules.dialog.retentionPruneUnknown")
+                  : t("schedules.dialog.retentionPrune", { count: pruneCount })}
+              </p>
+              <label className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={pruneConfirmed}
+                  onChange={(e) =>
+                    setPruneConfirmedFor(
+                      e.target.checked ? (pruneCount ?? "unknown") : null,
+                    )
+                  }
+                />
+                {t("schedules.dialog.retentionPruneAck")}
+              </label>
+            </div>
+          )}
         </>
       )}
 

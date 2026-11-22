@@ -778,9 +778,21 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.dialog.onlyWhenRunningHint":
     "予定時刻にサーバーが停止している場合、バックアップを取らずに実行を「スキップ」として記録します。",
   // Create only, for a backup schedule on a server with no retention policy
-  // (#4084): keep the last N (prefilled 7) or opt out to keep all.
-  "schedules.dialog.retentionHint":
-    "このサーバーには保持ポリシーがないため、定期バックアップはすべて保持されます。「最新のN件を保持」を選ぶと、スケジュールの作成時に保持ポリシーを設定し、その件数を超える古い定期バックアップを既存のものも含めて削除します。手動・アップロード・イベントのバックアップが削除されることはありません。",
+  // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
+  // follows the choice.
+  "schedules.dialog.retentionKeepLastHint":
+    "このサーバーにはまだ保持ポリシーがありません。スケジュールを作成すると、定期バックアップを最新のN件だけ保持するポリシーが設定され、その件数を超える古い定期バックアップは既存のものも含めて削除されます。手動・アップロード・イベントのバックアップが削除されることはありません。",
+  "schedules.dialog.retentionKeepAllHint":
+    "このサーバーには保持ポリシーがないため、定期バックアップは削除するか「バックアップ」タブでポリシーを設定するまで、すべて保持されます。",
+  // Keep-last N prunes at once: the count of existing scheduled backups it
+  // deletes, or a generic line when the backups list cannot be read; either
+  // gates Create behind the acknowledgement.
+  "schedules.dialog.retentionPrune":
+    "既存の定期バックアップ{count}件がすぐに削除されます。",
+  "schedules.dialog.retentionPruneUnknown":
+    "既存の定期バックアップの件数を取得できませんでした。その一部がすぐに削除される可能性があります。",
+  "schedules.dialog.retentionPruneAck":
+    "この件数を超える既存の定期バックアップが削除されることを理解しました。",
   "schedules.dialog.warningsLabel": "プレイヤーへの警告",
   "schedules.dialog.warningsHint":
     "アクションの指定分前にメッセージを通知します（最大5ステップ）。",

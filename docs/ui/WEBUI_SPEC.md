@@ -1080,15 +1080,24 @@ numbers): the UI for the general scheduler.
   `invalid_payload`) and the 409 duplicate name (`schedule_name_exists`).
 - Retention step (create only, #4084): a `backup` action on a server with no
   retention policy adds a retention select, keep-last-N prefilled with 7
-  (editable; a whole number ≥ 1, checked before anything is sent) or keep all.
-  Once the schedule is created, keep-last-N `PUT`s `{keep_last}` to
-  `…/{sid}/backups/retention`, which also prunes the server's existing
-  scheduled backups beyond N at once (the step's hint says so); keep all sends
-  nothing. A failed retention write does not undo the schedule: the dialog
-  closes on it, an error toast says the policy was not set, and the keep-all
-  warning stays. Creating a backup schedule already needs `backup:schedule`,
-  the endpoint's permission. Editing, and a server that has a policy, show no
-  step.
+  (editable; a whole number ≥ 1, checked before anything is sent) or keep all,
+  with a hint for the choice made. Keep-last-N prunes the server's existing
+  scheduled backups beyond N as soon as it is set, so the step counts them
+  from the backups list (`backup:read`). When some would be deleted it says
+  how many, and Create waits for an acknowledgement checkbox, asked again
+  when the count or N changes. Without `backup:read`, while the list loads,
+  or when it fails, a generic line replaces the count and the checkbox is
+  still required; with nothing to prune there is none.
+- Once the schedule is created, the step reads the server again and leaves a
+  policy set since (from another session) in place; otherwise keep-last-N
+  `PUT`s `{keep_last}` to `…/{sid}/backups/retention`. Keep all sends nothing.
+  After any retention attempt the server, the backups list and its statistics
+  are refetched, so the keep-all warning follows what the server holds, even
+  after a write reported as failed that had landed. A failed retention write
+  does not undo the schedule: the dialog closes on it and an error toast says
+  the policy was not set (a 403 also refreshes the capabilities, 7.3).
+  Creating a backup schedule already needs `backup:schedule`, the endpoint's
+  permission. Editing, and a server that has a policy, show no step.
 - Keep-all warning: the Backups tab's warning (6.7) also shows above this
   table, under the same condition; for a member with `backup:read` and
   `backup:schedule` it links to the Backups tab, where the retention editor
