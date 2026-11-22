@@ -3,7 +3,13 @@
 // jsdom but matches both the input and the show/hide toggle under happy-dom
 // (issue #1751).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "../api/client.ts";
@@ -76,9 +82,13 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+// Scoped to the profile field: the password form's hidden username field
+// carries the same value.
 async function waitForLoaded() {
   await waitFor(() =>
-    expect(screen.getByDisplayValue("miura")).toBeInTheDocument(),
+    expect(screen.getByLabelText(t("account.profile.username"))).toHaveValue(
+      "miura",
+    ),
   );
 }
 
@@ -228,6 +238,60 @@ describe("AccountPage password", () => {
     expect(
       await screen.findByText(t("account.error.too_short")),
     ).toBeInTheDocument();
+  });
+
+  // Password managers match a saved credential to a change-password form by
+  // its username field, and save a generated password against it, so the form
+  // carries the signed-in username in a field that is present but out of
+  // sight, out of the tab order and out of the accessibility tree (#4093,
+  // #4094).
+  it("carries the signed-in username in a hidden read-only field of the password form", async () => {
+    renderPage();
+    await waitForLoaded();
+
+    const form = (
+      screen.getByLabelText(t("account.password.current")) as HTMLInputElement
+    ).form;
+    const username = form?.querySelector('input[autocomplete="username"]');
+    expect(username).not.toBeNull();
+    expect(username).toHaveAttribute("type", "text");
+    expect(username).toHaveAttribute("name", "username");
+    expect(username).toHaveValue("miura");
+    expect(username).toHaveAttribute("readonly");
+    expect(username).toHaveAttribute("tabindex", "-1");
+    expect(username).toHaveAttribute("aria-hidden", "true");
+    expect(username).toHaveClass("visually-hidden");
+  });
+
+  it("names each password input next to its autocomplete hint", async () => {
+    renderPage();
+    await waitForLoaded();
+
+    const fields = [
+      ["account.password.current", "current-password", "current-password"],
+      ["account.password.new", "new-password", "new-password"],
+      ["account.password.confirm", "confirm-password", "new-password"],
+    ] as const;
+    for (const [label, name, autocomplete] of fields) {
+      const input = screen.getByLabelText(t(label));
+      expect(input).toHaveAttribute("name", name);
+      expect(input).toHaveAttribute("autocomplete", autocomplete);
+    }
+  });
+
+  it("keeps the name and autocomplete when the show/hide toggle reveals a password", async () => {
+    renderPage();
+    await waitForLoaded();
+
+    const input = screen.getByLabelText(t("account.password.new"));
+    fireEvent.click(
+      within(input.parentElement as HTMLElement).getByRole("button"),
+    );
+
+    const revealed = screen.getByLabelText(t("account.password.new"));
+    expect(revealed).toHaveAttribute("type", "text");
+    expect(revealed).toHaveAttribute("name", "new-password");
+    expect(revealed).toHaveAttribute("autocomplete", "new-password");
   });
 });
 

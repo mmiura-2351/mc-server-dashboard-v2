@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionProvider } from "../auth/SessionProvider.tsx";
@@ -313,5 +319,39 @@ describe("RegisterPage", () => {
     );
     expect(screen.getByText(t("register.success"))).toBeInTheDocument();
     expect(getAccessToken()).toBeNull();
+  });
+
+  // Password managers offer their generator on a sign-up form's new-password
+  // fields and save the result against its username field (#4094).
+  it("marks the username and named new-password fields for password managers", () => {
+    renderRegister();
+
+    expect(screen.getByLabelText(t("auth.fieldUsername"))).toHaveAttribute(
+      "autocomplete",
+      "username",
+    );
+    const fields = [
+      ["auth.fieldPassword", "new-password"],
+      ["register.confirmPassword", "confirm-password"],
+    ] as const;
+    for (const [label, name] of fields) {
+      const input = screen.getByLabelText(t(label));
+      expect(input).toHaveAttribute("name", name);
+      expect(input).toHaveAttribute("autocomplete", "new-password");
+    }
+  });
+
+  it("keeps the password's name and autocomplete when the show/hide toggle reveals it", () => {
+    renderRegister();
+
+    const input = screen.getByLabelText(t("auth.fieldPassword"));
+    fireEvent.click(
+      within(input.parentElement as HTMLElement).getByRole("button"),
+    );
+
+    const revealed = screen.getByLabelText(t("auth.fieldPassword"));
+    expect(revealed).toHaveAttribute("type", "text");
+    expect(revealed).toHaveAttribute("name", "new-password");
+    expect(revealed).toHaveAttribute("autocomplete", "new-password");
   });
 });
