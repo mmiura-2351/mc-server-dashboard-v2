@@ -534,6 +534,38 @@ async def test_a_marker_replaced_after_the_claim_refuses(backend: _Backend) -> N
     assert await ownership.refusal() is not None
 
 
+# --- an operator command that claims nothing (issue #4107) ----------------------
+
+
+async def test_a_command_may_run_on_a_store_whose_marker_names_its_installation(
+    backend: _Backend,
+) -> None:
+    # An operator command does not claim the store; it asks whether the marker
+    # names the installation of the database it was pointed at.
+    backend.seed(_marker(_OURS))
+
+    assert await backend.make().refusal_for(_OURS) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [None, _marker(_THEIRS), b"not json", b'{"installation_id": "x"}'],
+    ids=["no-marker", "another-installation", "not-json", "no-installation"],
+)
+async def test_a_command_is_refused_on_a_store_not_marked_for_its_installation(
+    backend: _Backend, body: bytes | None
+) -> None:
+    if body is not None:
+        backend.seed(body)
+
+    refusal = await backend.make().refusal_for(_OURS)
+
+    assert refusal is not None
+    assert OWNER_MARKER in refusal
+    # Asking claims nothing: the store's marker is left as it was.
+    assert backend.read() == body
+
+
 async def test_an_fs_claim_creates_a_root_that_does_not_exist_yet(
     tmp_path: Path,
 ) -> None:

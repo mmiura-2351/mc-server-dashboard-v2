@@ -562,6 +562,105 @@ Work from the cheapest, most-reversible step to the most invasive, and re-check
    > s3.clean.uploads
    ```
 
+#### Repair: dangling backup rows
+
+A backup row whose archive the store does not hold is **dangling**: the Web UI
+lists it, but it cannot be downloaded or restored. Since issue #4086 a create or
+an upload records its row only once its archive is written, but a deployment
+that ran an older release through a storage incident can still hold such rows,
+and nothing removes them on its own. Once the store and the database are healthy
+again (the Recovery steps above), find them with a dry run, then delete them:
+
+```sh
+# 1. List the dangling rows. Nothing is deleted.
+docker compose exec api python -m mc_server_dashboard_api.integrity_sweep_cli \
+  --delete-dangling
+# 2. Delete the rows it listed.
+docker compose exec api python -m mc_server_dashboard_api.integrity_sweep_cli \
+  --delete-dangling --apply
+```
+
+Add `--server <server-uuid>` to either command to check one server only. The
+pass sends one HEAD per backup row, under the server's lifecycle lock; it reads
+no archive bytes and does not run the integrity sweep.
+
+- **Only a "not found" answer marks a row dangling.** A row the store could not
+  answer for (an outage, a timeout, a 5xx) is listed as skipped and is never
+  deleted, and the command exits 1. Re-run it once the store is healthy.
+- **A busy row is skipped.** When another lifecycle operation holds the server
+  past the lock's wait budget, such as a backup delete in flight or a restore,
+  the row is listed as skipped. Re-run to check it.
+- **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
+- **`--apply` checks the store first.** It refuses with exit 2 unless the store
+  owner marker names this database's installation (STORAGE.md Section 4.3). A
+  store that is not this database's, such as a wrong bucket or fs root, holds
+  none of its archives, so every row would look dangling.
+- **`--apply` checks the store again before each deletion.** If the store stops
+  being this database's mid-pass, as when the fs root's mount drops or the
+  bucket goes, the command stops with exit 2 and the same refusal. The rows it
+  deleted before stay deleted; each is in the log and the audit trail. Fix the
+  store, then re-run.
+
+The other exit statuses are the command's usual ones: 3 when the database failed
+or a lifecycle lock was lost. Rows already deleted stay deleted, so a re-run is
+safe.
+
+**Worked example: the #4086 rows.** While a store's disk was full (2026-10-14
+to 10-15), one server's backup schedule kept recording rows it could not archive.
+From 2026-10-15 12:19 to 14:09 UTC it wrote 21 `scheduled` rows, about every 5.5
+minutes, each with an unknown size and no archive in the store. The dry run
+lists those rows, newest first:
+
+```text
+servers scanned: <n>
+dangling backup rows (the store reports no archive): 21
+  backup <backup-id> of server <server-id>, created 2026-10-15T14:09:<ss>+00:00, source scheduled
+  ...
+  backup <backup-id> of server <server-id>, created 2026-10-15T12:19:36+00:00, source scheduled
+skipped (the store could not say whether the archive exists; re-run once it is healthy): 0
+skipped (server busy; re-run to check them): 0
+dry run: nothing was deleted. Re-run with --apply to delete the dangling rows listed above.
+```
+
+Before you apply, check that every listed row falls in the incident window and
+belongs to the server whose schedule failed. A row outside the window has lost
+its archive some other way; find out why before you delete it. Then run the
+`--apply` command. It prints the same list and ends with
+`deleted: 21 (each audited as backup:delete_dangling)`. The rows drop out of the
+server's backup list, and retention no longer counts them.
+
+**A row the store cannot size stalls its server's retention.** Before it ranks,
+the retention prune sends a HEAD for each `scheduled` row whose size is unknown.
+If that HEAD keeps failing with anything other than "not found", such as an S3
+`403 AccessDenied` or an fs `EACCES`, the server's prune fails on every run, and
+its scheduled backups are no longer pruned. Each run logs this WARNING:
+
+```text
+retention prune of server <server-id> stopped before selecting anything: a NULL-size scheduled backup could not be sized (<error type>: <error>), and the ranking needs its size. The next run retries.
+```
+
+`--delete-dangling` cannot clear such a row: it lists the row as skipped and
+exits 1. To find the rows the prune sends a HEAD for (`mcsd` is the
+`POSTGRES_USER` and `POSTGRES_DB` of `.env`):
+
+```sh
+docker compose exec db psql -U mcsd -d mcsd -c "SELECT id, storage_ref, created_at
+  FROM backup WHERE server_id = '<server-id>' AND source = 'scheduled'
+  AND size_bytes IS NULL"
+```
+
+Then do one of the following:
+
+- Fix the store's permission so the HEAD answers again. The next prune sizes
+  the row and runs.
+- If you have confirmed in the store itself that the row's archive is gone,
+  delete the row by hand. This delete is not audited:
+
+  ```sh
+  docker compose exec db psql -U mcsd -d mcsd -c \
+    "DELETE FROM backup WHERE id = '<backup-id>'"
+  ```
+
 #### Steady-state prevention
 
 Three steady-state mechanisms keep the store from filling in normal operation; this

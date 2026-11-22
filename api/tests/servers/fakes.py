@@ -7,6 +7,7 @@ with`` blocks and tracks commits.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import uuid
@@ -2098,6 +2099,28 @@ class ExitHookUnitOfWork(FakeUnitOfWork):
             on_exit()
 
 
+class SessionTrackingUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` that knows whether one of its blocks is open.
+
+    The real adapter opens a session on entry, and the session holds a pool
+    connection from its first statement until the block exits, so a store call
+    made inside a block keeps that connection checked out for as long as the call
+    takes (issue #4107). ``open`` says whether a block is open now. Entering a
+    block while one is open fails: the real adapter keeps a single session, which
+    a nested entry would replace and leak.
+    """
+
+    open = False
+
+    async def __aenter__(self) -> "SessionTrackingUnitOfWork":
+        assert not self.open, "a unit-of-work block was entered inside another"
+        self.open = True
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.open = False
+
+
 class DatabaseOutageError(ConnectionError):
     """What :class:`OutageUnitOfWork` raises while its database is down."""
 
@@ -2524,9 +2547,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # sweep probe and restore (#3230) raise BackupUnreadableError. Distinct from
         # ``corrupt_refs`` — the bytes are gone, not the world.
         self.unreadable_refs: set[str] = set()
-        # refs whose probe hits a backend outage (#2371): the probe raises
-        # BackupStorageUnavailableError, which is a verdict about the STORE, not
-        # about the archive, so the sweep must not classify the row from it.
+        # refs whose probe hits a backend outage (#2371): the probe and the size
+        # HEAD (#4107) raise BackupStorageUnavailableError, which is a verdict
+        # about the STORE, not about the archive, so no caller may classify the
+        # row from it.
         self.unavailable_refs: set[str] = set()
         # The sweep (#744) snapshot fsck: corrupt-region count of each server's
         # published ``current``; a server absent here has no published snapshot, so
@@ -2676,9 +2700,34 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.size_calls.append(storage_ref)
         if self.size_error is not None:
             raise self.size_error
+        if storage_ref in self.unavailable_refs:
+            raise BackupStorageUnavailableError(storage_ref)
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])
+
+
+class HangingSizeStore(FakeBackupArchiveStore):
+    """A :class:`FakeBackupArchiveStore` whose ``size`` probe hangs (issue #4107).
+
+    ``size`` is the storage HEAD, which can take as long as the store's timeouts
+    and retries allow. Each call sets ``probing`` and then waits for ``release``
+    before answering, so a test can look at what the caller holds while it waits.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.probing = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        self.probing.set()
+        await self.release.wait()
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
 
 
 class FakeCatalogProvider(CatalogProvider):

@@ -2130,6 +2130,20 @@ logs the traceback of a 3. Any other error ends in a traceback, and Python exits
 connect is an `OSError` as well, so the command tells the two apart where it
 connects, not by type.
 
+**Dangling-row repair.** The sweep marks a row with no archive `unreadable` but
+never deletes it. `integrity_sweep_cli --delete-dangling` is the repair (issue
+#4107): instead of the sweep, it HEADs every backup row's archive, under the
+server's lifecycle lock and reading no bytes, and lists the rows whose archive
+the store reports missing. It deletes nothing unless `--apply` is given; then
+each listed row is deleted through the backup delete path and audited as
+`backup:delete_dangling`. Only a NotFound answer condemns a row: a HEAD that
+fails any other way skips it, and the command then exits 1. `--apply` runs only
+while the owner marker (Section 4.3) names this database's installation, since
+a store that is not this database's answers NotFound for every row. It checks
+the marker before the pass and again before each deletion, so a store that
+stops being this database's mid-pass stops it. The procedure and a worked
+example are in DEPLOYMENT.md (Storage-capacity incident runbook).
+
 **Sweep log.** The sweep logs through the API's handler, in `log.format` (JSON
 by default), at `log.level`. The per-backup verdict line of a healthy or
 quarantined backup (`integrity sweep: backup <id> -> healthy`) is an `INFO`

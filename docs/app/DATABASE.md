@@ -950,11 +950,18 @@ committed ahead of an archive it never wrote. Two legacy populations can be NULL
 and still have an archive: a create before issue #4119 that wrote its archive
 but was interrupted before its separate size update, and a row from the day
 between backups landing (issue #123) and creates recording a size (issue #283).
-The prune ranks the rows as loaded and does not size them first, so such a row
-ranks behind too until a listing sizes it (issue #661). A row whose archive went
-missing after its size was recorded, as when a delete is interrupted between its
-archive removal and its row removal, still ranks by its `health`.
+The prune sizes the NULL-size rows before it ranks them (below), so such a row
+ranks as the sized row it is. A row whose archive went missing after its size
+was recorded, as when a delete is interrupted between its archive removal and
+its row removal, still ranks by its `health`.
 Manual / uploaded / event rows are never auto-pruned.
+
+Before it ranks, the prune sizes each scheduled row whose `size_bytes` is NULL,
+as a listing does (issue #4107): a storage HEAD per row, with no unit of work
+open across it (the lifecycle lock's own connection stays held), and the sizes
+recorded in a short transaction of their own. A row whose archive the store reports missing stays NULL, so it ranks
+last. Any other store failure stops the prune before it selects or deletes
+anything, with a WARNING; the next run retries.
 
 ### `file_edit_history` — Storage-layer only (no DB table)
 

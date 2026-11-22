@@ -93,7 +93,9 @@ from tests.servers.fakes import (
     FakeControlPlane,
     FakeServerRepository,
     FakeUnitOfWork,
+    HangingSizeStore,
     OutageUnitOfWork,
+    SessionTrackingUnitOfWork,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -489,7 +491,7 @@ async def test_list_backfills_null_size_when_archive_exists() -> None:
     persisted = await uow.backups.get_by_id(backup.id)
     assert persisted is not None
     assert persisted.size_bytes == 42
-    # The backfill committed the write inside the open uow (the fake makes
+    # The backfill committed the write in a unit of work of its own (the fake makes
     # update_size visible regardless, so only the commit count proves the durability).
     assert uow.commits == 1
 
@@ -557,6 +559,47 @@ async def test_server_statistics_backfills_null_size_into_total() -> None:
     # longer counted as unknown.
     assert stats.total_bytes == 15
     assert stats.unknown_size_count == 0
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(ListBackups, id="list"),
+        pytest.param(ServerBackupStatistics, id="statistics"),
+    ],
+)
+async def test_a_hanging_size_probe_holds_no_unit_of_work_open(
+    read: type[ListBackups] | type[ServerBackupStatistics],
+) -> None:
+    # The backfill's size probe is a storage HEAD, which can hang for as long as
+    # the store's timeouts allow. It runs with no unit of work open, so a hanging
+    # HEAD keeps no pool connection checked out (issue #4107); the size is then
+    # written in a short unit of work of its own.
+    server = _at_rest()
+    uow = SessionTrackingUnitOfWork()
+    uow.servers.seed(server)
+    archive = HangingSizeStore()
+    backup = _seed_null_size_row(
+        uow.backups, archive, server.id, storage_ref="legacy", archive_bytes=b"x" * 42
+    )
+
+    reading = asyncio.create_task(
+        read(uow=uow, backup_store=archive)(
+            community_id=_COMMUNITY, server_id=server.id
+        )
+    )
+    try:
+        await archive.probing.wait()
+        open_while_probing = uow.open
+    finally:
+        archive.release.set()
+    await reading
+
+    assert open_while_probing is False
+    persisted = await uow.backups.get_by_id(backup.id)
+    assert persisted is not None
+    assert persisted.size_bytes == 42
+    assert uow.commits == 1
 
 
 async def test_list_fails_when_the_store_is_unavailable() -> None:
