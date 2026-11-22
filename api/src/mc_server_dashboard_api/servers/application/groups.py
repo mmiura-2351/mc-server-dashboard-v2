@@ -25,7 +25,10 @@ group itself holds off attaches of that group
 the servers it affects. It takes that lock BEFORE it writes anything of the
 group: a player edit that locked the group row only after writing its player
 rows would deadlock with a delete, which holds the group row and waits on those
-rows to cascade.
+rows to cascade. A player edit takes it before it even reads the group, and a
+rename takes :meth:`GroupRepository.lock_for_edit` there (issue #2965): the save
+writes back the whole group it read, so an edit that read it before another edit
+committed would undo that edit.
 
 ``StartServer`` then regenerates the owed files from the *current* union before
 it decides whether to hydrate (:func:`regenerate_pending_group_files`). That
@@ -204,6 +207,7 @@ class RenameGroup:
     ) -> PlayerGroup:
         new_name = GroupName(name)
         async with self.uow:
+            await self.uow.groups.lock_for_edit(group_id)
             group = await _load_group(self.uow, community_id, group_id)
             clash = await self.uow.groups.get_by_community_kind_name(
                 community_id, group.kind, new_name
@@ -271,8 +275,8 @@ class AddPlayer:
     ) -> PlayerGroup:
         player = Player(player_uuid, username)
         async with self.uow:
-            group = await _load_group(self.uow, community_id, group_id)
             await self.uow.groups.lock_against_attach(group_id)
+            group = await _load_group(self.uow, community_id, group_id)
             group.upsert_player(player)
             await self.uow.groups.save(group)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)
@@ -306,8 +310,8 @@ class RemovePlayer:
         player_uuid: uuid.UUID,
     ) -> PlayerGroup:
         async with self.uow:
-            group = await _load_group(self.uow, community_id, group_id)
             await self.uow.groups.lock_against_attach(group_id)
+            group = await _load_group(self.uow, community_id, group_id)
             group.remove_player(player_uuid)
             await self.uow.groups.save(group)
             server_ids = await self.uow.groups.list_server_ids_for_group(group_id)

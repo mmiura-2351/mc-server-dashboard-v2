@@ -216,6 +216,16 @@ class SqlAlchemyGroupRepository(GroupRepository):
             .with_for_update()
         )
 
+    async def lock_for_edit(self, group_id: GroupId) -> None:
+        # FOR NO KEY UPDATE, the lock save's re-read takes: it conflicts with a
+        # delete's FOR UPDATE and with another edit's lock, but not with the FOR
+        # KEY SHARE an attach's FK check takes.
+        await self._session.execute(
+            select(PlayerGroupModel.id)
+            .where(PlayerGroupModel.id == group_id.value)
+            .with_for_update(key_share=True)
+        )
+
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         stmt = (
             select(ServerGroupModel.server_id)

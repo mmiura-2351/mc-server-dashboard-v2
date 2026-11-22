@@ -80,8 +80,10 @@ class GroupRepository(abc.ABC):
         commit. A delete behind a save deletes once the save has committed; a save
         behind a delete finds the row gone and raises the not-found above. A second
         save of the group waits the same way; its DELETE then sees, and replaces,
-        the rows the first one wrote, so the later save's player set wins. An
-        attach's FK check does not conflict with the lock.
+        the rows the first one wrote, so the later save's player set wins -- which
+        is why an edit reads the group under :meth:`lock_for_edit` or
+        :meth:`lock_against_attach` before it saves. An attach's FK check does not
+        conflict with the lock.
 
         That lock closes three later sites that used to answer a racer. A
         concurrent group delete too late for the not-found above to catch left the
@@ -136,6 +138,22 @@ class GroupRepository(abc.ABC):
         under it (issue #3223): an attach that committed earlier is in the list,
         and a later one waits for the change — then sees it, or finds the group
         deleted. A group that does not exist locks nothing.
+
+        It holds off every edit and delete of the group as well, as
+        :meth:`lock_for_edit` does, so a player edit takes only this one.
+        """
+
+    @abc.abstractmethod
+    async def lock_for_edit(self, group_id: GroupId) -> None:
+        """Hold off every other edit and delete of ``group_id`` until this ends.
+
+        An edit takes this before it reads the group (issue #2965). :meth:`save`
+        writes back the whole group it is given -- its name and its full player
+        set -- so an edit that read the group before another edit committed would
+        write back what it read and undo that edit with no error. Under the lock,
+        an edit behind another reads what that one committed, and an edit behind
+        a delete finds the group gone. Attaches are not held off. A group that
+        does not exist locks nothing.
         """
 
     @abc.abstractmethod
