@@ -74,6 +74,7 @@ from mc_server_dashboard_api.archive_member import (
 from mc_server_dashboard_api.audit.domain.events import AuditEvent, Outcome
 from mc_server_dashboard_api.audit.domain.operations import (
     BACKUP_DELETE,
+    BACKUP_DELETE_DANGLING,
     TARGET_BACKUP,
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
@@ -131,6 +132,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidBackupArchiveError,
     InvalidRetentionPolicyError,
     PluginReconcileIncompleteError,
+    ServerBusyError,
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotStoppedError,
@@ -1054,8 +1056,9 @@ async def _delete_archive_then_row(
 ) -> None:
     """Delete a backup's archive first, then its metadata row (module docstring).
 
-    The single delete path (epic #649 constraint): :class:`DeleteBackup` and the
-    retention prune (:class:`PruneScheduledBackups`, issue #1841) both run
+    The single delete path (epic #649 constraint): :class:`DeleteBackup`, the
+    retention prune (:class:`PruneScheduledBackups`, issue #1841) and the
+    dangling-row repair (:class:`DeleteDanglingBackups`, issue #4107) all run
     through here, each under the per-server lifecycle lock it already holds.
     The archive delete is idempotent, so a crash between the two leaves a
     re-deletable dangling row (not harmless until then, see the module
@@ -1177,6 +1180,153 @@ class PruneScheduledBackups:
                     )
                 )
             return pruned
+
+
+@dataclass(frozen=True)
+class DanglingBackups:
+    """What a :class:`DeleteDanglingBackups` pass found (issue #4107).
+
+    ``dangling`` holds the rows whose archive the store reported missing, which
+    an applied pass deleted. ``skipped_store_error`` holds the rows whose size
+    HEAD failed any other way, which got no verdict, and ``skipped_busy`` the
+    rows whose server's lifecycle lock stayed held past its wait budget. A
+    re-run checks both kinds of skipped row again.
+    """
+
+    servers_scanned: int
+    dangling: tuple[Backup, ...]
+    skipped_store_error: tuple[Backup, ...]
+    skipped_busy: tuple[Backup, ...]
+
+
+@dataclass(frozen=True)
+class DeleteDanglingBackups:
+    """List, and with ``apply`` delete, backup rows whose archive is gone (#4107).
+
+    A dangling row is one whose archive HEAD (the store's ``size``) answers
+    NotFound. Such a row is listed as a backup but cannot be downloaded or
+    restored; the #4086 leak left them, and nothing else removes them. Every row
+    of every server (or of ``server_id``'s) is checked, whatever its size.
+
+    Each row is checked under its server's lifecycle lock, taken per row as the
+    integrity sweep takes it (issue #3220): a delete holds the lock from its
+    archive removal to its row removal, so under it a row is never seen
+    mid-delete. The row is re-read under the lock, so one deleted since the
+    listing is passed over. A row whose lock stays busy past the wait budget is
+    skipped. Only a NotFound answer is a verdict: a HEAD that fails any other
+    way (an outage, a timeout, a 5xx) skips the row, which is never deleted on
+    it.
+
+    With ``apply``, each dangling row is deleted in the same hold through
+    :func:`_delete_archive_then_row`, the single delete path, whose archive
+    delete is a no-op for an archive already gone. Each deletion is audited
+    post-commit as ``backup:delete_dangling`` with ``actor_id``, ``None`` when
+    run headless, as the sweep audits its verdicts.
+    """
+
+    uow: UnitOfWork
+    backup_store: BackupArchiveStore
+    audit: AuditRecorder
+    lifecycle_lock: LifecycleLock = NullLifecycleLock()
+
+    async def __call__(
+        self,
+        *,
+        apply: bool,
+        server_id: ServerId | None = None,
+        actor_id: uuid.UUID | None = None,
+    ) -> DanglingBackups:
+        async with self.uow:
+            if server_id is None:
+                servers = await self.uow.servers.list_all()
+            else:
+                found = await self.uow.servers.get_by_id(server_id)
+                servers = [] if found is None else [found]
+        dangling: list[Backup] = []
+        skipped_store_error: list[Backup] = []
+        skipped_busy: list[Backup] = []
+        for server in servers:
+            async with self.uow:
+                rows = await self.uow.backups.list_for_server(server.id)
+            for listed in rows:
+                try:
+                    async with self.lifecycle_lock.hold(server.id) as lock:
+                        async with self.uow:
+                            backup = await self.uow.backups.get_by_id(listed.id)
+                        if backup is None:
+                            continue
+                        try:
+                            await self.backup_store.size(
+                                community_id=server.community_id,
+                                server_id=server.id,
+                                storage_ref=backup.storage_ref,
+                            )
+                        except BackupNotFoundError:
+                            pass
+                        except Exception:  # noqa: BLE001 - no answer is no verdict
+                            _LOG.warning(
+                                "dangling backups: backup %s of server %s skipped: "
+                                "the store could not say whether its archive "
+                                "exists; re-run once the store is healthy",
+                                backup.id.value,
+                                server.id.value,
+                                exc_info=True,
+                            )
+                            skipped_store_error.append(backup)
+                            continue
+                        else:
+                            continue  # the archive exists
+                        dangling.append(backup)
+                        if apply:
+                            await self._delete(lock, server, backup, actor_id)
+                except ServerBusyError:
+                    _LOG.info(
+                        "dangling backups: backup %s skipped, server %s is busy "
+                        "(another lifecycle operation holds it); re-run to "
+                        "check it",
+                        listed.id.value,
+                        server.id.value,
+                    )
+                    skipped_busy.append(listed)
+        return DanglingBackups(
+            servers_scanned=len(servers),
+            dangling=tuple(dangling),
+            skipped_store_error=tuple(skipped_store_error),
+            skipped_busy=tuple(skipped_busy),
+        )
+
+    async def _delete(
+        self,
+        lock: HeldLifecycleLock,
+        server: Server,
+        backup: Backup,
+        actor_id: uuid.UUID | None,
+    ) -> None:
+        await _delete_archive_then_row(
+            self.uow,
+            self.backup_store,
+            lock,
+            community_id=server.community_id,
+            server_id=server.id,
+            backup_id=backup.id,
+            storage_ref=backup.storage_ref,
+        )
+        _LOG.info(
+            "dangling backups: deleted backup %s of server %s, whose archive the "
+            "store reports missing",
+            backup.id.value,
+            server.id.value,
+        )
+        await self.audit.record(
+            AuditEvent(
+                operation=BACKUP_DELETE_DANGLING,
+                outcome=Outcome.SUCCESS,
+                actor_id=actor_id,
+                community_id=server.community_id.value,
+                target_type=TARGET_BACKUP,
+                target_id=backup.id.value,
+            )
+        )
 
 
 @dataclass(frozen=True)

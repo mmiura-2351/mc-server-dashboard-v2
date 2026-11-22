@@ -2547,9 +2547,10 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         # sweep probe and restore (#3230) raise BackupUnreadableError. Distinct from
         # ``corrupt_refs`` — the bytes are gone, not the world.
         self.unreadable_refs: set[str] = set()
-        # refs whose probe hits a backend outage (#2371): the probe raises
-        # BackupStorageUnavailableError, which is a verdict about the STORE, not
-        # about the archive, so the sweep must not classify the row from it.
+        # refs whose probe hits a backend outage (#2371): the probe and the size
+        # HEAD (#4107) raise BackupStorageUnavailableError, which is a verdict
+        # about the STORE, not about the archive, so no caller may classify the
+        # row from it.
         self.unavailable_refs: set[str] = set()
         # The sweep (#744) snapshot fsck: corrupt-region count of each server's
         # published ``current``; a server absent here has no published snapshot, so
@@ -2699,6 +2700,8 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         self.size_calls.append(storage_ref)
         if self.size_error is not None:
             raise self.size_error
+        if storage_ref in self.unavailable_refs:
+            raise BackupStorageUnavailableError(storage_ref)
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])
