@@ -10034,6 +10034,62 @@
         "summary": "Check Plugin Update"
       }
     },
+    "/api/communities/{community_id}/servers/{server_id}/release-without-snapshot": {
+      "post": {
+        "description": "Release a server its Worker holds after refusing the final snapshot (#4055).\n\nNot a ``/stop`` parameter: ``force`` means \"kill now\" only, and this gives up\nthe progression since the last snapshot, so it has its own route, audit\noperation and confirmation. It sends the Worker nothing.",
+        "operationId": "release_server_without_snapshot_api_communities__community_id__servers__server_id__release_without_snapshot_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "community_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Community Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "server_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Server Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Release Server Without Snapshot"
+      }
+    },
     "/api/communities/{community_id}/servers/{server_id}/resource-pack": {
       "delete": {
         "description": "Unassign the resource pack from a server (server:update, issue #1177).",

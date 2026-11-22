@@ -22,6 +22,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from mc_server_dashboard_api.audit.domain import operations as ops
+from mc_server_dashboard_api.audit.domain.events import Outcome
 from mc_server_dashboard_api.community.domain.permission_checker import (
     MembershipVisibility,
     PermissionChecker,
@@ -34,9 +36,11 @@ from mc_server_dashboard_api.community.domain.value_objects import (
     UserId,
 )
 from mc_server_dashboard_api.dependencies import (
+    get_audit_recorder,
     get_current_user,
     get_membership_visibility,
     get_permission_checker,
+    get_release_held_server,
     get_restart_server,
     get_send_server_command,
     get_start_server,
@@ -77,6 +81,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
     WorkerId,
 )
+from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
@@ -1105,3 +1110,128 @@ def test_command_line_past_the_limit_is_422(line: str, message: str) -> None:
         ],
     }
     assert command.kwargs == {}
+
+
+# --- the release of a held server without its final snapshot (issue #4055) --
+
+_RELEASE = "release-without-snapshot"
+
+
+class _GrantsOnly(PermissionChecker):
+    """Grants exactly the listed permission codes."""
+
+    def __init__(self, *granted: str) -> None:
+        self._granted = set(granted)
+
+    async def can(
+        self, *, user: AuthUser, operation: Permission, resource: ResourceRef
+    ) -> bool:
+        return operation.value in self._granted
+
+
+def _released(community_id: uuid.UUID) -> Server:
+    return dataclasses.replace(
+        _server(community_id),
+        desired_state=DesiredState.STOPPED,
+        observed_state=ObservedState.STOPPED,
+    )
+
+
+def _release_app(
+    use_case: _FakeUseCase, *, granted: tuple[str, ...] = ("server:stop",)
+) -> tuple[object, RecordingAuditRecorder]:
+    app = _app(member=True, allow=True)
+    recorder = RecordingAuditRecorder()
+    _shared_app.dependency_overrides[get_permission_checker] = lambda: _GrantsOnly(
+        *granted
+    )
+    _shared_app.dependency_overrides[get_release_held_server] = lambda: use_case
+    _shared_app.dependency_overrides[get_audit_recorder] = lambda: recorder
+    return app, recorder
+
+
+def test_a_release_without_snapshot_answers_the_released_server() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _FakeUseCase(result=_released(community))
+    app, recorder = _release_app(use_case)
+
+    resp = _client(app).post(_url(community, server_id, _RELEASE))
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["desired_state"] == "stopped"
+    assert body["assigned_worker_id"] is None
+    assert body["final_snapshot_refusal"] is None
+    assert use_case.kwargs == {
+        "community_id": ServersCommunityId(community),
+        "server_id": ServerId(server_id),
+    }
+    [event] = recorder.events
+    assert event.operation == "server:release_without_snapshot"
+    assert event.outcome is Outcome.SUCCESS
+    assert event.target_type == ops.TARGET_SERVER
+    assert event.target_id == uuid.UUID(body["id"])
+    assert event.community_id == community
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (InvalidLifecycleTransitionError("x"), "invalid_transition"),
+        (LifecycleTransitionConflictError("x"), "transition_conflict"),
+    ],
+)
+def test_a_refused_release_without_snapshot_is_409_and_audited_denied(
+    error: Exception, reason: str
+) -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    app, recorder = _release_app(_FakeUseCase(error=error))
+
+    resp = _client(app).post(_url(community, server_id, _RELEASE))
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == reason
+    [event] = recorder.events
+    assert event.operation == "server:release_without_snapshot"
+    assert event.outcome is Outcome.DENIED
+    assert event.target_type == ops.TARGET_SERVER
+    assert event.target_id == server_id
+    assert event.community_id == community
+
+
+def test_a_release_without_snapshot_of_a_missing_server_is_404() -> None:
+    community, server_id = uuid.uuid4(), uuid.uuid4()
+    use_case = _FakeUseCase(error=ServerNotFoundError("x"))
+    app, recorder = _release_app(use_case)
+
+    resp = _client(app).post(_url(community, server_id, _RELEASE))
+
+    assert resp.status_code == 404
+    assert resp.json()["reason"] == "not_found"
+    # The use case found no server, so a 404 records nothing.
+    assert use_case.kwargs == {
+        "community_id": ServersCommunityId(community),
+        "server_id": ServerId(server_id),
+    }
+    assert recorder.events == []
+
+
+@pytest.mark.parametrize(
+    "granted",
+    [
+        "server:start",
+        "server:restart",
+        "server:update",
+        "server:delete",
+        "server:command",
+        "server:read",
+    ],
+)
+def test_only_server_stop_grants_the_release_without_snapshot(granted: str) -> None:
+    use_case = _FakeUseCase(result=_released(uuid.uuid4()))
+    app, _ = _release_app(use_case, granted=(granted,))
+
+    resp = _client(app).post(_url(uuid.uuid4(), uuid.uuid4(), _RELEASE))
+
+    assert resp.status_code == 403
+    assert use_case.kwargs == {}

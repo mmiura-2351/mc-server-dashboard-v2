@@ -341,6 +341,9 @@ from mc_server_dashboard_api.servers.application.port_availability import (
     CheckPort,
     ListAvailablePorts,
 )
+from mc_server_dashboard_api.servers.application.release_held_server import (
+    ReleaseHeldServer,
+)
 from mc_server_dashboard_api.servers.application.resource_packs import (
     AssignResourcePack,
     DeleteResourcePack,
@@ -2189,6 +2192,21 @@ def get_stop_server(
         unrecorded_stops=request.app.state.unrecorded_stops,
         stop_convergence=request.app.state.stop_convergence,
         stop_intents=request.app.state.stop_intents,
+    )
+
+
+def get_release_held_server(request: Request) -> ReleaseHeldServer:
+    """Assemble the :class:`ReleaseHeldServer` use case (server:stop, #4055).
+
+    It shares the process-wide stop-convergence exclusion with every stop, so it
+    refuses while one of them or a final snapshot is in flight, and publishes
+    its release on the app's event bus.
+    """
+
+    session_factory = create_session_factory(get_engine(request))
+    return ReleaseHeldServer(
+        uow=ServersUnitOfWork(session_factory, request.app.state.real_time_events),
+        stop_convergence=request.app.state.stop_convergence,
     )
 
 
