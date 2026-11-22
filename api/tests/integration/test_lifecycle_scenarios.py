@@ -95,6 +95,7 @@ from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.control_plane import (
     CommandOutcome,
     CommandStatus,
+    UnavailableWorkerState,
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -2727,3 +2728,87 @@ async def test_the_3701_sequence_ends_in_a_published_snapshot_and_a_release(
         engine, FakeControlPlane(place_to=next_worker), clock, store
     )(community_id=community, server_id=server_id)
     assert restarted.assigned_worker_id == next_worker
+
+
+# --- A stop of a held server while its Worker is gone (issue #4111) ----------
+
+
+class _SnapshotMeetingADrop(FakeControlPlane):
+    """A fake whose snapshot is in flight when its Worker's session ends."""
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        self.end_session(worker_id, at=_NOW)
+        raise WorkerUnavailableError(
+            str(worker_id.value),
+            session_ended_in_flight=True,
+            worker_state=UnavailableWorkerState.NOT_CONNECTED,
+        )
+
+
+async def test_a_held_server_stays_held_through_a_drop_until_its_worker_returns(
+    engine: AsyncEngine,
+) -> None:
+    """start -> stop whose final snapshot the Worker refuses: held -> the
+    operator's re-stop retries the snapshot, and the Worker drops while it is in
+    flight: still held, with the refusal -> the drop marks the server unknown ->
+    a stop while the Worker is gone answers worker_unavailable and changes
+    nothing -> the Worker returns, and a stop takes the snapshot, which
+    publishes, and releases the server.
+    """
+
+    clock = _AdvancingClock(_NOW)
+    store = _StoreGeneration(1)
+    server = await _create_server(engine, FakeFileStore(), clock)
+    server_id, community = server.id, server.community_id
+    worker = WorkerId(uuid.uuid4())
+    await _start_server_use_case(engine, FakeControlPlane(place_to=worker), clock)(
+        community_id=community, server_id=server_id
+    )
+    refusing = FakeControlPlane(
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.UNAVAILABLE)}
+    )
+    await _stop_server_use_case(engine, refusing, clock)(
+        community_id=community, server_id=server_id
+    )
+
+    dropping = _SnapshotMeetingADrop()
+    with pytest.raises(WorkerUnavailableError):
+        await _stop_server_use_case(engine, dropping, clock)(
+            community_id=community, server_id=server_id
+        )
+    assert [kind for kind, _, _ in dropping.dispatched] == ["snapshot"]
+    await _sink(engine, clock).mark_worker_servers_unknown(worker_id=str(worker.value))
+    held = await _load(engine, server_id)
+    assert held is not None
+    assert held.observed_state is ObservedState.UNKNOWN
+    assert held.assigned_worker_id == worker
+    assert held.final_snapshot_refusal is FinalSnapshotRefusal.UNAVAILABLE
+
+    gone = FakeControlPlane(connected={worker: False})
+    with pytest.raises(WorkerUnavailableError) as excinfo:
+        await _stop_server_use_case(engine, gone, clock)(
+            community_id=community, server_id=server_id
+        )
+    assert excinfo.value.worker_state is UnavailableWorkerState.NOT_CONNECTED
+    assert gone.dispatched == []
+    assert (await _load(engine, server_id)) == held
+    assert store.generation == 1
+
+    back = _PublishingControlPlane(store, place_to=worker, held={})
+    released = await _stop_server_use_case(engine, back, clock)(
+        community_id=community, server_id=server_id
+    )
+    assert [kind for kind, _, _ in back.dispatched] == ["stop", "snapshot"]
+    assert store.generation == 2
+    for row in (released, await _load(engine, server_id)):
+        assert row is not None
+        assert row.assigned_worker_id is None
+        assert row.final_snapshot_refusal is None

@@ -76,6 +76,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -548,6 +549,38 @@ def test_a_stop_of_a_held_server_refused_again_is_409_and_audited_denied() -> No
     [event] = recorder.events
     assert event.operation == ops.SERVER_STOP
     assert event.outcome is Outcome.DENIED
+
+
+def test_a_stop_of_a_held_server_whose_worker_is_gone_is_503_and_names_the_exits() -> (
+    None
+):
+    # Issue #4111: the stop releases nothing, so it answers the stop route's
+    # 503 for a Worker that is not connected, and says what does release it.
+    server = dataclasses.replace(
+        _desired_stopped(uuid.uuid4(), ObservedState.UNKNOWN, assigned=True),
+        final_snapshot_refusal=FinalSnapshotRefusal.UNAVAILABLE,
+    )
+    assert server.assigned_worker_id is not None
+    cp = FakeControlPlane(connected={server.assigned_worker_id: False})
+    recorder = RecordingAuditRecorder()
+
+    resp = _post_real_stop(server, cp, recorder=recorder)
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["reason"] == "worker_unavailable"
+    assert body["worker_state"] == "not_connected"
+    assert body["detail"] == (
+        "The server's Worker refused its final snapshot and is not connected, so "
+        "the stop released nothing and the server stays held. It is released when "
+        "the Worker returns and the snapshot is taken, when the Worker has stayed "
+        "away for the reconciler's full grace, or when someone allowed to stop it "
+        "releases it without the snapshot."
+    )
+    assert cp.dispatched == []
+    [event] = recorder.events
+    assert event.operation == ops.SERVER_STOP
+    assert event.outcome is Outcome.ERROR
 
 
 def test_stop_on_an_unassigned_desired_stopped_server_is_still_409() -> None:
