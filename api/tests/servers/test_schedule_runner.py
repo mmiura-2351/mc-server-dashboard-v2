@@ -2583,6 +2583,29 @@ async def test_a_retry_whose_server_read_raises_stays_armed_for_a_later_tick() -
     ]
 
 
+async def test_a_retry_claimed_while_its_schedule_is_disabled_is_spent() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # fails, arms the retry
+    store._missing = False
+    env.uow.schedules.by_id[schedule.id] = replace(
+        env.uow.schedules.by_id[schedule.id], enabled=False, next_run_at=None
+    )
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)
+
+    # Enabled again before its next occurrence: the spent retry does not run.
+    env.uow.schedules.by_id[schedule.id] = replace(
+        env.uow.schedules.by_id[schedule.id],
+        enabled=True,
+        next_run_at=_NOW + dt.timedelta(days=1),
+    )
+    await _tick_at(env, retry_at + _TICK)
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+
 async def test_corrupt_backup_failure_is_not_retried() -> None:
     # A BackupCorruptError is provably deterministic (issue #2250): re-archiving
     # the identical corrupt working set can never succeed, so the one-shot retry
