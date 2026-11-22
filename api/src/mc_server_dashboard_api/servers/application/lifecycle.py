@@ -2747,14 +2747,32 @@ class StopServer:
         matches under the stop-convergence claim: every release holds the claim,
         and no start places a row that is still assigned. So the entity takes the
         value either way.
+
+        A clear that fails is logged, not raised: the answer it follows decides
+        what the caller does (a timeout holds, a session end raises), and an
+        operator's re-stop would otherwise answer 500 for it. The row keeps the
+        refusal until a later answer is recorded or a release clears it.
         """
 
         if refusal is not recorded:
-            async with self.uow:
-                await self.uow.servers.set_final_snapshot_refusal(
-                    server.id, worker_id, refusal
+            try:
+                async with self.uow:
+                    await self.uow.servers.set_final_snapshot_refusal(
+                        server.id, worker_id, refusal
+                    )
+                    await self.uow.commit()
+            except Exception:
+                if refusal is not None:
+                    raise
+                _LOG.warning(
+                    "could not clear the recorded final-snapshot refusal of server "
+                    "%s; it stays recorded until a later answer is recorded or the "
+                    "server is released",
+                    server.id.value,
+                    exc_info=True,
                 )
-                await self.uow.commit()
+                server.final_snapshot_refusal = recorded
+                return
         server.final_snapshot_refusal = refusal
 
     async def redispatch_stop(

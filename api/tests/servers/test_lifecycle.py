@@ -8282,6 +8282,78 @@ async def test_a_retry_left_unanswered_keeps_the_row_and_clears_the_refusal(
     assert unrecorded.recorded_at(ServerId(server_id)) is None
 
 
+class _RepositoryFailingTheRefusalClear(FakeServerRepository):
+    """A repository whose clear of a recorded refusal raises, as in an outage."""
+
+    async def set_final_snapshot_refusal(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal | None,
+    ) -> bool:
+        if refusal is None:
+            raise RuntimeError("database unavailable")
+        return await super().set_final_snapshot_refusal(server_id, worker_id, refusal)
+
+
+@pytest.mark.parametrize(
+    ("entry", "answer"),
+    [
+        ("operator-re-stop", "timed-out"),
+        ("operator-re-stop", "session-ended"),
+        ("redispatch-not-found", "session-ended"),
+    ],
+)
+async def test_a_failed_clear_of_the_refusal_keeps_the_unanswered_retry_s_error(
+    entry: str, answer: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The clear only records that the latest answer is no longer a refusal. It
+    # must not replace that answer, which decides what the caller does: the
+    # operator's re-stop answers 503 worker_unavailable rather than 500, and the
+    # reconciler backs off as for any unanswered snapshot. The row keeps the
+    # refusal it holds until a later answer is recorded or a release clears it.
+    community, server_id, worker = _ids()
+    unanswered = _timed_out(worker) if answer == "timed-out" else _session_ended(worker)
+    redispatch = entry == "redispatch-not-found"
+    cp = _ScriptedSnapshots(
+        [unanswered],
+        stop=(
+            CommandOutcome(status=CommandStatus.SERVER_NOT_FOUND)
+            if redispatch
+            else None
+        ),
+    )
+    repo = _RepositoryFailingTheRefusalClear()
+    repo.seed(
+        _held(
+            community,
+            server_id,
+            worker,
+            refusal=FinalSnapshotRefusal.BUSY,
+            # A held row whose Worker dropped and came back reads unknown.
+            observed=ObservedState.UNKNOWN if redispatch else ObservedState.STOPPED,
+        )
+    )
+    uow = FakeUnitOfWork(servers=repo)
+
+    with (
+        caplog.at_level(logging.WARNING),
+        pytest.raises(WorkerUnavailableError) as excinfo,
+    ):
+        await _enter(
+            entry, _stale_clear(uow, cp, StopIntentCounter()), community, server_id
+        )
+
+    assert excinfo.value.upload_may_be_live is (answer == "timed-out")
+    stored = repo.by_id[ServerId(server_id)]
+    assert stored.assigned_worker_id == WorkerId(worker)
+    assert stored.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+    assert any(
+        "could not clear the recorded final-snapshot refusal" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 async def test_a_refused_retry_records_the_refusal_again() -> None:
     community, server_id, worker = _ids()
     cp = _ScriptedSnapshots([_refused(CommandStatus.UNAVAILABLE)])
