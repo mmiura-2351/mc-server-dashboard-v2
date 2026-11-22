@@ -333,7 +333,7 @@ async def test_import_seeds_rcon_when_archive_has_no_properties() -> None:
         create_server=_create_server(dst_uow, dst_store), file_store=dst_store
     )
     archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"\x00"})
-    await imp(
+    server = await imp(
         community_id=CommunityId(community),
         name="fresh",
         content=archive,
@@ -343,6 +343,7 @@ async def test_import_seeds_rcon_when_archive_has_no_properties() -> None:
         for line in dst_store.files["server.properties"].decode().splitlines()
         if "=" in line
     )
+    assert props["server-port"] == str(server.game_port)
     assert props["enable-rcon"] == "true"
     assert props["rcon.port"] == "25575"
     assert props["rcon.password"] != ""

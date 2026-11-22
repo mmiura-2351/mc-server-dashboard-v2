@@ -698,8 +698,9 @@ def new_server_properties(*, game_port: int, rcon_password: str) -> bytes:
     ``true`` opens region files ``O_DSYNC``, so on a host with slow synchronous
     writes a shutdown save takes minutes (#3436). That key is a default, not a
     platform-managed one: it is not in :data:`PLATFORM_MANAGED_KEYS`, so the
-    user's own value replaces it and no platform write touches it again. Only a
-    new server gets it; an imported or restored file is left as it is.
+    user's own value replaces it and no platform write touches it again. This is
+    the seed for a server that has no file yet; a file that exists is never
+    given the key, so an imported or restored server keeps what its file says.
     """
 
     content = set_rcon_properties(
