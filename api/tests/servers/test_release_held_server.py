@@ -314,6 +314,7 @@ async def test_a_release_refuses_while_a_final_snapshot_is_outstanding() -> None
             success=False,
             error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_UNAVAILABLE),
         ),
+        received_at=_NOW,
     )
     await snapshot
 

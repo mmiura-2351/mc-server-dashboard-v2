@@ -8936,3 +8936,140 @@ async def test_start_invalid_state_no_sync_without_bedrock_port() -> None:
     # no-op, and the real BedrockTunnelSyncer returns early on bedrock_port=None.
     assert len(tunnel_sync.calls) == 1
     assert tunnel_sync.calls[0][2] is None  # bedrock_port
+
+
+# --- a convergence carries its answer's instant (issues #4117, #4118) -------
+#
+# A write that converges observed state from the Worker's answer is stamped
+# with the instant the API read that answer, which the outcome carries, and not
+# when the write is made. Each answer here was read a second before the clock
+# reads, so a write stamped as it is made would read ``_NOW``.
+
+_ANSWERED_AT = _NOW - dt.timedelta(seconds=1)
+
+# Each call site of a convergence, by the one path that reaches it: the row it
+# starts from (desired, observed, assigned), the command the Worker answers, its
+# answer, and the observed state written from it.
+_CONVERGENCES = {
+    # StartServer.__call__: the start, or the hydrate before it, is refused
+    # because an instance already runs.
+    "start": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        False,
+        "start",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    "start-hydrate": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        False,
+        "hydrate",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    # The reconciler's placement of a running intent no Worker holds.
+    "placement-hydrate": (
+        DesiredState.RUNNING,
+        ObservedState.UNKNOWN,
+        False,
+        "hydrate",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    # The reconciler's re-sent start.
+    "redispatch-start": (
+        DesiredState.RUNNING,
+        ObservedState.CRASHED,
+        True,
+        "start",
+        CommandStatus.INVALID_STATE,
+        ObservedState.RUNNING,
+    ),
+    # StopServer.__call__, confirmed or answered that no instance remains.
+    "stop-confirmed": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.OK,
+        ObservedState.STOPPED,
+    ),
+    "stop-not-found": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.SERVER_NOT_FOUND,
+        ObservedState.STOPPED,
+    ),
+    # The reconciler's re-sent stop, which an operator's stop of a row already
+    # stopped also runs.
+    "redispatch-stop-confirmed": (
+        DesiredState.STOPPED,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.OK,
+        ObservedState.STOPPED,
+    ),
+    "redispatch-stop-not-found": (
+        DesiredState.STOPPED,
+        ObservedState.RUNNING,
+        True,
+        "stop",
+        CommandStatus.SERVER_NOT_FOUND,
+        ObservedState.STOPPED,
+    ),
+}
+
+
+async def _converge(
+    entry: str,
+    uow: FakeUnitOfWork,
+    cp: FakeControlPlane,
+    community: uuid.UUID,
+    server_id: uuid.UUID,
+) -> None:
+    c, s = CommunityId(community), ServerId(server_id)
+    stop = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
+    start = _start_server(uow, cp)
+    if entry.startswith("redispatch-stop"):
+        await stop.redispatch_stop(community_id=c, server_id=s)
+    elif entry.startswith("stop"):
+        await stop(community_id=c, server_id=s)
+    elif entry == "redispatch-start":
+        await start.redispatch_start(community_id=c, server_id=s)
+    elif entry == "placement-hydrate":
+        await start.place_and_start(community_id=c, server_id=s)
+    elif entry == "start-hydrate":
+        with pytest.raises(InvalidLifecycleTransitionError):
+            await start(community_id=c, server_id=s)
+    else:
+        await start(community_id=c, server_id=s)
+
+
+@pytest.mark.parametrize("entry", list(_CONVERGENCES))
+async def test_a_convergence_is_stamped_when_its_answer_was_read(entry: str) -> None:
+    community, server_id, worker = _ids()
+    desired, observed, assigned, kind, status, converged = _CONVERGENCES[entry]
+    uow = FakeUnitOfWork()
+    uow.servers.seed(
+        _server(
+            community_id=community,
+            server_id=server_id,
+            desired=desired,
+            observed=observed,
+            worker_id=worker if assigned else None,
+        )
+    )
+    cp = FakeControlPlane(
+        place_to=WorkerId(worker),
+        outcomes={kind: CommandOutcome(status=status, answered_at=_ANSWERED_AT)},
+    )
+
+    await _converge(entry, uow, cp, community, server_id)
+
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert (stored.observed_state, stored.observed_at) == (converged, _ANSWERED_AT)

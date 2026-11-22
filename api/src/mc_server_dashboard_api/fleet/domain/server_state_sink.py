@@ -28,6 +28,7 @@ class ServerStateSink(abc.ABC):
         server_id: str,
         worker_id: str,
         state: str,
+        observed_at: dt.datetime,
         detail: str = "",
         reason: str = "",
         emitted_at: dt.datetime | None = None,
@@ -37,6 +38,13 @@ class ServerStateSink(abc.ABC):
 
         Returns True when the write was applied, False when it was dropped
         (unknown server, ownership guard, or monotonic guard).
+
+        ``observed_at`` is the instant the API read the report off the stream,
+        the stamp the monotonic guard orders the write by (issue #4118). A
+        report still being written when the Worker's next session registers, or
+        when that session's teardown stamps its write, was read before either,
+        so it lands behind the newer session's reports and that write however
+        late it lands.
 
         An applied write is also relayed to subscribed clients as a live
         status event once it is committed (FR-MON-1); a dropped one is not
@@ -49,10 +57,11 @@ class ServerStateSink(abc.ABC):
         this one, the disconnect below, the API's own convergence writes —
         publishes through one seam, after its commit (issue #3212).
 
-        ``retry`` marks a retry of a report whose earlier attempt failed. That
-        attempt may have committed with its answer lost, so a retry that finds
-        the row already at the reported state still publishes the event that
-        attempt would have (issue #4062).
+        ``retry`` marks a retry of a report whose earlier attempt failed. It
+        carries that attempt's ``observed_at``. That attempt may have committed
+        with its answer lost, so a retry that finds the row already at the
+        reported state, at that stamp, still publishes the event that attempt
+        would have (issue #4062).
 
         ``worker_id`` is the reporting worker; the adapter applies the write
         only when it is the server's assigned worker, so a stale or misrouted

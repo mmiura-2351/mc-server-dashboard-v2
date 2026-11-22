@@ -25,7 +25,6 @@ import pytest
 
 from mc_server_dashboard_api.fleet.adapters import grpc_server
 from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegistry
-from mc_server_dashboard_api.fleet.domain.clock import Clock as FleetClock
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     Command as FleetCommand,
 )
@@ -59,7 +58,6 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     WorkerId,
 )
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
-from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import FakeServerStateSink
 from tests.fleet.test_grpc_session import (
     _CREDENTIAL,
@@ -98,20 +96,6 @@ _ANSWER_GUARD_SECONDS = 10.0
 # Well past every instant the test reads from the world's clock, which
 # advances one second a read, and so past any grace from the session's end.
 _TICK_AT = _T0 + dt.timedelta(hours=1)
-
-
-class _WorldClock(FleetClock):
-    """The world's clock, for the registry.
-
-    The session's end the write is stamped with is the registry's reading, and
-    the guard compares it with the sink's stamps: one clock, as in production.
-    """
-
-    def __init__(self, world: _World) -> None:  # noqa: F811
-        self._world = world
-
-    def now(self) -> dt.datetime:
-        return self._world.clock.now()
 
 
 class _FailingTeardownSink(FakeServerStateSink):
@@ -224,10 +208,9 @@ async def test_a_gone_workers_servers_end_unknown_when_its_teardown_wrote_nothin
     server = await world.server("survival", worker=_WORKER)
     server_id = str(server.id.value)
     sink = _FailingTeardownSink(world.sink(), refuse_second=teardown == "skipped")
-    registry = InMemoryWorkerRegistry(
-        clock=_WorldClock(world), heartbeat_timeout=_TIMEOUT
-    )
-    h = _Harness(registry, FleetFakeClock(_T0), state_sink=sink)
+    clock = world.fleet_clock()
+    registry = InMemoryWorkerRegistry(clock=clock, heartbeat_timeout=_TIMEOUT)
+    h = _Harness(registry, clock, state_sink=sink)
     try:
         stub = await h.start()
         old = await _registered(stub)

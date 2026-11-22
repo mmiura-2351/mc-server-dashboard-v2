@@ -81,6 +81,7 @@ async def test_reports_the_delete_to_every_connected_worker(
             msg.api_command.command_id,
             WorkerId(worker),
             pb.CommandResult(success=True),
+            received_at=_T0,
         )
 
 
@@ -112,5 +113,8 @@ async def test_the_delete_use_case_reports_through_the_fleet() -> None:
     assert msg.api_command.server_id == str(server_id.value)
     assert msg.api_command.WhichOneof("command") == "reclaim_deleted_server"
     await state.resolve(
-        msg.api_command.command_id, WorkerId(worker), pb.CommandResult(success=True)
+        msg.api_command.command_id,
+        WorkerId(worker),
+        pb.CommandResult(success=True),
+        received_at=_T0,
     )

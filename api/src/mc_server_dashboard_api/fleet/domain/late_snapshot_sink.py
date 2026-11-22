@@ -23,6 +23,7 @@ the seam.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 
 from mc_server_dashboard_api.fleet.domain.control_plane import CommandResultCode
 
@@ -38,6 +39,7 @@ class LateSnapshotResultSink(abc.ABC):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         """Release ``server_id``'s held assignment on a late snapshot result (#891).
@@ -68,6 +70,11 @@ class LateSnapshotResultSink(abc.ABC):
         a cause it never observed. The caller resolves it, so a failed result always
         carries something to log — mirroring the ``message or status.value`` every
         other failed-command log in the API renders.
+
+        ``received_at`` is the instant the API read the result off the stream
+        (issue #4117), which each held retry of it carries too. A failed write
+        of the release, and a refusal, are recorded for the reconciler with it,
+        so a report the API read after the result supersedes the record.
 
         ``retry`` marks a retry of a result whose earlier attempt failed. That
         attempt may have committed the release with its answer lost, so a retry

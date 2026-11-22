@@ -172,6 +172,9 @@ _REGISTRATION_DATABASE_TIMEOUT_SECONDS = 10.0
 # size is generous enough that a healthy processor never blocks the reader.
 _INBOUND_QUEUE_MAXSIZE = 1024
 
+# A queued message, with the instant the reader read it (issue #4118).
+_Received = tuple[pb.WorkerMessage, dt.datetime]
+
 _DRIVER_BY_KIND: dict[int, DriverKind] = {
     pb.EXECUTION_DRIVER_KIND_CONTAINER: DriverKind.CONTAINER,
 }
@@ -307,7 +310,7 @@ class _Hold:
     to status frames.
     """
 
-    def __init__(self, queue: asyncio.Queue[pb.WorkerMessage | None]) -> None:
+    def __init__(self, queue: asyncio.Queue[_Received | None]) -> None:
         self._queue = queue
         self.active = False
         self.logs = 0
@@ -323,11 +326,11 @@ class _Hold:
         self.active = True
         kept = []
         while not self._queue.empty():
-            message = self._queue.get_nowait()
-            if message is None or not self.drop(message):
-                kept.append(message)
-        for message in kept:
-            self._queue.put_nowait(message)
+            item = self._queue.get_nowait()
+            if item is None or not self.drop(item[0]):
+                kept.append(item)
+        for item in kept:
+            self._queue.put_nowait(item)
 
     def drop(self, message: pb.WorkerMessage) -> bool:
         """Count ``message`` and return True if it is dropped during a hold."""
@@ -769,7 +772,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         lines and metrics are dropped instead of queued (:class:`_Hold`).
         """
 
-        queue: asyncio.Queue[pb.WorkerMessage | None] = asyncio.Queue(
+        queue: asyncio.Queue[_Received | None] = asyncio.Queue(
             maxsize=_INBOUND_QUEUE_MAXSIZE
         )
         # Set at a clean EOF: the session is ending, so a held message gets one
@@ -781,17 +784,22 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         try:
             async for message in request_iterator:
+                # Stamped as it is read, before any await (issue #4118). The
+                # stamp rides the message to its write, retries included, and
+                # the monotonic guard orders the write by it. A message still
+                # being written when a newer session registers is stamped
+                # before that session's reports and its teardown's write, so it
+                # lands behind them however late it lands.
+                received_at = self._clock.now()
                 if processor.done():
                     await processor  # propagate cap-trip
                     return
                 if _is_heartbeat(message):
-                    self._registry.record_heartbeat(
-                        worker_id, session, self._clock.now()
-                    )
+                    self._registry.record_heartbeat(worker_id, session, received_at)
                     continue
                 if hold.drop(message):
                     continue
-                await queue.put(message)
+                await queue.put((message, received_at))
             stream_ended.set()
             await queue.put(None)  # sentinel for clean EOF
             await processor
@@ -813,7 +821,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         self,
         worker_id: WorkerId,
         session: SessionToken,
-        queue: asyncio.Queue[pb.WorkerMessage | None],
+        queue: asyncio.Queue[_Received | None],
         stream_ended: asyncio.Event,
         hold: _Hold,
     ) -> None:
@@ -829,9 +837,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
 
         consecutive_failures = 0
         while self._registry.is_current_session(worker_id, session):
-            message = await queue.get()
-            if message is None:
+            item = await queue.get()
+            if item is None:
                 return
+            message, received_at = item
             # The get may have waited for the message.
             if not self._registry.is_current_session(worker_id, session):
                 break
@@ -848,7 +857,9 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # failure is allowed to propagate, ending the session so teardown
             # marks the worker disconnected. Any success resets the streak.
             try:
-                await self._handle_held(worker_id, session, message, stream_ended, hold)
+                await self._handle_held(
+                    worker_id, session, message, received_at, stream_ended, hold
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -879,6 +890,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         session: SessionToken,
         message: pb.WorkerMessage,
+        received_at: dt.datetime,
         stream_ended: asyncio.Event,
         hold: _Hold,
     ) -> None:
@@ -894,7 +906,8 @@ class WorkerSessionServicer(WorkerServiceServicer):
         error is the message's own, and holding it would block the queue for good.
         Each retry is handled as one (:meth:`_handle`'s ``retry``): a failed
         attempt may have committed, so its retry publishes the frame of a write
-        it finds already made (issue #4062).
+        it finds already made (issue #4062). Every attempt carries the message's
+        ``received_at``, so a retry never stamps it later (issue #4118).
         However the hold ends, one WARNING counts the log lines and metrics
         dropped meanwhile, those purged from the queue as it started included,
         if any (issue #4028). The hold also starts while a first attempt is
@@ -909,7 +922,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         )
         try:
             try:
-                await self._handle(worker_id, message)
+                await self._handle(worker_id, message, received_at)
             except Exception as exc:
                 if (
                     not is_transient_database_error(exc)
@@ -957,7 +970,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     return
                 attempts += 1
                 try:
-                    await self._handle(worker_id, message, retry=True)
+                    await self._handle(worker_id, message, received_at, retry=True)
                 except Exception as exc:
                     if last:
                         _LOG.info(
@@ -1132,13 +1145,20 @@ class WorkerSessionServicer(WorkerServiceServicer):
         return worker_id, first.correlation_id, session, checked_ids
 
     async def _handle(
-        self, worker_id: WorkerId, message: pb.WorkerMessage, *, retry: bool = False
+        self,
+        worker_id: WorkerId,
+        message: pb.WorkerMessage,
+        received_at: dt.datetime,
+        *,
+        retry: bool = False,
     ) -> None:
-        """Apply ``message``; ``retry`` when an earlier attempt of it failed.
+        """Apply ``message``, read at ``received_at``; ``retry`` when an earlier
+        attempt of it failed.
 
         That attempt may have committed with its answer lost, so a retry tells
         the sinks to publish the frame of a write they find already made (issue
-        #4062).
+        #4062). A status change is stamped ``received_at`` (issue #4118), and a
+        command result carries it to the write it converges (issue #4117).
         """
 
         payload = message.WhichOneof("payload")
@@ -1151,7 +1171,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # through the late-snapshot sink (issue #891); the common match path is
             # still synchronous dict work that returns without awaiting.
             await self._control_plane.resolve(
-                message.correlation_id, worker_id, message.command_result, retry=retry
+                message.correlation_id,
+                worker_id,
+                message.command_result,
+                received_at=received_at,
+                retry=retry,
             )
             return
         if payload != "event":
@@ -1163,7 +1187,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         event = message.event.WhichOneof("event")
         if event == "status_change":
             await self._reconcile_status(
-                worker_id, message.event, emitted_at, retry=retry
+                worker_id, message.event, emitted_at, received_at, retry=retry
             )
         elif event == "log_line":
             self._relay_log(message.event, emitted_at)
@@ -1175,6 +1199,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
         worker_id: WorkerId,
         event: pb.Event,
         emitted_at: dt.datetime | None,
+        received_at: dt.datetime,
         *,
         retry: bool,
     ) -> None:
@@ -1189,6 +1214,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
             server_id=event.server_id,
             worker_id=worker_id.value,
             state=state,
+            observed_at=received_at,
             detail=event.status_change.detail,
             reason=_CRASH_REASON_BY_PROTO.get(event.status_change.crash_reason, ""),
             emitted_at=emitted_at,
