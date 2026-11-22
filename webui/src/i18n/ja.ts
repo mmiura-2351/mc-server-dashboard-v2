@@ -784,7 +784,7 @@ export const ja: Record<TranslationKey, string> = {
   // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
   // follows the choice.
   "schedules.dialog.retentionKeepLastHint":
-    "このサーバーにはまだ保持ポリシーがありません。スケジュールを作成すると、定期バックアップを最新のN件だけ保持するポリシーが設定され、その件数を超える古い定期バックアップは既存のものも含めて削除されます。手動・アップロード・イベントのバックアップが削除されることはありません。",
+    "このサーバーにはまだ保持ポリシーがありません。スケジュールを作成すると、定期バックアップを最新のN件だけ保持するポリシーが設定され、それ以外の定期バックアップは既存のものも含めて削除されます。「破損」と表示された定期バックアップは、ほかの定期バックアップだけではN件に届かない場合にのみ保持されます。手動・アップロード・イベントのバックアップが削除されることはありません。",
   "schedules.dialog.retentionKeepAllHint":
     "このサーバーには保持ポリシーがないため、定期バックアップは削除するか「バックアップ」タブでポリシーを設定するまで、すべて保持されます。",
   // Keep-last N prunes at once: the count of existing scheduled backups it

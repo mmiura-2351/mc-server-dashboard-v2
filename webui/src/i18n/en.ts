@@ -873,7 +873,7 @@ export const en = {
   // (#4084): keep the last N (prefilled 7) or opt out to keep all. The hint
   // follows the choice.
   "schedules.dialog.retentionKeepLastHint":
-    "This server has no retention policy yet. Creating the schedule sets it to keep the last N scheduled backups, and the older scheduled backups beyond that number are deleted, existing ones included. Manual, uploaded and event backups are never deleted.",
+    "This server has no retention policy yet. Creating the schedule sets it to keep the last N scheduled backups and delete the other scheduled backups, existing ones included. Scheduled backups marked Damaged are kept only when there are not enough other scheduled backups to reach N. Manual, uploaded and event backups are never deleted.",
   "schedules.dialog.retentionKeepAllHint":
     "This server has no retention policy, so every scheduled backup is kept until it is deleted or a policy is set on the Backups tab.",
   // Keep-last N prunes at once: the count of existing scheduled backups it
