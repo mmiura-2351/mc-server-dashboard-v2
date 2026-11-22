@@ -1398,12 +1398,12 @@ class UploadBackup:
             max_decompressed_bytes=self.max_decompressed_bytes,
         )
 
-        # Hold the per-server lifecycle lock across the server check, the row
-        # commit and the archive write, as CreateBackup does (issue #3219). Without
-        # it a DeleteServer / DeleteBackup landing between the commit and the write
-        # removes the row, and the write then lands an archive no delete saw while
-        # this returns a backup that no longer exists. The body is already fully
-        # received, so the lock never waits on the client's network.
+        # Hold the per-server lifecycle lock across the server check, the archive
+        # write and the row commit, as CreateBackup does (issue #3219). Without it
+        # a DeleteServer landing between the check and the write prunes the
+        # server's storage and removes it, and the write then lands an archive no
+        # delete saw. The body is already fully received, so the lock never waits
+        # on the client's network.
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
