@@ -165,9 +165,6 @@ async def test_a_teardown_write_landing_after_the_next_sessions_report_keeps_it(
     monkeypatch: pytest.MonkeyPatch,
     ending: str,
 ) -> None:
-    monkeypatch.setattr(
-        grpc_server, "_REGISTRATION_DATABASE_TIMEOUT_SECONDS", _DEADLINE_SECONDS
-    )
     server = await world.server("survival", worker=_WORKER)
     server_id = str(server.id.value)
     async with _stallable_teardowns(world, refuse_first=ending == "refused") as (
@@ -186,9 +183,17 @@ async def test_a_teardown_write_landing_after_the_next_sessions_report_keeps_it(
             )
             await old.done_writing()
         else:
-            old = stub.Session(metadata=_auth(_CREDENTIAL))
-            await old.write(_register_message())
-            code = await asyncio.wait_for(old.code(), timeout=_ANSWER_GUARD_SECONDS)
+            # Only the refused registration runs under the short deadline: the
+            # next one rebuilds from the real database.
+            with monkeypatch.context() as patch:
+                patch.setattr(
+                    grpc_server,
+                    "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+                    _DEADLINE_SECONDS,
+                )
+                old = stub.Session(metadata=_auth(_CREDENTIAL))
+                await old.write(_register_message())
+                code = await asyncio.wait_for(old.code(), timeout=_ANSWER_GUARD_SECONDS)
             assert code is grpc.StatusCode.UNAVAILABLE
         await asyncio.wait_for(sink.marking.wait(), timeout=_ANSWER_GUARD_SECONDS)
         reports = len(sink.applied)
