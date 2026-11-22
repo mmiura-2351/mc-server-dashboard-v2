@@ -499,9 +499,12 @@ async def publish_snapshot(
     #3865): a start writes ``eula.txt`` or owed group files, stamping an
     ``api-edit`` ``current``, then adopts the instance its placed worker already
     runs instead of hydrating it, and that instance's base lags the sentinel. A
-    restore or an at-rest edit never reaches the allowance: those doors refuse a
-    server still assigned to a worker (``Server.is_quiescent``) and wait for the
-    release (issue #3998). A commit-time fence re-reads the assignment AFTER the
+    restore or an at-rest edit reaches the allowance only through that same
+    adoption: the doors refuse a server still assigned to a worker
+    (``Server.is_quiescent``, issue #3998), so none lands under a stop's final
+    snapshot, but one made after the release is still published over when a start
+    then adopts a live instance from before it (issue #4004, item 4). A
+    commit-time fence re-reads the assignment AFTER the
     upload stream and refuses when the publisher is NOT the currently-assigned worker
     (409 ``publisher_not_assigned``): this prevents a late commit from a re-placed
     worker from wedging the new session. The commit runs the same fence again under
@@ -629,8 +632,11 @@ async def publish_snapshot(
                     # refusing it would wedge the server. The case that reaches here
                     # is an instance a start adopted instead of hydrating (#3865),
                     # whose base lags the ``api-edit`` of that start's EULA or group
-                    # write. A restore or an at-rest edit never does: those refuse a
-                    # server still assigned (issue #3998).
+                    # write. A restore or an at-rest edit reaches here only that way:
+                    # one made after the release, then a start that adopts a live
+                    # instance from before it (issue #4004, item 4). Those doors
+                    # refuse a server still assigned (issue #3998), so none lands
+                    # under a stop's final snapshot.
                     # That holds only once the worker has hydrated the server under
                     # its assignment (issue #3890). The check above refused a
                     # marked assigned worker, but this read is a second one: a

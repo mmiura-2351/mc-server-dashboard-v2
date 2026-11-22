@@ -165,7 +165,7 @@ class Server:
         )
 
     def is_quiescent(self) -> bool:
-        """Return whether nothing can publish over the server's store (#3998).
+        """Return whether no Worker holds the server at rest any more (#3998).
 
         At rest *and* unassigned. A stop keeps its Worker assigned until the final
         snapshot settles (#869), and that snapshot publishes over the store: the
@@ -173,7 +173,9 @@ class Server:
         sentinel ``current`` (the #1703 exemption, kept for adoption, #3865). So an
         API-side write to the working set made while the row is at rest but still
         assigned is overwritten. Every such write gates on this predicate, not on
-        :meth:`is_at_rest`; reads, which write nothing, may keep the latter.
+        :meth:`is_at_rest`; reads, which write nothing, may keep the latter. A
+        write made once quiescent can still be published over by a later start
+        that adopts a live instance from before it (#4004).
         """
 
         return self.assigned_worker_id is None and self.is_at_rest()

@@ -257,7 +257,7 @@ class DownloadResourcePack:
 # ---------------------------------------------------------------------------
 
 
-async def _load_server_at_rest(
+async def _load_quiescent_server(
     uow: UnitOfWork, community_id: CommunityId, server_id: ServerId
 ) -> Server:
     """Return the server, validating it exists, is in community, and is quiescent.
@@ -327,7 +327,7 @@ class AssignResourcePack:
     ) -> tuple[ResourcePackAssignment, ResourcePack]:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
-                server = await _load_server_at_rest(self.uow, community_id, server_id)
+                server = await _load_quiescent_server(self.uow, community_id, server_id)
 
                 pack = await self.uow.resource_packs.get_by_id(resource_pack_id)
                 if pack is None:
@@ -428,7 +428,7 @@ class UnassignResourcePack:
     ) -> None:
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
-                await _load_server_at_rest(self.uow, community_id, server_id)
+                await _load_quiescent_server(self.uow, community_id, server_id)
 
                 assignment = await self.uow.resource_packs.get_assignment_by_server(
                     server_id

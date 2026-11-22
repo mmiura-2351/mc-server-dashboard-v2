@@ -370,10 +370,17 @@ class ActionResult:
     # large to archive, #3859) whose re-archive can never succeed; True for
     # infra/unexpected faults that may heal.
     retryable: bool = True
-    # The action was refused because a stop still holds the server for its final
-    # snapshot (issue #3998): not an outcome to record, but one the runner owes
-    # again at its next tick.
-    deferred: bool = False
+
+
+@dataclass(frozen=True)
+class Deferred:
+    """An action :class:`ExecuteScheduleAction` did not attempt, owed at the next tick.
+
+    A backup of a server at rest that a stop still holds for its final snapshot
+    (issue #3998): :class:`CreateBackup` refused it under the lifecycle lock, since
+    an archive taken then would lack that snapshot. Not an outcome: the runner
+    records no run row and does not advance.
+    """
 
 
 @dataclass(frozen=True)
@@ -402,7 +409,7 @@ class ExecuteScheduleAction:
         action: ScheduleAction,
         command: str | None,
         only_when_running: bool | None,
-    ) -> ActionResult:
+    ) -> ActionResult | Deferred:
         async with self.uow:
             server = await self.uow.servers.get_by_id(server_id)
         if server is None:
@@ -419,17 +426,12 @@ class ExecuteScheduleAction:
             return ActionResult(
                 ScheduleRunOutcome.SKIPPED, _skip_detail(exc), community_id
             )
-        except ServerAssignedError:
-            # A backup of a server at rest that a stop still holds: whether the
-            # runner's read already saw that or a stop landed since, CreateBackup
-            # refused it under the lifecycle lock (issue #3998).
-            return ActionResult(
-                ScheduleRunOutcome.SKIPPED,
-                "server assigned",
-                community_id,
-                deferred=True,
-            )
         except ServerError as exc:
+            if action is ScheduleAction.BACKUP and isinstance(exc, ServerAssignedError):
+                # A server at rest that a stop still holds: whether the runner's
+                # read already saw that or a stop landed since, CreateBackup
+                # refused it under the lifecycle lock (issue #3998).
+                return Deferred()
             _LOG.warning(
                 "scheduled %s for server %s failed: %r",
                 action.value,
@@ -733,7 +735,7 @@ class RunScheduleTick:
                 if (schedule.id, occurrence, step.offset_minutes) not in self._warned:
                     self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
-        if result.deferred:
+        if isinstance(result, Deferred):
             self._log_deferred(schedule, "occurrence")
             return
         async with self._bookkeeping_lock:
@@ -764,7 +766,7 @@ class RunScheduleTick:
         ):
             return
         result, started_at, finished_at = await self._execute(schedule)
-        if result.deferred:
+        if isinstance(result, Deferred):
             # Not spent: nothing was attempted (issue #3998).
             self._backup_retry[schedule_id] = now
             self._log_deferred(schedule, "retry")
@@ -923,7 +925,7 @@ class RunScheduleTick:
 
     async def _execute(
         self, schedule: Schedule
-    ) -> tuple[ActionResult, dt.datetime, dt.datetime]:
+    ) -> tuple[ActionResult | Deferred, dt.datetime, dt.datetime]:
         started_at = self.clock.now()
         execute = self.make_execute()
         result = await execute(

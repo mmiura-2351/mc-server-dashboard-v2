@@ -5,12 +5,12 @@ assume an authorized member and only do the backup work. Create branches on serv
 state per the 6.9 table:
 
 - **at rest** (``server.is_at_rest()``: desired=stopped, observed in
-  {stopped, unknown}) -> archive directly from the authoritative Storage copy,
-  through the :class:`BackupArchiveStore` seam (FR-BAK-2). The server must also
-  be released (``server.is_quiescent()``): while a stop still holds its Worker,
-  ``current`` lacks the final snapshot in flight, so the create is refused 409
-  ``server_assigned`` (issue #3998). Restore is refused the same way, since that
-  snapshot would publish over it.
+  {stopped, unknown, crashed}) -> archive directly from the authoritative
+  Storage copy, through the :class:`BackupArchiveStore` seam (FR-BAK-2). The
+  server must also be released (``server.is_quiescent()``): while a stop still
+  holds its Worker, ``current`` lacks the final snapshot in flight, so the create
+  is refused 409 ``server_assigned`` (issue #3998). Restore is refused the same
+  way, since that snapshot would publish over it.
 - **running** (desired=running, observed=running, a worker assigned) ->
   on-demand snapshot (the :class:`SnapshotServer` hook, PR #114) whose worker
   path quiesces safely (save-off + non-blocking save-all + settle-wait), so the

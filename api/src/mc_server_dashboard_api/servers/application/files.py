@@ -5,7 +5,7 @@ assume an authorized member and only do the file work. Reads and edits branch on
 server state per the 6.9 table:
 
 - **at rest** (``server.is_at_rest()``: desired=stopped, observed in
-  {stopped, unknown}) → the authoritative Storage copy, through the
+  {stopped, unknown, crashed}) → the authoritative Storage copy, through the
   :class:`FileStore` seam. Edits are versioned (FR-FILE-3) and history/rollback
   act here. An edit also needs the server released (``server.is_quiescent()``):
   while a stop still holds its Worker for the final snapshot, that snapshot would

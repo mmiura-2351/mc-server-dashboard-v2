@@ -40,6 +40,7 @@ from mc_server_dashboard_api.servers.application.schedule_runner import (
     LATE_RUN_GRACE,
     WARNING_GRACE_FLOOR,
     ActionResult,
+    Deferred,
     ExecuteScheduleAction,
     RunScheduleTick,
 )
@@ -59,6 +60,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
     WorkerUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.entities import Server
+from mc_server_dashboard_api.servers.domain.errors import ServerAssignedError
 from mc_server_dashboard_api.servers.domain.schedule import (
     Cadence,
     Schedule,
@@ -551,6 +553,57 @@ async def test_a_backup_raced_by_a_stop_waits_for_the_next_tick(
     assert len(_deferred_lines(caplog, schedule)) == 1
 
 
+@dataclass(frozen=True)
+class _RefusesAssigned(StartServer):
+    """A start that answers ``server_assigned``, which only a backup defers."""
+
+    async def __call__(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        accept_eula: bool = False,
+    ) -> Server:
+        raise ServerAssignedError(str(server_id.value))
+
+
+async def test_only_a_backup_is_deferred_on_server_assigned(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Any other action refused ``server_assigned`` is an ordinary failure: it is
+    # recorded and advances rather than being owed at every tick (issue #3998).
+    caplog.set_level(logging.INFO)
+    env = _env()
+    server = _stopped_server()
+    schedule = _schedule(
+        server, action=ScheduleAction.START, next_run_at=_NOW - dt.timedelta(seconds=10)
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    base_factory = env.runner.make_execute
+
+    def _make_refusing() -> ExecuteScheduleAction:
+        base = base_factory()
+        return replace(
+            base,
+            start_server=_RefusesAssigned(
+                **{
+                    f.name: getattr(base.start_server, f.name)
+                    for f in fields(base.start_server)
+                }
+            ),
+        )
+
+    env.runner.make_execute = _make_refusing
+
+    await env.runner.tick()
+
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+    stored = env.uow.schedules.by_id[schedule.id]
+    assert stored.next_run_at is not None and stored.next_run_at > _NOW
+    assert _deferred_lines(caplog, schedule) == []
+
+
 async def test_a_backup_retry_of_a_server_a_worker_still_holds_waits_too(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -909,7 +962,7 @@ async def test_advance_does_not_resurrect_a_concurrently_disabled_schedule() -> 
             action: ScheduleAction,
             command: str | None,
             only_when_running: bool | None,
-        ) -> ActionResult:
+        ) -> ActionResult | Deferred:
             env.uow.schedules.by_id[schedule.id] = replace(
                 env.uow.schedules.by_id[schedule.id],
                 enabled=False,
@@ -1078,7 +1131,7 @@ async def test_two_due_schedules_on_different_servers_run_concurrently() -> None
                 action: ScheduleAction,
                 command: str | None,
                 only_when_running: bool | None,
-            ) -> ActionResult:
+            ) -> ActionResult | Deferred:
                 nonlocal max_concurrent
                 in_flight.add(server_id)
                 max_concurrent = max(max_concurrent, len(in_flight))
@@ -1146,7 +1199,7 @@ async def test_same_server_schedules_run_serially() -> None:
                 action: ScheduleAction,
                 command: str | None,
                 only_when_running: bool | None,
-            ) -> ActionResult:
+            ) -> ActionResult | Deferred:
                 # Use command line as schedule identifier since we can't get
                 # schedule id here.
                 key = ScheduleId(uuid.uuid4())  # unique per call
@@ -1218,7 +1271,7 @@ async def test_concurrent_cap_limits_parallel_executions() -> None:
                 action: ScheduleAction,
                 command: str | None,
                 only_when_running: bool | None,
-            ) -> ActionResult:
+            ) -> ActionResult | Deferred:
                 nonlocal max_concurrent, in_flight
                 in_flight += 1
                 max_concurrent = max(max_concurrent, in_flight)
@@ -2328,7 +2381,7 @@ class _BoomExecute(ExecuteScheduleAction):
         action: ScheduleAction,
         command: str | None,
         only_when_running: bool | None,
-    ) -> ActionResult:
+    ) -> ActionResult | Deferred:
         if action is ScheduleAction.STOP:
             raise RuntimeError("boom")
         return await super().__call__(
