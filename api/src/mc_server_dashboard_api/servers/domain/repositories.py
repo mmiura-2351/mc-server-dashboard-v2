@@ -394,6 +394,11 @@ class ServerRepository(abc.ABC):
         ``observed_at`` too, which ``Server.crash_not_restarted`` compares;
         under a stopped intent only that column is set to ``observed_at``, so
         its release waits a full grace from the disconnect.
+
+        A server observed later than ``observed_at`` is left as it is, its
+        stamp included (issue #4092): that is a report of the Worker's next
+        session, made after the disconnect, which this write must not
+        overwrite when it lands late.
         """
 
     @abc.abstractmethod

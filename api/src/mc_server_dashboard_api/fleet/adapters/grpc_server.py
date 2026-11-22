@@ -697,19 +697,15 @@ class WorkerSessionServicer(WorkerServiceServicer):
         # Pass this Session's token so a delayed teardown only offlines the
         # Worker if it has not reconnected on a newer Session (Section 4.4).
         self._registry.mark_disconnected(worker_id, session)
-        # Guard the bulk observed=unknown write with this Session's token too:
-        # the write deliberately bypasses the per-server monotonic guard, so a
-        # stale teardown after a reconnect would otherwise clobber the NEW
-        # session's live server states (issue #775, CONTROL_PLANE.md 4.4).
-        # There is an accepted one-roundtrip TOCTOU window here: a reconnect
-        # on a newer Session could win the is_current_session check between
-        # this read and the bulk unknown-write below, so the write could
-        # still clobber the NEW session's live states with unknown. The
-        # window is judged acceptable (PR #802 review): it is bounded to a
-        # single observation and the reconciler self-heals — the live worker
-        # re-reports its servers' states on its next StatusChange, restoring
-        # them. Closing it fully would need the write itself to be guarded by
-        # the session token atomically, which is not worth the complexity.
+        # Guard the bulk observed=unknown write with this Session's token too,
+        # so a stale teardown after a reconnect does not write at all (issue
+        # #775, CONTROL_PLANE.md 4.4). A reconnect can still come after the
+        # check, while the write waits on the database, and its reports can
+        # commit first (issue #4092). The sink stamps the write before its first
+        # await, with no await between the check and the call, so those
+        # reports are stamped later, and the write leaves every server observed
+        # later than its stamp. The reader has finished above, so this
+        # session's own reports are all stamped earlier and still marked.
         if self._registry.is_current_session(worker_id, session):
             # Logged here rather than raised: once the RPC's cancel has broken
             # the shield, nothing awaits this task's outcome.

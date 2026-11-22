@@ -427,48 +427,11 @@ async def test_record_observed_state_drops_expected_worker_write_on_unassigned_r
     assert loaded.observed_at is None
 
 
-async def test_mark_worker_servers_unknown_overrides_fresher_observed_at(
-    engine: AsyncEngine,
-) -> None:
-    # Bulk cache-invalidation always wins (issue #216 ruling): a worker disconnect
-    # marks state LESS certain (-> unknown) and must override even a row whose
-    # observed_at is newer than the invalidation stamp.
-    community_id = await _seed_community(engine)
-    server_id = await _create_server(engine, community_id, "survival")
-    worker = uuid.uuid4()
-    factory = create_session_factory(engine)
-
-    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
-        server = await uow.servers.get_by_id(server_id)
-        assert server is not None
-        server.desired_state = DesiredState.RUNNING
-        server.assigned_worker_id = WorkerId(worker)
-        server.updated_at = _NOW
-        await uow.servers.update_lifecycle(
-            server, expected_from=DesiredState.STOPPED, expected_assigned_worker_id=None
-        )
-        await uow.servers.record_observed_state(
-            server_id, observed_state=ObservedState.RUNNING, observed_at=_NOW
-        )
-        await uow.commit()
-
-    # _OLD is earlier than the row's _NOW observed_at, yet the invalidation lands.
-    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
-        await uow.servers.mark_worker_servers_unknown(WorkerId(worker), _OLD)
-        await uow.commit()
-
-    async with ServersUnitOfWork(factory, InProcessRealTimeEvents()) as uow:
-        loaded = await uow.servers.get_by_id(server_id)
-    assert loaded is not None
-    assert loaded.observed_state is ObservedState.UNKNOWN
-    assert loaded.observed_at == _OLD
-
-
 async def test_reset_unverifiable_overrides_fresher_observed_at(
     engine: AsyncEngine,
 ) -> None:
-    # The startup reset is bulk cache-invalidation too: it always wins regardless
-    # of the row's observed_at (issue #216 ruling).
+    # The startup reset is bulk cache-invalidation: it always wins regardless of
+    # the row's observed_at (issue #216 ruling).
     community_id = await _seed_community(engine)
     server_id = await _create_server(engine, community_id, "survival")
     worker = uuid.uuid4()
