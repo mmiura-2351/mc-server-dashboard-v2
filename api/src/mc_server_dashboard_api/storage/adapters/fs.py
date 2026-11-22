@@ -103,6 +103,7 @@ from mc_server_dashboard_api.storage.domain.port import (
     PublisherFence,
     SnapshotHandle,
     Storage,
+    SubtreeExtent,
     WorkingSetView,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
@@ -2713,6 +2714,43 @@ class FsStorage(Storage):
         finally:
             release()
 
+    async def subtree_extent(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: RelPath,
+        *,
+        max_depth: int,
+    ) -> SubtreeExtent:
+        return await asyncio.to_thread(
+            self._subtree_extent, community_id, server_id, rel_path, max_depth
+        )
+
+    def _subtree_extent(
+        self,
+        community_id: CommunityId,
+        server_id: ServerId,
+        rel_path: RelPath,
+        max_depth: int,
+    ) -> SubtreeExtent:
+        not_found = f"directory not found: {rel_path.value!r}"
+        if not self._current_link(community_id, server_id).is_symlink():
+            if rel_path.parts:
+                raise NotFoundError(not_found)
+            return SubtreeExtent(depth=0, longest=0)
+        # Leased like a listing, and resolved as one: only ``rel_path`` is.
+        current, release = self._lease_current(community_id, server_id)
+        try:
+            target = self._safe_read_target(current, rel_path)
+            # The adapter's one errno posture (issue #2555): a transient fault
+            # below the directory is the retryable storage type, and a standing
+            # one (EACCES on a mode-000 directory, say) stays the error it is, as
+            # it does when the same directory is listed, read or made into.
+            with _translating_io_faults():
+                return _measure_subtree(target, not_found, max_depth)
+        finally:
+            release()
+
     async def path_exists(
         self, community_id: CommunityId, server_id: ServerId, rel_path: RelPath
     ) -> bool:
@@ -3122,10 +3160,15 @@ class FsStorage(Storage):
         )
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
-        """temp-sibling + fsync + atomic rename (Section 4.4)."""
+        """temp-sibling + fsync + atomic rename (Section 4.4).
+
+        The temp's name is not built from the target's (issue #3973): a name of
+        255 bytes, ``NAME_MAX``, is one the object backend holds, so fs must write
+        it too, and a temp named after it would be past ``NAME_MAX`` itself.
+        """
 
         fd, tmp_name = tempfile.mkstemp(
-            dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+            dir=str(target.parent), prefix=".", suffix=".tmp"
         )
         tmp = Path(tmp_name)
         try:
@@ -3779,6 +3822,78 @@ async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
     )
 
 
+# A directory the subtree measure opens: never through a link, and not handed to
+# a child process.
+_WALK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _measure_subtree(target: Path, not_found: str, max_depth: int) -> SubtreeExtent:
+    """Measure ``target``'s subtree on its names' raw bytes (issue #3973).
+
+    Each directory is opened by its name relative to its parent's descriptor, as
+    the Worker's snapshot walk opens them, so no path the walk hands the kernel
+    is longer than one name: a subtree whose absolute paths pass ``PATH_MAX`` is
+    measured like any other. The walk holds one descriptor per level it is in,
+    and opens no directory ``max_depth`` levels below or deeper, so it holds at
+    most ``max_depth`` of them, as the Worker's walk stops at its depth bound:
+    a directory at that level is counted, and nothing below it is. It never
+    follows a link: a symlink is a name, as the listing describes it.
+    A directory that vanishes, or stops being one, between its listing and its
+    open is left out below its own name, as a listing leaves out a child that
+    vanishes. ``target`` itself not being a directory is the listing's miss; any
+    other failure surfaces as the ``OSError`` it is.
+    """
+
+    try:
+        top = os.open(target, _WALK_DIR_FLAGS)
+    except OSError as exc:
+        if exc.errno in _NOT_A_LISTABLE_DIR:
+            raise NotFoundError(not_found) from exc
+        raise
+    depth = longest = 0
+    # One frame per level the walk is in: the directory's descriptor, its path
+    # below ``target``, its level and the subdirectories it has left to walk.
+    frames: list[tuple[int, bytes, int, list[bytes]]] = []
+
+    def enter(fd: int, below: bytes, level: int) -> None:
+        nonlocal depth, longest
+        subdirectories: list[bytes] = []
+        # Framed before the listing, so a failing listing still closes it.
+        frames.append((fd, below, level, subdirectories))
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                name = os.fsencode(entry.name)
+                path = below + b"/" + name if below else name
+                longest = max(longest, len(path))
+                if entry.is_dir(follow_symlinks=False):
+                    depth = max(depth, level + 1)
+                    if level + 1 < max_depth:
+                        subdirectories.append(name)
+
+    try:
+        enter(top, b"", 0)
+        while frames:
+            fd, below, level, subdirectories = frames[-1]
+            if not subdirectories:
+                frames.pop()
+                os.close(fd)
+                continue
+            name = subdirectories.pop()
+            try:
+                child = os.open(name, _WALK_DIR_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                # Gone, or no longer a directory: a file, or a symlink, which
+                # ``O_DIRECTORY`` with ``O_NOFOLLOW`` refuses as ENOTDIR too.
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                    continue
+                raise
+            enter(child, below + b"/" + name if below else name, level + 1)
+    finally:
+        for fd, *_ in frames:
+            os.close(fd)
+    return SubtreeExtent(depth=depth, longest=longest)
+
+
 def _list_children(target: Path, not_found: str) -> list[Path]:
     """List ``target``'s children sorted by name, reporting a miss as ``NotFoundError``.
 
@@ -4120,8 +4235,8 @@ def _name_too_long_refused(name: str) -> Iterator[None]:
     directory it is extracted into, raises ``ENAMETOOLONG``, from the filter's
     path resolution or from the extraction, whichever reaches the name first.
     Refused, it is a member the ingest refuses and an archive nothing can be
-    restored from, rather than a raw ``OSError``. No rule decides here which
-    names a member may have: issue #3973 does.
+    restored from, rather than a raw ``OSError``. The member-name rule (issue
+    #3973) is not applied here yet: that is issue #3975.
     """
 
     try:

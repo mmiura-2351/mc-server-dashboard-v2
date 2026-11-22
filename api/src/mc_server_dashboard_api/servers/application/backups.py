@@ -66,6 +66,7 @@ from mc_server_dashboard_api.audit.domain.operations import (
     TARGET_BACKUP,
 )
 from mc_server_dashboard_api.audit.domain.recorder import AuditRecorder
+from mc_server_dashboard_api.member_name import member_name_refusal
 from mc_server_dashboard_api.servers.application.archive_validation import (
     run_archive_validation,
 )
@@ -1650,6 +1651,16 @@ def _validate_backup_archive(
                 # The Worker's generation-marker name (issue #3433), whether the
                 # member is that entry or lies under it.
                 _refuse_reserved_root_name(member.name)
+                # The member-name rule (issue #3973): restore publishes every
+                # member as a name of the working set. Not the characters a
+                # files-API door refuses: the platform's own backup of names a
+                # running server created must upload again.
+                name_refusal = member_name_refusal(member.name, is_dir=member.isdir())
+                if name_refusal is not None:
+                    raise InvalidBackupArchiveError(
+                        f"unsafe member: {_echoed_name(read.name)} is refused by "
+                        f"the member-name rule ({name_refusal})"
+                    )
                 if member.isfile():
                     handle = tar.extractfile(member)
                     if handle is not None:
@@ -1666,9 +1677,12 @@ def _validate_backup_archive(
         # GNU sparse field as a bare ``ValueError`` (#3769). The tuple guards our
         # own code in the loop too, and none of it raises one of these: the
         # helpers it calls (``without_tar_root_prefix``, ``unrestorable_reason``,
-        # ``_echoed_name``, the two ``_refuse_*`` guards, ``_drain_capped``) only
-        # slice, split and build ``PurePosixPath`` s, and refuse with
-        # ``ServerError`` s, none of which subclasses a member of the tuple. The
+        # ``_echoed_name``, the two ``_refuse_*`` guards, ``member_name_refusal``,
+        # ``_drain_capped``) only slice, split and build ``PurePosixPath`` s, and
+        # refuse with ``ServerError`` s, none of which subclasses a member of the
+        # tuple. ``member_name_refusal`` encodes the name too, with
+        # ``surrogateescape``, which takes back every byte ``tarfile`` decoded with
+        # it, so it raises no ``UnicodeEncodeError`` (a ``ValueError``). The
         # read past the end-of-archive marker raises them by design (#3778): a
         # ``ReadError`` for anything but zeros there, and the gzip layer's own
         # errors for its trailer. So does ``CappedReader`` for a seek back

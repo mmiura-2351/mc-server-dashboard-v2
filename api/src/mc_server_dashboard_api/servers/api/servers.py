@@ -599,6 +599,13 @@ async def import_server(
     under one is 422 ``reserved_name``, refused before the row is created rather
     than dropped. A same-named member deeper in the tree is ordinary user data.
 
+    **The member-name rule (issue #3973).** A member more than 128 directory
+    levels deep (the root is level 0 and only directories count) is 422
+    ``path_too_deep``, one with a component past 255 bytes in UTF-8
+    ``name_too_long`` and one with a path past 4,095 bytes ``path_too_long``,
+    refused before the row is created. The characters the files-API writes refuse
+    are not refused here: an export carries the names its working set held.
+
     A racer taking the auto-assigned game port or slug between the assignment and
     the commit that inserts the row is 409 ``port_taken`` / ``slug_taken``, and an
     exhausted slug retry budget is 503 ``slug_exhausted`` (issue #3022) — the same

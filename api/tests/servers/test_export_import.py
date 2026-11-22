@@ -1468,3 +1468,64 @@ async def test_import_member_under_a_nested_marker_name_is_published() -> None:
         content=archive,
     )
     assert dst_store.files["world/.mcsd_generation"] == b"X"
+
+
+# --- the member-name rule (issue #3973) -------------------------------------
+#
+# An import publishes every member as a name of the new working set, so a member
+# the Worker could not snapshot, or a name no backend can hold, is refused in the
+# pre-commit validate pass and no row is left behind. The characters a files-API
+# door refuses are not refused here: an export carries whatever names its working
+# set held, and importing it again must take them.
+
+
+def _deep(directories: int) -> str:
+    return "/".join(["d"] * directories + ["f"])
+
+
+def _exactly(size: int) -> str:
+    parts: list[str] = []
+    while size > 201:
+        parts.append("p" * 200)
+        size -= 201
+    return "/".join([*parts, "p" * size])
+
+
+@pytest.mark.parametrize(
+    ("member", "reason"),
+    [
+        (_deep(129), "path_too_deep"),
+        ("world/" + "n" * 256, "name_too_long"),
+        (_exactly(4096), "path_too_long"),
+    ],
+)
+async def test_import_member_the_rule_refuses_creates_no_row(
+    member: str, reason: str
+) -> None:
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), member: b"X"})
+
+    with pytest.raises(InvalidFilePathError) as caught:
+        await imp(community_id=CommunityId(community), name="fresh", content=archive)
+    assert caught.value.reason == reason
+    assert len(dst_uow.servers.by_id) == 0
+    assert dst_store.files == {}
+
+
+@pytest.mark.parametrize(
+    "member", [_deep(128), "world/" + "n" * 255, _exactly(4095), "a\\b", "a\x85b"]
+)
+async def test_import_member_the_rule_admits_is_published(member: str) -> None:
+    community = uuid.uuid4()
+    dst_uow, dst_store = FakeUnitOfWork(), FakeFileStore()
+    imp = ImportServer(
+        create_server=_create_server(dst_uow, dst_store), file_store=dst_store
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), member: b"X"})
+
+    await imp(community_id=CommunityId(community), name="fresh", content=archive)
+    assert dst_store.files[member] == b"X"

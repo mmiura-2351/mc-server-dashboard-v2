@@ -1556,6 +1556,33 @@ describe("ServerFilesTab error presentation glue", () => {
   });
 });
 
+describe("ServerFilesTab refused existing name", () => {
+  it("asks for a rename when a save is refused for the file's own name (#3973)", async () => {
+    routeGet({
+      detail: server(),
+      list: listing([{ name: "a\\b.txt", kind: "file" }]),
+      content: { path: "a\\b.txt", content_base64: encodeUtf8Base64("x\n") },
+    });
+    mockApi.put.mockRejectedValue(
+      new ApiError(422, { reason: "invalid_name_character" }),
+    );
+    renderPage();
+    await openFiles();
+
+    fireEvent.click(await screen.findByText(/a\\b\.txt/));
+    const editor = await screen.findByLabelText(t("files.editorLabel"));
+    fireEvent.change(editor, { target: { value: "y\n" } });
+    fireEvent.click(screen.getByRole("button", { name: t("files.save") }));
+
+    expect(
+      await screen.findByText(t("files.error.nameNoLongerAllowed")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("files.error.invalidNameCharacter")),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("ServerFilesTab protected content flow", () => {
   it("shows a redirect notice with a link to #plugins on content_dir_protected (paper)", async () => {
     routeGet({

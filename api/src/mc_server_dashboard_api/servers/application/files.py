@@ -57,6 +57,13 @@ from mc_server_dashboard_api.archive_member import (
     GzipReader,
     HeaderLimitError,
 )
+from mc_server_dashboard_api.member_name import (
+    MAX_DIRECTORY_DEPTH,
+    component_refusal,
+    extent_refusal,
+    member_name_refusal,
+    path_size,
+)
 from mc_server_dashboard_api.servers.application.archive_validation import (
     run_archive_validation,
 )
@@ -97,6 +104,9 @@ from mc_server_dashboard_api.servers.domain.server_properties import (
     changed_platform_managed_keys,
 )
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
+from mc_server_dashboard_api.servers.domain.upload_filename import (
+    is_refused_filename_character,
+)
 from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     DesiredState,
@@ -347,6 +357,88 @@ def _refuse_reserved_root_name(rel_path: str) -> None:
     parts = PurePosixPath(rel_path).parts
     if parts and parts[0].startswith(_GENERATION_MARKER_PREFIX):
         raise InvalidFilePathError(rel_path, reason="reserved_name")
+
+
+def _refuse_unstorable(rel_path: str, *, is_dir: bool) -> None:
+    """Refuse a name the member-name rule refuses (issue #3973).
+
+    ``rel_path`` is a name the mutation creates, ``is_dir`` whether it is a
+    directory. Too deep for the Worker to snapshot is ``path_too_deep``, a
+    component past 255 bytes ``name_too_long`` and a path past 4,095 bytes
+    ``path_too_long``, on either backend alike. A server import and the backup
+    upload ask only this, so the platform's own export or backup of names a
+    running server created still uploads again.
+    """
+
+    reason = member_name_refusal(rel_path, is_dir=is_dir)
+    if reason is not None:
+        raise InvalidFilePathError(rel_path, reason=reason)
+
+
+def _refuse_unnamable(rel_path: str, *, is_dir: bool) -> None:
+    """Refuse a name no files-API door may create (issues #3969, #3973).
+
+    The member-name rule (:func:`_refuse_unstorable`), and on top of it the
+    characters an uploaded file's name may not carry
+    (:func:`~mc_server_dashboard_api.servers.domain.upload_filename.is_refused_filename_character`),
+    in any component: ``invalid_name_character``. Call it on a path the traversal
+    check has accepted, so a C0 or DEL character stays that check's
+    ``invalid_path``. A name that already exists stays reachable: reads,
+    deletes and a rename away do not ask.
+
+    The lengths are judged before the characters, and each distinct character
+    is looked at once, so the character scan is bounded: past the lengths, at
+    most a path's worth of distinct characters is left, however long the string
+    or however many ``.`` and ``/`` segments pad it. The lengths themselves cost
+    a pass per segment, as the traversal check before them does. A lone
+    surrogate is refused first, at the cost of one encode: no name may carry
+    one, and the rule cannot measure one.
+    """
+
+    _refuse_lone_surrogate(rel_path)
+    _refuse_unstorable(rel_path, is_dir=is_dir)
+    _refuse_refused_characters(rel_path)
+
+
+def _refuse_renamed(from_path: str, to_path: str, *, is_dir: bool) -> None:
+    """Refuse a rename destination no files-API door may create (issue #3973).
+
+    Judged as :func:`_refuse_unnamable` judges a created name, in the same order,
+    with the one difference a move makes: a limit on where the name sits is
+    judged only when the destination grows what it bounds, as for the names
+    below a moved directory (:func:`_refuse_unstorable_subtree`). The depth is
+    judged when the destination has more components than the source, a
+    directory's destination counting as a level and a file's not; the path's
+    length when it has more bytes. A move that grows neither makes no name
+    deeper, or longer, than the source already is, so a name past a limit is
+    renamed at its own level and length. Its components and its characters are
+    new, so they are always judged.
+    """
+
+    _refuse_lone_surrogate(to_path)
+    to_components, to_bytes = path_size(to_path)
+    from_components, from_bytes = path_size(from_path)
+    reason = component_refusal(to_path) or extent_refusal(
+        directories=(to_components if is_dir else to_components - 1)
+        if to_components > from_components
+        else 0,
+        path_bytes=to_bytes if to_bytes > from_bytes else 0,
+    )
+    if reason is not None:
+        raise InvalidFilePathError(to_path, reason=reason)
+    _refuse_refused_characters(to_path)
+
+
+def _refuse_lone_surrogate(rel_path: str) -> None:
+    try:
+        rel_path.encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidFilePathError(rel_path, reason="invalid_name_character") from None
+
+
+def _refuse_refused_characters(rel_path: str) -> None:
+    if any(is_refused_filename_character(c) for c in set(rel_path) - {"/"}):
+        raise InvalidFilePathError(rel_path, reason="invalid_name_character")
 
 
 async def _current_properties(
@@ -602,6 +694,11 @@ class WriteFile:
         # Before the running/at-rest branch: a running write would overwrite the
         # Worker's own marker in the live working set (issue #3433).
         _refuse_reserved_root_name(rel_path)
+        # The name rule, before the branch too (issue #3973): a running write
+        # creates the name in the live working set, which the stop-time
+        # snapshot publishes. It judges a path the traversal check accepted.
+        self.file_store.validate_rel_path(rel_path)
+        _refuse_unnamable(rel_path, is_dir=False)
 
         # Hold the per-server lifecycle lock across the at-rest check and the
         # Storage write (issue #827): a start that flips desired=running must
@@ -631,7 +728,6 @@ class WriteFile:
                 )
                 return
             if _is_running(server):
-                self.file_store.validate_rel_path(rel_path)
                 await self._guard_platform_managed_keys(
                     community_id=community_id,
                     server_id=server_id,
@@ -952,6 +1048,27 @@ def _validate_archive(
         pass
 
 
+def _judge_extract_target(
+    file_store: FileStore, server_type: ServerType, target: str
+) -> None:
+    """Refuse an archive member by the path it extracts to, before any write.
+
+    ``target`` is the member joined to the upload's directory. A member named
+    ``server.properties/x`` (or any member under a directory of that name)
+    extracts through the same parent-creating write, leaving a DIRECTORY at the
+    guarded path (issue #2846); the same member under a subdirectory is ordinary
+    user data. The name rule runs after the traversal check the write would
+    make (issue #3973), so a member that fails either refuses the archive before
+    anything is written. Pure, so the extract runs it on the archive pool.
+    """
+
+    _guard_content_dir(server_type, target)
+    _refuse_dir_at_root_properties(str(PurePosixPath(target).parent))
+    _refuse_reserved_root_name(target)
+    file_store.validate_rel_path(target)
+    _refuse_unnamable(target, is_dir=False)
+
+
 def _check_entry_path(name: str) -> None:
     parts = name.split("/")
     if name.startswith("/") or ".." in parts:
@@ -1126,11 +1243,17 @@ class UploadFile:
                     max_bytes=self.max_bytes,
                     max_entries=self.max_entries,
                 )
-                # Guard every extracted entry against the content directory
-                # (issue #1337). Scan all entries before writing so a single
-                # offending member rejects the whole archive cleanly.
-                entries = await run_archive_validation(
-                    lambda: list(
+                # Guard every extracted entry by its JOINED target before writing,
+                # so a single offending member rejects the whole archive cleanly:
+                # the content directory (issue #1337), a directory at the root
+                # server.properties (issue #2846), the reserved marker name (issue
+                # #3433) and the name rule (issue #3973). The scan runs on the
+                # pool too, with the read that lists the entries: it is per member,
+                # and on the event loop it would block every other request.
+                server_type = server.server_type
+
+                def judged_entries() -> list[tuple[str, bytes]]:
+                    listed = list(
                         _archive_entries(
                             filename,
                             content,
@@ -1138,7 +1261,13 @@ class UploadFile:
                             max_entries=self.max_entries,
                         )
                     )
-                )
+                    for entry_path, _data in listed:
+                        _judge_extract_target(
+                            self.file_store, server_type, _join(dir_path, entry_path)
+                        )
+                    return listed
+
+                entries = await run_archive_validation(judged_entries)
                 # A member landing on the root server.properties is a write of that
                 # file, so it faces the same platform-key guard (issue #2809) — in
                 # this same pre-write scan, against ONE baseline read taken before
@@ -1147,15 +1276,6 @@ class UploadFile:
                 properties_baseline: bytes | None = None
                 for entry_path, data in entries:
                     target = _join(dir_path, entry_path)
-                    _guard_content_dir(server.server_type, target)
-                    # A member named ``server.properties/x`` (or any member under
-                    # a dir_path of that name) extracts through the same
-                    # parent-creating write, leaving a DIRECTORY at the guarded
-                    # path (issue #2846). Guarded on the JOINED target, not the
-                    # member name: the same member under a subdirectory is
-                    # ordinary user data.
-                    _refuse_dir_at_root_properties(str(PurePosixPath(target).parent))
-                    _refuse_reserved_root_name(target)
                     if _is_root_server_properties(target):
                         if properties_baseline is None:
                             properties_baseline = await _current_properties(
@@ -1182,6 +1302,7 @@ class UploadFile:
                 str(PurePosixPath(_join(dir_path, filename)).parent)
             )
             _refuse_reserved_root_name(_join(dir_path, filename))
+            _refuse_unnamable(_join(dir_path, filename), is_dir=False)
             await _guard_at_rest_properties(
                 self.file_store,
                 community_id=community_id,
@@ -1520,6 +1641,7 @@ class MakeDir:
             raise InvalidFilePathError(rel_path)
         _refuse_dir_at_root_properties(rel_path)
         _refuse_reserved_root_name(rel_path)
+        _refuse_unnamable(rel_path, is_dir=True)
         # Hold the per-server lifecycle lock across the at-rest check and the
         # make-dir so a concurrent start cannot race the mutation (issue #827).
         async with self.lifecycle_lock.hold(server_id) as lock:
@@ -1532,6 +1654,56 @@ class MakeDir:
             await self.file_store.make_dir(
                 community_id=community_id, server_id=server_id, rel_path=rel_path
             )
+
+
+async def _refuse_unstorable_subtree(
+    file_store: FileStore,
+    community_id: CommunityId,
+    server_id: ServerId,
+    from_path: str,
+    to_path: str,
+) -> None:
+    """Refuse a directory move the member-name rule refuses below it (issue #3973).
+
+    Moving ``from_path`` to ``to_path`` names everything below it anew: each
+    name is the destination plus its path below the source. The destination
+    itself is :func:`_refuse_renamed`'s; these are judged as it is, each limit
+    only when the destination grows what it bounds: the deepest directory below
+    when it has more components than the source, the longest path below when it
+    has more bytes. One it does not grow makes no name deeper, or longer, than
+    one already there, so a tree already too deep still moves to a longer name
+    at its own level. When neither grows nothing is measured. Otherwise the
+    subtree's extent is measured as stored and judged after the destination. The
+    names themselves do not change, so their characters are not asked about: a
+    name no path can spell moves with the rest.
+
+    The measure goes no deeper than the level at which a directory below would
+    put the destination's subtree past the depth bound: a directory found there
+    decides the depth, and nothing below it can change the answer. So an fs walk
+    holds at most 128 descriptors and a listing's, however deep the tree, and the
+    names below that level, all of them past the bound once moved and already
+    past it unless the move deepens them, are not measured for their length.
+    """
+
+    to_components, to_bytes = path_size(to_path)
+    from_components, from_bytes = path_size(from_path)
+    deeper, longer = to_components > from_components, to_bytes > from_bytes
+    if not deeper and not longer:
+        return
+    extent = await file_store.subtree_extent(
+        community_id=community_id,
+        server_id=server_id,
+        rel_path=from_path,
+        max_depth=max(MAX_DIRECTORY_DEPTH + 1 - to_components, 1),
+    )
+    # A limit with no name below to judge, or one the destination does not grow,
+    # is passed a zero, which it admits.
+    reason = extent_refusal(
+        directories=to_components + extent.depth if deeper and extent.depth else 0,
+        path_bytes=to_bytes + 1 + extent.longest if longer and extent.longest else 0,
+    )
+    if reason is not None:
+        raise InvalidFilePathError(to_path, reason=reason)
 
 
 @dataclass(frozen=True)
@@ -1594,11 +1766,19 @@ class RenameFile:
                 # source exists (404 if not). Return without rewriting.
                 return
 
+            # The name rule on the destination (issue #3973), before the store is
+            # asked about it: a name no backend can hold is not one to look up.
+            _refuse_renamed(from_path, to_path, is_dir=is_dir)
+
             if await _path_exists(self.file_store, community_id, server_id, to_path):
                 raise FileAlreadyExistsError(to_path)
 
             if is_dir:
                 _refuse_dir_at_root_properties(to_path)
+                # Every name the move creates below the destination (issue #3973).
+                await _refuse_unstorable_subtree(
+                    self.file_store, community_id, server_id, from_path, to_path
+                )
                 # The move relies on the lifecycle lock (issue #3927).
                 await lock.ensure_held()
                 await self.file_store.rename_dir(

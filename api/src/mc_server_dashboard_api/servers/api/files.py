@@ -35,11 +35,21 @@ every denial into ``invalid_path``. The file-API problem-reason catalog is:
   followed (the FR-FILE-4 escape-vector defence). Both branches produce it: the
   Worker for a running server, and Storage for one at rest (issue #2432), so the
   same request gets the same reason in either state.
-- ``name_too_long`` (422) — a mutation's DESTINATION name is past the backend's
-  ``NAME_MAX`` (write / make_dir / a rename destination, issue #2433). An over-long
-  SOURCE (delete, rename-from) is a 404 miss instead, matching a read of the same
-  name. An fs realization: object-store keys have no ``NAME_MAX`` so it cannot arise
-  there.
+- ``name_too_long`` (422) — a mutation's DESTINATION has a component past 255
+  bytes in UTF-8 (write / upload / make_dir / a rename destination; issues #2433,
+  #3973), on either backend: the member-name rule refuses it before Storage is
+  asked. An over-long SOURCE (delete, rename-from) is a 404 miss instead, matching
+  a read of the same name.
+- ``path_too_deep`` (422) — a mutation's destination is more than 128 directory
+  levels deep, counted as the Worker counts them: the root is level 0 and only
+  directories count, so a file may have 129 components (issue #3973). A
+  directory rename also judges every name it would create below the destination.
+- ``path_too_long`` (422) — a mutation's destination, or a name a directory
+  rename would create below it, is past 4,095 bytes (issue #3973).
+- ``invalid_name_character`` (422) — a mutation's destination carries, in any
+  component, a character an uploaded file's name may not carry: a ``\\``, a C1
+  control character, a line or paragraph separator, a lone surrogate or a
+  Unicode noncharacter (issues #3969, #3973). C0 and DEL stay ``invalid_path``.
 - ``platform_managed_path`` (422) — a mutation whose destination would leave a
   DIRECTORY at the root ``server.properties`` path. Every write door creates its
   destination's missing parents, so the make-dir and the directory rename that
@@ -449,6 +459,16 @@ async def write_file(
     or running, to a root name starting ``.mcsd_generation`` — the Worker's
     generation marker — or under one is 422 ``reserved_name``. A same-named entry
     deeper in the tree is ordinary user data.
+
+    **The member-name rule (issues #3969, #3973).** A path more than 128
+    directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+    directories count, so a file path may have 129 components), one with a
+    component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+    ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
+    Running or at rest alike, before the Worker is asked.
     """
 
     if len(body.content_base64) > MAX_EDIT_BASE64_CHARS:
@@ -764,6 +784,18 @@ async def upload_file(
     archive member landing at a root name starting ``.mcsd_generation`` — the
     Worker's generation marker — or under one is 422 ``reserved_name``, refused in
     the same pre-write scan on the resulting path.
+
+    **The member-name rule (issues #3969, #3973).** A path more than 128
+    directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+    directories count, so a file path may have 129 components), one with a
+    component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+    ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
+    Judged on the resulting path, of the upload and of each member once
+    joined to ``path``, in the same pre-write scan, so one refused member
+    refuses the whole extract with nothing written.
 
     **Only a few extracts at a time (issue #3843).** With ``extract=true`` this
     route and the backup upload validate on one small pool, and admit at most four
@@ -1162,6 +1194,24 @@ async def rename_file(
     a root name starting ``.mcsd_generation`` — the Worker's generation marker —
     or under one is 422 ``reserved_name``. The source is not guarded, so an entry
     planted there before the guard can still be moved away.
+
+    **The member-name rule (issues #3969, #3973).** A path more than 128
+    directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+    directories count, so a file path may have 129 components), one with a
+    component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+    ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
+    A rename's destination is judged for depth and length only where the move
+    grows them: the depth when it has more components than the source, a
+    directory's destination counting as a level, the length when it has more
+    bytes. A directory rename also judges the names the move creates below the
+    destination the same way, so a subtree that would end up too deep or too
+    long is refused with nothing moved. So a name already past a limit can still
+    be renamed at its own level, to a longer name too, and the names below are
+    not judged by their characters. The source is not judged, so a name created
+    before the rule can be renamed to one it admits.
     """
 
     try:
@@ -1320,6 +1370,16 @@ async def make_directory(
     issue #1125). A root name starting ``.mcsd_generation`` — the Worker's
     generation marker — or a path under one is 422 ``reserved_name`` (issue
     #3433); a same-named directory deeper in the tree is ordinary user data.
+
+    **The member-name rule (issues #3969, #3973).** A path more than 128
+    directory levels deep is 422 ``path_too_deep`` (the root is level 0 and only
+    directories count, so a file path may have 129 components), one with a
+    component past 255 bytes in UTF-8 ``name_too_long`` and one past 4,095 bytes
+    ``path_too_long``, on either storage backend. A path carrying a ``\\``, a C1
+    control character, a line or paragraph separator, a lone surrogate or a
+    Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
+    and DEL stay ``invalid_path``.
+    The new directory counts as a level, so it may have 128 components.
     """
 
     try:

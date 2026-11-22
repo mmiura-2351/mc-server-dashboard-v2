@@ -7,7 +7,35 @@ import {
   fileListErrorPresentation,
   fileOperationErrorPresentation,
   fileReadErrorPresentation,
+  fileSaveErrorPresentation,
 } from "./serverFilesErrorPresentation.ts";
+
+describe("fileSaveErrorPresentation", () => {
+  it.each([
+    "path_too_deep",
+    "name_too_long",
+    "path_too_long",
+    "invalid_name_character",
+  ])(
+    "asks for a rename when the saved file's name is refused: %s (#3973)",
+    (reason) => {
+      expect(fileSaveErrorPresentation(new ApiError(422, { reason }))).toEqual({
+        key: "files.error.nameNoLongerAllowed",
+      });
+    },
+  );
+
+  it.each([
+    ["another 422", new ApiError(422, { reason: "platform_managed_key" })],
+    [
+      "the reason on another status",
+      new ApiError(409, { reason: "name_too_long" }),
+    ],
+    ["a local refusal", new UnencodableTextError()],
+  ])("leaves %s to the operation's presentation", (_label, error) => {
+    expect(fileSaveErrorPresentation(error)).toBeUndefined();
+  });
+});
 
 describe("fileOperationErrorPresentation", () => {
   it.each([
@@ -111,6 +139,21 @@ describe("fileOperationErrorPresentation", () => {
       "maps the reserved generation-marker name (#3433)",
       new ApiError(422, { reason: "reserved_name" }),
       { key: "files.error.reservedName" },
+    ],
+    [
+      "maps a destination nested too deep (#3973)",
+      new ApiError(422, { reason: "path_too_deep" }),
+      { key: "files.error.pathTooDeep" },
+    ],
+    [
+      "maps a destination path too long (#3973)",
+      new ApiError(422, { reason: "path_too_long" }),
+      { key: "files.error.pathTooLong" },
+    ],
+    [
+      "maps a destination name with a character no name may carry (#3973)",
+      new ApiError(422, { reason: "invalid_name_character" }),
+      { key: "files.error.invalidNameCharacter" },
     ],
     [
       "maps an archive that does not read back (#3769)",

@@ -352,8 +352,11 @@ class InvalidFilePathError(ServerError):
     symlink). The at-rest path shares that last one: Storage refuses a path with a
     symlink at any component (issue #2432), so one browser click gets the same
     reason — and the same sentence — whether the server is at rest or running. A
-    mutation whose DESTINATION name is past the backend's ``NAME_MAX`` carries
-    ``"name_too_long"`` (issue #2433); an over-long SOURCE is a 404 miss instead, and
+    mutation whose DESTINATION has a component past 255 bytes carries
+    ``"name_too_long"`` on either backend (issues #2433, #3973), and one the
+    member-name rule refuses otherwise ``"path_too_deep"`` or ``"path_too_long"``,
+    or ``"invalid_name_character"`` for a character no uploaded file's name may
+    carry (issue #3969); an over-long SOURCE is a 404 miss instead, and
     a non-directory blocking the path is :class:`FileAlreadyExistsError` (409). A
     mutation that would leave a DIRECTORY at the root ``server.properties`` path
     carries ``"platform_managed_path"``: a make-dir or directory rename naming it

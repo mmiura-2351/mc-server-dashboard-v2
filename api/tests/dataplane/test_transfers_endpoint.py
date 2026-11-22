@@ -3352,7 +3352,7 @@ def test_snapshot_whose_member_path_the_fs_staging_cannot_hold_is_refused(
     # can join to past Linux's PATH_MAX there. That raised a raw ``OSError``
     # (ENAMETOOLONG) and answered 500 (issue #3931); it is a refusal naming the
     # member. Here the joined path is 4096 bytes, one past what a path may be.
-    # Which paths a snapshot may hold is issue #3973's to decide.
+    # The ingest's refusals of the member-name rule (issue #3973) are issue #3975's.
     staging = FsStorage(tmp_path)._staging_dir(
         CommunityId(uuid.uuid4()), ServerId(uuid.uuid4()), uuid.uuid4().hex
     )

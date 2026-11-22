@@ -1,0 +1,30 @@
+{
+  "$comment": [
+    "The member-name rule's numbers (issue #3973): the names and depth of a",
+    "working set's members. The SINGLE SOURCE OF TRUTH for numbers the API",
+    "(Python) and the Worker (Go) must agree on; each side holds its own",
+    "constants and a test asserting they equal the values here:",
+    "  - api:    api/tests/test_member_name.py",
+    "  - worker: worker/internal/adapters/datatransfer/member_name_limits_test.go,",
+    "            worker/internal/adapters/regionfsck/member_name_limits_test.go and",
+    "            worker/internal/application/instancemanager/member_name_limits_test.go",
+    "",
+    "max_directory_depth is the deepest directory level a working set may hold",
+    "(inclusive). The root is level 0 and only directories count, so a directory",
+    "may have this many components and a file one more. It is the Worker's",
+    "snapshot walk, region check and settle scan bound (maxPackDepth,",
+    "maxWalkDepth, settleScanMaxDepth).",
+    "",
+    "max_component_bytes is the longest name of one member, in UTF-8 bytes",
+    "(inclusive): Linux NAME_MAX, which bounds every name the Worker reads from",
+    "disk. The Worker holds no constant for it.",
+    "",
+    "max_path_bytes is the longest member path relative to the working-set root,",
+    "in bytes (inclusive): the Worker's snapshot member bound (maxMemberPath,",
+    "PATH_MAX-1). It is an upper bound only; issue #3979 decides the final number.",
+    "See docs/app/STORAGE.md Section 6.2."
+  ],
+  "max_directory_depth": 128,
+  "max_component_bytes": 255,
+  "max_path_bytes": 4095
+}

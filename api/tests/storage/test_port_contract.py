@@ -40,6 +40,7 @@ from mc_server_dashboard_api.storage.domain.errors import (
 from mc_server_dashboard_api.storage.domain.port import (
     API_EDIT_PUBLISHER,
     RESTORE_PUBLISHER,
+    SubtreeExtent,
 )
 from mc_server_dashboard_api.storage.domain.value_objects import (
     BackupKey,
@@ -2279,8 +2280,8 @@ async def test_a_member_named_past_the_name_limit_restores_on_object_only(
     (ENAMETOOLONG), and the live world stays (issue #3931). Writing the file
     raises it, or, once its directory is there, the member filter's resolution
     of its path. The object store holds it as a key, so there the backup is
-    healthy and restores. Which names a backup may hold is issue #3973's to
-    decide."""
+    healthy and restores. Restore's refusals of the member-name rule (issue
+    #3973) are issue #3975's."""
 
     harness = build_harness(backend, tmp_path)
     files = {f"world/{'n' * 300}.dat": b"long"}
@@ -2936,6 +2937,83 @@ async def test_write_file_overwrites_and_retains_prior_version(
         )
         == b"v1"
     )
+
+
+async def test_a_255_byte_name_is_written_on_both_backends(
+    harness: StorageHarness,
+) -> None:
+    """A name of 255 bytes, ``NAME_MAX``, is written and rewritten (issue #3973).
+
+    The fs write goes through a temp sibling. Named after the target, the temp
+    was 14 bytes longer than it, so fs refused any name over 241 bytes.
+    """
+
+    community, server = new_scope()
+    await harness.publish(community, server, {"f": b"DATA"})
+    rel = RelPath("n" * 255)
+
+    await harness.storage.write_file(community, server, rel, b"one")
+    await harness.storage.write_file(community, server, rel, b"two")
+
+    assert await harness.storage.read_file(community, server, rel) == b"two"
+
+
+async def test_subtree_extent_measures_the_names_below_as_stored(
+    harness: StorageHarness,
+) -> None:
+    """A directory's deepest level and longest path below it (issue #3973).
+
+    Measured on the names as stored, in bytes: a name no ``RelPath`` can spell
+    (a C0 or DEL character) counts like any other, and is not refused.
+    """
+
+    community, server = new_scope()
+    await harness.publish(
+        community,
+        server,
+        {
+            "top/a/b/f.txt": b"1",
+            "top/a\x01b/g": b"2",
+            "top/a\x7fb/h": b"3",
+            "top/\u3042\u3042\u3042\u3042/q": b"4",
+            "top/i": b"5",
+            "other/x/y/z/w": b"6",
+        },
+    )
+
+    # An empty directory is measured as the name it is: on object, its marker key
+    # is not a name, so ``a/b/emptydir`` is 12 bytes, not 17.
+    await harness.storage.make_dir(community, server, RelPath("top/a/b/emptydir"))
+
+    extent = await harness.storage.subtree_extent(
+        community, server, RelPath("top"), max_depth=129
+    )
+
+    # ``a/b/emptydir`` is level 3; four three-byte characters and ``/q`` are 14
+    # bytes.
+    assert extent == SubtreeExtent(depth=3, longest=14)
+    assert await harness.storage.subtree_extent(
+        community, server, RelPath("."), max_depth=129
+    ) == SubtreeExtent(depth=4, longest=len("top/") + 14)
+    assert await harness.storage.subtree_extent(
+        community, server, RelPath("top/a/b/emptydir"), max_depth=129
+    ) == SubtreeExtent(depth=0, longest=0)
+
+
+async def test_subtree_extent_of_a_path_that_is_not_a_directory_is_a_miss(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+    await harness.publish(community, server, {"top/f": b"1"})
+
+    with pytest.raises(NotFoundError):
+        await harness.storage.subtree_extent(
+            community, server, RelPath("top/f"), max_depth=129
+        )
+    with pytest.raises(NotFoundError):
+        await harness.storage.subtree_extent(
+            community, server, RelPath("gone"), max_depth=129
+        )
 
 
 async def test_write_file_before_any_publish_initializes_first_version(
@@ -3721,3 +3799,39 @@ async def test_active_staging_survives_concurrent_sweep(
     await harness.storage.commit_snapshot(handle)
     blob = await drain(harness.storage.open_hydrate_source(community, server))
     assert read_tar(blob) == {"f": b"INFLIGHT"}
+
+
+async def test_subtree_extent_before_any_publish_is_of_an_empty_root(
+    harness: StorageHarness,
+) -> None:
+    community, server = new_scope()
+
+    assert await harness.storage.subtree_extent(
+        community, server, RelPath("."), max_depth=129
+    ) == SubtreeExtent(depth=0, longest=0)
+    with pytest.raises(NotFoundError):
+        await harness.storage.subtree_extent(
+            community, server, RelPath("top"), max_depth=129
+        )
+
+
+async def test_subtree_extent_measures_no_deeper_than_it_is_asked(
+    harness: StorageHarness,
+) -> None:
+    """A subtree that reaches ``max_depth`` answers it, unmeasured past it (#3973)."""
+
+    community, server = new_scope()
+    await harness.publish(
+        community, server, {"top/a/b/c/d/long-file-name": b"1", "top/x/y": b"2"}
+    )
+    await harness.storage.make_dir(community, server, RelPath("top/a/b/c/e/f"))
+
+    async def extent(max_depth: int) -> SubtreeExtent:
+        return await harness.storage.subtree_extent(
+            community, server, RelPath("top"), max_depth=max_depth
+        )
+
+    assert await extent(129) == SubtreeExtent(depth=5, longest=22)
+    # ``a/b/c`` is level 3: counted, not walked into.
+    assert await extent(3) == SubtreeExtent(depth=3, longest=len("a/b/c"))
+    assert await extent(1) == SubtreeExtent(depth=1, longest=len("a"))

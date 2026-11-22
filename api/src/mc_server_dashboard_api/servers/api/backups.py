@@ -1076,6 +1076,15 @@ async def upload_backup(
     under one is 422 ``reserved_name``, refused before the archive is stored. A
     same-named member deeper in the tree is ordinary user data.
 
+    **The member-name rule (issue #3973).** A member more than 128 directory
+    levels deep (the root is level 0 and only directories count), with a
+    component past 255 bytes in UTF-8 or with a path past 4,095 bytes is 422
+    ``invalid_archive``, refused before the archive is stored; its ``detail``
+    names the member and the reason (``path_too_deep``, ``name_too_long`` or
+    ``path_too_long``). The characters the files-API writes refuse are not
+    refused here: a backup the platform wrote of names a running server created
+    uploads again.
+
     **Only a few archive uploads at a time (issue #3843).** This route, the files
     upload's extract and the server import validate on one small pool, and admit
     at most four archive uploads at a time between them: two validating and two

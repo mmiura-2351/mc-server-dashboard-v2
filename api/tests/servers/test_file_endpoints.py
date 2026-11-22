@@ -17,8 +17,10 @@ cases and authorization Ports faked (NFR-TEST-1, no database). Verifies:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import datetime as dt
+import os
 import tarfile
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -95,6 +97,7 @@ from mc_server_dashboard_api.servers.application.files import (
     MAX_EDIT_BYTES,
     DirListing,
     DownloadFile,
+    RenameFile,
     SearchResult,
     UploadFile,
     WriteFile,
@@ -3397,6 +3400,52 @@ def test_store_outage_on_a_non_convergent_write_stays_500(
 
     assert resp.status_code == 500
     assert resp.json()["reason"] == "internal_error"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+def test_a_rename_whose_subtree_cannot_be_measured_answers_as_a_failed_move(
+    tmp_path: Path,
+) -> None:
+    """A growing rename measures the moved subtree first (issue #3973). A
+    directory below it the walk cannot open is a standing fault, so it answers
+    what a failed move always has at this route: the 500 (#3233). Through the
+    real route, RenameFile and fs Storage."""
+
+    community, server = uuid.uuid4(), uuid.uuid4()
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_stopped_server(community, server))
+    storage = FsStorage(tmp_path)
+    file_store = StorageFileStoreAdapter(storage=storage)
+    asyncio.run(
+        file_store.write_file(
+            community_id=ServerCommunityId(community),
+            server_id=ServerScopeId(server),
+            rel_path="a/locked/f",
+            content=b"x",
+        )
+    )
+    app = _real_write_app(tmp_path, community, server)
+    app.dependency_overrides[get_rename_file] = lambda: RenameFile(  # type: ignore[attr-defined]
+        uow=uow, file_store=file_store
+    )
+    client = enter_client(TestClient(app, raise_server_exceptions=False))  # type: ignore[arg-type]
+    current = tmp_path / "communities" / str(community) / "servers" / str(server)
+    locked = (current / "current").resolve() / "a" / "locked"
+
+    locked.chmod(0)
+    try:
+        refused = client.post(
+            _url(community, server, "/rename"), json={"from": "a", "to": "longer"}
+        )
+    finally:
+        locked.chmod(0o755)
+    moved = client.post(
+        _url(community, server, "/rename"), json={"from": "a", "to": "longer"}
+    )
+
+    assert refused.status_code == 500
+    assert refused.json()["reason"] == "internal_error"
+    assert moved.status_code == 204
 
 
 # --- download: the stream is begun before the headers (issue #3234) --------

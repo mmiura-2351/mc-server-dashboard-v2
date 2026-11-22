@@ -811,7 +811,27 @@ parent's descriptor without following links, and what goes into the archive is
 decided on the opened descriptor, so an entry swapped for a symlink or a FIFO
 mid-snapshot is skipped instead of being packed from outside the working set or
 blocking the worker. The walk holds one descriptor per directory level and
-refuses a working set nested deeper than 128 directories. The region check
+refuses a working set nested deeper than 128 directories. The API creates no
+name past that bound (issue #3973): the files API's write, make-dir, upload,
+extract and rename, a server import and a backup upload — every door that
+creates one except those tracked in issue #4008 — refuse a name more than 128
+directory levels deep, counted as the walk counts them (the root is level 0 and
+only directories count), a component past 255 bytes, or a path past 4,095 bytes,
+the walk's own member bound ([STORAGE.md](STORAGE.md) Section 6.2). On object an
+empty directory is held as a `.dir` marker five bytes longer than its name,
+which the hydrate hands the Worker as a file; whether that bound leaves room for
+it is issue #3979's. A rename is the one exception, in two ways. It judges a
+limit only where the move grows what it bounds, so a move that grows no name may
+keep a chain that is already too deep, under new names too, as moving the file
+`d/…/d/f` 129 levels deep to `e/…/e/f` does. And a directory rename measures its
+subtree no deeper than the level that decides its depth
+([STORAGE.md](STORAGE.md) Section 6.2), so a move that grows only bytes may push
+a name below that level past 4,095 bytes; such a name already sits in a
+directory past the depth bound, which the Worker cannot snapshot either way. The
+names directly in a moved directory are always measured. The numbers are one
+contract file both sides are tested against. So a tree that deep reaches a
+snapshot only from the running server itself, or from a backup stored before the
+rule, whose restore does not apply it yet (issue #3975). The region check
 that precedes a snapshot walks the tree the same way, under the same depth
 bound, and reads a fixed number of fixed-size pieces of each region file
 whatever its size (issue #3335). An entry that disappears or changes kind under

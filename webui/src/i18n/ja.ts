@@ -874,6 +874,13 @@ export const ja: Record<TranslationKey, string> = {
     "指定されたパスはディレクトリではなくファイルです。",
   "files.error.symlinkRefused": "シンボリックリンクは許可されていません。",
   "files.error.nameTooLong": "名前が長すぎます。",
+  "files.error.pathTooDeep":
+    "パスの階層が深すぎます。サーバーファイルのフォルダーは 128 階層までです。",
+  "files.error.pathTooLong": "パスが長すぎます。パスは 4,095 バイトまでです。",
+  "files.error.invalidNameCharacter":
+    "名前に使用できない文字（制御文字や \\ など）が含まれています。別の名前を指定してください。",
+  "files.error.nameNoLongerAllowed":
+    "この名前は使用できなくなりました。編集するにはファイル名を変更してください。",
   "files.error.invalidFilename":
     "このファイル名は使用できません。制御文字や / \\ を含まず、長すぎない名前に変更して、再度アップロードしてください。",
   "files.error.platformManagedKey":
@@ -1143,6 +1150,12 @@ export const ja: Record<TranslationKey, string> = {
     "そのアーカイブには server.properties/ 配下のファイルが含まれています。server.properties はファイルとして管理されるため、該当のエントリを削除するか移動してからインポートしてください。",
   "serverCreate.import.error.reserved_name":
     "そのアーカイブの最上位に、名前が .mcsd_generation で始まるエントリがあります。このような名前はプラットフォームが使用するため予約されています。該当のエントリを削除するか名前を変更してからインポートしてください。",
+  "serverCreate.import.error.path_too_deep":
+    "そのアーカイブには、128 階層より深いフォルダーにあるエントリが含まれています。浅いフォルダーに移動してからインポートしてください。",
+  "serverCreate.import.error.name_too_long":
+    "そのアーカイブには、名前が 255 バイトを超えるエントリが含まれています。名前を短くしてからインポートしてください。",
+  "serverCreate.import.error.path_too_long":
+    "そのアーカイブには、パスが 4,095 バイトを超えるエントリが含まれています。パスを短くしてからインポートしてください。",
   // The import assigns the join address itself (issue #3022); see en.ts.
   "serverCreate.import.error.slug_taken":
     "インポート中に、割り当てようとした参加アドレス名を他のサーバーが取得しました。サーバーは作成されていません。もう一度インポートすると別の名前が割り当てられます。",
