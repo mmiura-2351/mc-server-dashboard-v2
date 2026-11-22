@@ -1930,8 +1930,10 @@ class _Hangs(FakeBackupArchiveStore):
         )
 
 
-async def _cancel_once_entered(task: asyncio.Task[Backup], archive: _Hangs) -> None:
-    await archive.entered.wait()
+async def _cancel_once_entered(
+    task: asyncio.Task[Backup], entered: asyncio.Event
+) -> None:
+    await entered.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -2014,7 +2016,7 @@ async def test_a_create_cancelled_mid_archive_leaves_no_row() -> None:
                 source=BackupSource.SCHEDULED,
             )
         ),
-        archive,
+        archive.entered,
     )
 
     assert uow.backups.by_id == {}
@@ -2034,7 +2036,7 @@ async def test_a_create_cancelled_after_its_archive_deletes_it() -> None:
                 source=BackupSource.SCHEDULED,
             )
         ),
-        archive,
+        archive.entered,
     )
 
     assert uow.backups.by_id == {}
@@ -2118,7 +2120,7 @@ async def test_an_upload_cancelled_mid_store_leaves_no_row() -> None:
                 content=_valid_tar_gz(),
             )
         ),
-        archive,
+        archive.entered,
     )
 
     assert uow.backups.by_id == {}
@@ -2136,4 +2138,140 @@ async def test_upload_whose_row_cannot_be_recorded_deletes_its_archive() -> None
 
     assert uow.backups.by_id == {}
     assert archive.stored == [server.id]
+    assert archive.archives == set()
+
+
+# Once the row's COMMIT is sent, its outcome is unknown: a COMMIT can apply and
+# still raise. Deleting the archive then could leave the row without it, so the
+# archive is kept and a WARNING logged (review r1 of PR #4119).
+
+
+class _CommitAnswerLost(FakeUnitOfWork):
+    """The COMMIT applies, and its answer is lost with the connection."""
+
+    async def commit(self) -> None:
+        await super().commit()
+        raise ConnectionError("connection lost after the COMMIT was sent")
+
+
+class _HangsInCommit(FakeUnitOfWork):
+    """The COMMIT applies, and its answer never arrives."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def commit(self) -> None:
+        await super().commit()
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+class _ExitFailsAfterCommit(FakeUnitOfWork):
+    """The commit returns, and leaving its block (the rollback, the close) fails."""
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self.commits:
+            raise ConnectionError("connection lost while closing the session")
+
+
+class _HangsInInsert(FakeBackupRepository):
+    """The row's INSERT never returns, so its COMMIT is never sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def add(self, backup: Backup) -> None:
+        self.entered.set()
+        await asyncio.Event().wait()
+
+
+async def _back_up(
+    kind: str, uow: FakeUnitOfWork, archive: FakeBackupArchiveStore, server: Server
+) -> Backup:
+    if kind == "create":
+        return await _make_create(uow, FakeControlPlane(), archive)(
+            community_id=_COMMUNITY, server_id=server.id, source=BackupSource.MANUAL
+        )
+    return await _upload_of(uow, archive)(
+        community_id=_COMMUNITY, server_id=server.id, content=_valid_tar_gz()
+    )
+
+
+_KINDS = pytest.mark.parametrize("kind", ["create", "upload"])
+
+
+@_KINDS
+async def test_a_backup_whose_commit_answer_is_lost_keeps_its_archive(
+    kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = _at_rest()
+    uow = _CommitAnswerLost()
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    with pytest.raises(ConnectionError):
+        await _back_up(kind, uow, archive, server)
+
+    (row,) = uow.backups.by_id.values()
+    assert archive.archives == {row.storage_ref}
+    (record,) = [r for r in caplog.records if r.name == backups_module.__name__]
+    assert record.levelno == logging.WARNING
+    assert [record.__dict__[k] for k in ("server_id", "storage_ref", "backup_id")] == [
+        str(server.id.value),
+        row.storage_ref,
+        str(row.id.value),
+    ]
+
+
+@_KINDS
+async def test_a_backup_cancelled_inside_its_commit_keeps_its_archive(
+    kind: str,
+) -> None:
+    server = _at_rest()
+    uow = _HangsInCommit()
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    await _cancel_once_entered(
+        asyncio.create_task(_back_up(kind, uow, archive, server)), uow.entered
+    )
+
+    (row,) = uow.backups.by_id.values()
+    assert archive.archives == {row.storage_ref}
+
+
+@_KINDS
+async def test_a_backup_whose_block_exit_fails_after_its_commit_keeps_its_archive(
+    kind: str,
+) -> None:
+    server = _at_rest()
+    uow = _ExitFailsAfterCommit()
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    with pytest.raises(ConnectionError):
+        await _back_up(kind, uow, archive, server)
+
+    (row,) = uow.backups.by_id.values()
+    assert archive.archives == {row.storage_ref}
+
+
+@_KINDS
+async def test_a_backup_cancelled_before_its_commit_is_sent_deletes_its_archive(
+    kind: str,
+) -> None:
+    server = _at_rest()
+    backups = _HangsInInsert()
+    uow = FakeUnitOfWork(backups=backups)
+    uow.servers.seed(server)
+    archive = FakeBackupArchiveStore()
+
+    await _cancel_once_entered(
+        asyncio.create_task(_back_up(kind, uow, archive, server)), backups.entered
+    )
+
+    assert backups.by_id == {}
+    assert len(archive.deleted) == 1
     assert archive.archives == set()

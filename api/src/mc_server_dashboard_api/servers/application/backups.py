@@ -24,9 +24,12 @@ Each create writes the archive **before** it records its :class:`Backup` metadat
 row (source manual or scheduled, the archive ref, its size, the actor), and an
 upload stores its archive the same way (issue #4086). The row is inserted with
 its size in one transaction, so no row is recorded ahead of its archive. A
-failure after the archive write, a cancellation included, deletes the archive
-again (best effort). A crash, or a delete that fails, leaves an archive with no
-row: no listing shows it, and the server's delete prunes it.
+failure after the archive write and before the row's COMMIT is sent, a
+cancellation included, deletes the archive again (best effort). Once the COMMIT
+is sent, its outcome is unknown, since a COMMIT can apply and still raise: the
+archive is kept and a WARNING logged. A crash, a delete that fails, or an
+unconfirmed COMMIT that did not apply leaves an archive with no row: no listing
+shows it, and the server's delete prunes it.
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
@@ -234,8 +237,9 @@ class CreateBackup:
                 raise server.not_quiescent_error(BackupUnsettledError)
 
             # Write the archive BEFORE recording its row (issue #4086), so no row
-            # is recorded ahead of its archive. A failure after the write
-            # deletes the archive again (best effort, :func:`_discard_archive`).
+            # is recorded ahead of its archive. A failure after the write and
+            # before the row's COMMIT is sent deletes the archive again (best
+            # effort, :func:`_discard_archive`); after it, the archive is kept.
             storage_ref = uuid.uuid4().hex
             created_at = self.clock.now()
             # The lock may have been lost during the snapshot (issue #3927).
@@ -247,6 +251,7 @@ class CreateBackup:
                 server_id=server_id,
                 storage_ref=storage_ref,
             )
+            commit_sent = False
             try:
                 backup = Backup(
                     id=BackupId.new(),
@@ -269,15 +274,22 @@ class CreateBackup:
                 # The archive write can take minutes; check again before the row.
                 await lock.ensure_held()
                 async with self.uow:
-                    await self.uow.backups.add(backup)
+                    # The savepoint sends the INSERT, so a refused one raises
+                    # here, before the COMMIT is sent.
+                    async with self.uow.savepoint():
+                        await self.uow.backups.add(backup)
+                    commit_sent = True
                     await self.uow.commit()
             except BaseException:
-                await _discard_archive(
-                    self.backup_store,
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                )
+                if commit_sent:
+                    _keep_unconfirmed_archive(backup)
+                else:
+                    await _discard_archive(
+                        self.backup_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    )
                 raise
             return backup
 
@@ -289,12 +301,14 @@ async def _discard_archive(
     server_id: ServerId,
     storage_ref: str,
 ) -> None:
-    """Delete an archive whose row could not be recorded (issue #4086).
+    """Delete an archive whose row was not recorded (issue #4086).
 
-    Best effort: a delete that fails is logged and the caller's own failure is
-    raised. The archive left behind has no row, so no listing shows it. It runs
-    without a lifecycle-lock check: the ref is new, so nothing else can be using
-    the archive.
+    Only for a failure before the row's COMMIT is sent: after it the row may
+    stand, and :func:`_keep_unconfirmed_archive` keeps the archive. Best effort: a
+    delete that fails is logged and the caller's own failure is raised. The
+    archive left behind has no row, so no listing shows it. It runs without a
+    lifecycle-lock check: the ref is new, so nothing else can be using the
+    archive.
     """
 
     try:
@@ -309,6 +323,26 @@ async def _discard_archive(
             exc_info=True,
             extra={"server_id": str(server_id.value), "storage_ref": storage_ref},
         )
+
+
+def _keep_unconfirmed_archive(backup: Backup) -> None:
+    """Keep the archive of a row whose COMMIT was sent but not confirmed.
+
+    A COMMIT can apply and still raise: its answer lost with the connection, a
+    cancellation while awaiting it, or a failure leaving the block after it. The
+    row may stand, and deleting its archive would leave it without one, the row
+    issue #4086 removes. So the archive is kept and logged. If the COMMIT did not
+    apply, the archive has no row, so no listing shows it.
+    """
+
+    _LOG.warning(
+        "kept the archive of a backup whose row commit was not confirmed",
+        extra={
+            "server_id": str(backup.server_id.value),
+            "storage_ref": backup.storage_ref,
+            "backup_id": str(backup.id.value),
+        },
+    )
 
 
 class _NullAuthorDirectory(BackupAuthorDirectory):
@@ -1434,18 +1468,26 @@ class UploadBackup:
                 stream=_chunked(content),
                 storage_ref=storage_ref,
             )
+            commit_sent = False
             try:
                 await lock.ensure_held()
                 async with self.uow:
-                    await self.uow.backups.add(backup)
+                    # As in CreateBackup: a refused INSERT raises before the
+                    # COMMIT is sent.
+                    async with self.uow.savepoint():
+                        await self.uow.backups.add(backup)
+                    commit_sent = True
                     await self.uow.commit()
             except BaseException:
-                await _discard_archive(
-                    self.backup_store,
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                )
+                if commit_sent:
+                    _keep_unconfirmed_archive(backup)
+                else:
+                    await _discard_archive(
+                        self.backup_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    )
                 raise
             return backup
 
