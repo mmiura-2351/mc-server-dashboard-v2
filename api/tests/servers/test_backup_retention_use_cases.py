@@ -474,21 +474,22 @@ async def test_prune_ranks_a_sized_legacy_row_by_its_health() -> None:
     assert env.uow.backups.by_id[legacy.id].size_bytes == 10
 
 
-async def test_prune_leaves_a_row_with_no_archive_unsized() -> None:
-    # A HEAD that answers NotFound leaves the row NULL: nothing is written for
-    # it, and the prune goes on to rank the rows.
+async def test_prune_ranks_a_row_with_no_archive_last() -> None:
+    # A HEAD that answers NotFound leaves the row NULL, so it ranks last: the
+    # older sized row keeps keep_last=1 and the newer dangling row is pruned.
     env = _Env()
-    await env.seed_retention({"keep_last": 2})
+    await env.seed_retention({"keep_last": 1})
     dangling = _unsized(_backup(env.server.id, _NOW))
-    env.seed_backup(dangling)
+    older = _backup(env.server.id, _NOW - dt.timedelta(days=1))
+    for backup in (dangling, older):
+        env.seed_backup(backup)
     env.store.archives.discard(dangling.storage_ref)
 
     pruned = await env.prune(community_id=_COMMUNITY, server_id=env.server.id)
 
-    assert pruned == []
     assert env.store.size_calls == [dangling.storage_ref]
-    assert env.uow.backups.by_id[dangling.id].size_bytes is None
-    assert env.uow.commits == 0
+    assert [(b.id, b.size_bytes) for b in pruned] == [(dangling.id, None)]
+    assert older.id in env.uow.backups.by_id
 
 
 async def test_a_store_error_while_sizing_fails_the_prune_before_any_deletion(

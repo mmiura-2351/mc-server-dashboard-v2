@@ -1090,10 +1090,10 @@ class PruneScheduledBackups:
     ``size_bytes`` are sized the way the listing sizes them
     (:func:`_backfill_null_sizes`, issue #4107), with no unit of work open, and
     their sizes recorded: a legacy row whose archive exists then ranks as the
-    sized row it is. A row whose archive the store reports missing stays NULL.
-    Any other store failure stops the prune before it selects or deletes
-    anything, with a WARNING, rather than rank on partial information; the next
-    run retries.
+    sized row it is. A row whose archive the store reports missing stays NULL,
+    so it ranks last. Any other store failure stops the prune before it selects
+    or deletes anything, with a WARNING, rather than rank on partial
+    information; the next run retries.
 
     Runs under the same per-server :class:`LifecycleLock` that
     :class:`RestoreBackup` / :class:`DeleteBackup` hold, so a backup can never
