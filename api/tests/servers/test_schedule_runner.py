@@ -2002,6 +2002,39 @@ async def test_a_held_retry_skip_whose_commit_applied_is_written_once(
     assert env.runner._deferred == {}
 
 
+async def test_a_held_retry_released_after_its_skip_applied_writes_its_own_row() -> (
+    None
+):
+    bound = dt.timedelta(seconds=60)
+    store = FakeBackupArchiveStore(missing=True)  # the occurrence fails
+    env = _env(backup_store=store, deferral_bound=bound)
+    schedule = _backup_schedule(env)
+    await _tick_at(env, _NOW)  # arms the retry 30 minutes on
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], _NOW + dt.timedelta(days=1)
+    )
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = _WORKER
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at)  # deferred
+    lost = _RecordAnswerLost(env)  # from the skip's record on
+    past = retry_at + bound + _TICK
+    await _tick_at(env, past)  # the skip's record applies, and raises
+
+    # Released: the retry, still armed, runs, and is a run of its own.
+    env.uow.servers.by_id[schedule.server_id].assigned_worker_id = None
+    store._missing = False
+    await _tick_at(env, past + _TICK)
+
+    assert lost.cuts == 1
+    assert _archive_attempts(store) == 2
+    assert _rows(env, schedule) == [
+        (ScheduleRunOutcome.FAILURE, "action failed"),
+        (ScheduleRunOutcome.SKIPPED, "server_assigned"),
+        (ScheduleRunOutcome.SUCCESS, None),
+    ]
+    assert env.runner._backup_retry == {}
+
+
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:
     env = _env(backup_store=_StorageTimeoutBackupStore())
     server = _stopped_server()
