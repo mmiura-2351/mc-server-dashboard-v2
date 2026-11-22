@@ -525,9 +525,11 @@ for 10 s. Cancelling the attempt instead could abandon a commit that still
 lands, and its retry would then apply the message a second time.
 If the attempt then succeeds, the hold ends; if it fails as an outage, the
 retries follow. Only the first attempt has the 3 s deadline. The retries back
-off from 0.5 s, doubling up to 10 s, with no time budget. A held `StatusChange`
-is stamped when its write lands, not when it arrived. The hold ends when the
-message is applied, or when the session ends:
+off from 0.5 s, doubling up to 10 s, with no time budget. A `StatusChange` is
+stamped when the API reads it off the stream, before it waits for anything, and
+each attempt of it carries that stamp, a held one's retries included (issue
+#4118). Its write is dropped for a server whose state is stamped later. The
+hold ends when the message is applied, or when the session ends:
 
 - When the Worker closes the stream, the held message gets one last attempt,
   and so does each message queued behind it. Any failure then drops the message.
@@ -535,6 +537,10 @@ message is applied, or when the session ends:
   queued behind it are dropped unapplied. Nothing from the old session lands
   after the new session's reports, except a message already being applied when
   the newer session registers: at most one per superseded session (#4015).
+  That message arrived before the newer session registered, so it is stamped
+  earlier than that session's reports and its teardown's `unknown` (Section
+  4.4). It overwrites neither, and that `unknown` marks it too if it lands
+  first (issue #4118).
 - When the heartbeats lapse or the transport drops, the held message and the
   queue behind it are lost.
 
@@ -666,9 +672,11 @@ Worker can also re-register after that check, while the `unknown` write waits
 on a slow database, however the Session ended, a refused registration
 included, and the new Session's reports can then commit first. So the write
 is stamped as the check passes and leaves every server observed later than
-that stamp: the ending Session's own reports were all stamped earlier, and a
-newer Session's are stamped later, so the outcome no longer depends on which
-write commits first (issue #4092). After a refused registration
+that stamp. A report is stamped as it arrives (Section 4.2), so the ending
+Session's own reports were all stamped earlier, and so was a report of an
+older Session still being written. A newer Session's are stamped later, so the
+outcome no longer depends on which write commits first (issues #4092, #4118).
+After a refused registration
 (Section 4.1), whose Worker is alive and retries, the write is held to the
 registration's 10 s deadline and skipped past it with a warning, so a stalled
 database does not hold a connection for each retry; the Worker's next accepted
@@ -1509,8 +1517,9 @@ A write that leaves the state as it was — the bulk `unknown` over a row alread
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —
 publishes nothing, unless it is a `StatusChange` carrying a `detail` or crash
 reason, or the held retry of a `StatusChange` (Section 4.2). A report the API
-drops — it comes from a Worker that no longer owns the server, or is no fresher
-than the state already recorded — is not relayed.
+drops — it comes from a Worker that no longer owns the server, or it is no
+fresher than the state already recorded, counted from the instant it arrived
+(Section 4.2) — is not relayed.
 
 Real-time delivery is best-effort end to end: if the control plane is down the
 API's REST endpoints still function and clients simply miss live updates
