@@ -1234,6 +1234,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 notifier=RealTimeEventsNotifier(real_time_events),
                 clock=ServersSystemClock(),
+                # A backup on a server a stop still holds waits at most the
+                # reconciler's grace, which outlasts the stop's own final
+                # snapshot (issue #4047), then is recorded as skipped.
+                deferral_bound=dt.timedelta(seconds=settings.reconciler.grace_seconds),
                 # A due warning stays sendable for at least one full tick, so a
                 # coarse loop cannot let a whole send window fall between wakes.
                 warning_grace=effective_warning_grace(settings.schedule.tick_seconds),

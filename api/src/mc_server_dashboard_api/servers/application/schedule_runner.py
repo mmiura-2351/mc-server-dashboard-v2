@@ -59,9 +59,19 @@ tick-level retry, with one exception. A backup of a server at rest that a stop
 still holds for its final snapshot is refused by :class:`CreateBackup` (409
 ``server_assigned``, issue #3998): an archive taken then would lack that
 snapshot. Nothing was attempted and the release is normally seconds away, so the
-occurrence is deferred rather than skipped: no run row, no advance, one INFO
-line, and the next tick runs it again. A pending backup retry stays pending the
-same way.
+occurrence is deferred rather than skipped: no run row, no advance, and the next
+tick runs it again. One INFO line opens the deferral. The deferral is bounded
+(issue #4047), since the row may stay held for as long as the Worker refuses the
+snapshot. The bound, ``deferral_bound``, is ``reconciler.grace_seconds``, which
+outlasts the stop's own final snapshot (``create_app`` warns when it does not
+exceed ``control.snapshot_timeout_seconds``). It does not outlast every snapshot:
+once the grace lapses, the reconciler's recovery takes a final snapshot of its
+own before it clears the row. Past the bound, timed from the first deferral, the
+occurrence is recorded as SKIPPED ``server_assigned``, with one WARNING line, and
+advances. A pending backup retry is deferred and bounded the same way, without
+advancing. An occurrence skipped this way takes a pending retry with it only when
+that retry is already due, since it would meet the same hold; a retry not yet due
+stays armed for its own time.
 
 Missed-run semantics: a non-``backup`` occurrence executes only while it is at
 most :data:`LATE_RUN_GRACE` past its due instant; a staler occurrence does *not*
@@ -379,8 +389,14 @@ class Deferred:
     A backup of a server at rest that a stop still holds for its final snapshot
     (issue #3998): :class:`CreateBackup` refused it under the lifecycle lock, since
     an archive taken then would lack that snapshot. Not an outcome: the runner
-    records no run row and does not advance.
+    records no run row and does not advance, until the deferral outlasts its
+    bound (issue #4047).
     """
+
+
+# What a backup deferred past the bound is recorded as (issue #4047), named as
+# CreateBackup refused it. No community: a skip is not audited.
+_SKIPPED_ASSIGNED = ActionResult(ScheduleRunOutcome.SKIPPED, "server_assigned", None)
 
 
 @dataclass(frozen=True)
@@ -581,6 +597,10 @@ class RunScheduleTick:
     audit: AuditRecorder
     notifier: ServerNotifier
     clock: Clock
+    # How long a backup waits on a server a stop still holds before it is
+    # recorded as skipped (issue #4047): the wiring passes
+    # reconciler.grace_seconds.
+    deferral_bound: dt.timedelta
     history_cap: int = _HISTORY_CAP
     backup_retry_delay: dt.timedelta = _BACKUP_RETRY_DELAY
     # How late a due player warning may still broadcast; the wiring derives it
@@ -595,6 +615,14 @@ class RunScheduleTick:
     prune_backups: PruneScheduledBackups | None = None
     # Per-schedule pending backup-retry instant; in-memory (lost on restart).
     _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
+    # Per schedule, the backup a hold defers and when it was first deferred
+    # (issue #4047): the occurrence's due instant or the retry's armed one. A
+    # deferral of another instant starts over. Dropped once the deferral ends in
+    # a run or a recorded skip, or the schedule is gone. In-memory, like
+    # _backup_retry: a restart gives a held backup a whole bound again.
+    _deferred: dict[ScheduleId, tuple[dt.datetime, dt.datetime]] = field(
+        default_factory=dict
+    )
     # Schedules currently in a failing state, so a sustained failure notifies once
     # rather than every occurrence (issue #2269). Each maps to the outcome already
     # notified for the incident: a FAILURE or UNKNOWN notifies only when the id is
@@ -622,13 +650,14 @@ class RunScheduleTick:
         async with self.uow:
             due = await self.uow.schedules.list_due(now)
             # A schedule deleted between ticks never reaches the claim or the record
-            # that forget it, so look up each one still notifying: the due poll
-            # lists only the due ones, and a failing schedule outlives the ticks
-            # between its occurrences (issue #3799). Only its toast state goes: a
-            # pending backup retry still reaches its claim, which logs the delete.
+            # that forget it, so look up each one still notifying or deferred: the
+            # due poll lists only the due ones, and a failing schedule outlives the
+            # ticks between its occurrences (issue #3799), as a held one does its
+            # deferral (issue #4047). Only that state goes: a pending backup retry
+            # still reaches its claim, which logs the delete.
             gone = [
                 schedule_id
-                for schedule_id in list(self._notifying)
+                for schedule_id in {*self._notifying, *self._deferred}
                 if await self.uow.schedules.get_ref(schedule_id) is None
             ]
             # Commit the poll transaction: list_due may have quarantined a corrupt
@@ -637,6 +666,7 @@ class RunScheduleTick:
             await self.uow.commit()
         for schedule_id in gone:
             self._notifying.pop(schedule_id, None)
+            self._deferred.pop(schedule_id, None)
         handled: set[ScheduleId] = set()
 
         # Group due schedules by server so same-server schedules stay serial,
@@ -669,7 +699,7 @@ class RunScheduleTick:
             if schedule_id in handled or retry_at > now:
                 continue
             try:
-                await self._run_retry(schedule_id, now)
+                await self._run_retry(schedule_id, retry_at)
             except Exception:  # noqa: BLE001 - one schedule must not stop the tick
                 _LOG.exception(
                     "schedule %s retry failed; continuing", schedule_id.value
@@ -735,9 +765,18 @@ class RunScheduleTick:
                 if (schedule.id, occurrence, step.offset_minutes) not in self._warned:
                     self._log_missed_step(schedule, step)
         result, started_at, finished_at = await self._execute(schedule)
+        gave_up = False
         if isinstance(result, Deferred):
-            self._log_deferred(schedule, "occurrence")
-            return
+            assert occurrence is not None  # list_due predicate guarantees non-None
+            if not self._deferral_outlived(
+                schedule, occurrence, finished_at, "occurrence"
+            ):
+                return
+            gave_up = True
+            result = _SKIPPED_ASSIGNED
+        else:
+            # The hold, if there was one, has ended.
+            self._deferred.pop(schedule.id, None)
         async with self._bookkeeping_lock:
             recorded = await self._record(
                 schedule,
@@ -747,12 +786,20 @@ class RunScheduleTick:
                 advance=True,
                 last_run_at=started_at,
             )
+        if gave_up:
+            self._end_deferral(schedule, "occurrence", recorded=recorded)
+            # One skipped run stands for the backup the schedule owes: a retry
+            # already due would meet the same hold. One not yet due keeps its
+            # own time (issue #4047).
+            retry_at = self._backup_retry.get(schedule.id)
+            if retry_at is not None and retry_at <= now:
+                del self._backup_retry[schedule.id]
         if recorded and schedule.action is ScheduleAction.BACKUP:
             self._reschedule_retry(schedule.id, result, finished_at)
         async with self._bookkeeping_lock:
             await self._prune_after_backup(schedule, result)
 
-    async def _run_retry(self, schedule_id: ScheduleId, now: dt.datetime) -> None:
+    async def _run_retry(self, schedule_id: ScheduleId, retry_at: dt.datetime) -> None:
         # One-shot: the single retry is spent up front, REGARDLESS of its outcome
         # (even a skip on a transitional server consumes it) — the next regular
         # occurrence takes over. A retry-of-the-retry chain is exactly the
@@ -766,23 +813,75 @@ class RunScheduleTick:
         ):
             return
         result, started_at, finished_at = await self._execute(schedule)
+        gave_up = False
         if isinstance(result, Deferred):
-            # Not spent: nothing was attempted (issue #3998).
-            self._backup_retry[schedule_id] = now
-            self._log_deferred(schedule, "retry")
-            return
+            if not self._deferral_outlived(schedule, retry_at, finished_at, "retry"):
+                # Not spent: nothing was attempted (issue #3998).
+                self._backup_retry[schedule_id] = retry_at
+                return
+            gave_up = True
+            result = _SKIPPED_ASSIGNED
+            # Armed until the skipped run is recorded: a record that fails
+            # leaves it to the next tick, still past the bound.
+            self._backup_retry[schedule_id] = retry_at
+        else:
+            # The hold, if there was one, has ended.
+            self._deferred.pop(schedule_id, None)
         # The retry records (and notifies on failure) but never moves next_run_at:
         # it is a catch-up for the failed occurrence, not a new occurrence.
-        await self._record(schedule, result, started_at, finished_at, advance=False)
+        recorded = await self._record(
+            schedule, result, started_at, finished_at, advance=False
+        )
+        if gave_up:
+            self._backup_retry.pop(schedule_id, None)
+            self._end_deferral(schedule, "retry", recorded=recorded)
         await self._prune_after_backup(schedule, result)
 
-    def _log_deferred(self, schedule: Schedule, what: str) -> None:
-        _LOG.info(
-            "schedule %s: server %s is at rest but still assigned to a Worker; "
-            "backup %s deferred to the next tick",
+    def _deferral_outlived(
+        self, schedule: Schedule, owed: dt.datetime, now: dt.datetime, what: str
+    ) -> bool:
+        """Note a deferred backup; whether it has been deferred past the bound.
+
+        ``owed`` is the instant the deferred backup was due. Its first deferral
+        is logged once at INFO, and each later tick only checks the bound, so a
+        long hold costs two log lines rather than one a tick (issue #4047). Past
+        the bound the caller records the backup as skipped, then ends the
+        deferral with :meth:`_end_deferral`; a record that fails leaves it to
+        the next tick, still past the bound.
+        """
+
+        deferred = self._deferred.get(schedule.id)
+        if deferred is None or deferred[0] != owed:
+            self._deferred[schedule.id] = (owed, now)
+            _LOG.info(
+                "schedule %s: server %s is at rest but still assigned to a "
+                "Worker; backup %s deferred until it is released, for at most %s",
+                schedule.id.value,
+                schedule.server_id.value,
+                what,
+                self.deferral_bound,
+            )
+            return False
+        return now - deferred[1] > self.deferral_bound
+
+    def _end_deferral(self, schedule: Schedule, what: str, *, recorded: bool) -> None:
+        """Forget a deferral given up past the bound (issue #4047).
+
+        ``recorded`` is :meth:`_record`'s answer: ``False`` when the schedule
+        was deleted, so no skipped run stands for the backup.
+        """
+
+        self._deferred.pop(schedule.id, None)
+        _LOG.warning(
+            "schedule %s: server %s is still assigned to a Worker after %s; "
+            "backup %s %s",
             schedule.id.value,
             schedule.server_id.value,
+            self.deferral_bound,
             what,
+            "recorded as skipped (server_assigned)"
+            if recorded
+            else "given up; the schedule was deleted, so no run was recorded",
         )
 
     async def _claim(self, schedule_id: ScheduleId, what: str) -> Schedule | None:
@@ -810,6 +909,7 @@ class RunScheduleTick:
 
         self._notifying.pop(schedule_id, None)
         self._backup_retry.pop(schedule_id, None)
+        self._deferred.pop(schedule_id, None)
 
     async def _prune_after_backup(
         self, schedule: Schedule, result: ActionResult

@@ -264,6 +264,7 @@ class _World:
             audit=self.audit,
             notifier=FakeServerNotifier(),
             clock=self.clock,
+            deferral_bound=dt.timedelta(seconds=660),
             backup_retry_delay=dt.timedelta(minutes=1),
         )
 
