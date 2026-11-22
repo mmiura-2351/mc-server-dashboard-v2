@@ -1947,10 +1947,10 @@ JAR-pool, plugin-cache and resource-pack GCs, and
 archives. The rest go soon after the first start: the backup archives at the
 start itself, the other objects at each GC's first pass, at most 10 minutes
 later (CONFIGURATION.md Section 5.7; STORAGE.md Section 4.3, under "Cases the
-marker does not cover"). The commands above dump
-the database before they archive the store, so a backup taken between the two
-is restored with its archive but no row, and the reclaim deletes that archive
-once it is older than the grace.
+marker does not cover"). The commands above dump the database before they
+archive the store, so a backup taken between the two is restored with its
+archive but no row, and the reclaim deletes that archive once it is older than
+the grace.
 
 ## 11. Server export / import (ZIP)
 
