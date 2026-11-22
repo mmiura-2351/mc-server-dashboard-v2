@@ -1010,16 +1010,10 @@ class RunScheduleTick:
         # server read meets a database that is down: nothing was attempted, so
         # the retry stays armed for the next tick.
         result, started_at, finished_at = await self._execute(schedule)
-        # One-shot: the single retry is spent once it ran, REGARDLESS of its
-        # outcome (even a skip on a transitional server consumes it) — the next
-        # regular occurrence takes over. A retry-of-the-retry chain is exactly
-        # the unbounded tail the owner-confirmed "retry once" bound excludes.
-        self._backup_retry.pop(schedule_id, None)
         gave_up = False
         if isinstance(result, Deferred):
             if not self._deferral_outlived(schedule, retry_at, finished_at, "retry"):
                 # Not spent: nothing was attempted (issue #3998).
-                self._backup_retry[schedule_id] = (retry_at, skip_id)
                 return
             gave_up = True
             result = _SKIPPED_ASSIGNED
@@ -1030,6 +1024,12 @@ class RunScheduleTick:
             run_id = ScheduleRunId.new() if skip_id is None else skip_id
             self._backup_retry[schedule_id] = (retry_at, run_id)
         else:
+            # One-shot: the single retry is spent once it ran, REGARDLESS of its
+            # outcome (even a skip on a transitional server consumes it) — the
+            # next regular occurrence takes over. A retry-of-the-retry chain is
+            # exactly the unbounded tail the owner-confirmed "retry once" bound
+            # excludes.
+            self._backup_retry.pop(schedule_id, None)
             # The hold, if there was one, has ended.
             self._deferred.pop(schedule_id, None)
             run_id = ScheduleRunId.new()
