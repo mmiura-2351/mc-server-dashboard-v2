@@ -10,11 +10,12 @@ retains. It is a union type — exactly one of two forms (owner-confirmed):
   ``now`` and including the current day/week/month. Tiers are each ``>= 0`` with
   at least one ``> 0``; a backup kept by *any* tier bucket survives.
 
-Only a healthy row can be kept (issue #1864): a ``QUARANTINED`` or
-``UNREADABLE`` scheduled row claims no keep-N slot and no tier bucket, so the
-keepers are chosen from the healthy rows alone and a condemned scheduled row is
-always pruned — with no healthy row, nothing is kept. ``UNKNOWN`` (a row no
-check has read yet) counts as healthy.
+Healthy rows are chosen as keepers first (issue #1864): a ``QUARANTINED`` row
+keeps a keep-N slot only when too few other scheduled rows are left to fill the
+N, and a tier bucket only when the bucket holds no other row. Keep-N therefore
+keeps as many rows as it would ignoring health, every bucket stays filled, and
+an all-quarantined set keeps exactly the health-blind selection. ``UNKNOWN`` and
+``UNREADABLE`` rank like ``HEALTHY``.
 
 :func:`backups_to_prune` is the pure selection: given a policy, a server's
 backup rows, and ``now``, it returns the rows the policy prunes. Only
@@ -45,13 +46,6 @@ from mc_server_dashboard_api.servers.domain.errors import (
 
 _KEEP_LAST_KEYS = frozenset({"keep_last"})
 _TIERED_KEYS = frozenset({"daily", "weekly", "monthly"})
-
-# The verdicts that bar a row from claiming a keep-N slot or a tier bucket
-# (issue #1864): a check found its world corrupt, or could not read it back.
-# UNKNOWN is not one: no check has condemned the row, and the only scheduled
-# rows that carry it predate the health column, so barring it would prune every
-# such legacy row on the first run, before the integrity sweep reads any of them.
-_UNHEALTHY = frozenset({BackupHealth.QUARANTINED, BackupHealth.UNREADABLE})
 
 
 def _require_int(value: object, name: str) -> int:
@@ -158,6 +152,15 @@ def _newest_first(backups: list[Backup]) -> list[Backup]:
     return sorted(backups, key=lambda b: (b.created_at, str(b.id.value)), reverse=True)
 
 
+def _quarantined_last(backup: Backup) -> bool:
+    # Only QUARANTINED ranks behind the other rows (issue #1864): a check found
+    # the world inside it corrupt. UNKNOWN is a legacy row no check has read
+    # yet. UNREADABLE is not final either: the sweep re-reads every row, and a
+    # half-up backend or a read limit can mark an intact archive unreadable, so
+    # retention stays health-blind for it.
+    return backup.health is BackupHealth.QUARANTINED
+
+
 def _window_days(now_date: dt.date, days: int) -> set[dt.date]:
     return {now_date - dt.timedelta(days=i) for i in range(days)}
 
@@ -185,17 +188,21 @@ def backups_to_prune(
 
     Pure: no I/O, no clock — ``now`` anchors the tiered windows (UTC
     boundaries). Manual / uploaded / event rows are never candidates. Keep-N
-    keeps the newest N healthy scheduled rows; tiered keeps the newest healthy
-    scheduled row per day/week/month bucket inside the configured windows.
-    Every other scheduled row is pruned, a quarantined or unreadable one always.
+    keeps the newest N scheduled rows and tiered the newest scheduled row per
+    day/week/month bucket inside the configured windows, in both cases choosing
+    a quarantined row only where no other row is left; every scheduled row no
+    slot or bucket kept is pruned.
     """
 
     scheduled = _newest_first(
         [b for b in backups if b.source is BackupSource.SCHEDULED]
     )
-    claimants = [b for b in scheduled if b.health not in _UNHEALTHY]
+    # A stable sort: the quarantined rows move behind the rest, each group still
+    # newest-first, so the first claimant of a slot or bucket is its newest
+    # non-quarantined row, else its newest quarantined one.
+    ranked = sorted(scheduled, key=_quarantined_last)
     if policy.keep_last is not None:
-        kept = {b.id for b in claimants[: policy.keep_last]}
+        kept = {b.id for b in ranked[: policy.keep_last]}
         return [b for b in scheduled if b.id not in kept]
 
     now_date = now.astimezone(dt.timezone.utc).date()
@@ -206,7 +213,7 @@ def backups_to_prune(
     claimed_days: set[dt.date] = set()
     claimed_weeks: set[tuple[int, int]] = set()
     claimed_months: set[tuple[int, int]] = set()
-    for backup in claimants:  # newest first, so the first claimant is the newest
+    for backup in ranked:
         created = backup.created_at.astimezone(dt.timezone.utc).date()
         if created in days and created not in claimed_days:
             claimed_days.add(created)
