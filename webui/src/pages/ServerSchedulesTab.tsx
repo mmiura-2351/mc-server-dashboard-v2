@@ -16,7 +16,7 @@
  */
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 import { backupStatsKey, backupsKey } from "../api/backupQueryKeys.ts";
 import { ApiError, api } from "../api/client.ts";
@@ -660,6 +660,7 @@ function ScheduleDialog({
     number | "unknown" | null
   >(null);
   const pruneConfirmed = pruneConfirmedFor === (pruneCount ?? "unknown");
+  const pruneLineId = useId();
 
   const [nameError, setNameError] = useState<string | null>(null);
   const [cadenceError, setCadenceError] = useState<string | null>(null);
@@ -1293,7 +1294,13 @@ function ScheduleDialog({
           </p>
           {confirmPrune && (
             <div className="field">
-              <p className="schedule-prune-warning">
+              {/* A live region: a count that arrives unticks the box below
+                  and holds Create, which is heard rather than silent. */}
+              <p
+                id={pruneLineId}
+                className="schedule-prune-warning"
+                role="status"
+              >
                 {pruneCount !== null
                   ? t("schedules.dialog.retentionPrune", { count: pruneCount })
                   : t(
@@ -1305,6 +1312,7 @@ function ScheduleDialog({
               <label className="checkbox">
                 <input
                   type="checkbox"
+                  aria-describedby={pruneLineId}
                   checked={pruneConfirmed}
                   onChange={(e) =>
                     setPruneConfirmedFor(

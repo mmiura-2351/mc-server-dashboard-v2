@@ -1622,6 +1622,22 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     });
   });
 
+  it("describes the acknowledgement by the line that announces the count", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    const line = await screen.findByText(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+    // A live region, so a count that arrives and unticks the box is heard.
+    expect(line).toHaveAttribute("role", "status");
+    expect(pruneAck()).toHaveAccessibleDescription(
+      t("schedules.dialog.retentionPrune", { count: 3 }),
+    );
+  });
+
   it("asks again when the number to keep changes", async () => {
     routeGet({ schedules: [], backups: scheduled(10) });
     routePost({ create: schedule() });

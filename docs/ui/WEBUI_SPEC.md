@@ -1090,7 +1090,9 @@ numbers): the UI for the general scheduler.
   when the count or N changes. While the list loads, a counting line
   replaces the count; without `backup:read`, or when the list fails, a
   generic line says it could not be counted. Either way the checkbox is
-  still required; with nothing to prune there is none.
+  still required; with nothing to prune there is none. The line describes
+  the checkbox and is a polite live region (`role="status"`), so a count
+  that arrives and unticks the box is announced.
 - Once the schedule is created, the step reads the server again and leaves a
   policy set since (from another session) in place, and the success toast
   says so; otherwise keep-last-N `PUT`s `{keep_last}` to
