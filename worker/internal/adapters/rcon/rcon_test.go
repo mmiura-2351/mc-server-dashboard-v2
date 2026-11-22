@@ -180,13 +180,15 @@ func TestDialExecute(t *testing.T) {
 }
 
 // newSilentFakeServer accepts and authenticates but never replies to an
-// EXEC_COMMAND. See fakeServer.silent.
+// EXEC_COMMAND. See fakeServer.silent. Its listener is a closingListener, so the
+// cleanup that closes it also ends a client read still waiting on the server.
 func newSilentFakeServer(t *testing.T, password string) *fakeServer {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	ln := &closingListener{Listener: raw}
 	fs := &fakeServer{
 		ln:               ln,
 		password:         password,
@@ -530,6 +532,12 @@ func TestExecuteTimeoutIsNotADroppedCommand(t *testing.T) {
 	defaultExecuteTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { defaultExecuteTimeout = prev })
 
+	// Cleanups run LIFO: register wg.Wait before the server, so the server's
+	// closingListener, which also closes the connection it accepted, and the
+	// client's Close both run before it. A hung Execute then ends, and a
+	// regression fails at the guard below instead of at go test's timeout.
+	var wg sync.WaitGroup
+	t.Cleanup(func() { wg.Wait() })
 	fs := newSilentFakeServer(t, "secret")
 	c, err := Dial(context.Background(), fs.addr(), "secret")
 	if err != nil {
@@ -537,9 +545,20 @@ func TestExecuteTimeoutIsNotADroppedCommand(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 
-	_, err = c.Execute(context.Background(), "list")
-	if err == nil || errors.Is(err, execution.ErrCommandDropped) {
-		t.Fatalf("Execute error = %v, want a timeout that is not execution.ErrCommandDropped", err)
+	done := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := c.Execute(context.Background(), "list")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, execution.ErrCommandDropped) {
+			t.Fatalf("Execute error = %v, want a timeout that is not execution.ErrCommandDropped", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Execute hung past the default deadline against a silent server")
 	}
 }
 
@@ -663,6 +682,10 @@ func TestExecutePoisonsConnAfterIOError(t *testing.T) {
 	defaultExecuteTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { defaultExecuteTimeout = prev })
 
+	// Cleanups run LIFO, as in TestExecuteTimeoutIsNotADroppedCommand: a hung
+	// Execute ends before wg.Wait, and a regression fails at the guard below.
+	var wg sync.WaitGroup
+	t.Cleanup(func() { wg.Wait() })
 	fs := newSilentFakeServer(t, "secret")
 	c, err := Dial(context.Background(), fs.addr(), "secret")
 	if err != nil {
@@ -670,8 +693,20 @@ func TestExecutePoisonsConnAfterIOError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 
-	if _, err := c.Execute(context.Background(), "save-off"); err == nil {
-		t.Fatal("first Execute returned nil against a silent server, want timeout error")
+	done := make(chan error, 1)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err := c.Execute(context.Background(), "save-off")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("first Execute returned nil against a silent server, want timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Execute hung past the default deadline against a silent server")
 	}
 
 	// The connection is now poisoned; the next Execute must fail fast without

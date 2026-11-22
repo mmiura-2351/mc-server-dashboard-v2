@@ -1122,11 +1122,25 @@ deleted (`DELETE /communities/{cid}` answers 409 `community_has_servers`), and
 nothing it would have cascaded to is removed either. A row delete cannot do what
 deleting a server requires — the at-rest check, the lifecycle lock, and the
 storage retention of STORAGE.md Section 2.1 — so each server is deleted through
-its own deletion first. The foreign key also orders the deletion against a
-concurrent server creation: the creation's INSERT holds the `community` row
-`FOR KEY SHARE` until it commits, so a Community deletion either waits for it and
-is then refused, or commits first and the creation fails as "community not
-found".
+its own deletion first.
+
+**The deletion is refused before its `DELETE` runs** (issue #4033). It locks
+the `community` row `FOR UPDATE`, the lock the `DELETE` takes, then reads whether
+a server references the Community. The foreign key alone refuses only after the
+`DELETE` has cascaded to every other table. Such a cascade deadlocked with a
+server deletion, which locks its server and then cascades to the server's
+grants: the Community's cascade had taken those grants, then waited for the
+server. A refused deletion now holds the `community` row alone, and the foreign
+key stays as the backstop. The check takes no lock, so it still counts a server
+whose deletion has not committed: a Community deletion racing the deletion of
+its last server is refused, where it used to wait for it.
+
+The lock also orders the check against a concurrent server creation. The
+creation's INSERT holds the `community` row `FOR KEY SHARE` for its foreign key
+until it commits, and that conflicts with the lock. So a Community deletion
+either waits for the creation and then finds its server, or locks first, and the
+creation waits for it and fails as "community not found". A second deletion of
+the same Community waits at the lock, then finds the row gone and answers 404.
 
 **A Community deletion and a concurrent write in that Community wait for each
 other at the `community` row** (issue #4021). The deletion's `DELETE` locks
@@ -1155,6 +1169,25 @@ overlap of writes can delay it, as their foreign-key checks already could.
   cascades the new row away. A grant names a server of the Community, so the
   deletion that waited for a grant creation is then refused 409
   `community_has_servers`.
+
+**An account deletion and a Community deletion meet only at the account's
+membership** (issue #4033). Each would cascade to the account's membership, its
+role assignments and its grants in that Community, in its own trigger-name
+order. But a grant names a server of its Community, so a Community deletion
+that cascades at all reaches no grant. For the membership and its assignments,
+both take the membership first: an assignment is a grandchild of each, and a
+cascade's own cascades run after all of its first-level ones. Whichever deletes
+the membership first, the other waits there holding nothing the first needs.
+Before the server check moved ahead of the cascade, the two deadlocked over the
+membership and the grant whenever the account's grants cascaded before its
+memberships, an order a recreated foreign key produces.
+
+**A role deletion or a grant revocation that loses a race answers 404.** Its
+pre-read still sees the row. Its `DELETE` then waits for the transaction that
+is removing the row, and once that commits it matches nothing: a deletion of the
+role's Community, or a revocation of the grant or a cascade to it from its
+membership, server or account. The use case checks the `DELETE`'s row count
+and answers its not-found (404), not 204 (issue #4033).
 
 Also distinct, **deleting a single server** (without deleting its Community)
 removes the `resource_grant` rows that point at it, `ON DELETE CASCADE` through

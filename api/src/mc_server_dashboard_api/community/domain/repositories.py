@@ -77,6 +77,25 @@ class CommunityRepository(abc.ABC):
         """
 
     @abc.abstractmethod
+    async def lock(self, community_id: CommunityId) -> bool:
+        """Lock the community for its deletion until commit; return whether it exists.
+
+        The lock the DELETE takes, taken before it (#4033): a holder
+        (:meth:`hold`) and an INSERT whose foreign key references the community,
+        a server creation's among them, wait for this transaction, or this waits
+        for them to commit. A community one deleted first is reported absent.
+        """
+
+    @abc.abstractmethod
+    async def has_servers(self, community_id: CommunityId) -> bool:
+        """Return whether a server references the community.
+
+        A plain read: it takes no lock and waits for nothing, so a server whose
+        deletion has not committed still counts. Under :meth:`lock` no server is
+        created in the community until commit (#4033).
+        """
+
+    @abc.abstractmethod
     async def update(self, community: Community) -> None:
         """Persist mutable fields of ``community`` (M1: its name, FR-COMM-1).
 
@@ -91,6 +110,8 @@ class CommunityRepository(abc.ABC):
 
         Servers are not among them: a community that still holds one raises
         :class:`CommunityHasServersError` and nothing is deleted (issue #3218).
+        That refusal comes only after the cascade, so the deletion checks
+        :meth:`has_servers` first, under :meth:`lock` (#4033).
         """
 
 
@@ -269,8 +290,13 @@ class RoleRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def delete(self, role_id: RoleId) -> None:
-        """Delete the role, cascading its ``membership_role`` rows (Section 10)."""
+    async def delete(self, role_id: RoleId) -> bool:
+        """Delete the role, cascading its ``membership_role`` rows (Section 10).
+
+        Returns whether it deleted the role: ``False`` when a concurrent delete,
+        of the role or of its community, removed it since the caller's pre-read
+        (issue #4033).
+        """
 
 
 class ResourceGrantRepository(abc.ABC):
@@ -325,8 +351,13 @@ class ResourceGrantRepository(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def delete(self, grant_id: ResourceGrantId) -> None:
-        """Delete the grant with ``grant_id`` (the ``grant:manage`` revoke)."""
+    async def delete(self, grant_id: ResourceGrantId) -> bool:
+        """Delete the grant with ``grant_id`` (the ``grant:manage`` revoke).
+
+        Returns whether it deleted the grant: ``False`` when a concurrent
+        revocation, or a cascade from a member removal, a server deletion or an
+        account deletion, removed it since the caller's pre-read (issue #4033).
+        """
 
 
 class ResourceExistenceChecker(abc.ABC):

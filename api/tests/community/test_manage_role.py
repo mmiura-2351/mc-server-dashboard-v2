@@ -280,6 +280,26 @@ async def test_delete_role_in_other_community_is_not_found() -> None:
         await DeleteRole(uow=uow)(community_id=CommunityId.new(), role_id=role_id)
 
 
+class _DeleteOnReadRoleRepository(FakeRoleRepository):
+    """Commits a concurrent deletion right after a read hands the role out."""
+
+    async def get_by_id(self, role_id: RoleId) -> Role | None:
+        role = await super().get_by_id(role_id)
+        self.by_id.pop(role_id, None)
+        return role
+
+
+async def test_delete_role_deleted_since_its_read_is_not_found() -> None:
+    # The DELETE matches nothing, which is the role's 404, not a 204 (#4033).
+    uow = FakeAuthzUnitOfWork()
+    uow.roles = _DeleteOnReadRoleRepository()
+    community = CommunityId.new()
+    role_id = _seed_custom_role(uow, community)
+    with pytest.raises(RoleNotFoundError):
+        await DeleteRole(uow=uow)(community_id=community, role_id=role_id)
+    assert uow.commits == 0
+
+
 async def test_read_role_returns_the_role() -> None:
     uow = FakeAuthzUnitOfWork()
     community = CommunityId.new()

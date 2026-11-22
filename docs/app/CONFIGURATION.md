@@ -954,8 +954,10 @@ a wait for the region files to settle; up to 90 s). The wait may use whatever
 the RCON commands leave of the 90 s, less 5 s, so it gives up before the flush
 does: up to 85 s. A scan of the region files that takes longer than about 3 s
 can end the wait up to that scan's length past the 90 s; the stop then still
-goes on as below. If that flush succeeds the container is killed outright,
-since the world is already on disk. Otherwise the
+goes on as below. A flush whose wait ends settled logs `stop flush: working set
+settled` at `INFO`, with the `save-off` and `save-all` round trips as
+`save_off_ms` and `save_all_ms`. If that flush succeeds the container is
+killed outright, since the world is already on disk. Otherwise the
 Worker asks the server to stop — RCON `stop`, or SIGTERM straight away when RCON
 cannot be opened — and Minecraft runs its own shutdown save. Each wait after
 `stop` and after SIGTERM lasts **as long as the world's region files keep being

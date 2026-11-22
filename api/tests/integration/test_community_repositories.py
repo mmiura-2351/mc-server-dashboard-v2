@@ -862,6 +862,22 @@ async def test_list_summaries_page_counts_members_and_servers(
     assert page[1].server_count == 0
 
 
+async def test_has_servers_reports_only_the_communitys_servers(
+    engine: AsyncEngine,
+) -> None:
+    factory = create_session_factory(engine)
+    busy, empty = _community("busy"), _community("empty")
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        await uow.communities.add(busy)
+        await uow.communities.add(empty)
+        await uow.commit()
+    await _insert_server(engine, uuid.uuid4(), busy.id)
+
+    async with SqlAlchemyUnitOfWork(factory) as uow:
+        assert await uow.communities.has_servers(busy.id) is True
+        assert await uow.communities.has_servers(empty.id) is False
+
+
 async def test_list_summaries_page_paginates(engine: AsyncEngine) -> None:
     factory = create_session_factory(engine)
     async with SqlAlchemyUnitOfWork(factory) as uow:

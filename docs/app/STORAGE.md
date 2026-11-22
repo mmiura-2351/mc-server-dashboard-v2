@@ -2381,7 +2381,8 @@ everything else dirty on that filesystem, so a scratch that shares it with the
 store or Postgres waits on their writeback too; a separate filesystem is
 recommended ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 3). Each
 successful sync logs `snapshot made the working set durable` at `INFO` with its
-duration as `sync_ms`.
+duration as `sync_ms`, and with the quiesce's RCON round trips as `save_off_ms`,
+`save_all_ms` and `save_on_ms`.
 
 **The Worker believes only a marker it signed.** The working-set root is
 writable by the server's own code, so the marker's value is authenticated
