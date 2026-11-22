@@ -593,8 +593,13 @@ no archive bytes and does not run the integrity sweep.
 - **`--apply` deletes the row only.** It sends the store no archive delete. A
   row that is truly dangling has no archive to delete. If the store answered
   "not found" for an archive it still holds, the archive stays in the store
-  with no row: no listing shows it, and the server's delete reclaims it
-  (issue #4106 tracks a cleaner for such archives).
+  with no row: no listing shows it. A row-less archive is reclaimed after the
+  grace (`storage_sweep.rowless_archive_grace_seconds`, 1 h by default), by the
+  reclaim that runs at API startup and after each storage sweep pass
+  (STORAGE.md Section 4.3). Copy it out of
+  `communities/<community-id>/servers/<server-id>/backups/` before then if you
+  want to keep it. One left under a server that has since been deleted is not
+  reclaimed; issue #4165 tracks those.
 - **Each deleted row is audited** as `backup:delete_dangling`, with no actor.
 - **`--apply` checks the store first.** It refuses with exit 2 unless the store
   owner marker names this database's installation (STORAGE.md Section 4.3). A
@@ -712,8 +717,9 @@ them here — each has its own subsection:
   ratio crosses 10% — early enough that the headroom to compact is still
   available. See [Vacuum tuning and manual recovery](#vacuum-tuning-and-manual-recovery)
   above.
-- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes
-  and aborts orphan in-progress multipart uploads on a loop (daily by default,
+- **App-side periodic sweep.** The API reclaims orphan staging/snapshot prefixes,
+  aborts orphan in-progress multipart uploads and reclaims backup archives no
+  row names, once past their grace, on a loop (daily by default,
   `storage_sweep.interval_seconds`). See CONFIGURATION.md
   [Section 5.15](../app/CONFIGURATION.md#515-crash-recovery-storage-sweep).
 

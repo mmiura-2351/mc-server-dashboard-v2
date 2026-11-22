@@ -8,9 +8,12 @@ multipart parts without a restart (STORAGE.md Section 9.5).
 
 The sweep is dispatched exactly like the startup hook: awaited directly when it
 is a coroutine function (the async object adapter) and run off the event loop
-via a thread otherwise (the blocking fs adapter). A failure inside one pass is
-logged and the loop continues — one bad pass must not stop reclaiming for good.
-Cancelling the task (on shutdown) ends the loop cleanly.
+via a thread otherwise (the blocking fs adapter). Each pass then runs the
+row-less backup archive reclaim (issue #4106), which reads the backup rows the
+adapter's sweep cannot. A failure inside either is logged and the loop
+continues — one bad pass must not stop reclaiming for good, and a sweep that
+fails does not stop the reclaim. Cancelling the task (on shutdown) ends the loop
+cleanly.
 """
 
 from __future__ import annotations
@@ -27,21 +30,32 @@ _LOG = logging.getLogger(__name__)
 Sweep = Callable[[], Awaitable[None]] | Callable[[], None]
 
 
-async def run_storage_sweep_loop(sweep: Sweep, *, tick_seconds: float) -> None:
-    """Run one sweep every ``tick_seconds`` until cancelled."""
+async def run_storage_sweep_loop(
+    sweep: Sweep,
+    *,
+    reclaim_rowless_archives: Callable[[], Awaitable[None]],
+    tick_seconds: float,
+) -> None:
+    """Run one sweep, then the reclaim, every ``tick_seconds`` until cancelled."""
 
-    async def run_sweep() -> None:
-        if inspect.iscoroutinefunction(sweep):
-            await sweep()
-        else:
-            await asyncio.to_thread(sweep)
+    async def run_pass() -> None:
+        try:
+            if inspect.iscoroutinefunction(sweep):
+                await sweep()
+            else:
+                await asyncio.to_thread(sweep)
+        except Exception:  # noqa: BLE001 - the reclaim runs regardless
+            _LOG.exception("storage sweep pass failed; continuing")
+        await reclaim_rowless_archives()
 
     # One full interval first, unlike the GC loops (issue #3868): the lifespan
-    # already sweeps before serving on every start, so an early pass would only
-    # repeat that sweep.
+    # already sweeps and reclaims before serving on every start, so an early pass
+    # would only repeat them.
     await run_periodic(
-        run_sweep,
+        run_pass,
         tick_seconds=tick_seconds,
-        on_error=lambda: _LOG.exception("storage sweep pass failed; continuing"),
+        on_error=lambda: _LOG.exception(
+            "row-less backup archive reclaim pass failed; continuing"
+        ),
         first_pass="after_interval",
     )

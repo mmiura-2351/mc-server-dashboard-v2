@@ -225,6 +225,19 @@ class JarPoolEntry:
     modified_at: dt.datetime
 
 
+@dataclass(frozen=True)
+class BackupEntry:
+    """One stored backup archive's key and store time (issue #4106).
+
+    ``modified_at`` is when the store last wrote the archive, timezone-aware UTC:
+    the file's mtime on fs, the object's ``LastModified`` on the object backend.
+    The row-less archive reclaim reads it as the archive's age.
+    """
+
+    key: BackupKey
+    modified_at: dt.datetime
+
+
 class SnapshotHandle(abc.ABC):
     """An opaque handle to an in-flight incoming snapshot transfer.
 
@@ -590,6 +603,16 @@ class BackupStore(abc.ABC):
         self, community_id: CommunityId, server_id: ServerId
     ) -> list[BackupKey]:
         """Enumerate a server's backup keys (metadata lives in the DB, #15)."""
+
+    @abc.abstractmethod
+    async def list_backup_entries(
+        self, community_id: CommunityId, server_id: ServerId
+    ) -> list[BackupEntry]:
+        """Enumerate a server's backup archives with their store times (#4106).
+
+        The archives :meth:`list_backups` lists, each with the time the
+        row-less archive reclaim ages it by.
+        """
 
     @abc.abstractmethod
     async def restore_backup(
