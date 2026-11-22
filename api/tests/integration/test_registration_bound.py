@@ -172,6 +172,10 @@ async def test_a_stalled_registration_is_refused_in_time_and_the_next_succeeds(
     finally:
         proxy.answering.set()
         await h.stop()
+        # Both sessions' teardowns write through the engine, as at the app's
+        # shutdown.
+        if h.servicer is not None:
+            await h.servicer.drain_teardowns()
         await engine.dispose()
         listener.close()
         for writer in proxy.writers:

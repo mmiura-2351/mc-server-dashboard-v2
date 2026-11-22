@@ -2080,6 +2080,60 @@ async def test_a_held_lookup_the_database_does_not_answer_still_acks_in_time(
     ]
 
 
+# A rebuild that answers at half the deadline leaves the held-server lookup the
+# other half, so the ack is due at the deadline. A lookup with a deadline of its
+# own could not answer before the rebuild's time plus a whole deadline, 1.5 s.
+_SHARED_DEADLINE_SECONDS = 1.0
+_SLOW_REBUILD_SECONDS = 0.5
+
+
+class _SlowRebuildSink(_StalledRegistrationSink):
+    """A database that answers the rebuild only after half the deadline, and not
+    the held-server lookup."""
+
+    def __init__(self) -> None:
+        super().__init__(rebuild=False, lookup=True)
+
+    async def running_assignment_ids(self, *, worker_id: str) -> dict[str, int]:
+        await asyncio.sleep(_SLOW_REBUILD_SECONDS)
+        return await super().running_assignment_ids(worker_id=worker_id)
+
+
+async def test_the_rebuild_and_the_held_lookup_answer_within_one_deadline(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        grpc_server,
+        "_REGISTRATION_DATABASE_TIMEOUT_SECONDS",
+        _SHARED_DEADLINE_SECONDS,
+    )
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=_SlowRebuildSink(),
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        stub = await h.start()
+        call = stub.Session(metadata=_auth(_CREDENTIAL))
+        started = loop.time()
+        await call.write(_register_message(held_servers={_SERVER_A: 1}))
+        response = await asyncio.wait_for(call.read(), timeout=5)
+        elapsed = loop.time() - started
+        candidates = h.registry.candidates_for_placement()
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+    assert list(response.register_ack.unknown_held_server_ids) == []
+    assert [candidate.load for candidate in candidates] == [1]
+    assert _warnings(caplog) == [
+        "failed to compute unknown held servers; sending empty list"
+    ]
+    # About one deadline, short of the 1.5 s a fresh one would take.
+    assert _SHARED_DEADLINE_SECONDS <= elapsed < 1.4
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat fast-path (issue #1698)
 # ---------------------------------------------------------------------------
