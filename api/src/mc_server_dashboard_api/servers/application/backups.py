@@ -1778,6 +1778,23 @@ async def _backfill_null_sizes(
     covers closing that gap for all of them at once.
     """
 
+    await _record_sizes(
+        uow, await _probe_null_sizes(backup_store, community_id, server_id, rows)
+    )
+    return rows
+
+
+async def _probe_null_sizes(
+    backup_store: BackupArchiveStore,
+    community_id: CommunityId,
+    server_id: ServerId,
+    rows: list[Backup],
+) -> dict[BackupId, int]:
+    """HEAD each NULL-size row, set the size on the row, and return the sizes.
+
+    The store half of :func:`_backfill_null_sizes`, run with no unit of work open.
+    """
+
     sizes: dict[BackupId, int] = {}
     for row in rows:
         if row.size_bytes is None:
@@ -1790,12 +1807,20 @@ async def _backfill_null_sizes(
             except BackupNotFoundError:
                 continue
             row.size_bytes = sizes[row.id] = size_bytes
+    return sizes
+
+
+async def _record_sizes(uow: UnitOfWork, sizes: dict[BackupId, int]) -> None:
+    """Write ``sizes`` in a short unit of work, opened only when there is one.
+
+    The database half of :func:`_backfill_null_sizes`.
+    """
+
     if sizes:
         async with uow:
             for backup_id, size_bytes in sizes.items():
                 await uow.backups.update_size(backup_id, size_bytes)
             await uow.commit()
-    return rows
 
 
 def _aggregate(rows: list[Backup]) -> BackupStatistics:
