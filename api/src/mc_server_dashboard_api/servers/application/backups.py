@@ -232,64 +232,82 @@ class CreateBackup:
                 # that snapshot, so archiving it now would miss it (issue #3998).
                 raise server.not_quiescent_error(BackupUnsettledError)
 
-            # Commit the metadata row BEFORE writing the archive (#1707): a crash
-            # after the row commit but before the archive write leaves a dangling
-            # row (detectable, self-healing via the lazy size backfill and health
-            # sweep), never an orphaned archive with no row to find it by. The
-            # storage_ref is pre-generated so the row can reference it before the
-            # archive exists; size_bytes starts NULL and is backfilled once the
-            # archive lands (the same lazy path legacy rows already use, #661).
+            # Write the archive BEFORE recording its row (issue #4086), so no row
+            # is ever visible without its archive. A failure after the write
+            # deletes the archive again (best effort, :func:`_discard_archive`).
             storage_ref = uuid.uuid4().hex
-            backup = Backup(
-                id=BackupId.new(),
-                server_id=server_id,
-                storage_ref=storage_ref,
-                size_bytes=None,
-                source=source,
-                # Healthy by construction: ``create_from_current`` runs through the
-                # integrity gate (#749), which refuses to archive a corrupt working
-                # set — so reaching here means the archived contents were sound
-                # (#742).
-                health=BackupHealth.HEALTHY,
-                created_by=created_by,
-                created_at=self.clock.now(),
-            )
-            # The lock may have been lost during the snapshot (issue #3927). The row
-            # and the archive written right behind it are one guarded write; the
-            # check stays outside the compensation below, which must not run for
-            # a holder that knows it lost the lock.
+            created_at = self.clock.now()
+            # The lock may have been lost during the snapshot (issue #3927).
             await lock.ensure_held()
-            async with self.uow:
-                await self.uow.backups.add(backup)
-                await self.uow.commit()
             # Both the at-rest path and the running path (after the snapshot just
             # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
-            # If the archive write fails, compensate by deleting the committed
-            # row so repeated failures (e.g. scheduler retries) do not accumulate
-            # dangling rows.
-            try:
-                await self.backup_store.create_from_current(
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                )
-            except Exception:
-                async with self.uow:
-                    await self.uow.backups.delete(backup.id)
-                    await self.uow.commit()
-                raise
-            # Record the archive size now that it exists (#281). The row was
-            # committed with NULL; update it in place.
-            size_bytes = await self.backup_store.size(
+            await self.backup_store.create_from_current(
                 community_id=community_id,
                 server_id=server_id,
                 storage_ref=storage_ref,
             )
-            backup.size_bytes = size_bytes
-            async with self.uow:
-                await self.uow.backups.update_size(backup.id, size_bytes)
-                await self.uow.commit()
+            try:
+                backup = Backup(
+                    id=BackupId.new(),
+                    server_id=server_id,
+                    storage_ref=storage_ref,
+                    size_bytes=await self.backup_store.size(
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    ),
+                    source=source,
+                    # Healthy by construction: ``create_from_current`` runs through
+                    # the integrity gate (#749), which refuses to archive a corrupt
+                    # working set — so reaching here means the archived contents
+                    # were sound (#742).
+                    health=BackupHealth.HEALTHY,
+                    created_by=created_by,
+                    created_at=created_at,
+                )
+                # The archive write can take minutes; check again before the row.
+                await lock.ensure_held()
+                async with self.uow:
+                    await self.uow.backups.add(backup)
+                    await self.uow.commit()
+            except BaseException:
+                await _discard_archive(
+                    self.backup_store,
+                    community_id=community_id,
+                    server_id=server_id,
+                    storage_ref=storage_ref,
+                )
+                raise
             return backup
+
+
+async def _discard_archive(
+    backup_store: BackupArchiveStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    storage_ref: str,
+) -> None:
+    """Delete an archive whose row could not be recorded (issue #4086).
+
+    Best effort: a delete that fails is logged and the caller's own failure is
+    raised. The archive left behind has no row, so no listing shows it. It runs
+    without a lifecycle-lock check: the ref is new, so nothing else can be using
+    the archive.
+    """
+
+    try:
+        await backup_store.delete(
+            community_id=community_id,
+            server_id=server_id,
+            storage_ref=storage_ref,
+        )
+    except Exception:
+        _LOG.warning(
+            "could not delete the archive of a backup whose row was not recorded",
+            exc_info=True,
+            extra={"server_id": str(server_id.value), "storage_ref": storage_ref},
+        )
 
 
 class _NullAuthorDirectory(BackupAuthorDirectory):
@@ -1389,9 +1407,9 @@ class UploadBackup:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
 
-            # Commit the metadata row BEFORE writing the archive (#1707): same
-            # ordering rationale as CreateBackup — a dangling row is detectable and
-            # self-healing, an orphaned archive is not.
+            # Store the archive BEFORE recording its row, as CreateBackup does
+            # (issue #4086). The archive is stored verbatim, so its size is the
+            # body's and needs no read back.
             storage_ref = uuid.uuid4().hex
             backup = Backup(
                 id=BackupId.new(),
@@ -1406,24 +1424,27 @@ class UploadBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
-            # One guarded write for the row and the archive behind it, checked
-            # outside the compensation below, as in CreateBackup (issue #3927).
+            # Each guarded write is checked right before it, as in CreateBackup
+            # (issue #3927).
             await lock.ensure_held()
-            async with self.uow:
-                await self.uow.backups.add(backup)
-                await self.uow.commit()
-            # If the store write fails, compensate by deleting the committed row.
+            await self.backup_store.store(
+                community_id=community_id,
+                server_id=server_id,
+                stream=_chunked(content),
+                storage_ref=storage_ref,
+            )
             try:
-                await self.backup_store.store(
+                await lock.ensure_held()
+                async with self.uow:
+                    await self.uow.backups.add(backup)
+                    await self.uow.commit()
+            except BaseException:
+                await _discard_archive(
+                    self.backup_store,
                     community_id=community_id,
                     server_id=server_id,
-                    stream=_chunked(content),
                     storage_ref=storage_ref,
                 )
-            except Exception:
-                async with self.uow:
-                    await self.uow.backups.delete(backup.id)
-                    await self.uow.commit()
                 raise
             return backup
 

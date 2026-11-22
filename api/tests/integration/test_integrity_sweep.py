@@ -41,9 +41,6 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.config import load_settings
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
-from mc_server_dashboard_api.servers.adapters import (
-    lifecycle_lock as lifecycle_lock_mod,
-)
 from mc_server_dashboard_api.servers.adapters.backup_store import (
     StorageBackupStoreAdapter,
 )
@@ -63,10 +60,7 @@ from mc_server_dashboard_api.servers.domain.backup import (
     BackupId,
     BackupSource,
 )
-from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
-    HeldLifecycleLock,
-    LifecycleLock,
-)
+from mc_server_dashboard_api.servers.domain.lifecycle_lock import HeldLifecycleLock
 from mc_server_dashboard_api.servers.domain.ports import PortRange
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
@@ -312,55 +306,33 @@ async def test_sweep_persists_unreadable_for_a_row_with_no_archive(
 
 
 class _GatedArchiveStore(StorageBackupStoreAdapter):
-    """Parks ``CreateBackup`` after its metadata commit, before the archive write.
-
-    That is the publication window of issue #3220: the ``healthy`` row is visible
-    while its archive does not exist yet.
-    """
+    """Parks ``CreateBackup`` in its archive write, which comes before its row."""
 
     def __init__(self, *, storage: FsStorage) -> None:
         super().__init__(storage=storage)
-        self.row_committed = asyncio.Event()
+        self.writing = asyncio.Event()
         self.release = asyncio.Event()
 
     async def create_from_current(
         self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
     ) -> None:
-        self.row_committed.set()
+        self.writing.set()
         await self.release.wait()
         await super().create_from_current(
             community_id=community_id, server_id=server_id, storage_ref=storage_ref
         )
 
 
-class _ObservedLifecycleLock(LifecycleLock):
-    """The real advisory lock, flagging the moment a caller starts acquiring it."""
-
-    def __init__(self, inner: PgLifecycleLock) -> None:
-        self.inner = inner
-        self.acquiring = asyncio.Event()
-
-    @contextlib.asynccontextmanager
-    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
-        self.acquiring.set()
-        async with self.inner.hold(server_id) as held:
-            yield held
-
-
 # 10 fsyncs on the fs backend, at 10 s each plus 30 s (issue #3651).
 @pytest.mark.timeout(10 * 10 + 30)
-async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
-    engine: AsyncEngine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_a_sweep_during_a_backup_publication_finds_no_row_to_condemn(
+    engine: AsyncEngine, tmp_path: Path
 ) -> None:
-    """A sweep that starts inside CreateBackup's row-before-archive window must
-    not judge the pending archive missing (issue #3220). Both take the server's
-    real advisory lock, so the sweep waits for the publication and then finds the
-    archive sound: the persisted health stays ``healthy``, agreeing with the
-    Backup the creation returned, and no condemnation audit is emitted."""
+    """A creation writes its archive before its row (issue #4086), so a sweep that
+    runs while the archive is being written finds no row: it neither condemns the
+    pending archive as missing nor waits on the creation's lock (issue #3220). The
+    row the creation then records is ``healthy``."""
 
-    # Pin the ordering, not the wait budget: a slow host must not turn the waiting
-    # sweep into a busy skip (which has its own unit test).
-    monkeypatch.setattr(lifecycle_lock_mod, "_ACQUIRE_BUDGET_SECONDS", 600.0)
     community, server = await _seed_server(engine)
     factory = create_session_factory(engine)
     storage = FsStorage(tmp_path)
@@ -379,38 +351,30 @@ async def test_sweep_waits_out_a_backup_publication_instead_of_condemning_it(
         lifecycle_lock=lock,
     )
     audit = RecordingAuditRecorder()
-    sweep_lock = _ObservedLifecycleLock(lock)
     sweep = IntegritySweep(
         uow=ServersUnitOfWork(factory),
         backup_store=StorageBackupStoreAdapter(storage=storage),
         audit=audit,
-        lifecycle_lock=sweep_lock,
+        lifecycle_lock=lock,
     )
 
     create_task = asyncio.create_task(
         create(community_id=community, server_id=server, source=BackupSource.MANUAL)
     )
-    await gated.row_committed.wait()
-    sweep_task = asyncio.create_task(sweep(server_id=server))
-    # Resume the publication only once the sweep is acquiring the lock the
-    # creation still holds, so the sweep reached the row inside the window. A
-    # sweep that never asks for the lock finishes first and fails here.
-    acquiring = asyncio.create_task(sweep_lock.acquiring.wait())
-    await asyncio.wait({acquiring, sweep_task}, return_when=asyncio.FIRST_COMPLETED)
-    assert sweep_lock.acquiring.is_set()
-    assert not sweep_task.done()
-
-    gated.release.set()
+    await gated.writing.wait()
+    try:
+        summary = await sweep(server_id=server)
+    finally:
+        gated.release.set()
     created = await create_task
-    summary = await sweep_task
 
-    async with ServersUnitOfWork(factory) as uow:
-        persisted = await uow.backups.get_by_id(created.id)
-    assert created.health is BackupHealth.HEALTHY
-    assert persisted is not None and persisted.health is BackupHealth.HEALTHY
-    assert summary.backups_healthy == 1
+    # A row seen mid-publication would have met the creation's lock: busy.
+    assert summary.backups_skipped_busy == 0
     assert summary.backups_dangling == 0
     assert audit.events == []
+    async with ServersUnitOfWork(factory) as uow:
+        persisted = await uow.backups.get_by_id(created.id)
+    assert persisted is not None and persisted.health is BackupHealth.HEALTHY
 
 
 async def test_cli_sweep_completes_on_the_smallest_accepted_pool(

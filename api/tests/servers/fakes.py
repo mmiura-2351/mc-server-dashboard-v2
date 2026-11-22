@@ -2062,6 +2062,27 @@ class ExitHookUnitOfWork(FakeUnitOfWork):
             on_exit()
 
 
+class DatabaseOutageError(ConnectionError):
+    """What :class:`OutageUnitOfWork` raises while its database is down."""
+
+
+class OutageUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` whose database can go down (issue #4086).
+
+    While ``down`` is set, opening a block raises :class:`DatabaseOutageError`, as
+    a pool that reaches no database does, so nothing in the block runs. The fault
+    is at the entry rather than in ``commit``: this fake applies an add or a
+    delete at once, so a failing commit would not undo it.
+    """
+
+    down = False
+
+    async def __aenter__(self) -> "OutageUnitOfWork":
+        if self.down:
+            raise DatabaseOutageError("database unreachable")
+        return self
+
+
 @dataclass
 class BumpHookStopIntents(StopIntentCounter):
     """A :class:`StopIntentCounter` that runs ``on_bump`` after the next bump."""
