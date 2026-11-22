@@ -173,15 +173,18 @@ function testQueryClient() {
 }
 
 function renderTab(can: Can, srv = server(), queryClient = testQueryClient()) {
-  return render(
+  const tree = (current: Can) => (
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ToastProvider>
-          <ServerSchedulesTab server={srv} communityId={CID} can={can} />
+          <ServerSchedulesTab server={srv} communityId={CID} can={current} />
         </ToastProvider>
       </QueryClientProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  const view = render(tree(can));
+  // Capabilities that change under an open tab keep its state and cache.
+  return { ...view, rerenderCan: (next: Can) => view.rerender(tree(next)) };
 }
 
 beforeEach(() => {
@@ -1288,6 +1291,10 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     mockApi.post.mock.calls.filter(
       (call) => !(call[0] as string).includes("/preview"),
     );
+  const backupsRead = () =>
+    mockApi.get.mock.calls.some((call) =>
+      (call[0] as string).endsWith("/backups"),
+    );
 
   async function openBackupCreate() {
     fireEvent.click(
@@ -1537,7 +1544,7 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     routeGet({ schedules: [] });
     routePost({ create: schedule() });
     renderTab(
-      canFor(ALL_CODES),
+      CAN_COUNT,
       server({ backup_retention: { daily: 7, weekly: 4, monthly: 0 } }),
     );
 
@@ -1549,6 +1556,8 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
 
     expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
     expect(mockApi.put).not.toHaveBeenCalled();
+    // With no step, nothing is counted.
+    expect(backupsRead()).toBe(false);
   });
 
   it("offers no retention step when creating a schedule of another action", async () => {
@@ -1573,6 +1582,7 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
     expect(createCalls().length).toBe(1);
     expect(mockApi.put).not.toHaveBeenCalled();
+    expect(backupsRead()).toBe(false);
   });
 
   it("offers no retention step when editing a backup schedule", async () => {
@@ -1588,6 +1598,7 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(
       screen.queryByLabelText(t("backups.retention.modeLabel")),
     ).not.toBeInTheDocument();
+    expect(backupsRead()).toBe(false);
   });
 
   it("asks to confirm the scheduled backups the policy deletes now", async () => {
@@ -1620,6 +1631,21 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(JSON.parse(mockApi.put.mock.calls[0][1].body)).toEqual({
       keep_last: 7,
     });
+  });
+
+  it("holds Create again when the acknowledgement is unticked", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(createButton()).toBeEnabled();
+
+    fireEvent.click(pruneAck() as HTMLElement);
+    expect(pruneAck()).not.toBeChecked();
+    expect(createButton()).toBeDisabled();
   });
 
   it("describes the acknowledgement by the line that announces the count", async () => {
@@ -1809,6 +1835,26 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(createButton()).toBeDisabled();
   });
 
+  it("stops counting when backup:read is revoked while the dialog is open", async () => {
+    routeGet({ schedules: [], backups: scheduled(10) });
+    routePost({ create: schedule() });
+    const view = renderTab(CAN_COUNT, server({ backup_retention: null }));
+
+    await openBackupCreate();
+    await screen.findByText(t("schedules.dialog.retentionPrune", { count: 3 }));
+
+    // The capabilities refetch without backup:read: the list read under it
+    // is no longer counted.
+    view.rerenderCan(canFor(ALL_CODES));
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(t("schedules.dialog.retentionPrune", { count: 3 })),
+    ).not.toBeInTheDocument();
+    expect(createButton()).toBeDisabled();
+  });
+
   describe("with a backups list cached by the Backups tab", () => {
     // The dialog shares the Backups tab's list cache; a visit there leaves
     // a list that may be out of date by the time the dialog opens.
@@ -1946,7 +1992,7 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     expect(mockApi.put).not.toHaveBeenCalled();
   });
 
-  it("refreshes the backups list and statistics after the policy prunes", async () => {
+  it("refreshes the server list, backups list and statistics after the policy prunes", async () => {
     routeGet({ schedules: [] });
     routePost({ create: schedule() });
     mockApi.put.mockResolvedValue({ keep_last: 7 });
@@ -1958,6 +2004,7 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
 
     expect(await screen.findByText(t("schedules.created"))).toBeInTheDocument();
     const keys = invalidate.mock.calls.map(([filters]) => filters?.queryKey);
+    expect(keys).toContainEqual(["communities", CID, "servers"]);
     expect(keys).toContainEqual(["backups", CID, SID]);
     expect(keys).toContainEqual(["backups", CID, SID, "statistics"]);
     invalidate.mockRestore();
