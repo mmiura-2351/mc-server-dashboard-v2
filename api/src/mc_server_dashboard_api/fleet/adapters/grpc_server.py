@@ -795,9 +795,7 @@ class WorkerSessionServicer(WorkerServiceServicer):
                     await processor  # propagate cap-trip
                     return
                 if _is_heartbeat(message):
-                    self._registry.record_heartbeat(
-                        worker_id, session, self._clock.now()
-                    )
+                    self._registry.record_heartbeat(worker_id, session, received_at)
                     continue
                 if hold.drop(message):
                     continue

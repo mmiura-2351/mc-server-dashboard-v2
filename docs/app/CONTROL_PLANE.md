@@ -423,10 +423,10 @@ other unexpected stop, which the reconciler restarts after its grace (CONFIGURAT
 Section 5.6).
 
 No resync report is queued behind a newer event for the same server (#3587). The API
-stamps each `StatusChange` as its write lands, so a report queued after the event that
-superseded it, such as a stop's `STOPPED` that landed between the Worker reading the
-state and sending the report, would set the row back to the older state until the
-reconciler's slow path. The Worker reads each server's state and queues its report in
+stamps each `StatusChange` as it reads it (Section 4.2), so a report queued after the
+event that superseded it, such as a stop's `STOPPED` that landed between the Worker
+reading the state and sending the report, is read after that event and stamped later,
+and would set the row back to the older state until the reconciler's slow path. The Worker reads each server's state and queues its report in
 one critical section. A command, an instance's status forwarding or the orphan
 converger has to enter that section to change the state or to queue an event for the
 server, so its events follow the report. The one event that comes before the record
@@ -528,13 +528,17 @@ retries follow. Only the first attempt has the 3 s deadline. The retries back
 off from 0.5 s, doubling up to 10 s, with no time budget. A `StatusChange` is
 stamped when the API reads it off the stream, before it waits for anything, and
 each attempt of it carries that stamp, a held one's retries included (issue
-#4118). Its write is dropped for a server whose state is stamped later. A
-`CommandResult` is stamped the same way. When the command's caller converges a
-server's observed state from the Worker's answer (Section 6), the write carries
-that stamp, not the instant it is made (issue #4117). So a report read after the
-answer outlasts the convergence, and one read before it does not, whichever is
-written first. The hold ends when the message is applied, or when the session
-ends:
+#4118). Its write is dropped for a server whose state is stamped later, or at the
+same instant; only a retry is applied at its own stamp, which its first attempt
+may have written with the answer lost. A `CommandResult` is stamped the same way.
+When the command's caller converges a server's observed state from the Worker's
+answer (Section 6), the write carries that stamp, not the instant it is made
+(issue #4117). So a report read after the answer outlasts the convergence, and
+one read before it does not, whichever is written first. The reconciler's record
+that the answer settled the command, a refused stop or a finished stop whose
+write failed, carries it too, so a report read after the answer supersedes that
+record (CONFIGURATION.md Section 5.6). The hold ends when the message is applied,
+or when the session ends:
 
 - When the Worker closes the stream, the held message gets one last attempt,
   and so does each message queued behind it. Any failure then drops the message.
