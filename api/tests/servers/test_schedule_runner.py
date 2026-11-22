@@ -895,7 +895,9 @@ async def test_a_held_occurrence_skip_keeps_a_retry_not_yet_due() -> None:
     env.uow.servers.seed(server)
     env.uow.schedules.seed(schedule)
     await env.runner.tick()
-    assert env.runner._backup_retry == {schedule.id: day.replace(hour=3, minute=30)}
+    assert env.runner._backup_retry == {
+        schedule.id: (day.replace(hour=3, minute=30), None)
+    }
 
     env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
     store._missing = False
@@ -906,7 +908,9 @@ async def test_a_held_occurrence_skip_keeps_a_retry_not_yet_due() -> None:
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SKIPPED,
     ]
-    assert env.runner._backup_retry == {schedule.id: day.replace(hour=3, minute=30)}
+    assert env.runner._backup_retry == {
+        schedule.id: (day.replace(hour=3, minute=30), None)
+    }
 
     env.uow.servers.by_id[server.id].assigned_worker_id = None  # released at 03:25
     await _tick_at(env, day.replace(hour=3, minute=30))
@@ -936,7 +940,7 @@ async def test_a_held_occurrence_skip_takes_a_retry_due_that_very_tick() -> None
     env.uow.schedules.seed(schedule)
     await env.runner.tick()  # fails -> arms the retry 30 minutes on
     retry_at = _NOW + dt.timedelta(minutes=30)
-    assert env.runner._backup_retry == {schedule.id: retry_at}
+    assert env.runner._backup_retry == {schedule.id: (retry_at, None)}
 
     # An occurrence first deferred a bound and a tick before the retry is skipped
     # at the retry's own instant. The retry is due then, so it goes with it.

@@ -669,8 +669,12 @@ class RunScheduleTick:
     # prune failure never turns the successful backup run into a failure (owner
     # spec), and prune emits nothing on the notification stream.
     prune_backups: PruneScheduledBackups | None = None
-    # Per-schedule pending backup-retry instant; in-memory (lost on restart).
-    _backup_retry: dict[ScheduleId, dt.datetime] = field(default_factory=dict)
+    # Per-schedule pending backup retry: its armed instant, and the run id of
+    # its skip past a deferral's bound once that skip is decided (issue #4166),
+    # else None. In-memory (lost on restart).
+    _backup_retry: dict[ScheduleId, tuple[dt.datetime, ScheduleRunId | None]] = field(
+        default_factory=dict
+    )
     # Per schedule, the backup a hold defers and when it was first deferred
     # (issue #4047): the occurrence's due instant or the retry's armed one. A
     # deferral of another instant starts over. Dropped once the deferral ends in
@@ -769,11 +773,11 @@ class RunScheduleTick:
 
         # Fire any pending backup retry that has come due and was not already
         # superseded by a scheduled occurrence handled above.
-        for schedule_id, retry_at in list(self._backup_retry.items()):
+        for schedule_id, (retry_at, skip_id) in list(self._backup_retry.items()):
             if schedule_id in handled or schedule_id in self._owed or retry_at > now:
                 continue
             try:
-                await self._run_retry(schedule_id, retry_at)
+                await self._run_retry(schedule_id, retry_at, skip_id)
             except Exception:  # noqa: BLE001 - one schedule must not stop the tick
                 _LOG.exception(
                     "schedule %s retry failed; continuing", schedule_id.value
@@ -866,8 +870,8 @@ class RunScheduleTick:
             # One skipped run stands for the backup the schedule owes: a retry
             # already due would meet the same hold. One not yet due keeps its
             # own time (issue #4047).
-            retry_at = self._backup_retry.get(schedule.id)
-            if retry_at is not None and retry_at <= now:
+            pending = self._backup_retry.get(schedule.id)
+            if pending is not None and pending[0] <= now:
                 del self._backup_retry[schedule.id]
                 self._retry_unclaimed.pop(schedule.id, None)
 
@@ -961,7 +965,12 @@ class RunScheduleTick:
                 self.clock.now() - ran.finished_at,
             )
 
-    async def _run_retry(self, schedule_id: ScheduleId, retry_at: dt.datetime) -> None:
+    async def _run_retry(
+        self,
+        schedule_id: ScheduleId,
+        retry_at: dt.datetime,
+        skip_id: ScheduleRunId | None,
+    ) -> None:
         try:
             schedule = await self._claim(schedule_id, "backup retry")
         except Exception:  # noqa: BLE001 - a claim that raises attempted nothing
@@ -1005,13 +1014,13 @@ class RunScheduleTick:
         if isinstance(result, Deferred):
             if not self._deferral_outlived(schedule, retry_at, finished_at, "retry"):
                 # Not spent: nothing was attempted (issue #3998).
-                self._backup_retry[schedule_id] = retry_at
+                self._backup_retry[schedule_id] = (retry_at, skip_id)
                 return
             gave_up = True
             result = _SKIPPED_ASSIGNED
             # Armed until the skipped run is recorded: a record that fails
             # leaves it to the next tick, still past the bound.
-            self._backup_retry[schedule_id] = retry_at
+            self._backup_retry[schedule_id] = (retry_at, None)
         else:
             # The hold, if there was one, has ended.
             self._deferred.pop(schedule_id, None)
@@ -1368,7 +1377,7 @@ class RunScheduleTick:
         self, schedule_id: ScheduleId, result: ActionResult, now: dt.datetime
     ) -> None:
         if result.outcome is ScheduleRunOutcome.FAILURE and result.retryable:
-            self._backup_retry[schedule_id] = now + self.backup_retry_delay
+            self._backup_retry[schedule_id] = (now + self.backup_retry_delay, None)
         elif result.outcome is ScheduleRunOutcome.SUCCESS:
             self._backup_retry.pop(schedule_id, None)
             self._retry_unclaimed.pop(schedule_id, None)
