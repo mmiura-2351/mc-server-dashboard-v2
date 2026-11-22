@@ -768,7 +768,11 @@ async def test_a_held_retry_is_bounded_too_and_leaves_next_run_at(
     env.uow.servers.seed(server)
     env.uow.schedules.seed(schedule)
     await env.runner.tick()  # fails -> arms the retry 30 minutes on
-    next_run = env.uow.schedules.by_id[schedule.id].next_run_at
+    # Far enough out that an advance would show.
+    next_run = _NOW + dt.timedelta(days=1)
+    env.uow.schedules.by_id[schedule.id] = _replace_next_run(
+        env.uow.schedules.by_id[schedule.id], next_run
+    )
 
     # At the retry a stop holds the row, for longer than the bound.
     env.uow.servers.by_id[server.id].assigned_worker_id = _WORKER
