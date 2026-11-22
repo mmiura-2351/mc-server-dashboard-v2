@@ -189,7 +189,11 @@ class _FailingFileStore(StorageFileStoreAdapter):
 
 class _EndCommitFails(ServersUnitOfWork):
     """Fails ``times`` of the creation's commits from its second, the ones that
-    end it, with an outage (issue #4088)."""
+    end it, with an outage (issue #4088).
+
+    The creations below sleep on a fake that returns for one wait more than the
+    retry makes, so an extra attempt fails a test instead of parking it.
+    """
 
     def __init__(
         self, session_factory: async_sessionmaker[AsyncSession], *, times: int
@@ -496,7 +500,7 @@ async def test_a_start_after_a_failed_creation_is_refused(
         file_store=file_store,
         port_range=PortRange(start=25565, end=25664),
         lifecycle_lock=lock,
-        sleep=RecordingSleep(returns=2),
+        sleep=RecordingSleep(returns=3),
     )
     creation = (
         ImportServer(create_server=create, file_store=file_store)(
@@ -546,7 +550,7 @@ async def test_a_creation_whose_end_met_an_outage_once_can_start(
         file_store=StorageFileStoreAdapter(storage=storage),
         port_range=PortRange(start=25565, end=25664),
         lifecycle_lock=lock,
-        sleep=RecordingSleep(returns=2),
+        sleep=RecordingSleep(returns=3),
     )
     server = await create(
         community_id=community_id,

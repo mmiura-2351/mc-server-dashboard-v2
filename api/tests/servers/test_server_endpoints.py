@@ -723,7 +723,8 @@ def test_create_seed_failed_is_503_and_audits_the_committed_row() -> None:
 
 def _create_whose_end_meets_outages(outages: int) -> tuple[TestClient, FakeUnitOfWork]:
     # The write that ends the creation meets ``outages`` pool timeouts (#4051)
-    # before it is made (issue #4088).
+    # before it is made (issue #4088). The sleep returns for one wait more than
+    # the retry makes, so an extra attempt fails the test instead of parking it.
     uow = FakeUnitOfWork(
         servers=ClearCreationFailsRepository(
             *(sqlalchemy.exc.TimeoutError("QueuePool limit") for _ in range(outages))
@@ -738,7 +739,7 @@ def _create_whose_end_meets_outages(outages: int) -> tuple[TestClient, FakeUnitO
             version_validator=FakeVersionValidator(),
             file_store=FakeFileStore(),
             port_range=PortRange(start=25565, end=25664),
-            sleep=RecordingSleep(returns=2),
+            sleep=RecordingSleep(returns=3),
         ),
     )
     return _client(app), uow

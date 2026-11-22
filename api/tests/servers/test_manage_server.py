@@ -1052,13 +1052,15 @@ _COMMUNITY = CommunityId(uuid.uuid4())
 def _create(
     uow: FakeUnitOfWork, store: FakeFileStore, sleep: RecordingSleep | None = None
 ) -> Awaitable[Server]:
+    # The sleeps return for one wait more than the end of a creation makes, so
+    # an extra attempt fails a test's assertions instead of parking it.
     return CreateServer(
         uow=uow,
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=store,
         port_range=_PORTS,
-        sleep=sleep or RecordingSleep(returns=2),
+        sleep=sleep or RecordingSleep(returns=3),
     )(
         community_id=_COMMUNITY,
         name="survival",
@@ -1140,7 +1142,7 @@ async def test_a_creation_whose_end_failed_transiently_is_retried_and_ends() -> 
     # the write that ends the creation is retried in a new unit of work,
     # rather than leaving a whole working set unstartable.
     servers = ClearCreationFailsRepository(_pool_timeout())
-    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=2)
+    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=3)
 
     server = await _create(uow, FakeFileStore(), sleep)
 
@@ -1159,7 +1161,7 @@ async def test_a_creation_whose_end_kept_failing_transiently_is_seed_failed(
     # answers for its other failures after the row commits.
     errors = [_pool_timeout() for _ in range(3)]
     servers = ClearCreationFailsRepository(*errors)
-    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=2)
+    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=3)
 
     with caplog.at_level(logging.WARNING, logger=manage_server.__name__):
         with pytest.raises(WorkingSetSeedFailedError) as exc_info:
@@ -1184,7 +1186,7 @@ async def test_a_creation_whose_end_failed_otherwise_is_not_retried() -> None:
         asyncpg.UndefinedColumnError('column "creation_incomplete" does not exist')
     )
     servers = ClearCreationFailsRepository(error)
-    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=2)
+    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=3)
 
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await _create(uow, FakeFileStore(), sleep)
