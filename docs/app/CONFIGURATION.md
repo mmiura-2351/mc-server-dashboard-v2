@@ -982,7 +982,9 @@ the server is not saving.
 **New servers start with it off.** A server created on this platform gets
 `sync-chunk-writes=false` in its initial `server.properties` (issue #3443). The
 key is not platform-managed: a user can set it back to `true`, and no platform
-write changes it after that. Existing and imported vanilla, Fabric and Forge
+write changes it after that. Removing a `sync-chunk-writes` override from the
+server's config deletes the line, so the server falls back to vanilla's `true`,
+not the seeded `false`. Existing and imported vanilla, Fabric and Forge
 servers keep the value their file has, so on a slow-sync host they stay slow to
 stop until someone edits the key. Paper ignores the key unless the JVM is
 started with `-DPaper.enable-sync-chunk-writes=true`, which the Worker does not

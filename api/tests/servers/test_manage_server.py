@@ -647,6 +647,31 @@ async def test_create_seeds_sync_chunk_writes_off() -> None:
     assert "sync-chunk-writes=false" in seeded.splitlines()
 
 
+async def test_create_override_replaces_the_seeded_sync_chunk_writes() -> None:
+    # The default is not platform-managed (issue #3443): a create-time override
+    # rewrites the seeded line in place, leaving exactly one, the user's.
+    file_store = FakeFileStore()
+    await CreateServer(
+        uow=FakeUnitOfWork(),
+        clock=FakeClock(_NOW),
+        version_validator=FakeVersionValidator(),
+        file_store=file_store,
+        port_range=_PORTS,
+        token_generator=lambda: "tok",
+    )(
+        community_id=CommunityId(uuid.uuid4()),
+        name="survival",
+        mc_edition="java",
+        mc_version="1.21.1",
+        server_type="vanilla",
+        config={"sync-chunk-writes": "true"},
+    )
+    assert file_store.files["server.properties"] == (
+        b"server-port=25565\nenable-rcon=true\nrcon.port=25575\nrcon.password=tok\n"
+        b"sync-chunk-writes=true\n"
+    )
+
+
 # --- create: config overrides written to server.properties (#1209) ---------
 
 
