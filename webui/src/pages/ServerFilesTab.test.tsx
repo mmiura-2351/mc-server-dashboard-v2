@@ -4679,6 +4679,12 @@ describe("ServerFilesTab a stopped server its Worker still holds", () => {
       },
     });
 
+    // A drop taken shows its preparing line at once, then yields before it
+    // asks to overwrite a.txt.
+    expect(
+      screen.queryByText(t("files.upload.preparing")),
+    ).not.toBeInTheDocument();
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mockPostFormWithProgress).not.toHaveBeenCalled();
   });
