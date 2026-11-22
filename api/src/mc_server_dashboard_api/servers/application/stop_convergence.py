@@ -20,15 +20,14 @@ API caller is alive:
 - a shielded release a flow started has not finished — it outlives the caller's
   cancellation, so it keeps the server in flight on its own until it completes;
 - a final-snapshot command for the server is outstanding: dispatched, with its
-  result not yet consumed by the caller or by the late-result sink. The
-  control-plane state already tracks these by command id for the late-result
-  path, and ``outstanding`` asks it.
+  result not yet arrived. The control-plane state already tracks these by command
+  id for the late-result path, and ``outstanding`` asks it.
 
 A flow that finds the server in flight does not queue behind it. An operator stop
 gets ``LifecycleTransitionConflictError`` (409 ``transition_conflict``), and the
-reconciler skips the row for the tick. A late result whose own command record is
-already consumed releases only if nothing else is in flight; otherwise the flow
-still in flight, or a later reconciler tick, converges the row. An outstanding
+reconciler skips the row for the tick. A late result, whose own snapshot no longer
+counts once it arrives, releases only if nothing else is in flight; otherwise the
+flow still in flight, or a later reconciler tick, converges the row. An outstanding
 record is dropped when its result arrives, when the Worker's session ends or is
 superseded (a superseding session fails the old one's commands, so none of them
 can linger), or when the command is dropped unsent as stale. Once nothing is in

@@ -687,3 +687,88 @@ async def test_a_reconnect_that_retires_a_stops_final_snapshot_keeps_the_row(
 
     assert not worker.guard.in_flight(server.id)
     assert _assigned(repo, server) is None
+
+
+class _FailingClears(FakeServerRepository):
+    """Each assignment clear raises the next of ``errors`` before it writes."""
+
+    def __init__(self, *errors: type[Exception]) -> None:
+        super().__init__()
+        self._errors = list(errors)
+
+    async def clear_assignment_after_final_snapshot(
+        self, server_id: ServerId, worker_id: WorkerId
+    ) -> bool:
+        if self._errors:
+            raise self._errors.pop(0)("scripted write failure")
+        return await super().clear_assignment_after_final_snapshot(server_id, worker_id)
+
+
+async def test_a_held_retry_of_a_late_result_releases_at_once() -> None:
+    # Issue #4023: the release a late final-snapshot result drives fails because
+    # the database is down, so the servicer holds the result and retries it in
+    # place (issue #3614). The retry must apply the release at once, rather than
+    # leave the row to the reconciler's grace. Meanwhile the server is not in
+    # flight: its snapshot has settled, so nothing is outstanding.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = _FailingClears(ConnectionRefusedError)
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    abandoned = await _abandon_a_final_snapshot(repo, server, worker)
+
+    with pytest.raises(ConnectionRefusedError):
+        await worker.report_failed(abandoned)
+    assert not worker.guard.in_flight(server.id)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+    await worker.report_failed(abandoned)  # the held retry
+
+    assert _assigned(repo, server) is None
+
+
+@pytest.mark.parametrize(
+    "errors",
+    [[RuntimeError], [ConnectionRefusedError, RuntimeError]],
+    ids=["first_attempt", "held_retry"],
+)
+async def test_a_late_result_whose_release_fails_otherwise_is_dropped(
+    errors: list[type[Exception]],
+) -> None:
+    # A release that fails with an error that is not an outage is dropped, with
+    # the late result, on a first attempt or on a held retry: the servicer does
+    # not hold it, so its record goes too. The server is then not in flight, the
+    # reconciler converges the row (issue #3441), and the result applies nothing
+    # if it is delivered again.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = _FailingClears(*errors)
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    abandoned = await _abandon_a_final_snapshot(repo, server, worker)
+
+    for error in errors:
+        with pytest.raises(error):
+            await worker.report_failed(abandoned)
+
+    assert not worker.guard.in_flight(server.id)
+    await worker.report_failed(abandoned)
+    assert _assigned(repo, server) == server.assigned_worker_id
+
+
+async def test_a_duplicate_late_result_does_not_release_a_later_hold() -> None:
+    # A late result applies its release once. After its held retry has released
+    # the row, a duplicate of the result must not release the next hold of the
+    # server on the same Worker: that hold waits on a later snapshot.
+    server = _server(desired=DesiredState.STOPPED, observed=ObservedState.STOPPED)
+    repo = _FailingClears(ConnectionRefusedError)
+    repo.seed(server)
+    worker = _Worker(repo, server)
+    abandoned = await _abandon_a_final_snapshot(repo, server, worker)
+    with pytest.raises(ConnectionRefusedError):
+        await worker.report_failed(abandoned)
+    await worker.report_failed(abandoned)  # the held retry
+    assert _assigned(repo, server) is None
+
+    repo.by_id[server.id].assigned_worker_id = server.assigned_worker_id
+    await worker.report_failed(abandoned)
+
+    assert _assigned(repo, server) == server.assigned_worker_id

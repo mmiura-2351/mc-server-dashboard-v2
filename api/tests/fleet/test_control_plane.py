@@ -1125,6 +1125,41 @@ async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> N
     assert sink.calls == []
 
 
+class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
+    """Records each clear call, failing every one as a database outage."""
+
+    async def clear_held_assignment_on_late_snapshot(
+        self, *, server_id: str, worker_id: str, succeeded: bool, message: str | None
+    ) -> None:
+        await super().clear_held_assignment_on_late_snapshot(
+            server_id=server_id,
+            worker_id=worker_id,
+            succeeded=succeeded,
+            message=message,
+        )
+        raise ConnectionRefusedError("connect call failed")
+
+
+async def test_reconnect_sweeps_a_late_snapshot_whose_release_is_held() -> None:
+    # A late result's release failed with an outage, so its record is kept for
+    # the servicer's held retry (issue #4023). The hold ends with the session, so
+    # the superseding session's open_session drops the record too: a result for
+    # the old command routes nowhere after it.
+    sink = _DownLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    state.open_session(owner, 1)
+    state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    state.discard_pending("cmd-1")
+    with pytest.raises(ConnectionRefusedError):
+        await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    state.open_session(owner, 2)
+    await state.resolve("cmd-1", owner, _failed_transfer_result())
+
+    assert len(sink.calls) == 1
+
+
 async def test_register_ack_echoes_correlation_id_and_sets_sent_at(
     harness: _Harness,
 ) -> None:

@@ -2954,7 +2954,7 @@ class StopServer:
         """``_clear_assignment_after_late_snapshot``, unless anything is in flight.
 
         The late result is of a snapshot whose flow has already given up its
-        claim, and the control plane consumed the snapshot's command record before
+        claim, and the control plane no longer counts the snapshot as outstanding when
         this runs. If the server is still in flight — another flow's claim, a
         shielded release, or another outstanding final snapshot — then some other
         upload over the same scratch may be unsettled, and only its own settling
@@ -3033,9 +3033,9 @@ class StopServer:
         the operator after a cause nobody observed (issue #2766).
         """
 
-        # The late result says the upload settled, and the control plane has already
-        # dropped the snapshot's record, so no later result retries this release. If
-        # the write fails, record it for the reconciler instead (issue #3441).
+        # The late result says the upload settled. If the write fails, record it for
+        # the reconciler (issue #3441): only an outage's failure is retried, and only
+        # while the Worker's session lasts (issue #4023).
         with self._recording_unwritten_stop(server_id):
             async with self.uow:
                 server = await self.uow.servers.get_by_id(server_id)

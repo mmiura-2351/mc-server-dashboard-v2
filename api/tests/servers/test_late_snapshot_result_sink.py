@@ -153,10 +153,11 @@ async def test_clear_carries_the_worker_message_into_the_release_warning(
 async def test_a_release_that_fails_to_be_written_is_recorded_for_the_reconciler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Issue #3441: the control plane drops the late snapshot's record before this
-    # sink writes the release, so a failed write would otherwise lose it until the
-    # full reconciler grace. The sink must hand the use case the process-wide record
-    # the reconciler reads, so the failure is recorded where it will be seen.
+    # Issue #3441: a release this sink fails to write is retried only after an
+    # outage, and only while the Worker's session lasts (issue #4023), so a failed
+    # write would otherwise lose it until the full reconciler grace. The sink must
+    # hand the use case the process-wide record the reconciler reads, so the
+    # failure is recorded where it will be seen.
     server_id, worker_id = uuid.uuid4(), uuid.uuid4()
 
     class _DownUnitOfWork(FakeUnitOfWork):
