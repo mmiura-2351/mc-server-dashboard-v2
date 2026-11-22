@@ -504,11 +504,13 @@ A stop also keeps the server assigned when the Worker refuses its final snapshot
 still holds the world's latest changes, which a release would lose to a start on
 another Worker or to an at-rest write. The stop answers with the server
 `stopped`, still assigned, and the refusal in `final_snapshot_refusal`. The
-reconciler retries the snapshot `refused_stop_grace_seconds` after the refusal,
-not `grace_seconds`. After that, a snapshot refused `BUSY` is taken again on
-the next tick and not counted toward the backoff, since the id frees once the
-other command or orphan settles, and one refused `UNAVAILABLE` counts, since
-each attempt may spend a graceful stop on a leftover the Worker cannot end.
+reconciler retries the snapshot once `refused_stop_grace_seconds`, not
+`grace_seconds`, has passed since the server's last report or intent commit: the
+refusal only selects the shorter grace. After that, a snapshot refused `BUSY` is
+taken again on the next tick and not counted toward the backoff, since the id
+frees once the other command or orphan settles, and one refused `UNAVAILABLE`
+counts, since each attempt may spend a graceful stop on a leftover the Worker
+cannot end.
 Nothing bounds the retries. A second `stop` retries at once, and answers
 `409 final_snapshot_refused` if the Worker refuses again. Until the server is
 released, a `start` answers `409`, and a delete or a write to the server's files
@@ -518,6 +520,11 @@ hold outlasts an API restart, after which the first retry waits the full
 `grace_seconds`. If the Worker disconnects, the server waits a full
 `grace_seconds` from the drop like any held server: a Worker back within it gets
 the snapshot retried, and past it the server is released without the snapshot.
+One exception remains (issue #4111): a `stop` of the held server while its
+Worker is not connected releases it at once, without the snapshot and without
+the grace, as it does any server of a disconnected Worker ("A Worker that never
+reconnects" below). It is audited as a plain `server:stop`, and nothing retries
+the snapshot when the Worker comes back.
 
 **A Worker that never reconnects.** When a Worker disconnects, the API marks its
 servers `observed=unknown`, except a crashed one, which stays `crashed`, and keeps

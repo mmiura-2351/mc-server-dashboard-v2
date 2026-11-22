@@ -567,7 +567,9 @@ can be re-placed after hydrate (FR-WRK-4), or when a failed start is undone
 refuses `BUSY` or `UNAVAILABLE` keeps it set, with the refusal in
 `final_snapshot_refusal`, until a retry of the snapshot settles, an operator
 releases the server without it, or its Worker stays away a full grace (issue
-#3697). A Worker disconnect does not clear it:
+#3697). One exception remains: a stop while that Worker is not connected
+releases the server at once, without the snapshot (issue #4111). A Worker
+disconnect does not clear the column:
 the API marks the Worker's servers `observed=unknown` (a crashed one stays
 `crashed`) and they stay assigned to it. A server whose Worker never comes back
 is released by an operator stop and re-placed by a start ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6,

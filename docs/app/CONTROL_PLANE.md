@@ -849,11 +849,13 @@ Notes:
   not an error. The stop that set the intent still answers, with the server
   stopped, assigned and the refusal set. A late result of an abandoned final
   snapshot that is such a refusal holds the server the same way.
-  The reconciler retries the snapshot `refused_stop_grace_seconds` after the
-  refusal, then retries a `BUSY` one every tick and backs an `UNAVAILABLE` one
-  off (CONFIGURATION.md Section 5.6). Nothing bounds the retries. A stop of the
-  held server retries at once and answers `409 final_snapshot_refused` when the
-  Worker refuses again. A retry that publishes releases the server and clears
+  The reconciler retries the snapshot once `refused_stop_grace_seconds` has
+  passed since the server's last report or intent commit (the refusal only
+  selects that shorter grace), then retries a `BUSY` one every tick and backs an
+  `UNAVAILABLE` one off (CONFIGURATION.md Section 5.6). Nothing bounds the
+  retries. A stop of the held server retries at once and answers
+  `409 final_snapshot_refused` when the Worker refuses again. A retry that
+  publishes releases the server and clears
   the refusal. One that times out or meets a session end keeps the server and
   clears the refusal, since the latest answer is not a refusal; a later
   refusal sets it again. Every other answer to a final snapshot releases the
@@ -864,7 +866,12 @@ Notes:
   only the short grace is lost, and the first retry after the restart waits
   the full grace. A Worker that disconnects and stays away a full grace from
   the drop loses the hold, and the server is released without the snapshot
-  (Section 4.4). A holder of `server:stop` can release it at once (next note).
+  (Section 4.4). One exception remains (issue #4111): a stop of the held
+  server while its Worker is not connected releases it at once, without the
+  snapshot and without the grace, as it does any server of a disconnected
+  Worker. It is audited as a plain `server:stop`, and nothing retries the
+  snapshot when the Worker comes back. A holder of `server:stop` can release
+  it at once (next note).
 - **Releasing a held server without its final snapshot sends no command.** A
   stop holds its Worker until the final snapshot settles. When the Worker
   refuses that snapshot `BUSY` or `UNAVAILABLE`, the server records the refusal

@@ -2484,11 +2484,18 @@ which leaves markers that read as 0 or an unusable key.
   - To avoid the loss, stop every server before upgrading the Worker. A stop
     publishes the server's final snapshot and removes its scratch, so nothing
     is held when the new Worker boots. That holds only when the final snapshot
-    publishes: a refused one keeps the working set (Section 4.6), and the
-    upgrade then hydrates over it. So check that no `<id>` directory is left in
-    the scratch root before upgrading. Alternatively, take an on-demand backup
-    of each running server just before the upgrade: for a running server it
-    publishes a quiesced snapshot first (Section 3.3).
+    publishes. One the Worker refuses `BUSY` or `UNAVAILABLE` keeps the server
+    assigned, so nothing hydrates over its working set until a release. The
+    upgrade's restart is a drop: back within `reconciler.grace_seconds`, the
+    Worker gets the snapshot retried, which declares no base generation since
+    its marker reads 0; past it, the server is released without the snapshot
+    ([`CONFIGURATION.md`](CONFIGURATION.md) Section 5.6). One that fails any
+    other way, such as `TRANSFER_FAILED`, releases the server and keeps the
+    working set (Section 4.6), and the upgrade then hydrates over it. So check
+    that no stopped server is still assigned to the Worker, and that no `<id>`
+    directory is left in the scratch root, before upgrading. Alternatively,
+    take an on-demand backup of each running server just before the upgrade:
+    for a running server it publishes a quiesced snapshot first (Section 3.3).
   - Rolling the Worker back to a version from before this change costs the
     same again: that version reads a `v2` marker as no generation at all.
 
