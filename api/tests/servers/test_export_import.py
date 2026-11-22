@@ -28,8 +28,9 @@ import json
 import threading
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -41,6 +42,7 @@ from mc_server_dashboard_api.servers.application.export_import import (
     ImportServer,
     ResolveServerExport,
 )
+from mc_server_dashboard_api.servers.application.files import _archive_entries
 from mc_server_dashboard_api.servers.application.manage_server import CreateServer
 from mc_server_dashboard_api.servers.domain.display_name import checked_display_name
 from mc_server_dashboard_api.servers.domain.entities import Server
@@ -683,14 +685,14 @@ async def test_import_publish_failure_is_seed_failed() -> None:
     [
         pytest.param("_parse_metadata", 1, id="the-metadata-read"),
         pytest.param("_archive_entries", 1, id="the-dry-run"),
-        pytest.param("_archive_entries", 2, id="the-pass-that-publishes-the-entries"),
+        pytest.param("_archive_entries", 2, id="the-read-of-the-entries-to-publish"),
     ],
 )
 async def test_imports_reading_together_leave_the_default_executor_free(
     monkeypatch: pytest.MonkeyPatch, reader: str, slow_call: int
 ) -> None:
     # An import reads the archive three times: the metadata, the dry run before
-    # the row is created, and the pass that publishes the entries. A crafted
+    # the row is created, and the read of the entries to publish. A crafted
     # archive costs as much in each, so all three run on the archive-validation
     # pool (issue #3912): on the default executor, a few imports reading for
     # minutes would take every worker from the fs Storage calls, the sweep and
@@ -1335,9 +1337,9 @@ async def test_import_plugins_that_lost_the_lock_commits_no_plugin_rows() -> Non
     await _import(held_uow, FakeLifecycleLock())
     lost_uow = FakeUnitOfWork()
     lost = FakeLifecycleLock()
-    # The seed's check passes (the archive has no member to publish); the
-    # plugin commit's is lost.
-    lost.checks_before_loss = 1
+    # The row commit's and the seed's checks pass (the archive has no member to
+    # publish); the plugin commit's is lost.
+    lost.checks_before_loss = 2
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
         await _import(lost_uow, lost)
 
@@ -1388,6 +1390,42 @@ async def test_import_publishes_inside_the_lock_its_create_took() -> None:
     assert all(ev[i - 1] == (server.id, "check") for i in writes), ev
 
 
+async def test_import_reads_its_entries_before_the_lock_and_the_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The read of the entries to publish can wait for the archive-validation
+    # pool (issue #3912), so it runs before the creation takes the lifecycle
+    # lock and its pooled connection (issue #4045), and a failure of it leaves
+    # no row. Each read of the entries notes how far the lock's timeline had got
+    # when it finished.
+    community = uuid.uuid4()
+    dst_uow = FakeUnitOfWork()
+    dst_store = FakeFileStore()
+    lock = FakeLifecycleLock()
+    dst_uow.servers.events = lock.events
+    reads_done_at: list[int] = []
+
+    def entries(*args: Any, **kwargs: Any) -> Iterator[tuple[str, bytes]]:
+        yield from _archive_entries(*args, **kwargs)
+        reads_done_at.append(len(lock.events))
+
+    monkeypatch.setattr(export_import, "_archive_entries", entries)
+    imp = ImportServer(
+        create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
+        file_store=dst_store,
+    )
+    archive = _zip({EXPORT_METADATA_FILENAME: _metadata(), "world/level.dat": b"x"})
+
+    server = await imp(
+        community_id=CommunityId(community), name="fresh", content=archive
+    )
+
+    # The dry run and the read of the entries to publish, both before acquire.
+    acquire_at = lock.events.index((server.id, "acquire"))
+    assert len(reads_done_at) == 2, reads_done_at
+    assert all(at <= acquire_at for at in reads_done_at), (reads_done_at, lock.events)
+
+
 async def test_import_that_lost_the_lock_before_its_publish_writes_no_member() -> None:
     # A lock lost after the seed stops the publish before its first member's
     # write (issue #3927); the row stands, so it is the seed failure.
@@ -1395,7 +1433,8 @@ async def test_import_that_lost_the_lock_before_its_publish_writes_no_member() -
     dst_uow = FakeUnitOfWork()
     dst_store = FakeFileStore()
     lock = FakeLifecycleLock()
-    lock.checks_before_loss = 1
+    # The row commit's and the seed's checks pass; the first member's is lost.
+    lock.checks_before_loss = 2
     imp = ImportServer(
         create_server=replace(_create_server(dst_uow, dst_store), lifecycle_lock=lock),
         file_store=dst_store,

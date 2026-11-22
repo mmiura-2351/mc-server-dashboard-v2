@@ -322,10 +322,11 @@ class ImportServer:
     entry that fails either is :class:`InvalidExportMetadataError`. Its display
     name is made to fit the display-name rule, as a catalog title is.
 
-    Each read of the archive (the metadata, the dry run and the publish pass) runs
-    on the archive-validation pool it shares with the backup upload and the files
-    upload's extract (:mod:`.archive_validation`, issue #3912), so a crafted
-    import can hold a thread of that pool but none of the default executor's.
+    Each read of the archive (the metadata, the dry run and the read of the
+    entries to publish) runs on the archive-validation pool it shares with the
+    backup upload and the files upload's extract (:mod:`.archive_validation`,
+    issue #3912), so a crafted import can hold a thread of that pool but none of
+    the default executor's.
 
     On publish, the imported ``server.properties`` has every platform-managed key
     re-applied (issue #2621) via :func:`apply_platform_properties`: the archive
@@ -394,7 +395,7 @@ class ImportServer:
         # archive 413/422s with no server row left behind (issue #277). The metadata
         # member is included in this pass (it is a normal archive entry); only its
         # write is skipped later. A crafted archive that passes this pass costs as
-        # much again in the publish pass.
+        # much again in the read of the entries to publish, below.
         await run_archive_validation(
             _validate_import_archive,
             content,

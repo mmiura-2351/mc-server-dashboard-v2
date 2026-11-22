@@ -273,8 +273,10 @@ class CreateServer:
     or is refused ``server_busy`` once its acquire budget runs out. ``populate`` is
     more create-time work run inside the same hold, after the seed: import passes
     the publish of its archive and the re-creation of its plugin rows. The held
-    lock is confirmed before each seed write (issue #3927); a loss there is the
-    seed failure above, as the row already stands.
+    lock is confirmed before the row's commit and before each seed write (issue
+    #3927). A loss before the commit raises :class:`LifecycleLockLostError` with
+    no row created; a loss before a seed write is the seed failure above, as the
+    row already stands.
 
     A new server's ``server.properties`` also gets ``sync-chunk-writes=false``
     (issue #3443), a default that the user's own value replaces. With
@@ -407,6 +409,10 @@ class CreateServer:
                     updated_at=now,
                 )
                 await self.uow.servers.add(server)
+                # A start may take the lock once it is lost, so the row is not
+                # made visible without it (issues #3927, #4045): a loss here
+                # refuses with no row.
+                await lock.ensure_held()
                 await self.uow.commit()
             await self._seed_initial_working_set(
                 community_id=community_id,
