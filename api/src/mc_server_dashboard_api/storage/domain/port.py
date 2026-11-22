@@ -1053,9 +1053,12 @@ class FileStore(abc.ABC):
         ``rel_path`` is resolved, as :meth:`list_dir` resolves it; what lies
         below is measured as stored, without a resolve per name, so a name no
         ``RelPath`` can spell (a C0 or DEL character) counts like any other. A
-        symlink below is a name and is not followed. One walk on fs, one prefix
-        listing on object. Raises :class:`~.errors.NotFoundError` for a path that
-        is not a directory.
+        symlink below is a name and is not followed. One walk by directory
+        descriptor on fs, so no absolute path bounds it, and one prefix listing
+        on object. A failure to open or list a directory below is
+        :class:`~.errors.StorageUnavailableError`: the extent is then unknown.
+        Raises :class:`~.errors.NotFoundError` for a path that is not a
+        directory.
         """
 
     @abc.abstractmethod

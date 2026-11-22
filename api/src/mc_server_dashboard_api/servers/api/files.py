@@ -1203,14 +1203,15 @@ async def rename_file(
     control character, a line or paragraph separator, a lone surrogate or a
     Unicode noncharacter in any component is 422 ``invalid_name_character``; C0
     and DEL stay ``invalid_path``.
-    A directory rename also judges the names the move creates below the
-    destination, so a subtree that would end up too deep or too long is
-    refused with nothing moved. Each limit is judged only when the destination
-    grows it: the depth when it has more components than the source, the length
-    when it has more bytes. So a tree already too deep can still be renamed at
-    its own level, to a longer name too, and the names below are not judged by
-    their characters. The source is not judged, so a name created before the
-    rule can be renamed to one it admits.
+    A rename's destination is judged for depth and length only where the move
+    grows them: the depth when it has more components than the source, a
+    directory's destination counting as a level, the length when it has more
+    bytes. A directory rename also judges the names the move creates below the
+    destination the same way, so a subtree that would end up too deep or too
+    long is refused with nothing moved. So a name already past a limit can still
+    be renamed at its own level, to a longer name too, and the names below are
+    not judged by their characters. The source is not judged, so a name created
+    before the rule can be renamed to one it admits.
     """
 
     try:

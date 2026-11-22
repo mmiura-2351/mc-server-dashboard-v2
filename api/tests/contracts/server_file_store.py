@@ -19,7 +19,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     ServerFileNotFoundError,
 )
-from mc_server_dashboard_api.servers.domain.file_store import FileStore
+from mc_server_dashboard_api.servers.domain.file_store import FileStore, SubtreeExtent
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
 
 
@@ -137,6 +137,46 @@ class FileStoreContract:
             harness.export("empty", [("export_metadata.json", b"metadata")])
         ) == {"export_metadata.json": b"metadata"}
 
+    async def test_subtree_extent_measures_the_names_below_a_directory(
+        self, file_store_harness: FileStoreHarness
+    ) -> None:
+        # Issue #3973: the deepest directory below, ``empty/inner`` at level 2 and
+        # holding nothing, and the longest path below, in bytes.
+        harness = file_store_harness
+        scope: _Scope = {
+            "community_id": harness.community_id,
+            "server_id": harness.server_id,
+        }
+        await harness.write("world/region/r.0.0.mca", b"region")
+        # Six three-byte characters and ``.dat``: 22 bytes, 10 characters.
+        await harness.write("world/" + "\u3042" * 6 + ".dat", b"multibyte")
+        await harness.write("outside/a-longer-name-than-any-in-world.txt", b"x")
+        await harness.store.make_dir(**scope, rel_path="world/empty/inner")
+
+        assert await harness.store.subtree_extent(
+            **scope, rel_path="world"
+        ) == SubtreeExtent(depth=2, longest=22)
+        assert await harness.store.subtree_extent(
+            **scope, rel_path="world/empty/inner"
+        ) == SubtreeExtent(depth=0, longest=0)
+        assert await harness.store.subtree_extent(
+            **scope, rel_path="world/region"
+        ) == SubtreeExtent(depth=0, longest=len("r.0.0.mca"))
+
+    @pytest.mark.parametrize("path", ["missing", "world/region/r.0.0.mca"])
+    async def test_subtree_extent_of_a_path_that_is_not_a_directory_is_a_miss(
+        self, file_store_harness: FileStoreHarness, path: str
+    ) -> None:
+        harness = file_store_harness
+        await harness.write("world/region/r.0.0.mca", b"region")
+
+        with pytest.raises(ServerFileNotFoundError):
+            await harness.store.subtree_extent(
+                community_id=harness.community_id,
+                server_id=harness.server_id,
+                rel_path=path,
+            )
+
     @pytest.mark.parametrize("method", ["download", "export"])
     @pytest.mark.parametrize("path", ["missing", "seed.txt"])
     async def test_missing_directory_is_reported_on_iteration(
@@ -161,6 +201,7 @@ class FileStoreContract:
             "open_file_stream",
             "list_dir",
             "path_exists",
+            "subtree_extent",
             "write_file",
             "delete_file",
             "delete_dir",
@@ -208,6 +249,10 @@ class FileStoreContract:
             } == {"level.dat"}
         elif method == "path_exists":
             assert await store.path_exists(**scope, rel_path=file_alias)
+        elif method == "subtree_extent":
+            assert await store.subtree_extent(
+                **scope, rel_path=dir_alias
+            ) == SubtreeExtent(depth=0, longest=len("level.dat"))
         elif method == "write_file":
             await store.write_file(**scope, rel_path=file_alias, content=b"changed")
             assert (
@@ -251,6 +296,7 @@ class FileStoreContract:
             "open_file_stream",
             "list_dir",
             "path_exists",
+            "subtree_extent",
             "write_file",
             "retain_if_changed",
             "delete_file",

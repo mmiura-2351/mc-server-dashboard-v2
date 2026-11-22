@@ -1513,3 +1513,42 @@ async def test_subtree_extent_does_not_follow_a_symlink(tmp_path: Path) -> None:
     assert await storage.subtree_extent(community, server, RelPath("top")) == (
         SubtreeExtent(depth=1, longest=len("a/up"))
     )
+
+
+@pytest.mark.parametrize("replaced_by", ["nothing", "a file", "a symlink"])
+async def test_subtree_extent_leaves_out_a_directory_that_vanishes_under_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced_by: str
+) -> None:
+    """A directory gone, or no longer one, between its listing and its open (#3973).
+
+    It is measured as the name it was listed under, and nothing below it is, as a
+    listing leaves out a child that vanishes.
+    """
+
+    storage = FsStorage(tmp_path)
+    community, server = new_scope()
+    await publish(
+        storage,
+        community,
+        server,
+        {"top/k/longer-name": b"x", "top/gone/deeper/a-longer-name": b"x"},
+    )
+    real_open = os.open
+
+    def vanishing(
+        path: str | bytes, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+    ) -> int:
+        if dir_fd is not None and path == b"gone":
+            os.rename(b"gone", b"elsewhere", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            if replaced_by == "a file":
+                os.close(real_open(b"gone", os.O_CREAT | os.O_WRONLY, dir_fd=dir_fd))
+            elif replaced_by == "a symlink":
+                # Followed, it would add ``gone/longer-name``.
+                os.symlink(b"k", b"gone", dir_fd=dir_fd)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", vanishing)
+
+    assert await storage.subtree_extent(community, server, RelPath("top")) == (
+        SubtreeExtent(depth=1, longest=len("k/longer-name"))
+    )

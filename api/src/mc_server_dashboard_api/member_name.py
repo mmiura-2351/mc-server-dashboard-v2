@@ -60,6 +60,19 @@ def member_name_refusal(path: str, *, is_dir: bool) -> str | None:
     )
 
 
+def component_refusal(path: str) -> str | None:
+    """``name_too_long`` when a component of ``path`` is past 255 bytes, else ``None``.
+
+    The part of :func:`member_name_refusal` that does not depend on where the
+    name sits, with its precondition: what a rename judges its destination by
+    whatever the move grows, since its components are new.
+    """
+
+    if any(size > MAX_COMPONENT_BYTES for size in _component_sizes(path)):
+        return NAME_TOO_LONG
+    return None
+
+
 def extent_refusal(*, directories: int, path_bytes: int) -> str | None:
     """Why no working set may hold a name this deep and this long, or ``None``.
 

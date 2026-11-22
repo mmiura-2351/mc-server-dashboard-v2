@@ -226,8 +226,10 @@ class FileStore(abc.ABC):
         What a directory rename judges the names it creates by. Only ``rel_path``
         is resolved; the names below are measured as stored, whatever they hold,
         so one no path can spell does not fail the measure. Raises
-        :class:`ServerFileNotFoundError` for a path that is not a directory and
-        :class:`InvalidFilePathError` for a traversal-unsafe one.
+        :class:`ServerFileNotFoundError` for a path that is not a directory,
+        :class:`InvalidFilePathError` for a traversal-unsafe one and
+        :class:`ServerFileStorageUnavailableError` when a directory below cannot
+        be opened or listed.
         """
 
     @abc.abstractmethod

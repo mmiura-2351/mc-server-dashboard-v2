@@ -498,26 +498,13 @@ class FakeFileStore(FileStore):
     async def subtree_extent(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str
     ) -> SubtreeExtent:
-        # Every seeded listing at or below the path, each entry measured as a path
-        # below it.
-        path = _canonical(rel_path)
-        if path != "." and (
-            _seeded_key(self.dirs, path, container="dirs", holds="directory") is None
-        ):
-            raise ServerFileNotFoundError(str(server_id.value))
-        prefix = "" if path == "." else path + "/"
-        depth = longest = 0
-        for key, listing in self.dirs.items():
-            listed = _canonical(key)
-            if listed != path and not listed.startswith(prefix):
-                continue
-            base = "" if listed == "." else listed + "/"
-            for entry in listing:
-                child = (base + entry.name)[len(prefix) :]
-                longest = max(longest, len(child.encode()))
-                if entry.kind is FileEntryKind.DIRECTORY:
-                    depth = max(depth, child.count("/") + 1)
-        return SubtreeExtent(depth=depth, longest=longest)
+        # Measured under the shared seam contract (tests/contracts/
+        # server_file_store.py), on the shared fake and both adapters, so this
+        # fake keeps no second copy of it: a case that grows a moved directory
+        # here uses the shared fake.
+        raise AssertionError(
+            "subtree_extent is pinned on tests.servers.fakes.FakeFileStore"
+        )
 
     async def make_dir(
         self, *, community_id: CommunityId, server_id: ServerId, rel_path: str

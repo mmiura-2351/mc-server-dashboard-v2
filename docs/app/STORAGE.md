@@ -1815,29 +1815,34 @@ The rule is the application's, above this Port: every door that creates a name,
 except those tracked in issue #4008, asks it before anything is written, and
 answers a refusal with that `422` reason. The files-API write (at rest, and
 running, before the Worker is asked), make-dir, upload and each archive member
-joined to the upload's directory, and a rename's destination. A directory rename
-also judges the names the move creates below the destination, each the
-destination plus a path below the source. Each limit is judged only when the
-destination grows what it bounds: the depth when it has more components than the
-source, the length when it has more bytes. One it does not grow makes no name
-deeper, or longer, than one already there, so a tree already too deep can still
-be renamed at its own level, to a longer name too. A destination that grows
-neither is not measured. Any other is judged by the subtree's extent, its
-deepest directory and longest path below the source, measured as stored in one
-walk on fs and one prefix listing on object (`subtree_extent`), so a subtree too
-deep or too long to move is refused whole. The moved names keep their characters
-and are not asked about them, so a directory whose name no path can spell moves
-with the rest. A server import refuses such a member before its row exists, and
-the backup upload gate refuses one as `422 invalid_archive`, its `detail` naming
-the member and the reason, before the archive is stored.
+joined to the upload's directory, and a rename's destination. A rename judges
+the limits on where a name sits only where the move grows what they bound: the
+depth when the destination has more components than the source, a directory's
+destination counting as a level, and the length when it has more bytes. A limit
+the move does not grow makes no name deeper, or longer, than one already there,
+so a name already past a limit can still be renamed at its own level, to a
+longer name too. The destination's components and characters are new, so they
+are always judged. A directory rename judges the names the move creates below
+the destination the same way, each the destination plus a path below the source.
+A destination that grows neither is not measured. Any other is judged by the
+subtree's extent, its deepest directory and longest path below the source,
+measured as stored (`subtree_extent`): on fs in one walk that opens each
+directory by its parent's descriptor, so a subtree past `PATH_MAX` is measured
+like any other, and on object in one prefix listing. A subtree too deep or too
+long to move is refused whole, and one the walk cannot open answers `503
+storage_unavailable`. The moved names keep their characters and are not asked
+about them, so a directory whose name no path can spell moves with the rest. A
+server import refuses such a member before its row exists, and the backup upload
+gate refuses one as `422 invalid_archive`, its `detail` naming the member and
+the reason, before the archive is stored.
 
 The files-API doors also refuse the characters an uploaded file's name may not
-carry (issues #3922, #3969): a `\`, a control character (C0, DEL or C1), a lone
-surrogate or a Unicode noncharacter, in any component, as `422
-invalid_name_character`. C0 and DEL keep the path's own `invalid_path` (Section
-6). The import and the backup upload do not: a running server can create any
-name its game or a plugin writes, its snapshot and backup carry it as it is, and
-the platform's own export or backup must upload again.
+carry (issues #3922, #3969, #3988): a `\`, a control character (C0, DEL or C1),
+a line or paragraph separator, a lone surrogate or a Unicode noncharacter, in
+any component, as `422 invalid_name_character`. C0 and DEL keep the path's own
+`invalid_path` (Section 6). The import and the backup upload do not: a running
+server can create any name its game or a plugin writes, its snapshot and backup
+carry it as it is, and the platform's own export or backup must upload again.
 
 Reads, deletes and a rename *away* do not ask, so a name created before the
 rule, or by a running server, stays reachable: it can be listed, read,

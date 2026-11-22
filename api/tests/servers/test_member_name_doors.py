@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import io
+import os
 import tarfile
 import uuid
 import zipfile
@@ -44,6 +45,7 @@ from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     InvalidFilePathError,
     ServerFileNotFoundError,
+    ServerFileStorageUnavailableError,
 )
 from mc_server_dashboard_api.servers.domain.upload_filename import (
     is_refused_filename_character,
@@ -70,6 +72,7 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from tests.servers.fakes import FakeControlPlane, FakeFileStore, FakeUnitOfWork
 from tests.storage.conftest import StorageHarness, build_harness
 from tests.storage.fake_s3 import FakeS3Client, FakeS3Store
+from tests.storage.helpers import snapshot_dir
 
 _NOW = dt.datetime(2025, 1, 1, tzinfo=dt.UTC)
 
@@ -765,3 +768,127 @@ async def test_an_empty_directory_moved_to_4095_bytes_is_admitted(
 
     await doors.rename("e", _long_path(4095))
     assert await doors.names(_long_path(4095)) == []
+
+
+async def test_a_directory_renamed_to_level_129_is_too_deep(doors: _Doors) -> None:
+    # Nothing is below it, so only the destination itself, a level, is judged.
+    await doors.mkdir("e")
+
+    assert await _refusal(doors.rename("e", _nested(129))) == "path_too_deep"
+
+    await doors.rename("e", _nested(128))
+    assert await doors.names(_nested(128)) == []
+
+
+async def test_a_directory_already_at_level_129_is_renamed_beside_itself(
+    odd: _Doors,
+) -> None:
+    # The same number of components: the destination's depth is not judged.
+    await odd.rename(_nested(129), _nested(128) + "/e")
+
+    assert await odd.read(_nested(128) + "/e/f") == b"deep"
+
+
+async def test_a_file_already_too_deep_is_renamed_beside_itself(odd: _Doors) -> None:
+    await odd.rename(_nested(129, "f"), _nested(129, "g"))
+
+    assert await odd.read(_nested(129, "g")) == b"deep"
+
+
+@dataclass(frozen=True)
+class _FsDoors:
+    doors: _Doors
+    # The live snapshot directory the working set's paths are joined to.
+    root: Path
+
+
+@pytest.fixture
+async def fs_doors(tmp_path: Path) -> _FsDoors:
+    harness = build_harness("fs", tmp_path)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    await harness.publish(
+        StorageCommunityId(community), StorageServerId(server), {"seed.txt": b"s"}
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community, server, running=False))
+    return _FsDoors(
+        doors=_Doors(
+            community=CommunityId(community),
+            server=ServerId(server),
+            store=StorageFileStoreAdapter(storage=harness.storage),
+            uow=uow,
+        ),
+        root=snapshot_dir(
+            tmp_path, StorageCommunityId(community), StorageServerId(server)
+        ),
+    )
+
+
+async def test_a_growing_move_past_path_max_is_answered_by_the_rule(
+    fs_doors: _FsDoors,
+) -> None:
+    # The reviewer's reproduction (r2): a file 21 bytes short of PATH_MAX (4,096)
+    # in absolute terms, its tree moved to a name 40 bytes longer, then measured
+    # again for a longer one. Its directories are then past PATH_MAX, which a
+    # walk joining absolute paths cannot open; a walk by descriptor measures them,
+    # and the rule answers each move.
+    doors = fs_doors.doors
+    prefix = len(os.fsencode(fs_doors.root)) + 1
+    inner = _long_path(4075 - prefix - len("a/") - len("/f")) + "/f"
+    await doors.write("a/" + inner)
+
+    await doors.rename("a", "a" + "x" * 40)
+    await doors.rename("a" + "x" * 40, "a" + "x" * 41)
+    await doors.rename("a" + "x" * 41, "z/a")
+    # Then to a 255-byte name: refused by the rule when the moved path passes
+    # 4,095 bytes relative to the working set, which depends on the store's own
+    # prefix here, and admitted otherwise.
+    moved = len(("n" * 255 + "/" + inner).encode())
+    if moved > 4095:
+        assert await _refusal(doors.rename("z/a", "n" * 255)) == "path_too_long"
+        assert await doors.names("z") == ["a"]
+    else:
+        await doors.rename("z/a", "n" * 255)
+        assert "n" * 255 in await doors.names()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+async def test_a_subtree_the_walk_cannot_open_is_the_store_failing(
+    fs_doors: _FsDoors,
+) -> None:
+    doors = fs_doors.doors
+    await doors.write("a/locked/f")
+    locked = fs_doors.root / "a" / "locked"
+    locked.chmod(0)
+    try:
+        with pytest.raises(ServerFileStorageUnavailableError):
+            await doors.rename("a", "longer")
+    finally:
+        locked.chmod(0o755)
+    assert await doors.read("a/locked/f") == b"x"
+
+
+async def test_a_file_already_too_long_is_renamed_at_its_own_length(
+    tmp_path: Path,
+) -> None:
+    # On object only, as fs cannot hold a path this long: a 4,097-byte path
+    # renamed to another of 4,097 bytes adds no byte, so its length is not judged.
+    harness = build_harness("object", tmp_path)
+    community, server = uuid.uuid4(), uuid.uuid4()
+    await harness.publish(
+        StorageCommunityId(community),
+        StorageServerId(server),
+        {_long_path(4096) + "a": b"long"},
+    )
+    uow = FakeUnitOfWork()
+    uow.servers.seed(_server(community, server, running=False))
+    doors = _Doors(
+        community=CommunityId(community),
+        server=ServerId(server),
+        store=StorageFileStoreAdapter(storage=harness.storage),
+        uow=uow,
+    )
+
+    await doors.rename(_long_path(4096) + "a", _long_path(4096) + "b")
+
+    assert await doors.read(_long_path(4096) + "b") == b"long"

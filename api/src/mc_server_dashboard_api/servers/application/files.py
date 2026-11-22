@@ -58,6 +58,7 @@ from mc_server_dashboard_api.archive_member import (
     HeaderLimitError,
 )
 from mc_server_dashboard_api.member_name import (
+    component_refusal,
     extent_refusal,
     member_name_refusal,
     path_size,
@@ -393,11 +394,48 @@ def _refuse_unnamable(rel_path: str, *, is_dir: bool) -> None:
     one, and the rule cannot measure one.
     """
 
+    _refuse_lone_surrogate(rel_path)
+    _refuse_unstorable(rel_path, is_dir=is_dir)
+    _refuse_refused_characters(rel_path)
+
+
+def _refuse_renamed(from_path: str, to_path: str, *, is_dir: bool) -> None:
+    """Refuse a rename destination no files-API door may create (issue #3973).
+
+    Judged as :func:`_refuse_unnamable` judges a created name, in the same order,
+    with the one difference a move makes: a limit on where the name sits is
+    judged only when the destination grows what it bounds, as for the names
+    below a moved directory (:func:`_refuse_unstorable_subtree`). The depth is
+    judged when the destination has more components than the source, a
+    directory's destination counting as a level and a file's not; the path's
+    length when it has more bytes. A move that grows neither makes no name
+    deeper, or longer, than the source already is, so a name past a limit is
+    renamed at its own level and length. Its components and its characters are
+    new, so they are always judged.
+    """
+
+    _refuse_lone_surrogate(to_path)
+    to_components, to_bytes = path_size(to_path)
+    from_components, from_bytes = path_size(from_path)
+    reason = component_refusal(to_path) or extent_refusal(
+        directories=(to_components if is_dir else to_components - 1)
+        if to_components > from_components
+        else 0,
+        path_bytes=to_bytes if to_bytes > from_bytes else 0,
+    )
+    if reason is not None:
+        raise InvalidFilePathError(to_path, reason=reason)
+    _refuse_refused_characters(to_path)
+
+
+def _refuse_lone_surrogate(rel_path: str) -> None:
     try:
         rel_path.encode("utf-8")
     except UnicodeEncodeError:
         raise InvalidFilePathError(rel_path, reason="invalid_name_character") from None
-    _refuse_unstorable(rel_path, is_dir=is_dir)
+
+
+def _refuse_refused_characters(rel_path: str) -> None:
     if any(is_refused_filename_character(c) for c in set(rel_path) - {"/"}):
         raise InvalidFilePathError(rel_path, reason="invalid_name_character")
 
@@ -1627,16 +1665,16 @@ async def _refuse_unstorable_subtree(
     """Refuse a directory move the member-name rule refuses below it (issue #3973).
 
     Moving ``from_path`` to ``to_path`` names everything below it anew: each
-    name is the destination plus its path below the source. Each limit is judged
-    only when the destination grows what it bounds: the depth when it has more
-    components than the source, the length when it has more bytes. One that
-    does not grow makes no name deeper, or longer, than one already there, so a
-    tree already too deep still moves to a longer name at its own level. When
-    neither grows nothing is measured. Otherwise the subtree's extent, its
-    deepest directory and its longest path below the source, is measured as
-    stored and judged after the destination. The names themselves do not change,
-    so their characters are not asked about: a name no path can spell moves with
-    the rest.
+    name is the destination plus its path below the source. The destination
+    itself is :func:`_refuse_renamed`'s; these are judged as it is, each limit
+    only when the destination grows what it bounds: the deepest directory below
+    when it has more components than the source, the longest path below when it
+    has more bytes. One it does not grow makes no name deeper, or longer, than
+    one already there, so a tree already too deep still moves to a longer name
+    at its own level. When neither grows nothing is measured. Otherwise the
+    subtree's extent is measured as stored and judged after the destination. The
+    names themselves do not change, so their characters are not asked about: a
+    name no path can spell moves with the rest.
     """
 
     to_components, to_bytes = path_size(to_path)
@@ -1647,12 +1685,11 @@ async def _refuse_unstorable_subtree(
     extent = await file_store.subtree_extent(
         community_id=community_id, server_id=server_id, rel_path=from_path
     )
-    # An empty directory adds no separator. A limit the destination does not
-    # grow is passed a zero, which it admits.
-    moved_bytes = to_bytes + 1 + extent.longest if extent.longest else to_bytes
+    # A limit with no name below to judge, or one the destination does not grow,
+    # is passed a zero, which it admits.
     reason = extent_refusal(
-        directories=to_components + extent.depth if deeper else 0,
-        path_bytes=moved_bytes if longer else 0,
+        directories=to_components + extent.depth if deeper and extent.depth else 0,
+        path_bytes=to_bytes + 1 + extent.longest if longer and extent.longest else 0,
     )
     if reason is not None:
         raise InvalidFilePathError(to_path, reason=reason)
@@ -1720,7 +1757,7 @@ class RenameFile:
 
             # The name rule on the destination (issue #3973), before the store is
             # asked about it: a name no backend can hold is not one to look up.
-            _refuse_unnamable(to_path, is_dir=is_dir)
+            _refuse_renamed(from_path, to_path, is_dir=is_dir)
 
             if await _path_exists(self.file_store, community_id, server_id, to_path):
                 raise FileAlreadyExistsError(to_path)

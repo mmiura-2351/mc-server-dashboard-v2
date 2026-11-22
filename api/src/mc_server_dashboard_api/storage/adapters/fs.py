@@ -2732,9 +2732,17 @@ class FsStorage(Storage):
         # Leased like a listing, and resolved as one: only ``rel_path`` is.
         current, release = self._lease_current(community_id, server_id)
         try:
-            return _measure_subtree(
-                self._safe_read_target(current, rel_path), not_found
-            )
+            target = self._safe_read_target(current, rel_path)
+            try:
+                return _measure_subtree(target, not_found)
+            except OSError as exc:
+                # What the walk could not open or list below the directory (EACCES
+                # on a mode-000 one, EMFILE past the descriptor limit) leaves the
+                # extent unknown, so no move can be judged by it: the store's
+                # failure, answered as one rather than as a raw error (#3973).
+                raise StorageUnavailableError(
+                    f"fs storage could not measure {rel_path.value!r}: {exc}"
+                ) from exc
         finally:
             release()
 
@@ -3809,38 +3817,69 @@ async def _open_readable(path: Path, not_found: str) -> io.BufferedReader:
     )
 
 
+# A directory the subtree measure opens: never through a link, and not handed to
+# a child process.
+_WALK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
 def _measure_subtree(target: Path, not_found: str) -> SubtreeExtent:
     """Measure ``target``'s subtree on its names' raw bytes (issue #3973).
 
-    One ``os.scandir`` per directory, iterative, never following a link: a
-    symlink is a name, as the listing describes it. A directory that vanishes
-    under the walk, or stops being one, is left out, as a listing leaves out a
-    child that vanishes; any other failure surfaces. ``target`` itself not being
-    a directory is the listing's miss.
+    Each directory is opened by its name relative to its parent's descriptor, as
+    the Worker's snapshot walk opens them, so no path the walk hands the kernel
+    is longer than one name: a subtree whose absolute paths pass ``PATH_MAX`` is
+    measured like any other. The walk holds one descriptor per level it is in,
+    and never follows a link: a symlink is a name, as the listing describes it.
+    A directory that vanishes, or stops being one, between its listing and its
+    open is left out below its own name, as a listing leaves out a child that
+    vanishes. ``target`` itself not being a directory is the listing's miss; any
+    other failure surfaces as the ``OSError`` it is.
     """
 
+    try:
+        top = os.open(target, _WALK_DIR_FLAGS)
+    except OSError as exc:
+        if exc.errno in _NOT_A_LISTABLE_DIR:
+            raise NotFoundError(not_found) from exc
+        raise
     depth = longest = 0
-    stack: list[tuple[bytes, bytes, int]] = [(os.fsencode(target), b"", 0)]
-    while stack:
-        directory, below, level = stack.pop()
-        try:
-            with os.scandir(directory) as entries:
-                children = [
-                    (entry.name, entry.is_dir(follow_symlinks=False))
-                    for entry in entries
-                ]
-        except OSError as exc:
-            if not below and exc.errno in _NOT_A_LISTABLE_DIR:
-                raise NotFoundError(not_found) from exc
-            if below and exc.errno in (errno.ENOENT, errno.ENOTDIR):
+    # One frame per level the walk is in: the directory's descriptor, its path
+    # below ``target``, its level and the subdirectories it has left to walk.
+    frames: list[tuple[int, bytes, int, list[bytes]]] = []
+
+    def enter(fd: int, below: bytes, level: int) -> None:
+        nonlocal depth, longest
+        subdirectories: list[bytes] = []
+        # Framed before the listing, so a failing listing still closes it.
+        frames.append((fd, below, level, subdirectories))
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                name = os.fsencode(entry.name)
+                path = below + b"/" + name if below else name
+                longest = max(longest, len(path))
+                if entry.is_dir(follow_symlinks=False):
+                    depth = max(depth, level + 1)
+                    subdirectories.append(name)
+
+    try:
+        enter(top, b"", 0)
+        while frames:
+            fd, below, level, subdirectories = frames[-1]
+            if not subdirectories:
+                frames.pop()
+                os.close(fd)
                 continue
-            raise
-        for name, is_dir in children:
-            path = below + b"/" + name if below else name
-            longest = max(longest, len(path))
-            if is_dir:
-                depth = max(depth, level + 1)
-                stack.append((os.path.join(directory, name), path, level + 1))
+            name = subdirectories.pop()
+            try:
+                child = os.open(name, _WALK_DIR_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    continue
+                raise
+            enter(child, below + b"/" + name if below else name, level + 1)
+    finally:
+        for fd, *_ in frames:
+            os.close(fd)
     return SubtreeExtent(depth=depth, longest=longest)
 
 
