@@ -1992,7 +1992,8 @@ class FakeScheduleRunRepository(ScheduleRunRepository):
         self.rows.append(self._copy(run))
 
     async def add(self, run: ScheduleRun) -> None:
-        self.rows.append(self._copy(run))
+        if all(r.id != run.id for r in self.rows):
+            self.rows.append(self._copy(run))
 
     async def list_for_schedule(self, schedule_id: ScheduleId) -> list[ScheduleRun]:
         return sorted(

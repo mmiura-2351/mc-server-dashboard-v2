@@ -1859,6 +1859,24 @@ class ScheduleRunRepositoryContract:
         assert len(saved) == 1
         assert saved[0].outcome is ScheduleRunOutcome.SUCCESS
 
+    async def test_a_run_added_again_keeps_its_one_row(
+        self,
+        schedule_run_repository_harness: RepositoryHarness[ScheduleRunRepository],
+        contract_schedule_id: ScheduleId,
+    ) -> None:
+        # A record retried after a COMMIT that applied but was answered as
+        # failed adds the same run again (issue #4141).
+        item = run(contract_schedule_id)
+        async with schedule_run_repository_harness.open() as tx:
+            await tx.repository.add(item)
+            await tx.commit()
+        async with schedule_run_repository_harness.open() as tx:
+            await tx.repository.add(replace(item, detail="added again"))
+            await tx.commit()
+        async with schedule_run_repository_harness.open() as tx:
+            listed = await tx.repository.list_for_schedule(contract_schedule_id)
+        assert [(r.id, r.detail) for r in listed] == [(item.id, None)]
+
 
 class ResourcePackRepositoryContract:
     async def test_add_and_readers_detach_pack(
