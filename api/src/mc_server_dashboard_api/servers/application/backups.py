@@ -402,9 +402,9 @@ class ListBackups:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             rows = await self.uow.backups.list_for_server(server_id)
-            rows = await _backfill_null_sizes(
-                self.uow, self.backup_store, community_id, server_id, rows
-            )
+        rows = await _backfill_null_sizes(
+            self.uow, self.backup_store, community_id, server_id, rows
+        )
         author_ids = {row.created_by for row in rows if row.created_by is not None}
         usernames = await self.users.usernames_for(list(author_ids))
         return [
@@ -1523,9 +1523,9 @@ class ServerBackupStatistics:
         async with self.uow:
             await _load(self.uow, community_id, server_id)
             rows = await self.uow.backups.list_for_server(server_id)
-            rows = await _backfill_null_sizes(
-                self.uow, self.backup_store, community_id, server_id, rows
-            )
+        rows = await _backfill_null_sizes(
+            self.uow, self.backup_store, community_id, server_id, rows
+        )
         return _aggregate(rows)
 
 
@@ -1556,9 +1556,13 @@ async def _backfill_null_sizes(
     """Compute + persist ``size_bytes`` for legacy NULL rows whose archive exists.
 
     The lazy backfill on read (issue #661). Only NULL-size rows trigger a store
-    call, and the persisted value makes it one-time per row. Runs inside the
-    caller's open unit of work; the returned ``rows`` carry any computed size so
-    the listing/total reflect it immediately.
+    call, and the persisted value makes it one-time per row. The caller has
+    closed its unit of work: each store call is a HEAD that can take as long as
+    the store's timeouts allow, so none runs with a session open, which would
+    keep a pool connection checked out for that long (issue #4107). The sizes are
+    then written in a short unit of work of their own, opened only when there is
+    one to write. The returned ``rows`` carry any computed size so the
+    listing/total reflect it immediately.
 
     **Only a missing archive is tolerated** (``BackupNotFoundError``, a row left
     dangling before creates wrote the archive first, issue #4086): its NULL size
@@ -1583,7 +1587,7 @@ async def _backfill_null_sizes(
     covers closing that gap for all of them at once.
     """
 
-    changed = False
+    sizes: dict[BackupId, int] = {}
     for row in rows:
         if row.size_bytes is None:
             try:
@@ -1594,11 +1598,12 @@ async def _backfill_null_sizes(
                 )
             except BackupNotFoundError:
                 continue
-            await uow.backups.update_size(row.id, size_bytes)
-            row.size_bytes = size_bytes
-            changed = True
-    if changed:
-        await uow.commit()
+            row.size_bytes = sizes[row.id] = size_bytes
+    if sizes:
+        async with uow:
+            for backup_id, size_bytes in sizes.items():
+                await uow.backups.update_size(backup_id, size_bytes)
+            await uow.commit()
     return rows
 
 

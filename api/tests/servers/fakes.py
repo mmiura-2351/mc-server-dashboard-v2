@@ -7,6 +7,7 @@ with`` blocks and tracks commits.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import io
 import uuid
@@ -2098,6 +2099,28 @@ class ExitHookUnitOfWork(FakeUnitOfWork):
             on_exit()
 
 
+class SessionTrackingUnitOfWork(FakeUnitOfWork):
+    """A :class:`FakeUnitOfWork` that knows whether one of its blocks is open.
+
+    The real adapter opens a session on entry, and the session holds a pool
+    connection from its first statement until the block exits, so a store call
+    made inside a block keeps that connection checked out for as long as the call
+    takes (issue #4107). ``open`` says whether a block is open now. Entering a
+    block while one is open fails: the real adapter keeps a single session, which
+    a nested entry would replace and leak.
+    """
+
+    open = False
+
+    async def __aenter__(self) -> "SessionTrackingUnitOfWork":
+        assert not self.open, "a unit-of-work block was entered inside another"
+        self.open = True
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.open = False
+
+
 class DatabaseOutageError(ConnectionError):
     """What :class:`OutageUnitOfWork` raises while its database is down."""
 
@@ -2679,6 +2702,29 @@ class FakeBackupArchiveStore(BackupArchiveStore):
         if storage_ref not in self.archives:
             raise BackupNotFoundError(storage_ref)
         return len(self.bytes_by_ref[storage_ref])
+
+
+class HangingSizeStore(FakeBackupArchiveStore):
+    """A :class:`FakeBackupArchiveStore` whose ``size`` probe hangs (issue #4107).
+
+    ``size`` is the storage HEAD, which can take as long as the store's timeouts
+    and retries allow. Each call sets ``probing`` and then waits for ``release``
+    before answering, so a test can look at what the caller holds while it waits.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.probing = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def size(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> int:
+        self.probing.set()
+        await self.release.wait()
+        return await super().size(
+            community_id=community_id, server_id=server_id, storage_ref=storage_ref
+        )
 
 
 class FakeCatalogProvider(CatalogProvider):
