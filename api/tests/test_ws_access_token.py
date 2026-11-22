@@ -158,6 +158,7 @@ def _events_app() -> FastAPI:
         assigned_worker_id = None
         crash_reason = None
         crash_detail = None
+        final_snapshot_refusal = None
 
         def crash_not_restarted(self) -> bool:
             return False

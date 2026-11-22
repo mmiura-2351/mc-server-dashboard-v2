@@ -366,6 +366,10 @@ class ServerResponse(BaseModel):
     crash_reason: str | None
     crash_detail: str | None
     crash_not_restarted: bool
+    # Why the assigned Worker refused the stop's final snapshot (issue #4054):
+    # ``busy`` / ``unavailable`` while a stop holds its Worker for that reason,
+    # ``None`` otherwise.
+    final_snapshot_refusal: str | None = None
     # The scheduled-backup retention policy (issue #1841): the raw stored shape
     # (``{"keep_last": N}`` or ``{"daily": D, "weekly": W, "monthly": M}``), or
     # ``None`` while unconfigured. Written via the backups retention endpoints
@@ -413,6 +417,11 @@ class ServerResponse(BaseModel):
             ),
             crash_detail=server.crash_detail,
             crash_not_restarted=server.crash_not_restarted(),
+            final_snapshot_refusal=(
+                None
+                if server.final_snapshot_refusal is None
+                else server.final_snapshot_refusal.value
+            ),
             backup_retention=server.backup_retention,
         )
 

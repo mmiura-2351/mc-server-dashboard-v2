@@ -557,6 +557,7 @@ async def test_server_stream_carries_the_desired_state_snapshot_and_change(
                 "crash_reason": None,
                 "crash_detail": None,
                 "crash_not_restarted": False,
+                "final_snapshot_refusal": None,
             },
         ),
         ("status", {"desired_state": "stopped"}),
@@ -600,6 +601,7 @@ async def test_community_stream_carries_the_desired_state_snapshot_and_change(
                         "crash_reason": None,
                         "crash_detail": None,
                         "crash_not_restarted": False,
+                        "final_snapshot_refusal": None,
                     }
                 ]
             },

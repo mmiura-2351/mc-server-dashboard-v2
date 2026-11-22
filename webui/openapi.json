@@ -3547,6 +3547,17 @@
             "title": "Desired State",
             "type": "string"
           },
+          "final_snapshot_refusal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final Snapshot Refusal"
+          },
           "game_port": {
             "anyOf": [
               {

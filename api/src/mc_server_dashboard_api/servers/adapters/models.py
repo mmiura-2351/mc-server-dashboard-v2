@@ -48,6 +48,7 @@ _CRASH_REASONS = (
     "forge_install_out_of_memory",
     "forge_install_java_incompatible",
 )
+_FINAL_SNAPSHOT_REFUSALS = ("busy", "unavailable")
 
 
 def _in_clause(column: str, values: tuple[str, ...]) -> str:
@@ -84,6 +85,10 @@ class ServerModel(Base):
         CheckConstraint(
             _in_clause("crash_reason", _CRASH_REASONS),
             name="ck_server_crash_reason",
+        ),
+        CheckConstraint(
+            _in_clause("final_snapshot_refusal", _FINAL_SNAPSHOT_REFUSALS),
+            name="ck_server_final_snapshot_refusal",
         ),
         # Index on (assigned_worker_id) for "all servers on Worker X" (FR-WRK-4).
         Index("ix_server_assigned_worker_id", "assigned_worker_id"),
@@ -145,3 +150,7 @@ class ServerModel(Base):
     awaiting_hydrate: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=false()
     )
+    # Why the assigned Worker refused the stop's final snapshot (issue #4054):
+    # ``busy`` / ``unavailable``, written only while the stopped row is still
+    # assigned to that Worker, and cleared with the assignment. NULL otherwise.
+    final_snapshot_refusal: Mapped[str | None] = mapped_column(String, nullable=True)
