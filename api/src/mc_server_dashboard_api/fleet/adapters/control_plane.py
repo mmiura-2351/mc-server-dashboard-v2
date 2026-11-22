@@ -605,6 +605,7 @@ def _to_api_command(command_id: str, server_id: str, command: Command) -> pb.Api
             pb.SnapshotTrigger(
                 transfer_url=command.transfer_url,
                 transfer_token=command.transfer_token,
+                final=command.final,
             )
         )
     elif isinstance(command, ReadFileCommand):

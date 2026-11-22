@@ -436,7 +436,9 @@ class FleetControlPlaneAdapter(ControlPlane):
         outcome = await self._dispatch(
             worker_id,
             server_id,
-            SnapshotCommand(transfer_url=url, transfer_token=self._token()),
+            SnapshotCommand(
+                transfer_url=url, transfer_token=self._token(), final=final
+            ),
             timeout_override=self._snapshot_timeout_seconds,
             snapshot_is_final=final,
         )

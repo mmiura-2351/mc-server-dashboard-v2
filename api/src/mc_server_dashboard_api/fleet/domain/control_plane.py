@@ -252,7 +252,13 @@ class HydrateCommand:
 
 @dataclass(frozen=True)
 class SnapshotCommand:
-    """Trigger the Worker to push its working set to the data plane (FR-DATA-4)."""
+    """Trigger the Worker to push its working set to the data plane (FR-DATA-4).
+
+    ``final`` marks a stop's final snapshot (issue #4053). On the wire it has the
+    Worker first end the containers its failed starts left running for a stopped
+    server, then pack what their shutdown saves left. Periodic and on-demand
+    snapshots leave it ``False``: they end nothing.
+    """
 
     transfer_url: str
     transfer_token: str
