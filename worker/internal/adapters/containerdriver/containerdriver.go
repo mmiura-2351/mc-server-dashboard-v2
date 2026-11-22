@@ -98,9 +98,9 @@ const MaxStopDuration = defaultFlushTimeout + defaultStopCap + stopDeadlineGrace
 
 // defaultFlushTimeout bounds the pre-stop flush (#1007): the RCON save-off /
 // save-all plus the settle-wait that drives the live world's dirty chunks to
-// disk before the container is terminated. It is generous enough for the
-// manager's 60 s settle budget plus the RCON round trips, and it is the whole
-// bound when the flush's RCON hangs. The flush runs to completion before the
+// disk before the container is terminated. The manager's settle-wait takes what
+// the RCON round trips leave of it, less a 5 s margin (issue #3503), and it is the
+// whole bound when the flush's RCON hangs. The flush runs to completion before the
 // stop escalation's own deadline starts (Stop), so this budget is additive to
 // stopDeadline rather than carved out of it (issue #2622). Tests shrink it.
 const defaultFlushTimeout = 90 * time.Second

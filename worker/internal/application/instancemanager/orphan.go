@@ -278,9 +278,9 @@ func (m *Manager) currentOrphan(serverID string) (orphanEntry, bool) {
 // returned long ago, and an unbounded context is safe because every leg carries
 // its own bound — the driver's Stop detaches onto its own stopDeadline, the RCON
 // dial/Execute fall back to their 30s ceiling when the caller's context has no
-// deadline, and the pre-stop flush gives up after settleBudget. A retry that
-// could park here forever would be "gives up probing" by another name, since it
-// also holds the id's reservation.
+// deadline, and the pre-stop flush runs under the driver's flush budget. A
+// retry that could park here forever would be "gives up probing" by another
+// name, since it also holds the id's reservation.
 //
 // attemptStop's own failure path re-records the orphan (no second converger —
 // recordOrphan is idempotent on the flag), so a retry that still cannot confirm

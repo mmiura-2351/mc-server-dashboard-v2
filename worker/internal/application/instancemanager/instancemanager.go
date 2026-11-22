@@ -208,8 +208,10 @@ type Manager struct {
 	// server's periodic snapshot (#907): after the async save-all, the working set's
 	// .mca files are polled every settlePollInterval and considered settled once two
 	// consecutive scans observe identical (mtime, size) for every region file, bounded
-	// by settleBudget. They are fields (not consts) so tests can shrink them, mirroring
-	// fsckRetryDelay. Defaulted in New.
+	// by settleBudget (snapshotSettleCap). The stop flush's settle is bounded by its
+	// context instead, and uses settleBudget only when that context has no deadline
+	// (flushBeforeStopWithDriver). They are fields (not consts) so tests can shrink
+	// them, mirroring fsckRetryDelay. Defaulted in New.
 	settlePollInterval time.Duration
 	settleBudget       time.Duration
 
@@ -578,7 +580,7 @@ func New(drivers map[string]execution.ExecutionDriver, scratchDir string, region
 		metricsInterval:    defaultMetricsInterval,
 		fsckRetryDelay:     defaultFsckRetryDelay,
 		settlePollInterval: defaultSettlePollInterval,
-		settleBudget:       defaultSettleBudget,
+		settleBudget:       snapshotSettleCap,
 		scanRegion:         scanRegionState,
 		readWorkingDir:     os.ReadDir,
 		readGeneration:     recordedGeneration,
@@ -1405,18 +1407,36 @@ const snapshotFsckAttempts = 3
 // command budget (control.snapshot_timeout_seconds=600). Tests shrink it to zero.
 const defaultFsckRetryDelay = 2 * time.Second
 
-// defaultSettlePollInterval / defaultSettleBudget bound the quiesce settle-wait
+// defaultSettlePollInterval / snapshotSettleCap bound the quiesce settle-wait
 // (#907): after the async save-all the working set's .mca files are re-scanned
 // every defaultSettlePollInterval, and the save is considered settled once two
 // consecutive scans observe identical (mtime, size) for every region file. The
-// wait gives up after defaultSettleBudget and the snapshot is refused
-// quiesce_unavailable (the next tick retries). The budget is generous yet well
-// inside the snapshot command budget (control.snapshot_timeout_seconds=600), so
-// the settle-wait never races the command timeout. Tests shrink both.
+// wait gives up after snapshotSettleCap and the snapshot is refused
+// quiesce_unavailable (the next tick retries). The cap is 180 s, the owner's
+// decision on issue #3503: a shutdown save on a slow disk took 85-143 s (#3436),
+// but no running server's save has been measured against it there. A fast disk
+// still settles in seconds, since the wait ends once the writes stop. The
+// quiesce's RCON calls, the settle, the fsck, the pack and the upload all run
+// under the snapshot command's one deadline (snapshotContext), so none of them
+// can run past it; a save that uses the whole cap leaves at most 420 s of the
+// API's 600 s default (control.snapshot_timeout_seconds) for the rest. While it
+// waits, auto-save is off and the snapshot holds the server's lane and one of
+// the Worker's command slots. Tests shrink both (the cap through
+// Manager.settleBudget).
 const (
 	defaultSettlePollInterval = 2 * time.Second
-	defaultSettleBudget       = 60 * time.Second
+	snapshotSettleCap         = 180 * time.Second
 )
+
+// flushSettleMargin is how much of the stop flush's context its settle-wait leaves
+// unused (issue #3503). The wait checks its budget only after a poll and a scan, so
+// it can end up to one defaultSettlePollInterval and a scan past it; the margin
+// covers that for a scan of up to about 3 s, so the settle gives up, and says so,
+// before the context ends under it. A longer scan can end the wait up to its own
+// length past the context; the flush then still reports whether the world
+// settled. Under the driver's 90 s flush budget the settle gets up to 85 s, less
+// what the RCON round trips took.
+const flushSettleMargin = 5 * time.Second
 
 // handleSnapshot packs the server's working dir and uploads it. For a running
 // server it brackets the working-dir copy with RCON save-off / save-on so the
@@ -2109,7 +2129,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 			m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
 			quiesced = false
-		} else if !m.settleWorkingSet(ctx, settleForSnapshot, serverID, workingDir) {
+		} else if !m.settleWorkingSet(ctx, settleForSnapshot, serverID, workingDir, m.settleBudget) {
 			quiesced = false
 		}
 	}
@@ -2143,9 +2163,12 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 // It is best-effort and bounded: any failure — RCON cannot be opened, save-off or
 // save-all errors, or the save never settles within the budget — is logged and the
 // stop proceeds anyway. Wedging a stop on a save failure would be strictly worse
-// than the pre-fix behavior; the common path completes the flush. The settle
-// budget (m.settleBudget, default 60s) stays well inside the API's stop dispatch
-// budget (stop_timeout_seconds=600).
+// than the pre-fix behavior; the common path completes the flush. The settle may
+// use what ctx has left once save-all has answered, less flushSettleMargin (issue
+// #3503): the driver bounds the whole flush with ctx (defaultFlushTimeout, 90 s),
+// so the settle stays inside the stop budget sized from it, and gives up before
+// ctx ends under it. A ctx with no deadline (the driver always sets one) leaves
+// the settle m.settleBudget.
 //
 // save-off is issued first to disable MC's auto-save disk writes (#1038): without
 // it, an active player's actions continuously generate new chunk writes, so
@@ -2240,7 +2263,11 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 			"server_id", serverID, "error", err)
 		return false
 	}
-	if !m.settleWorkingSet(ctx, settleForStop, serverID, filepath.Join(m.scratchDir, serverID)) {
+	budget := m.settleBudget
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = max(deadline.Sub(m.clock.Now())-flushSettleMargin, 0)
+	}
+	if !m.settleWorkingSet(ctx, settleForStop, serverID, filepath.Join(m.scratchDir, serverID), budget) {
 		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
 			"server_id", serverID)
 		return false
@@ -2548,16 +2575,17 @@ func (m *Manager) drainPendingSaveOn(seal bool) map[string]saveOnTarget {
 // working set's region files before the fsck/copy reads them (#907). It snapshots
 // the (mtime, size) of every .mca under workingDir, re-scans every settlePollInterval,
 // and reports settled (true) once two consecutive scans are identical — the save's
-// region writes have stopped. It gives up (false) after settleBudget so a world
-// that never settles refuses the periodic snapshot (quiesce_unavailable) instead of
-// waiting unbounded, and returns false on ctx cancellation. A scan I/O error is
-// treated as "not yet settled" and retried within the budget rather than aborting,
-// and so is a scan that met an entry swapped under it (errSettleUncertain): only
-// two consecutive complete scans can settle. The budget-exhausted WARN counts the
-// uncertain scans, so a refusal caused by entries changing under the scan says so,
-// and it is prefixed with caller, the operation that ran the wait (issue #3445).
-func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workingDir string) bool {
-	deadline := time.Now().Add(m.settleBudget)
+// region writes have stopped. It gives up (false) once budget has passed on the
+// manager's clock, so a world that never settles refuses the periodic snapshot
+// (quiesce_unavailable) instead of waiting unbounded, and returns false on ctx
+// cancellation. A scan I/O error is treated as "not yet settled" and retried
+// within the budget rather than aborting, and so is a scan that met an entry
+// swapped under it (errSettleUncertain): only two consecutive complete scans
+// can settle. The budget-exhausted WARN counts the uncertain scans, so a refusal
+// caused by entries changing under the scan says so, and it is prefixed with
+// caller, the operation that ran the wait (issue #3445).
+func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workingDir string, budget time.Duration) bool {
+	deadline := m.clock.Now().Add(budget)
 	uncertain := 0
 	scan := func() (regionState, error) {
 		state, err := m.scanRegion(workingDir)
@@ -2577,9 +2605,9 @@ func (m *Manager) settleWorkingSet(ctx context.Context, caller, serverID, workin
 		if err == nil && curErr == nil && regionStateEqual(prev, cur) {
 			return true
 		}
-		if time.Now().After(deadline) {
+		if m.clock.Now().After(deadline) {
 			m.logger.Warn(caller+": working set did not settle within budget",
-				"server_id", serverID, "budget", m.settleBudget, "uncertain_scans", uncertain)
+				"server_id", serverID, "budget", budget, "uncertain_scans", uncertain)
 			return false
 		}
 		prev, err = cur, curErr
