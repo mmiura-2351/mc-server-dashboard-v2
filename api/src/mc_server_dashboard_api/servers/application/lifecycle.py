@@ -756,14 +756,21 @@ class StartServer:
             # KEEP desired=running + the assignment.
             if dispatch.attempted:
                 # The user's start IS satisfied.
-                await self._record_running(server, worker_id)
+                await self._record_running(
+                    server, worker_id, answered_at=outcome.answered_at
+                )
                 return server
             # A refused hydrate means this start launched nothing: the instance was
             # there before it, on whatever working set it had, which may be older
             # than the store's. So the player files are owed again (see
             # ``_record_running``), the start did not happen as asked, and the user
             # gets the start verb's "already running" conflict instead of a success.
-            await self._record_running(server, worker_id, owe_again=owed_group_files)
+            await self._record_running(
+                server,
+                worker_id,
+                answered_at=outcome.answered_at,
+                owe_again=owed_group_files,
+            )
             _LOG.warning(
                 "worker %s refused the hydrate for server %s because it already "
                 "runs an instance of it; this start does not give that Worker back",
@@ -992,7 +999,10 @@ class StartServer:
                 # Nothing failed, so this returns, and the reconciler counts no
                 # failure.
                 await self._record_running(
-                    server, worker_id, owe_again=owed_group_files
+                    server,
+                    worker_id,
+                    answered_at=outcome.answered_at,
+                    owe_again=owed_group_files,
                 )
                 _LOG.warning(
                     "worker %s refused the hydrate for server %s because it "
@@ -1196,7 +1206,9 @@ class StartServer:
             # that did not say, an older Worker's, may have swapped.
             await self._unmark(marked, worker_id, stop_intent_count)
         if outcome.status is CommandStatus.INVALID_STATE:
-            await self._record_running(server, worker_id)
+            await self._record_running(
+                server, worker_id, answered_at=outcome.answered_at
+            )
             return server
         if outcome.status is CommandStatus.BUSY:
             # A BUSY start (or hydrate) means the Worker is in one of two UNSETTLED
@@ -1544,6 +1556,7 @@ class StartServer:
         server: Server,
         worker_id: WorkerId,
         *,
+        answered_at: dt.datetime | None,
         owe_again: list[PendingGroupSync] | None = None,
     ) -> None:
         """Record observed=running for an instance found live on ``worker_id``.
@@ -1552,6 +1565,13 @@ class StartServer:
         (#213): the Worker performed no transition, so no ``StatusChange`` will
         come to record it. The write asserts the row is still on ``worker_id``.
 
+        It is stamped ``answered_at``, the instant the API read that answer
+        (issue #4117), not when it is made: work done in between, such as
+        :meth:`_unmark`'s round trip, could otherwise stamp it after a report
+        read since, which it would then overwrite, or after the Worker's
+        session ended, whose ``unknown`` it would then outlive. An outcome no
+        Worker sent carries no instant and is stamped now.
+
         ``owe_again`` is passed when the refused step was the hydrate (issue
         #3865): the marks the start cleared with its intent, for a launch that did
         not happen. The instance keeps its own working set, and its snapshots
@@ -1559,7 +1579,7 @@ class StartServer:
         again in this same transaction, as :meth:`_owe_group_files_again` says.
         """
 
-        observed_at = self.clock.now()
+        observed_at = self.clock.now() if answered_at is None else answered_at
         async with self.uow:
             applied = await self.uow.servers.record_observed_state(
                 server.id,
@@ -2204,6 +2224,7 @@ class StopServer:
                     worker_id=worker_id,
                     community_id=community_id,
                     server_id=server_id,
+                    answered_at=outcome.answered_at,
                 )
             return server
         if not outcome.success:
@@ -2237,6 +2258,7 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                answered_at=outcome.answered_at,
             )
         return server
 
@@ -2247,6 +2269,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
+        answered_at: dt.datetime | None,
     ) -> None:
         """Converge observed=stopped, snapshot, then DELAY the unassign (issue #847).
 
@@ -2310,7 +2333,9 @@ class StopServer:
         row once the grace window lapses if no late result arrives — grace-bounded.
         """
 
-        observed_at = self.clock.now()
+        # Stamped as the Worker's answer was read, as ``_record_running`` is (issue
+        # #4117).
+        observed_at = self.clock.now() if answered_at is None else answered_at
         # The Worker confirmed the stop and no final snapshot has been dispatched
         # yet, so nothing is in flight if this write fails.
         with self._recording_unwritten_stop(server_id):
@@ -2397,6 +2422,7 @@ class StopServer:
         worker_id: WorkerId,
         community_id: CommunityId,
         server_id: ServerId,
+        answered_at: dt.datetime | None,
     ) -> None:
         """Release a stop the Worker answered ``SERVER_NOT_FOUND`` (issue #2448).
 
@@ -2467,7 +2493,9 @@ class StopServer:
         # permanent wedge shape of #2439/#2452. Holding costs a grace window and
         # nothing else: every held triple IS reconcilable, and the arm it lands on
         # re-runs this release.
-        observed_at = self.clock.now()
+        # Stamped as the Worker's answer was read, as ``_record_running`` is (issue
+        # #4117).
+        observed_at = self.clock.now() if answered_at is None else answered_at
         # The Worker answered that no instance remains, and no final snapshot has been
         # dispatched yet, so nothing is in flight if this write fails (issue #3441).
         with self._recording_unwritten_stop(server_id):
@@ -2872,6 +2900,7 @@ class StopServer:
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                answered_at=outcome.answered_at,
             )
             return server
         # A confirmed live stop: converge observed=stopped, take the final snapshot,
@@ -2882,6 +2911,7 @@ class StopServer:
             worker_id=worker_id,
             community_id=community_id,
             server_id=server_id,
+            answered_at=outcome.answered_at,
         )
         return server
 

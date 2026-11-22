@@ -528,8 +528,13 @@ retries follow. Only the first attempt has the 3 s deadline. The retries back
 off from 0.5 s, doubling up to 10 s, with no time budget. A `StatusChange` is
 stamped when the API reads it off the stream, before it waits for anything, and
 each attempt of it carries that stamp, a held one's retries included (issue
-#4118). Its write is dropped for a server whose state is stamped later. The
-hold ends when the message is applied, or when the session ends:
+#4118). Its write is dropped for a server whose state is stamped later. A
+`CommandResult` is stamped the same way. When the command's caller converges a
+server's observed state from the Worker's answer (Section 6), the write carries
+that stamp, not the instant it is made (issue #4117). So a report read after the
+answer outlasts the convergence, and one read before it does not, whichever is
+written first. The hold ends when the message is applied, or when the session
+ends:
 
 - When the Worker closes the stream, the held message gets one last attempt,
   and so does each message queued behind it. Any failure then drops the message.
@@ -674,8 +679,9 @@ included, and the new Session's reports can then commit first. So the write
 is stamped as the check passes and leaves every server observed later than
 that stamp. A report is stamped as it arrives (Section 4.2), so the ending
 Session's own reports were all stamped earlier, and so was a report of an
-older Session still being written. A newer Session's are stamped later, so the
-outcome no longer depends on which write commits first (issues #4092, #4118).
+older Session still being written, and the convergence of an answer either sent
+(issue #4117). A newer Session's are stamped later, so the outcome no longer
+depends on which write commits first (issues #4092, #4118).
 After a refused registration
 (Section 4.1), whose Worker is alive and retries, the write is held to the
 registration's 10 s deadline and skipped past it with a warning, so a stalled
@@ -1511,7 +1517,10 @@ and equally the writes the API makes without one, whose frames carry an empty
   a start or a placement keeps the Worker that refused its hydrate `BUSY`,
   `UNAVAILABLE` or `EXPIRED` (Section 5), `stopped` when a stop is confirmed
   or answered `SERVER_NOT_FOUND`, and `unknown` when a stop left at `stopping`
-  under a disconnected Worker is released.
+  under a disconnected Worker is released. The `running` and `stopped` writes
+  are stamped with the instant the API read the Worker's answer (Section 4.2);
+  the `unknown` for a kept Worker with the instant of its placement, so a report
+  sent during the hydrate is kept.
 
 A write that leaves the state as it was — the bulk `unknown` over a row already
 `unknown`, a confirmed stop the Worker's own `stopped` report preceded —

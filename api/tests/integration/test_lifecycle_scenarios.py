@@ -2409,7 +2409,9 @@ async def test_late_snapshot_release_whose_write_failed_converges_on_the_short_g
     state.discard_pending("final-snapshot")
     outage.down = True
     with pytest.raises(OSError):
-        await state.resolve("final-snapshot", reporter, pb.CommandResult(success=True))
+        await state.resolve(
+            "final-snapshot", reporter, pb.CommandResult(success=True), received_at=_NOW
+        )
     outage.down = False
     assert not state.final_snapshot_outstanding(str(server_id.value))
     still_held = await _load(engine, server_id)

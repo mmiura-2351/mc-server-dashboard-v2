@@ -50,6 +50,7 @@ from mc_server_dashboard_api.fleet.adapters.registry import InMemoryWorkerRegist
 from mc_server_dashboard_api.fleet.domain.control_plane import (
     CommandResultCode,
     ReclaimDeletedServerCommand,
+    StopServerCommand,
 )
 from mc_server_dashboard_api.fleet.domain.entities import WorkerStatus
 from mc_server_dashboard_api.fleet.domain.late_snapshot_sink import (
@@ -3710,10 +3711,13 @@ class _RecordingControlPlane(ControlPlaneState):
         worker_id: WorkerId,
         result: pb.CommandResult,
         *,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         self.resolved.append((command_id, list(self._observed)))
-        await super().resolve(command_id, worker_id, result, retry=retry)
+        await super().resolve(
+            command_id, worker_id, result, received_at=received_at, retry=retry
+        )
 
 
 async def _write_all(
@@ -4590,6 +4594,48 @@ async def test_a_report_waiting_to_be_handled_keeps_its_receipt_stamp(
             (_SERVER_B, queued),
             (_SERVER_C, blocked),
         ]
+        await call.done_writing()
+    finally:
+        await h.stop()
+
+
+async def test_a_command_result_carries_the_instant_it_was_read() -> None:
+    # Issue #4117: the answer waits behind a slow write before it is handled,
+    # and the write that converges from it is stamped with the instant it was
+    # read, as a report is. So the result the dispatch returns carries that
+    # instant, not the one it was handled or resumed at.
+    gate = asyncio.Event()
+    sink = _StampSink(gate=gate)
+    state = ControlPlaneState()
+    h = _Harness(
+        InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+        FakeClock(_T0),
+        state_sink=sink,
+        control_plane=state,
+    )
+    try:
+        call = await _registered(await h.start())
+        await call.write(_status_message(_SERVER_A, pb.SERVER_STATE_RUNNING))
+        await _wait_until(lambda: sink.stamps, "A's write did not start")
+        dispatch = asyncio.ensure_future(
+            GrpcControlPlane(state, clock=h.clock, timeout_seconds=5.0).dispatch(
+                worker_id=WorkerId(_WORKER_ID),
+                server_id=_SERVER_B,
+                command=StopServerCommand(),
+            )
+        )
+        sent = await asyncio.wait_for(call.read(), timeout=5)
+        answered = _T0 + dt.timedelta(seconds=1)
+        h.clock.set(answered)
+        await call.write(_command_result_message(sent.correlation_id))
+        await call.write(_heartbeat_message())
+        await _wait_for_heartbeat_at(h, answered)
+        h.clock.set(_T0 + dt.timedelta(seconds=2))
+        gate.set()
+        result = await asyncio.wait_for(dispatch, timeout=5)
+
+        assert result.success
+        assert result.answered_at == answered
         await call.done_writing()
     finally:
         await h.stop()

@@ -36,7 +36,10 @@ from mc_server_dashboard_api.servers.adapters.control_plane import (
 from mc_server_dashboard_api.servers.adapters.server_state_sink import (
     ServersServerStateSink,
 )
-from mc_server_dashboard_api.servers.application.lifecycle import StartServer
+from mc_server_dashboard_api.servers.application.lifecycle import (
+    StartServer,
+    StopServer,
+)
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.value_objects import (
     ObservedState,
@@ -126,21 +129,27 @@ class _Stack:
             state_sink=self.sink,
             control_plane=state,
         )
+        control_plane = FleetControlPlaneAdapter(
+            registry=self.registry,
+            control_plane=GrpcControlPlane(
+                state, clock=clock, timeout_seconds=_ANSWER_GUARD_SECONDS
+            ),
+            data_plane_base_url="http://api.invalid",
+            worker_credential=_CREDENTIAL,
+            hydrate_timeout_seconds=_ANSWER_GUARD_SECONDS,
+            snapshot_timeout_seconds=_ANSWER_GUARD_SECONDS,
+            stop_timeout_seconds=_ANSWER_GUARD_SECONDS,
+        )
         self.start = StartServer(
             uow=world.uow(),
-            control_plane=FleetControlPlaneAdapter(
-                registry=self.registry,
-                control_plane=GrpcControlPlane(
-                    state, clock=clock, timeout_seconds=_ANSWER_GUARD_SECONDS
-                ),
-                data_plane_base_url="http://api.invalid",
-                worker_credential=_CREDENTIAL,
-                hydrate_timeout_seconds=_ANSWER_GUARD_SECONDS,
-            ),
+            control_plane=control_plane,
             clock=world.clock,
             jar_provisioner=FakeJarProvisioner(),
             store_generation=FakeStoreGenerationReader(),
             file_store=FakeFileStore(seed_eula=True),
+        )
+        self.stop_server = StopServer(
+            uow=world.uow(), control_plane=control_plane, clock=world.clock
         )
 
     async def register(
@@ -167,26 +176,49 @@ def _redispatch(stack: _Stack, server: Server) -> asyncio.Task[Server]:
     )
 
 
-async def _refuse_invalid_state(
-    call: aio.StreamStreamCall, command: str
-) -> pb.ApiMessage:
+async def _answer(
+    call: aio.StreamStreamCall,
+    command: str,
+    error: pb.CommandErrorCode.ValueType | None = None,
+) -> None:
+    """Read the next command, ``command``, and answer it: ``error``, or success."""
+
     message: pb.ApiMessage = await asyncio.wait_for(
         call.read(), timeout=_ANSWER_GUARD_SECONDS
     )
     assert message.api_command.WhichOneof("command") == command
+    result = pb.CommandResult(success=True)
+    if error is not None:
+        result = pb.CommandResult(success=False, error=pb.CommandError(code=error))
     await call.write(
-        pb.WorkerMessage(
-            correlation_id=message.correlation_id,
-            command_result=pb.CommandResult(
-                success=False,
-                error=pb.CommandError(
-                    code=pb.COMMAND_ERROR_CODE_INVALID_STATE,
-                    message="an instance of the server is already running",
-                ),
-            ),
-        )
+        pb.WorkerMessage(correlation_id=message.correlation_id, command_result=result)
     )
-    return message
+
+
+async def _hold_the_processor(stack: _Stack, call: aio.StreamStreamCall) -> None:
+    """Hold the session's processor on a slow write of another server's report."""
+
+    stack.sink.gated = _OTHER_SERVER
+    await call.write(_status_message(_OTHER_SERVER, pb.SERVER_STATE_RUNNING))
+    await asyncio.wait_for(stack.sink.holding.wait(), timeout=_ANSWER_GUARD_SECONDS)
+
+
+async def _report_behind_the_answer(
+    stack: _Stack,
+    call: aio.StreamStreamCall,
+    server_id: str,
+    state: pb.ServerState.ValueType,
+) -> None:
+    """Send ``state`` behind the answer, then free the processor once it is read."""
+
+    await call.write(_status_message(server_id, state))
+    beat = stack.registry.list_workers()[0].last_heartbeat_at
+    await call.write(_heartbeat_message())
+    await _wait_until(
+        lambda: stack.registry.list_workers()[0].last_heartbeat_at != beat,
+        "the report was not read",
+    )
+    stack.sink.release.set()
 
 
 async def test_a_report_read_after_a_refused_start_outlives_its_convergence(
@@ -202,20 +234,11 @@ async def test_a_report_read_after_a_refused_start_outlives_its_convergence(
     try:
         # Held at the store's generation, so the start skips the hydrate.
         call = await stack.register(held={server_id: 0})
-        stack.sink.gated = _OTHER_SERVER
-        await call.write(_status_message(_OTHER_SERVER, pb.SERVER_STATE_RUNNING))
-        await asyncio.wait_for(stack.sink.holding.wait(), timeout=_ANSWER_GUARD_SECONDS)
+        await _hold_the_processor(stack, call)
         start = _redispatch(stack, server)
 
-        await _refuse_invalid_state(call, "start")
-        await call.write(_status_message(server_id, pb.SERVER_STATE_CRASHED))
-        beat = stack.registry.list_workers()[0].last_heartbeat_at
-        await call.write(_heartbeat_message())
-        await _wait_until(
-            lambda: stack.registry.list_workers()[0].last_heartbeat_at != beat,
-            "the crash report was not read",
-        )
-        stack.sink.release.set()
+        await _answer(call, "start", pb.COMMAND_ERROR_CODE_INVALID_STATE)
+        await _report_behind_the_answer(stack, call, server_id, pb.SERVER_STATE_CRASHED)
         await asyncio.wait_for(start, timeout=_ANSWER_GUARD_SECONDS)
         await _wait_until(
             lambda: [s for s, _ in stack.sink.applied] == [_OTHER_SERVER, server_id],
@@ -255,7 +278,7 @@ async def test_a_refused_hydrates_convergence_does_not_outlive_the_disconnect(
         call = await stack.register()
         start = _redispatch(stack, server)
 
-        await _refuse_invalid_state(call, "hydrate")
+        await _answer(call, "hydrate", pb.COMMAND_ERROR_CODE_INVALID_STATE)
         await asyncio.wait_for(unmarking.wait(), timeout=_ANSWER_GUARD_SECONDS)
         await call.done_writing()
         await asyncio.wait_for(stack.sink.marked.wait(), timeout=_ANSWER_GUARD_SECONDS)
@@ -267,3 +290,54 @@ async def test_a_refused_hydrates_convergence_does_not_outlive_the_disconnect(
         await stack.stop()
 
     assert observed is ObservedState.UNKNOWN
+
+
+@pytest.mark.parametrize("answer", ["stopped", "not_found"])
+async def test_a_report_read_after_a_stops_answer_outlives_its_convergence(
+    world: _World,  # noqa: F811
+    answer: str,
+) -> None:
+    # The same interleave on a stop: the Worker confirms it, or finds no
+    # instance, and then reports the next state of the server, a start queued
+    # behind the stop, before the stop's convergence to stopped is written.
+    # The report was read after the answer, so the row ends starting.
+    server = await world.server("survival", worker=_WORKER)
+    server_id = str(server.id.value)
+    stack = _Stack(world)
+    try:
+        call = await stack.register()
+        await _hold_the_processor(stack, call)
+        stop = asyncio.create_task(
+            stack.stop_server(community_id=server.community_id, server_id=server.id)
+        )
+
+        error = None
+        if answer == "not_found":
+            error = pb.COMMAND_ERROR_CODE_SERVER_NOT_FOUND
+        await _answer(call, "stop", error)
+        await _report_behind_the_answer(
+            stack, call, server_id, pb.SERVER_STATE_STARTING
+        )
+        # The final snapshot is sent once the convergence has committed.
+        snapshot: pb.ApiMessage = await asyncio.wait_for(
+            call.read(), timeout=_ANSWER_GUARD_SECONDS
+        )
+        assert snapshot.api_command.WhichOneof("command") == "snapshot"
+        await _wait_until(
+            lambda: [s for s, _ in stack.sink.applied] == [_OTHER_SERVER, server_id],
+            "the report did not land",
+        )
+        observed = await world.observed(server)
+        await call.write(_command_result(snapshot.correlation_id))
+        await asyncio.wait_for(stop, timeout=_ANSWER_GUARD_SECONDS)
+        await call.done_writing()
+    finally:
+        await stack.stop()
+
+    assert observed is ObservedState.STARTING
+
+
+def _command_result(command_id: str) -> pb.WorkerMessage:
+    return pb.WorkerMessage(
+        correlation_id=command_id, command_result=pb.CommandResult(success=True)
+    )

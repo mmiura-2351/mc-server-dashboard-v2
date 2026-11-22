@@ -1159,7 +1159,8 @@ class WorkerSessionServicer(WorkerServiceServicer):
 
         That attempt may have committed with its answer lost, so a retry tells
         the sinks to publish the frame of a write they find already made (issue
-        #4062). A status change is stamped ``received_at`` (issue #4118).
+        #4062). A status change is stamped ``received_at`` (issue #4118), and a
+        command result carries it to the write it converges (issue #4117).
         """
 
         payload = message.WhichOneof("payload")
@@ -1172,7 +1173,11 @@ class WorkerSessionServicer(WorkerServiceServicer):
             # through the late-snapshot sink (issue #891); the common match path is
             # still synchronous dict work that returns without awaiting.
             await self._control_plane.resolve(
-                message.correlation_id, worker_id, message.command_result, retry=retry
+                message.correlation_id,
+                worker_id,
+                message.command_result,
+                received_at=received_at,
+                retry=retry,
             )
             return
         if payload != "event":

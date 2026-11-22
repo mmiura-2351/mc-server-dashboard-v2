@@ -436,11 +436,16 @@ class _Worker:
                 success=False,
                 error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED),
             ),
+            received_at=_NOW,
         )
 
     async def report_ok(self, command_id: str, *, retry: bool = False) -> None:
         await self.state.resolve(
-            command_id, self.fleet_id, pb.CommandResult(success=True), retry=retry
+            command_id,
+            self.fleet_id,
+            pb.CommandResult(success=True),
+            retry=retry,
+            received_at=_NOW,
         )
 
     def reconnect(self) -> None:
