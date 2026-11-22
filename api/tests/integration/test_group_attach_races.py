@@ -11,6 +11,12 @@ Each test pauses one change right after it has listed the attached servers,
 starts an attach of the same group on another connection, and requires that the
 attach waits for the change instead of slipping in beside it.
 
+The last three pin the lock order a group edit shares with a group delete
+(issue #2965): ``save`` locks the group row before it touches a player row. An
+edit paused right after its player-row DELETE holds off a delete and a second
+edit until it commits, and an edit arriving behind a paused delete waits, then
+finds the group gone.
+
 Runs only when ``MCD_TEST_DATABASE_URL`` is set (a real PostgreSQL); skipped
 otherwise (TESTING.md Section 5).
 """
@@ -21,12 +27,14 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import Delete, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.servers.adapters.group_models import GroupPlayerModel
 from mc_server_dashboard_api.servers.adapters.group_repository import (
     SqlAlchemyGroupRepository,
 )
@@ -37,6 +45,7 @@ from mc_server_dashboard_api.servers.application.groups import (
     AttachGroup,
     DeleteGroup,
     RemovePlayer,
+    RenameGroup,
 )
 from mc_server_dashboard_api.servers.domain.errors import GroupNotFoundError
 from mc_server_dashboard_api.servers.domain.groups import (
@@ -47,7 +56,7 @@ from mc_server_dashboard_api.servers.domain.groups import (
     PlayerGroup,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import CommunityId, ServerId
-from tests.integration.races import await_settled, race_database
+from tests.integration.races import SETTLE_TIMEOUT, await_settled, race_database
 from tests.servers.fakes import FakeFileStore
 
 _DB_URL = os.environ.get("MCD_TEST_DATABASE_URL")
@@ -106,6 +115,37 @@ class _PausingUnitOfWork(ServersUnitOfWork):
         assert self._session is not None
         self.groups = _PausingGroupRepository(self._session, self._pause)
         return self
+
+
+class _PauseMidSaveSession(AsyncSession):
+    """Holds ``save`` right after its player-row DELETE, before the replacements.
+
+    That is the point where an edit could close a cycle with a delete: it holds
+    the group's player rows and has yet to insert their replacements, whose FK
+    check must lock the group row (issue #2965).
+    """
+
+    def __init__(self, *args: Any, pause: _Pause, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._pause = pause
+
+    async def execute(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        result = await super().execute(statement, *args, **kwargs)
+        if (
+            isinstance(statement, Delete)
+            and statement.entity_description["entity"] is GroupPlayerModel
+            and not self._pause.reached.is_set()
+        ):
+            await self._pause.hold()
+        return result
+
+
+def _pausing_mid_save(
+    engine: AsyncEngine, pause: _Pause
+) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(
+        engine, expire_on_commit=False, class_=_PauseMidSaveSession, pause=pause
+    )
 
 
 class _PidUnitOfWork(ServersUnitOfWork):
@@ -291,3 +331,115 @@ async def test_player_removal_and_group_delete_do_not_deadlock(
     await removal
     await deletion
     assert await world.count("player_group") == 0
+
+
+# --- one lock order for save and delete (issue #2965) --------------------------
+# A rename to the name the group already has stages no UPDATE of the group row,
+# so on its way to the player rows it takes no lock but the one ``save`` takes
+# on its re-read. The tests pause it right after its player-row DELETE.
+
+
+async def test_same_name_rename_and_group_delete_do_not_deadlock(
+    engine: AsyncEngine,
+) -> None:
+    # The rename has deleted the player rows; the delete arrives. Were the group
+    # row left to the replacement rows' FK check, the delete would lock it, wait
+    # on the player rows, and the rename's INSERT would wait on the row.
+    world = _World(engine)
+    await world.seed()
+    pause = _Pause()
+    rename = asyncio.create_task(
+        RenameGroup(uow=ServersUnitOfWork(_pausing_mid_save(engine, pause)))(
+            community_id=world.community_id, group_id=world.group.id, name="admins"
+        )
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    deletion = asyncio.create_task(
+        DeleteGroup(uow=_PidUnitOfWork(world.factory, pid), file_store=FakeFileStore())(
+            community_id=world.community_id, group_id=world.group.id
+        )
+    )
+    await await_settled(
+        world.engine, deletion, lambda: pid.result() if pid.done() else None
+    )
+    assert not deletion.done()
+    pause.resume.set()
+
+    # Both complete, in that order: the rename commits, then the delete it held
+    # off removes the group.
+    await rename
+    await deletion
+    assert await world.count("player_group") == 0
+
+
+async def test_same_name_rename_racing_a_group_delete_reports_not_found(
+    engine: AsyncEngine,
+) -> None:
+    # The other order: the delete holds the group row first. The rename waits on
+    # the row before it touches a player row, then finds the group gone and
+    # answers the not-found (404) a delete landing a moment earlier gets.
+    world = _World(engine)
+    await world.seed()
+    pause = _Pause()
+    deletion = asyncio.create_task(
+        DeleteGroup(
+            uow=_PausingUnitOfWork(world.factory, pause), file_store=FakeFileStore()
+        )(community_id=world.community_id, group_id=world.group.id)
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    rename = asyncio.create_task(
+        RenameGroup(uow=_PidUnitOfWork(world.factory, pid))(
+            community_id=world.community_id, group_id=world.group.id, name="admins"
+        )
+    )
+    await await_settled(
+        world.engine, rename, lambda: pid.result() if pid.done() else None
+    )
+    assert not rename.done()
+    pause.resume.set()
+
+    await deletion
+    with pytest.raises(GroupNotFoundError):
+        await rename
+    assert await world.count("player_group") == 0
+
+
+async def test_interleaved_player_edits_of_one_group_both_land(
+    engine: AsyncEngine,
+) -> None:
+    # Two edits of one group, the second arriving once the first has deleted the
+    # player rows. The second waits on the group row the first locked, so its
+    # wholesale DELETE runs after the first commits and removes what the first
+    # wrote: it re-inserts nothing on top of it. Run side by side instead, the
+    # second re-inserted onto the first's committed rows and violated
+    # uq_group_player_group_uuid (issue #2613).
+    world = _World(engine)
+    await world.seed()
+    contested = Player(uuid.uuid4(), "bob")
+
+    async def edit(uow: ServersUnitOfWork) -> None:
+        async with uow:
+            loaded = await uow.groups.get_by_id(world.group.id)
+            assert loaded is not None
+            loaded.upsert_player(contested)
+            await uow.groups.save(loaded)
+            await uow.commit()
+
+    pause = _Pause()
+    first = asyncio.create_task(
+        edit(ServersUnitOfWork(_pausing_mid_save(engine, pause)))
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    second = asyncio.create_task(edit(_PidUnitOfWork(world.factory, pid)))
+    await await_settled(
+        world.engine, second, lambda: pid.result() if pid.done() else None
+    )
+    assert not second.done()
+    pause.resume.set()
+
+    await first
+    await second
+    assert await world.count("group_player") == 2

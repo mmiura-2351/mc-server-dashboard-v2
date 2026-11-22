@@ -106,8 +106,22 @@ class SqlAlchemyGroupRepository(GroupRepository):
         # group, or a removal that emptied the set -- because the writes that
         # would have violated the FK (#2583) were never staged. The read is the
         # one thing every save does, so it carries the assertion for all of them.
+        #
+        # It also locks the row, before any group_player row is touched (issue
+        # #2965). A group delete locks the row first and then cascades to the
+        # player rows; an edit that held those rows and reached the group row only
+        # through its replacement rows' FK check closed a cycle with it, and
+        # PostgreSQL aborted one of the two as a deadlock (a 500). With one order
+        # the later of the two waits instead: a delete behind an edit deletes once
+        # the edit commits, and an edit behind a delete finds no row here.
+        # ``key_share`` without ``read`` is FOR NO KEY UPDATE, which conflicts
+        # with the delete's FOR UPDATE and with another edit's lock but not with
+        # the FK check an attach makes on the row.
         row = await self._session.get(
-            PlayerGroupModel, group.id.value, populate_existing=True
+            PlayerGroupModel,
+            group.id.value,
+            populate_existing=True,
+            with_for_update={"key_share": True},
         )
         if row is None:
             raise GroupNotFoundError(str(group.id.value))
@@ -117,9 +131,7 @@ class SqlAlchemyGroupRepository(GroupRepository):
             # aggregate is the source of truth for the upsert/remove the caller made.
             # This execute autoflushes the name update above, so
             # uq_player_group_community_kind_name can surface here for a concurrent
-            # rename racer (issue #2000), and so can StaleDataError: a delete racer
-            # that commits between the re-read and this statement leaves the UPDATE
-            # matching zero rows (issue #2937).
+            # rename racer (issue #2000).
             await self._session.execute(
                 delete(GroupPlayerModel).where(
                     GroupPlayerModel.group_id == group.id.value
@@ -128,9 +140,11 @@ class SqlAlchemyGroupRepository(GroupRepository):
             for player in group.players:
                 self._session.add(_player_model(group.id, player))
             # Flush the staged rows here rather than leaving them for whichever
-            # autoflush the caller happens to trigger next: a concurrent group
-            # delete makes them violate fk_group_player_group_id_player_group, and
-            # only a flush this method owns can translate that (issue #2583).
+            # autoflush the caller happens to trigger next, so a violation surfaces
+            # where this method translates it (issue #2583). The one it was added
+            # for, a concurrent group delete leaving
+            # fk_group_player_group_id_player_group unmet, now waits on the row
+            # lock above instead.
             await self._session.flush()
         except IntegrityError as exc:
             translate_integrity_error(exc)
@@ -142,7 +156,9 @@ class SqlAlchemyGroupRepository(GroupRepository):
             # thing: the group is gone. Same cause and same answer as the FK above,
             # translated here because StaleDataError carries no constraint name and
             # is not an IntegrityError, so it would otherwise cross the port
-            # boundary raw and surface as a 500 (issue #2937).
+            # boundary raw and surface as a 500 (issue #2937). A delete racer used to
+            # reach it by committing between the re-read and this block; it now
+            # waits on the re-read's row lock instead (issue #2965).
             raise GroupNotFoundError(str(group.id.value)) from exc
 
     async def delete(self, group_id: GroupId) -> None:

@@ -60,7 +60,10 @@ re-inserts a pair that now exists. The delete-then-insert stays (the owner's
 #2613 ruling: a 409 for a genuinely simultaneous edit of one group is acceptable
 at this scale), so the constraint is translated to a conflict the loser can
 retry -- its transaction rolls back whole, the winner's edit stands, and
-re-reading the group and reapplying the edit succeeds.
+re-reading the group and reapplying the edit succeeds. Since issue #2965
+``save`` locks the group row before its DELETE, so the second edit waits for
+the first to commit and its DELETE sees those rows: the interleave no longer
+forms through ``save``, and the entry is kept as the constraint's translation.
 
 The map below is **deliberately partial**. The issue #2583 audit walked every
 named UNIQUE and FOREIGN KEY constraint in ``api/migrations/`` against it and
