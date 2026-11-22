@@ -79,6 +79,14 @@ _SECTION_LOADING_CASES = [
         id="database-pool",
     ),
     pytest.param(
+        "database",
+        {"connect_timeout_seconds": 5.0, "statement_timeout_seconds": 60.0},
+        {"connect_timeout_seconds": 3.0, "statement_timeout_seconds": 30.0},
+        {"statement_timeout_seconds": "45"},
+        {"statement_timeout_seconds": 45.0},
+        id="database-bounds",
+    ),
+    pytest.param(
         "storage",
         {"backend": "fs", "version_retention": 10},
         {"backend": "object", "version_retention": 3},
@@ -382,6 +390,18 @@ _SCALAR_INVALID_CASES = [
     ),
     pytest.param(
         "database", "max_overflow = -1", "max_overflow", id="negative-database-overflow"
+    ),
+    pytest.param(
+        "database",
+        "connect_timeout_seconds = 0",
+        "connect_timeout_seconds",
+        id="zero-database-connect-timeout",
+    ),
+    pytest.param(
+        "database",
+        "statement_timeout_seconds = 0",
+        "statement_timeout_seconds",
+        id="zero-database-statement-timeout",
     ),
     pytest.param(
         "storage", 'backend = "s3-but-typo"', "backend", id="unknown-storage-backend"

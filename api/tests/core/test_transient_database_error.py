@@ -20,7 +20,9 @@ from sqlalchemy.dialects.postgresql.asyncpg import AsyncAdapt_asyncpg_dbapi
 
 from mc_server_dashboard_api.core.adapters.database import (
     DatabaseConnectError,
+    DatabaseTimeoutError,
     create_engine,
+    is_database_timeout,
     is_transient_database_error,
 )
 from tests.core.fakes import interface_error, server_error
@@ -129,7 +131,9 @@ def test_an_outage_the_server_reports_is_transient(
         # A protocol violation is a driver or proxy fault, not an outage (#4010).
         pytest.param(asyncpg.ProtocolViolationError("x"), "08P01", id="08P01"),
         # A cancelled or timed-out statement, a dropped database and an idle
-        # session timed out are not an outage of the server.
+        # session timed out are not an outage of the server. The engine's own
+        # statement bound is the driver's ``TimeoutError``, never a 57014
+        # (#4042).
         pytest.param(asyncpg.QueryCanceledError("x"), "57014", id="57014"),
         pytest.param(asyncpg.DatabaseDroppedError("x"), "57P04", id="57P04"),
         pytest.param(asyncpg.IdleSessionTimeoutError("x"), "57P05", id="57P05"),
@@ -211,3 +215,31 @@ async def test_an_unreachable_database_raises_a_transient_error() -> None:
     finally:
         await engine.dispose()
     assert is_transient_database_error(caught.value) is True
+
+
+def _connect_error(cause: Exception) -> DatabaseConnectError:
+    error = DatabaseConnectError(f"{type(cause).__name__}: {cause}")
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    ("exc", "timed_out"),
+    [
+        pytest.param(DatabaseTimeoutError("no answer"), True, id="statement-bound"),
+        pytest.param(_connect_error(TimeoutError()), True, id="connect-bound"),
+        pytest.param(
+            _connect_error(ConnectionRefusedError(111, "refused")),
+            False,
+            id="connect-refused",
+        ),
+        # Only the engine's own bound is the database's: a bare one may be a
+        # store's or a Worker's.
+        pytest.param(TimeoutError(), False, id="bare-timeout"),
+        pytest.param(sqlalchemy.exc.TimeoutError("pool"), False, id="pool-timeout"),
+    ],
+)
+def test_a_database_timeout_is_the_engines_bound_running_out(
+    exc: Exception, timed_out: bool
+) -> None:
+    assert is_database_timeout(exc) is timed_out
