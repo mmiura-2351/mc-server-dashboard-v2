@@ -2098,6 +2098,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/communities/{community_id}/servers/{server_id}/release-without-snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release Server Without Snapshot
+         * @description Release a server its Worker holds after refusing the final snapshot (#4055).
+         *
+         *     Not a ``/stop`` parameter: ``force`` means "kill now" only, and this gives up
+         *     the progression since the last snapshot, so it has its own route, audit
+         *     operation and confirmation. It sends the Worker nothing.
+         */
+        post: operations["release_server_without_snapshot_api_communities__community_id__servers__server_id__release_without_snapshot_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/communities/{community_id}/servers/{server_id}/resource-pack": {
         parameters: {
             query?: never;
@@ -7836,6 +7860,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PluginUpdateInfoResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    release_server_without_snapshot_api_communities__community_id__servers__server_id__release_without_snapshot_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                community_id: string;
+                server_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerResponse"];
                 };
             };
             /** @description Validation Error */

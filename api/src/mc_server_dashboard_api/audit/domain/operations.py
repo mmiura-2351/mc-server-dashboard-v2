@@ -77,6 +77,12 @@ SERVER_START: Final = "server:start"
 SERVER_STOP: Final = "server:stop"
 SERVER_RESTART: Final = "server:restart"
 SERVER_COMMAND: Final = "server:command"
+# An operator releasing a server held by a refused final snapshot without that
+# snapshot (issue #4055). A distinct code so the deliberate loss of the
+# progression since the last snapshot is queryable apart from a stop; gated by
+# server:stop, so it names the operation, not a permission (free-text column, see
+# module docstring).
+SERVER_RELEASE_WITHOUT_SNAPSHOT: Final = "server:release_without_snapshot"
 # Whole-server ZIP export / import (M2 Epic C2, issue #274). These name the
 # operation, not a permission code: export is gated by file:read (bulk file read)
 # and import by server:create; there is no server:export / server:import

@@ -53,6 +53,7 @@ from mc_server_dashboard_api.dependencies import (
     get_list_game_sessions,
     get_list_servers,
     get_read_server,
+    get_release_held_server,
     get_resolve_server_export,
     get_restart_server,
     get_send_server_command,
@@ -108,6 +109,9 @@ from mc_server_dashboard_api.servers.application.manage_server import (
     ListServers,
     ReadServer,
     UpdateServer,
+)
+from mc_server_dashboard_api.servers.application.release_held_server import (
+    ReleaseHeldServer,
 )
 from mc_server_dashboard_api.servers.domain.config_bounds import (
     ConfigInvalidShapeError,
@@ -1338,6 +1342,63 @@ async def stop_server(
         )
         raise _lifecycle_http_error(exc, name_worker_state=True) from exc
     await _record(recorder, ops.SERVER_STOP, authorized, community_id, server.id.value)
+    return ServerResponse.from_entity(
+        server,
+        join_config,
+        has_enabled_geyser=await _has_enabled_geyser(server, join_config, bedrock),
+    )
+
+
+@router.post("/communities/{community_id}/servers/{server_id}/release-without-snapshot")
+async def release_server_without_snapshot(
+    community_id: uuid.UUID,
+    server_id: uuid.UUID,
+    authorized: Annotated[
+        AuthUser,
+        Depends(
+            require_permission(
+                Permission("server:stop"),
+                resource_type=_SERVER_RESOURCE_TYPE,
+                resource_id_param="server_id",
+            )
+        ),
+    ],
+    use_case: Annotated[ReleaseHeldServer, Depends(get_release_held_server)],
+    recorder: Annotated[AuditRecorder, Depends(get_audit_recorder)],
+    join_config: Annotated[JoinHostnameConfig, Depends(get_join_hostname_config)],
+    bedrock: Annotated[BedrockJoinability, Depends(get_bedrock_joinability)],
+) -> ServerResponse:
+    """Release a server its Worker holds after refusing the final snapshot (#4055).
+
+    Not a ``/stop`` parameter: ``force`` means "kill now" only, and this gives up
+    the progression since the last snapshot, so it has its own route, audit
+    operation and confirmation. It sends the Worker nothing.
+    """
+
+    try:
+        server = await use_case(
+            community_id=CommunityId(community_id),
+            server_id=ServerId(server_id),
+        )
+    except ServerNotFoundError as exc:
+        raise _not_found() from exc
+    except _LIFECYCLE_FAILURES as exc:
+        await _record_op_failure(
+            recorder,
+            ops.SERVER_RELEASE_WITHOUT_SNAPSHOT,
+            authorized,
+            community_id,
+            server_id,
+            exc,
+        )
+        raise _lifecycle_http_error(exc) from exc
+    await _record(
+        recorder,
+        ops.SERVER_RELEASE_WITHOUT_SNAPSHOT,
+        authorized,
+        community_id,
+        server.id.value,
+    )
     return ServerResponse.from_entity(
         server,
         join_config,
