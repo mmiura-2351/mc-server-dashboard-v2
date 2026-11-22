@@ -1591,6 +1591,122 @@ async def test_an_owed_record_of_a_deleted_schedule_is_audited_once_and_dropped(
     assert not [line for line in infos if "owed" in line]
 
 
+async def test_an_owed_record_once_recorded_is_owed_no_more() -> None:
+    store = FakeBackupArchiveStore()
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    outage.down = False
+    await _tick_at(env, _NOW + _TICK)  # records the owed run
+
+    await _tick_at(env, _NOW + 2 * _TICK)
+    assert _run_rows(env, schedule) == [(ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW)]
+
+    next_at = _NOW.replace(hour=13)
+    await _tick_at(env, next_at)
+    assert _archive_attempts(store) == 2
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW),
+        (ScheduleRunOutcome.SUCCESS, None, next_at, next_at),
+    ]
+
+
+async def test_a_command_whose_record_fails_is_sent_once_until_it_is_recorded() -> None:
+    env = _env()
+    server = _running_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.COMMAND,
+        cadence=_HOURLY,
+        command="say hi",
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    outage = _RecordsFail(env)
+
+    # Every tick is within the late-run grace, so a re-run would be sent.
+    for tick in range(5):
+        await _tick_at(env, _NOW + tick * _TICK)
+    outage.down = False
+    await _tick_at(env, _NOW + 5 * _TICK)
+
+    assert [kind for kind, *_ in env.control_plane.dispatched] == ["command"]
+    assert _run_rows(env, schedule) == [(ScheduleRunOutcome.SUCCESS, None, _NOW, _NOW)]
+
+
+async def test_an_owed_failure_arms_its_retry_from_when_it_ran() -> None:
+    store = FakeBackupArchiveStore(missing=True)
+    env = _env(backup_store=store)
+    schedule = _backup_schedule(env)
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    store._missing = False
+    outage.down = False
+    await _tick_at(env, _NOW + dt.timedelta(minutes=10))  # records the owed failure
+
+    retry_at = _NOW + dt.timedelta(minutes=30)
+    await _tick_at(env, retry_at - _TICK)
+    assert _runs(env, schedule) == [ScheduleRunOutcome.FAILURE]
+
+    await _tick_at(env, retry_at)
+    assert _runs(env, schedule) == [
+        ScheduleRunOutcome.FAILURE,
+        ScheduleRunOutcome.SUCCESS,
+    ]
+
+
+async def test_an_owed_success_prunes_per_retention_once_it_is_recorded() -> None:
+    env = _env()
+    schedule = _backup_schedule(env)
+    server = env.uow.servers.by_id[schedule.server_id]
+    server.backup_retention = {"keep_last": 1}
+    old = _scheduled_backup(env, server, _NOW - dt.timedelta(days=1))
+    outage = _RecordsFail(env)
+    await _tick_at(env, _NOW)
+    assert len(_scheduled_rows(env, server)) == 2
+
+    outage.down = False
+    await _tick_at(env, _NOW + _TICK)
+
+    remaining = _scheduled_rows(env, server)
+    assert len(remaining) == 1
+    assert remaining[0].id != old.id
+
+
+async def test_a_precondition_skip_whose_record_fails_is_recorded_once_as_decided(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = _env()
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        cadence=_HOURLY,
+        only_when_running=True,
+        next_run_at=_NOW.replace(minute=0, second=0),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+    outage = _RecordsFail(env)
+
+    for tick in range(5):
+        await _tick_at(env, _NOW + tick * _TICK)
+    outage.down = False
+    await _tick_at(env, _NOW + 5 * _TICK)
+
+    # Owed like any outcome: recorded with the times it was decided.
+    assert _run_rows(env, schedule) == [
+        (ScheduleRunOutcome.SKIPPED, "server not running", _NOW, _NOW)
+    ]
+    assert _lines_naming(caplog, logging.WARNING, schedule) == [
+        f"schedule {schedule.id.value}: the skipped run of its backup could not "
+        "be recorded; the record is retried each tick, and the backup is not run "
+        "again"
+    ]
+
+
 async def test_a_record_owed_for_hours_warns_once_an_hour(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
