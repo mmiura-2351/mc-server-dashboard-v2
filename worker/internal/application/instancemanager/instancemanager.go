@@ -58,10 +58,14 @@ type resilientControl struct {
 	dial     func(ctx context.Context) (execution.ServerControl, error)
 	logger   *slog.Logger
 	serverID string
+	// clock times each command's round trip into trips (issue #4038): the command
+	// on the wire alone, not the redial in front of it.
+	clock session.Clock
+	trips rconRoundTrips
 }
 
 func (r *resilientControl) Execute(ctx context.Context, line string) (string, error) {
-	reply, err := r.inner.Execute(ctx, line)
+	reply, err := r.timed(ctx, line)
 	if err == nil || !errors.Is(err, execution.ErrConnBroken) {
 		return reply, err
 	}
@@ -73,10 +77,42 @@ func (r *resilientControl) Execute(ctx context.Context, line string) (string, er
 		return "", fmt.Errorf("redial after broken connection: %w", dialErr)
 	}
 	r.inner = fresh
-	return r.inner.Execute(ctx, line)
+	return r.timed(ctx, line)
+}
+
+// timed runs line on the current connection and records its round trip, unless
+// the connection was already poisoned: then nothing went out.
+func (r *resilientControl) timed(ctx context.Context, line string) (string, error) {
+	start := r.clock.Now()
+	reply, err := r.inner.Execute(ctx, line)
+	if !errors.Is(err, execution.ErrConnBroken) {
+		r.trips[line] = r.clock.Now().Sub(start)
+	}
+	return reply, err
 }
 
 func (r *resilientControl) Close() error { return r.inner.Close() }
+
+// rconRoundTrips is how long each command of a quiesce or a stop flush took on the
+// wire, keyed by command line and timed on the manager's clock (issue #4038). The
+// bracket's log lines carry it, so how close a live reply comes to rcon's 30 s
+// per-leg ceiling can be read off the Worker's log. A command that has not gone
+// out has no entry, and one that failed has the time it took to fail.
+type rconRoundTrips map[string]time.Duration
+
+// attr is the round trips as save_off_ms, save_all_ms and save_on_ms. Its group
+// has no key, so a handler writes them as top-level fields.
+func (r rconRoundTrips) attr() slog.Attr {
+	var attrs []slog.Attr
+	for _, f := range [...]struct{ line, key string }{
+		{"save-off", "save_off_ms"}, {"save-all", "save_all_ms"}, {"save-on", "save_on_ms"},
+	} {
+		if d, ok := r[f.line]; ok {
+			attrs = append(attrs, slog.Int64(f.key, d.Milliseconds()))
+		}
+	}
+	return slog.Attr{Value: slog.GroupValue(attrs...)}
+}
 
 // Transfer is the data-plane Port: move a server's working set between the API's
 // authoritative Storage and the local working dir (FR-DATA-3/4). The trigger
@@ -1626,6 +1662,9 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 	// upload (issue #1710). Made idempotent via sync.Once so the deferred safety-net
 	// and the explicit call do not double-issue save-on.
 	var restore func()
+	// trips is the quiesce's RCON round trips, which the running path's lines below
+	// carry (issue #4038).
+	trips := rconRoundTrips{}
 	// pin guards the running path's marker stamp; nil (and unused) on the stopped path,
 	// which records no generation. Declared here so the post-upload tail below can see it.
 	var pin *workingDirRef
@@ -1742,7 +1781,7 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 		var quiesced bool
 		var rawRestore func()
 		var openErr error
-		quiesced, rawRestore, openErr = m.quiesceRunning(cmdCtx, cmd.ServerID, workingDir, att)
+		quiesced, rawRestore, openErr = m.quiesceRunning(cmdCtx, cmd.ServerID, workingDir, att, trips)
 		var once sync.Once
 		restore = func() { once.Do(rawRestore) }
 		defer restore()
@@ -1755,7 +1794,7 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 			// post-stop FINAL snapshot still covers a permanently-RCON-broken server (the
 			// stopped-id path needs no RCON).
 			m.logger.Warn("snapshot refused: could not quiesce running world",
-				"server_id", cmd.ServerID, "reason", "quiesce_unavailable")
+				"server_id", cmd.ServerID, "reason", "quiesce_unavailable", trips.attr())
 			if errors.Is(openErr, execution.ErrServerPropertiesUnreadable) {
 				// RCON could not be opened because server.properties is refused: a
 				// cause the user can fix, so it is named rather than retried in
@@ -1931,10 +1970,10 @@ func (m *Manager) snapshotBody(ctx, cmdCtx context.Context, cmd session.Command,
 		if err := syncWorkingSet(ctx, workingDir); err != nil {
 			treeDurable = false
 			m.logger.Warn("snapshot could not make the working set durable; it is published, but the generation marker is not advanced",
-				"server_id", cmd.ServerID, "error", err)
+				"server_id", cmd.ServerID, "error", err, trips.attr())
 		} else {
 			m.logger.Info("snapshot made the working set durable",
-				"server_id", cmd.ServerID, "sync_ms", time.Since(syncStart).Milliseconds())
+				"server_id", cmd.ServerID, "sync_ms", time.Since(syncStart).Milliseconds(), trips.attr())
 		}
 		// Record the NEW generation the publish produced (issue #763): the scratch we
 		// just pushed is the source of this store generation, so its local generation
@@ -2069,7 +2108,9 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // succeeded AND the save settled within the budget; the caller refuses the
 // periodic snapshot otherwise rather than packing a live world (#907). openErr is
 // the RCON open failure when that is why it is not quiesced, so the caller can
-// name a refused server.properties (issue #3347).
+// name a refused server.properties (issue #3347). Each command's round trip,
+// the restore's save-on included, is recorded in trips for the caller's log
+// lines as well as this bracket's own (issue #4038).
 //
 // It deliberately uses a non-blocking save-all, NOT save-all flush: the
 // synchronous flush runs on the Minecraft main thread and crashed survival-main in
@@ -2090,7 +2131,7 @@ func (m *Manager) checkWorkingSet(ctx context.Context, serverID, workingDir stri
 // running server would be left with auto-save permanently OFF (#694 hard
 // requirement). A final failure is logged loudly: auto-save stuck off is
 // operator-actionable.
-func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string, att *snapshotAttempt) (bool, func(), error) {
+func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir string, att *snapshotAttempt, trips rconRoundTrips) (bool, func(), error) {
 	driverName, mcVersion := m.controlTargetFor(serverID)
 	raw, err := m.openControl(ctx, serverID, driverName, mcVersion)
 	if err != nil {
@@ -2115,6 +2156,8 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		dial:     dial,
 		logger:   m.logger,
 		serverID: serverID,
+		clock:    m.clock,
+		trips:    trips,
 	}
 
 	saveOff := true
@@ -2122,12 +2165,12 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 	att.saveOffSent(dial)
 	if _, err := ctrl.Execute(ctx, "save-off"); err != nil {
 		m.logger.Warn("snapshot save-off failed; snapshot will not be quiesced",
-			"server_id", serverID, "error", err)
+			"server_id", serverID, "error", err, trips.attr())
 		saveOff = false
 		quiesced = false
 	} else {
 		if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
-			m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err)
+			m.logger.Warn("snapshot save-all failed", "server_id", serverID, "error", err, trips.attr())
 			quiesced = false
 		} else if !m.settleWorkingSet(ctx, settleForSnapshot, serverID, workingDir, m.settleBudget) {
 			quiesced = false
@@ -2139,7 +2182,7 @@ func (m *Manager) quiesceRunning(ctx context.Context, serverID, workingDir strin
 		if !saveOff {
 			return
 		}
-		if m.restoreSaveOn(ctx, serverID, ctrl, dial) {
+		if m.restoreSaveOn(ctx, serverID, ctrl, dial, trips) {
 			att.saveOnRestored()
 		}
 	}, nil
@@ -2205,7 +2248,10 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	// Wrap in resilientControl (#919/#1040): a save-off failure poisons the rcon
 	// connection, so save-all on the same client returns ErrConnBroken instantly.
 	// The wrapper auto-redials so save-all degrades to the pre-save-off behavior
-	// (flush without quiesce) instead of silently losing the flush entirely.
+	// (flush without quiesce) instead of silently losing the flush entirely. It
+	// records each command's round trip in trips, which the lines below carry
+	// (issue #4038).
+	trips := rconRoundTrips{}
 	ctrl := &resilientControl{
 		inner: raw,
 		dial: func(dialCtx context.Context) (execution.ServerControl, error) {
@@ -2213,6 +2259,8 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 		},
 		logger:   m.logger,
 		serverID: serverID,
+		clock:    m.clock,
+		trips:    trips,
 	}
 	defer func() { _ = ctrl.Close() }()
 
@@ -2254,13 +2302,13 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 		close(written)
 		if err != nil {
 			m.logger.Warn("stop flush: save-off failed; proceeding with save-all",
-				"server_id", serverID, "error", err)
+				"server_id", serverID, "error", err, trips.attr())
 		}
 	}
 
 	if _, err := ctrl.Execute(ctx, "save-all"); err != nil {
 		m.logger.Warn("stop flush: save-all failed; stopping without a final save",
-			"server_id", serverID, "error", err)
+			"server_id", serverID, "error", err, trips.attr())
 		return false
 	}
 	budget := m.settleBudget
@@ -2269,7 +2317,7 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 	}
 	if !m.settleWorkingSet(ctx, settleForStop, serverID, filepath.Join(m.scratchDir, serverID), budget) {
 		m.logger.Warn("stop flush: working set did not settle within budget; stopping anyway",
-			"server_id", serverID)
+			"server_id", serverID, trips.attr())
 		return false
 	}
 	return true
@@ -2284,8 +2332,10 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 // dial (quiesceRunning's: the open's own credentials where the connection can
 // reuse them, issue #3511) and retries save-on once with a short backoff inside the timeout, so
 // a running server is never left with auto-save permanently OFF (#694). A final
-// failure is logged loudly — auto-save stuck off is operator-actionable.
-func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl, dial func(context.Context) (execution.ServerControl, error)) bool {
+// failure is logged loudly — auto-save stuck off is operator-actionable. ctrl
+// records the first save-on's round trip in trips, and the retry's is recorded
+// here, so trips holds the last attempt's (issue #4038).
+func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execution.ServerControl, dial func(context.Context) (execution.ServerControl, error), trips rconRoundTrips) bool {
 	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreSaveTimeout)
 	defer cancel()
 
@@ -2294,7 +2344,7 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 		return true
 	}
 	m.logger.Warn("snapshot save-on failed on the quiesce connection; redialing",
-		"server_id", serverID, "error", err)
+		"server_id", serverID, "error", err, trips.attr())
 
 	// The quiesce connection is poisoned (a prior failed Execute closed it). Back
 	// off briefly inside the restore budget, then redial a fresh connection and
@@ -2302,7 +2352,7 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	select {
 	case <-restoreCtx.Done():
 		m.logger.Error("snapshot save-on NOT restored; server left with auto-save disabled",
-			"server_id", serverID, "error", restoreCtx.Err())
+			"server_id", serverID, "error", restoreCtx.Err(), trips.attr())
 		return false
 	case <-time.After(m.fsckRetryDelay):
 	}
@@ -2310,13 +2360,16 @@ func (m *Manager) restoreSaveOn(ctx context.Context, serverID string, ctrl execu
 	fresh, err := dial(restoreCtx)
 	if err != nil {
 		m.logger.Error("snapshot save-on NOT restored; redial failed, server left with auto-save disabled",
-			"server_id", serverID, "error", err)
+			"server_id", serverID, "error", err, trips.attr())
 		return false
 	}
 	defer func() { _ = fresh.Close() }()
-	if _, err := fresh.Execute(restoreCtx, "save-on"); err != nil {
+	start := m.clock.Now()
+	_, err = fresh.Execute(restoreCtx, "save-on")
+	trips["save-on"] = m.clock.Now().Sub(start)
+	if err != nil {
 		m.logger.Error("snapshot save-on NOT restored after redial; server left with auto-save disabled",
-			"server_id", serverID, "error", err)
+			"server_id", serverID, "error", err, trips.attr())
 		return false
 	}
 	return true
