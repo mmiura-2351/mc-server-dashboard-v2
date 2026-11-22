@@ -332,6 +332,25 @@ describe("AccountPage deletion", () => {
     await waitFor(() => expect(mockLogout).toHaveBeenCalledTimes(1));
   });
 
+  // The delete dialog's password field sits in a form with the signed-in
+  // username, for password managers to offer the saved credential (#4121).
+  it("carries the signed-in username in the delete dialog's password form", async () => {
+    renderPage();
+    await waitForLoaded();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: t("account.delete.open") }),
+    );
+
+    const form = (
+      screen.getByLabelText(t("account.delete.password")) as HTMLInputElement
+    ).form;
+    expect(form).not.toBeNull();
+    const username = form?.querySelector('input[autocomplete="username"]');
+    expect(username).toHaveValue("miura");
+    expect(username).toHaveAttribute("readonly");
+  });
+
   it("keeps deletion gated when only the password is entered", async () => {
     renderPage();
     await waitForLoaded();
