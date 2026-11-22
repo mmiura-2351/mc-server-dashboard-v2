@@ -1426,8 +1426,10 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
 1. **Identify the displaced tree.** The boot WARN gives the full path. Or scan the
    Worker's `worker.scratch_dir` for directories matching `.displaced-*`.
 2. **Assess the world.** The displaced tree is a plain working-set directory (the
-   same layout the Worker normally holds in `<scratch>/<id>`). A tree displaced because
-   the boot region fsck judged it **torn** carries a `.mcsd_generation` marker of `0`:
+   same layout the Worker normally holds in `<scratch>/<id>`). Its `.mcsd_generation`
+   marker reads `v2 <generation> <mac>` (Section 8), so the generation the tree was
+   published as is the second field. A tree displaced because
+   the boot region fsck judged it **torn** carries a marker recording generation `0`:
    the Worker rewrote it so the verdict reached the API, and the generation the tree was
    actually at survives only as `recorded_generation` in that boot's `held set has a
    corrupt region` `WARN` for the server id. Grep the Worker log for it before judging
@@ -1451,13 +1453,21 @@ WARN  displaced recovery tree for unknown/unassigned server found at boot; manua
      once the tar is in hand.
 
    - **Copy directly into an existing server's scratch.** Stop the target server,
-     copy the displaced tree content into `<scratch>/<target-id>` (or swap the
-     whole directory), then start the server. A hydrate will follow from the API
-     unless the Worker holds a fresh enough generation — if in doubt, bump the
-     authoritative store generation by any at-rest edit (`write_file` etc.) so the
-     next start is forced to re-hydrate from the current store, not the patched
-     scratch. **Use with care:** writing directly into the scratch bypasses all
-     integrity gates.
+     copy the displaced tree content into `<scratch>/<target-id>`, then start the
+     server. What decides whether that start hydrates over the copy is the target's
+     own marker, `<scratch>/<target-id>/.mcsd_generation`, which only the Worker can
+     write: it is believed only with a MAC under the Worker's key for that server id
+     (Section 8). A marker written or edited by hand, or one from another server's
+     tree, reads as generation 0. The displaced tree's own marker, brought along with
+     its content or by swapping the whole directory in, names the generation that
+     tree was at, which the store has since passed, unless the target is another
+     server, in which case it reads as 0. In all of those cases the start hydrates
+     over the copy. Keeping the target's own marker boots the copy only while that
+     marker still names the store's current generation. To make the next start
+     re-hydrate from the current store instead of the patched scratch, delete the
+     marker (`rm <scratch>/<target-id>/.mcsd_generation`): with no marker, the next
+     start always hydrates. **Use with care:** writing directly into the scratch
+     bypasses all integrity gates.
 
 4. **Remove the displaced tree.** Once recovery is confirmed and the world is
    safely in the store (or the world is genuinely not needed), delete the
@@ -2372,6 +2382,45 @@ store or Postgres waits on their writeback too; a separate filesystem is
 recommended ([`../dev/DEPLOYMENT.md`](../dev/DEPLOYMENT.md) Section 3). Each
 successful sync logs `snapshot made the working set durable` at `INFO` with its
 duration as `sync_ms`.
+
+**The Worker believes only a marker it signed.** The working-set root is
+writable by the server's own code, so the marker's value is authenticated
+(issue #3349). The Worker writes it as `v2 <generation> <mac>`, where `<mac>`
+is HMAC-SHA256, in hex, over the server id followed by the generation as eight
+big-endian bytes. Both writers sign: the hydrate, which writes the marker into
+the unpacked tree before swapping it in, and the running-id snapshot's stamp.
+So does the boot scan's torn-verdict rewrite. Every reader verifies: the boot
+held-set scan, the scan before each registration, and the snapshot's base
+generation. A marker that does not verify reads as generation 0, which makes
+the next start hydrate. That covers a bare number (every marker written before
+this format, or one written by hand), a marker copied from another server's
+working set, and one whose generation was edited. The Worker logs
+`generation marker failed verification` at `WARN`, once per server per
+process. A genuine older marker of the same server can only name a generation
+the Worker really stamped, which is never above the store's, so replaying one
+also leads to a hydrate.
+
+The key is 32 random bytes at `<worker.scratch_dir>/.generation-key`, mode
+`0600`. It lies outside every `<id>` directory, so no container can read it, and
+it shares the scratch volume's lifetime, as the markers do. The Worker creates
+it on its first boot and reads it back at every later one. It writes the key in
+full under a temporary name, fsyncs it, and links it into place, so the key's
+name never holds a partial key.
+
+- **Losing the key** (a wiped or replaced file, a restored scratch volume
+  without it) invalidates every marker on that Worker. The next boot creates a
+  new key, and each held server hydrates once. A retained working set holding
+  unpublished progression is replaced by the store's copy; the hydrate parks the
+  replaced tree aside as it does any other (Section 4.6).
+- **An unusable key** is one that exists but is not a regular file of exactly
+  32 bytes, or cannot be read. The Worker logs an `ERROR` naming the path and
+  keeps running. It believes no marker, so every start hydrates, and it never
+  replaces the key, so the file stays as it was for inspection. It still writes
+  markers, which keeps the launch guard satisfied, but declares no held
+  generation to the API. The remedy is to remove the file and restart the
+  Worker, which creates a new key at the cost above.
+- **Upgrading** a Worker from a version that wrote bare-number markers
+  invalidates them all in the same way: each held server hydrates once.
 
 **One region rule set, applied everywhere.** The structural fsck and
 the API integrity gate run **one rule set** at every gate — no source-keyed mode
