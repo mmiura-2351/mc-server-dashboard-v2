@@ -27,6 +27,10 @@ Two races take a third write: a rename onto the name of a role the deletion has
 deleted, while a role deletion holds the deletion back; and a role deletion,
 which takes no hold, stalled mid-cascade with the deletion waiting for it.
 
+One race takes no deletion: two permission edits, each of the other
+community's Owner role. Each edit's role locks match its own community, so the
+two hold nothing the other waits for (issue #4027).
+
 Some of those deadlocks need the deletion to cascade to roles or grants before
 memberships. A deletion runs a row's cascades in the order of their trigger
 names, which embed OIDs, so the schema does not fix that order; those races
@@ -84,6 +88,7 @@ from mc_server_dashboard_api.community.domain.errors import (
     CommunityNotFoundError,
     GrantTargetNotMemberError,
     PermissionCeilingExceededError,
+    RoleNotFoundError,
 )
 from mc_server_dashboard_api.community.domain.value_objects import (
     CommunityId,
@@ -761,6 +766,66 @@ async def test_write_racing_an_uncommitted_deletion_reports_not_found(
     assert isinstance(outcome, CommunityNotFoundError)
     assert await _count(engine, "membership") == 0
     assert await _count(engine, "role") == 0
+
+
+@pytest.mark.parametrize("stalled", [False, True], ids=["prompt", "stalled"])
+async def test_crossed_edits_of_another_communitys_role_do_not_deadlock(
+    engine: AsyncEngine, stalled: bool
+) -> None:
+    # Each owner edits, with permissions, the Owner role of the other's
+    # community. Each edit share-locks its own Owner role in the ceiling's role
+    # pass; had either then locked the other's role FOR UPDATE -- a target
+    # matched by id alone -- the two would deadlock. Both answer not-found. The
+    # first is paused holding its ceiling's locks; the second runs until it
+    # finishes or blocks; then the first resumes, at once or past
+    # deadlock_timeout.
+    world = await _world(engine)
+    other_owner = UserId(uuid.uuid4())
+    await _insert_user(engine, other_owner.value, "other-owner")
+    other = await ProvisionCommunity(
+        uow=SqlAlchemyUnitOfWork(world.factory), clock=SystemClock()
+    )(name="guild2", owner_user_id=other_owner)
+    async with SqlAlchemyUnitOfWork(world.factory) as uow:
+        other_owner_role = next(
+            role
+            for role in await uow.roles.list_for_community(other.id)
+            if role.is_preset
+        )
+
+    pause = _Pause()
+    first = asyncio.create_task(
+        UpdateRole(
+            uow=_UnitOfWork(
+                world.factory, pause=pause, pause_after="memberships.lock_role_ids"
+            ),
+            clock=SystemClock(),
+        )(
+            community_id=world.community_id,
+            role_id=other_owner_role.id,
+            actor_id=world.owner,
+            permissions={_START},
+        )
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    second = asyncio.create_task(
+        UpdateRole(uow=_UnitOfWork(world.factory, pid=pid), clock=SystemClock())(
+            community_id=other.id,
+            role_id=world.owner_role,
+            actor_id=other_owner,
+            permissions={_START},
+        )
+    )
+    await await_settled(
+        world.engine, second, lambda: pid.result() if pid.done() else None
+    )
+    if stalled:
+        await asyncio.sleep(await _deadlock_timeout(engine) + 0.5)
+    pause.resume.set()
+    edited, edited_back = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert isinstance(edited, RoleNotFoundError), edited
+    assert isinstance(edited_back, RoleNotFoundError), edited_back
 
 
 async def test_ceiling_of_a_removed_member_of_a_live_community_stays_forbidden(
