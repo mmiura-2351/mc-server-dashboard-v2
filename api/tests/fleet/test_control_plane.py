@@ -951,8 +951,9 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
             await harness.control_plane.dispatch(
                 worker_id=worker,
                 server_id=_SERVER,
-                command=SnapshotCommand(transfer_url="u", transfer_token="t"),
-                snapshot_is_final=True,
+                command=SnapshotCommand(
+                    transfer_url="u", transfer_token="t", final=True
+                ),
             )
         final_cmd = (await call.read()).api_command.command_id
 
@@ -988,8 +989,7 @@ async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None
         control_plane.dispatch(
             worker_id=worker,
             server_id=_SERVER,
-            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
-            snapshot_is_final=True,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t", final=True),
         )
     )
     # Once the command is on the outbound queue, dispatch is parked awaiting the
@@ -1440,8 +1440,7 @@ async def test_dispatch_cancel_resolve_before_discard_fires_sink() -> None:
         control_plane.dispatch(
             worker_id=worker,
             server_id=_SERVER,
-            command=SnapshotCommand(transfer_url="u", transfer_token="t"),
-            snapshot_is_final=True,
+            command=SnapshotCommand(transfer_url="u", transfer_token="t", final=True),
         )
     )
     command_id = (await queue.get()).api_command.command_id
@@ -1776,8 +1775,9 @@ async def test_a_final_snapshot_is_never_stamped_and_runs_late() -> None:
             await harness.control_plane.dispatch(
                 worker_id=worker,
                 server_id=_SERVER,
-                command=snapshot,
-                snapshot_is_final=True,
+                command=SnapshotCommand(
+                    transfer_url="u", transfer_token="t", final=True
+                ),
             )
         final_msg = await call.read()
         assert not final_msg.api_command.HasField("expires_after")

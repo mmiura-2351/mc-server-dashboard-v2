@@ -1841,6 +1841,13 @@ type SnapshotTrigger struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TransferUrl   string                 `protobuf:"bytes,1,opt,name=transfer_url,json=transferUrl,proto3" json:"transfer_url,omitempty"`
 	TransferToken string                 `protobuf:"bytes,2,opt,name=transfer_token,json=transferToken,proto3" json:"transfer_token,omitempty"`
+	// final is set only on a stop's final snapshot (issue #4053). With it, a
+	// stopped-id snapshot first ends the containers this Worker's own failed starts
+	// left running for the server, as a hydrate does, and then packs what their
+	// shutdown saves left. Without it nothing is ended: a periodic or on-demand
+	// snapshot of a stopped id is refused while such a container may be running.
+	// A running-id snapshot ignores it.
+	Final         bool `protobuf:"varint,3,opt,name=final,proto3" json:"final,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1887,6 +1894,13 @@ func (x *SnapshotTrigger) GetTransferToken() string {
 		return x.TransferToken
 	}
 	return ""
+}
+
+func (x *SnapshotTrigger) GetFinal() bool {
+	if x != nil {
+		return x.Final
+	}
+	return false
 }
 
 // ReadFile reads a path from a running server's live working set (Section 7.2).
@@ -3114,10 +3128,11 @@ const file_mcsd_controlplane_v1_control_plane_proto_rawDesc = "" +
 	"\x04line\x18\x01 \x01(\tR\x04line\"Z\n" +
 	"\x0eHydrateTrigger\x12!\n" +
 	"\ftransfer_url\x18\x01 \x01(\tR\vtransferUrl\x12%\n" +
-	"\x0etransfer_token\x18\x02 \x01(\tR\rtransferToken\"[\n" +
+	"\x0etransfer_token\x18\x02 \x01(\tR\rtransferToken\"q\n" +
 	"\x0fSnapshotTrigger\x12!\n" +
 	"\ftransfer_url\x18\x01 \x01(\tR\vtransferUrl\x12%\n" +
-	"\x0etransfer_token\x18\x02 \x01(\tR\rtransferToken\"\x1e\n" +
+	"\x0etransfer_token\x18\x02 \x01(\tR\rtransferToken\x12\x14\n" +
+	"\x05final\x18\x03 \x01(\bR\x05final\"\x1e\n" +
 	"\bReadFile\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"8\n" +
 	"\bEditFile\x12\x12\n" +
