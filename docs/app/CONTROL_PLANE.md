@@ -621,7 +621,9 @@ stamps, the start of this process's control-plane listener (issue #3916), and
 the instant the Worker first read disconnected (issue #3963): the stream's end,
 or the heartbeat lapse the registry reports before the teardown runs. The
 server's stamps lag that instant until the teardown's write lands, and keep the
-old one if the write fails. A Worker that re-registers within the grace, after a
+old one if the write fails, until the reconciler makes that write itself, stamped
+with the session's end (Teardown, below).
+A Worker that re-registers within the grace, after a
 drop, a graceful restart or a crash, still gets the final snapshot or the stop,
 and so does one that drops before the reconciler's release has taken the final
 snapshot or sent the owed stop: the release is abandoned and waits that grace

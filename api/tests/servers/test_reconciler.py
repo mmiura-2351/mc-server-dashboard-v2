@@ -4452,7 +4452,7 @@ async def test_a_gone_workers_servers_already_unknown_are_left_alone(
     cp = FakeControlPlane()
     cp.end_session(_GONE, at=landed - dt.timedelta(microseconds=1))
 
-    with caplog.at_level(logging.WARNING, logger="mc_server_dashboard_api"):
+    with caplog.at_level(logging.INFO, logger="mc_server_dashboard_api"):
         await _reconciler(uow, cp, FakeClock(_NOW)).tick()
 
     assert uow.servers.by_id[stopped.id].assigned_worker_id is None

@@ -141,7 +141,10 @@ read disconnected: the end of its session, or the lapse of its heartbeats, which
 the registry reports before the teardown runs (issue #3963). The teardown's bulk
 write restamps the Worker's rows, but until it lands, or when it fails, a row
 still carries its stamp from before the drop, and a tick in that window would
-release it at once without its final snapshot.
+release it at once without its final snapshot. When the write fails, the tick
+makes it itself once the session has been over for the heartbeat timeout,
+stamped with the session's end, the stamp the teardown would have given the
+row (issue #4130, ``RunReconcilerTick._mark_gone_workers_unknown``).
 
 The tick reads each row's Worker once, its connectivity and then its drop
 instant, and the grace, the finished-stop record below and the release's routing
@@ -527,8 +530,8 @@ class RunReconcilerTick:
     _attempts: dict[ServerId, _Backoff] = field(default_factory=dict)
 
     async def tick(self) -> None:
-        await self._mark_gone_workers_unknown()
         now = self.clock.now()
+        await self._mark_gone_workers_unknown(now)
         async with self.uow:
             candidates = await self.uow.servers.list_reconcilable()
             # A converged row is never a candidate, so read each server holding a
@@ -570,7 +573,7 @@ class RunReconcilerTick:
                     exc_info=result,
                 )
 
-    async def _mark_gone_workers_unknown(self) -> None:
+    async def _mark_gone_workers_unknown(self, now: dt.datetime) -> None:
         """Mark a gone Worker's servers unknown when its teardown did not (#4130).
 
         A session's teardown marks its Worker's servers ``unknown``, but its
@@ -601,7 +604,7 @@ class RunReconcilerTick:
         grace = dt.timedelta(seconds=self.heartbeat_timeout_seconds)
         for worker_id in worker_ids:
             ended_at = self.control_plane.worker_session_ended_at(worker_id=worker_id)
-            if ended_at is None or self.clock.now() - ended_at < grace:
+            if ended_at is None or now - ended_at < grace:
                 continue
             try:
                 async with self.uow:
@@ -617,7 +620,7 @@ class RunReconcilerTick:
                     exc_info=True,
                 )
                 continue
-            _LOG.warning(
+            _LOG.info(
                 "worker %s has had no session since %s and its servers still read "
                 "their last report; marked them unknown",
                 worker_id.value,
