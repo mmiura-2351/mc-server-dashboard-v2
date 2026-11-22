@@ -33,6 +33,11 @@ func TestSnapshotQuiesceRefusesAHungSaveOffAtTheRCONCeiling(t *testing.T) {
 		conns := make(chan net.Conn, 2)
 		conns <- quiesceConn
 		conns <- restoreConn
+		// A connection the manager never dialed would leave its peer blocked.
+		t.Cleanup(func() {
+			_ = quiesceConn.Close()
+			_ = restoreConn.Close()
+		})
 
 		m := newManager(t, &fakeDriver{}, nil).WithTransfer(&fakeTransfer{})
 		m.openControl = func(ctx context.Context, _, _, _ string) (execution.ServerControl, error) {
