@@ -35,6 +35,21 @@ describe("serverSettingsErrorPresentation", () => {
     });
   });
 
+  // An export of a server a refusal holds reaches the API (the export is not
+  // held), and the toast names the refusal the caller knows (#4057).
+  it.each([
+    [null, "common.serverAssigned"],
+    ["busy", "common.serverHeld.busy"],
+    ["unavailable", "common.serverHeld.unavailable"],
+  ] as const)(
+    "toasts server_assigned on a server held by refusal %s with %s",
+    (refusal, key) => {
+      expect(
+        serverSettingsErrorPresentation("server_assigned", refusal),
+      ).toEqual({ target: "toast", key });
+    },
+  );
+
   // A join-address refusal lands inline on the slug field (issue #961).
   it.each([
     ["invalid_slug", "serverDetail.settings.slugInvalid"],

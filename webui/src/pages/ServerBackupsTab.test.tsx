@@ -805,6 +805,15 @@ describe("ServerBackupsTab restore of a stopped server its Worker still holds", 
     expect(confirm).toHaveAccessibleDescription(t("common.serverAssigned"));
   });
 
+  // A refusal hold has no bound, so the reason names the refusal (#4057).
+  it("names the refusal a held server is held for", async () => {
+    routeGet({ srv: { ...held, final_snapshot_refusal: "busy" } });
+    const confirm = await openRestoreAndType();
+
+    expect(confirm).toBeDisabled();
+    expect(confirm).toHaveAccessibleDescription(t("common.serverHeld.busy"));
+  });
+
   it("frees the confirm on the release frame", async () => {
     routeGet({ srv: held });
     mockApi.post.mockResolvedValue(undefined);

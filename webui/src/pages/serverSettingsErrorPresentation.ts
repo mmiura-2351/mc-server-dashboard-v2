@@ -10,6 +10,7 @@
  */
 
 import type { TranslationKey } from "../i18n/index.ts";
+import { type FinalSnapshotRefusal, serverAssignedKey } from "./serverState.ts";
 
 export interface SettingsErrorPresentation {
   target: "slug" | "toast";
@@ -22,10 +23,6 @@ export interface SettingsErrorPresentation {
 const SETTINGS_ERROR_KEY: Record<string, TranslationKey> = {
   server_not_stopped: "serverDetail.error.notStopped",
   server_unsettled: "serverDetail.error.unsettled",
-  // A save, delete or export the stop's Worker still holds the server for
-  // (#3852, #3998): the cache showed the server released, so the control was
-  // not held. One neutral message, as on the other tabs (#4003).
-  server_assigned: "common.serverAssigned",
   // A rename the server-name rule refuses (#3957). The save sends the name
   // only when it changed (#3988), so a server stored with such a name before
   // the rule still saves its other settings.
@@ -48,15 +45,26 @@ const SETTINGS_ERROR_KEY: Record<string, TranslationKey> = {
   config_lone_surrogate: "serverDetail.error.configLoneSurrogate",
 };
 
-/** Select where and how the Settings tab shows a failed save/delete/export. */
+/**
+ * Select where and how the Settings tab shows a failed save/delete/export.
+ * `refusal` is the final-snapshot refusal the server is held for, if any.
+ */
 export function serverSettingsErrorPresentation(
   reason: string | undefined,
+  refusal: FinalSnapshotRefusal | null = null,
 ): SettingsErrorPresentation {
   switch (reason) {
     case "invalid_slug":
       return { target: "slug", key: "serverDetail.settings.slugInvalid" };
     case "slug_taken":
       return { target: "slug", key: "serverDetail.settings.slugTaken" };
+    case "server_assigned":
+      // A save, delete or export the stop's Worker still holds the server for
+      // (#3852, #3998): the cache showed the server released, so the control
+      // was not held, or it was the export, which is not. The neutral message
+      // of the other tabs (#4003), worded by the refusal the caller knows
+      // (#4057).
+      return { target: "toast", key: serverAssignedKey(refusal) };
   }
   const key = reason === undefined ? undefined : SETTINGS_ERROR_KEY[reason];
   return { target: "toast", key: key ?? "serverDetail.error.generic" };

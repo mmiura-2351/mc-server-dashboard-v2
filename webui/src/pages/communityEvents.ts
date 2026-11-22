@@ -22,7 +22,7 @@ import {
   EventsSocketClient,
   wsOrigin,
 } from "./eventsSocket.ts";
-import { assignmentOf } from "./serverEvents.ts";
+import { assignmentOf, refusalOf } from "./serverEvents.ts";
 
 // Re-exported for the existing tests / callers that import it from here.
 export { backoffDelayMs };
@@ -30,24 +30,28 @@ export { backoffDelayMs };
 /**
  * A STATUS frame from the community stream (`_community_frame` in events.py).
  * It sets the server state fields it carries: an observed transition carries
- * `state`, a change of the server's intent carries `desiredState` (#3428), and
- * a placement or release carries `assignedWorkerId`, `null` once released
- * (#3818). A `crashed` transition also carries the crash reason the Worker
- * classified, `""` when none, which decides whether the reconciler leaves the
- * crash alone (#3281).
+ * `state`, a change of the server's intent carries `desiredState` (#3428), a
+ * placement or release carries `assignedWorkerId`, `null` once released
+ * (#3818), and a refusal of the stop's final snapshot carries
+ * `finalSnapshotRefusal`, which a release clears to `null` (#4054). A
+ * `crashed` transition also carries the crash reason the Worker classified,
+ * `""` when none, which decides whether the reconciler leaves the crash alone
+ * (#3281).
  */
 export interface StatusEvent {
   serverId: string;
   state?: string;
   desiredState?: string;
   assignedWorkerId?: string | null;
+  finalSnapshotRefusal?: string | null;
   crashReason?: string;
 }
 
 /**
  * One server of the status snapshot: its observed state and, when the API
- * reports them, its desired state (#3428), assigned Worker (#3818) and whether
- * the reconciler leaves its crash alone (#3281).
+ * reports them, its desired state (#3428), assigned Worker (#3818), whether
+ * the reconciler leaves its crash alone (#3281) and the final-snapshot refusal
+ * (#4054).
  */
 export interface SnapshotEntry {
   serverId: string;
@@ -55,6 +59,7 @@ export interface SnapshotEntry {
   desiredState?: string;
   assignedWorkerId?: string | null;
   crashNotRestarted?: boolean;
+  finalSnapshotRefusal?: string | null;
 }
 
 /**
@@ -147,10 +152,12 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     reason?: unknown;
   };
   const assignedWorkerId = assignmentOf(payload);
+  const finalSnapshotRefusal = refusalOf(payload);
   if (
     typeof state !== "string" &&
     typeof desired_state !== "string" &&
-    assignedWorkerId === undefined
+    assignedWorkerId === undefined &&
+    finalSnapshotRefusal === undefined
   ) {
     return null;
   }
@@ -160,6 +167,7 @@ export function parseCommunityFrame(raw: string): CommunityFrame | null {
     ...(typeof state === "string" && { state }),
     ...(typeof desired_state === "string" && { desiredState: desired_state }),
     ...(assignedWorkerId !== undefined && { assignedWorkerId }),
+    ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
     ...(state === "crashed" && {
       crashReason: typeof reason === "string" ? reason : "",
     }),
@@ -200,7 +208,8 @@ function parseNotification(
 
 /**
  * Parse a SNAPSHOT frame's `{servers: [{server_id, state, desired_state,
- * assigned_worker_id, crash_not_restarted}]}` payload. A malformed entry
+ * assigned_worker_id, crash_not_restarted, final_snapshot_refusal}]}`
+ * payload. A malformed entry
  * rejects the whole frame: a partial snapshot would misreport the community's
  * server set.
  */
@@ -225,6 +234,7 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
       return null;
     }
     const assignedWorkerId = assignmentOf(entry as object);
+    const finalSnapshotRefusal = refusalOf(entry as object);
     parsed.push({
       serverId: server_id,
       state,
@@ -233,6 +243,7 @@ function parseSnapshot(payload: unknown): CommunityFrame | null {
       ...(typeof crash_not_restarted === "boolean" && {
         crashNotRestarted: crash_not_restarted,
       }),
+      ...(finalSnapshotRefusal !== undefined && { finalSnapshotRefusal }),
     });
   }
   return { kind: "snapshot", servers: parsed };

@@ -3658,6 +3658,7 @@
           "crash_reason",
           "crash_detail",
           "crash_not_restarted",
+          "final_snapshot_refusal",
           "creation_incomplete"
         ],
         "title": "ServerResponse",

@@ -21,7 +21,12 @@ import { type TranslationKey, t } from "../i18n/index.ts";
 import { supportsResourcePackOptions } from "../mcVersion.ts";
 import type { Can } from "../permissions/useCan.ts";
 import { useOnForbidden } from "../permissions/useOnForbidden.ts";
-import { atRestWriteRefusal, normalizeState } from "./serverState.ts";
+import {
+  atRestWriteRefusal,
+  finalSnapshotRefusal,
+  normalizeState,
+  serverAssignedKey,
+} from "./serverState.ts";
 
 type ServerResponse = components["schemas"]["ServerResponse"];
 type ResourcePackAssignmentResponse =
@@ -76,7 +81,7 @@ export function ServerResourcePackSection({
   const serverAtRest = writeRefusal === null;
   const holdReason: TranslationKey =
     writeRefusal === "server_assigned"
-      ? "common.serverAssigned"
+      ? serverAssignedKey(finalSnapshotRefusal(server.final_snapshot_refusal))
       : "serverDetail.resourcePack.notAtRest";
 
   const assignmentQuery = useQuery({

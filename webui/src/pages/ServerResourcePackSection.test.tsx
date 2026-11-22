@@ -565,6 +565,20 @@ describe("ServerResourcePackSection — a server the stop still holds", () => {
     },
   );
 
+  // A refusal hold has no bound, so the hint names the refusal (#4057).
+  it("names the refusal a held server is held for", async () => {
+    routeGet({
+      srv: { ...held, final_snapshot_refusal: "busy" },
+      assignment: null,
+    });
+    await openSettings();
+
+    await screen.findByRole("button", {
+      name: t("serverDetail.resourcePack.assign"),
+    });
+    expect(packCard().getByText(t("common.serverHeld.busy"))).toBeVisible();
+  });
+
   it("frees the actions on the release frame", async () => {
     routeGet({ srv: held, assignment: ASSIGNMENT });
     await openSettings();
