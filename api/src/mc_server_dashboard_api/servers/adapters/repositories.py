@@ -677,20 +677,25 @@ class SqlAlchemyServerRepository(ServerRepository):
         self,
         server_id: ServerId,
         worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
     ) -> bool:
         # A release's guard (issue #847): only a stop still holding worker_id
-        # takes its answer. Only a change is written and announced.
-        value = None if refusal is None else refusal.value
-        stmt = (
-            update(ServerModel)
-            .where(
-                ServerModel.id == server_id.value,
-                ServerModel.desired_state == DesiredState.STOPPED.value,
-                ServerModel.assigned_worker_id == worker_id.value,
-                ServerModel.final_snapshot_refusal.is_distinct_from(value),
+        # takes its answer. Only a change is written and announced, except on a
+        # retry, whose earlier attempt may have written it unannounced (#4104).
+        value = refusal.value
+        conditions = [
+            ServerModel.id == server_id.value,
+            ServerModel.desired_state == DesiredState.STOPPED.value,
+            ServerModel.assigned_worker_id == worker_id.value,
+        ]
+        if not retry:
+            conditions.append(
+                ServerModel.final_snapshot_refusal.is_distinct_from(value)
             )
-            .values(final_snapshot_refusal=value)
+        stmt = (
+            update(ServerModel).where(*conditions).values(final_snapshot_refusal=value)
         )
         result = await self._session.execute(stmt)
         changed = cast("CursorResult[Any]", result).rowcount == 1

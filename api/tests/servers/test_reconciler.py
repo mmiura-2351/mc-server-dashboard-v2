@@ -68,6 +68,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     CommunityId,
     CrashReason,
     DesiredState,
+    FinalSnapshotRefusal,
     ObservedState,
     ServerId,
     ServerName,
@@ -79,6 +80,7 @@ from tests.fleet.fakes import FakeClock as FleetFakeClock
 from tests.fleet.fakes import make_worker
 from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
@@ -87,6 +89,7 @@ from tests.servers.fakes import (
     FakeStoreGenerationReader,
     FakeUnitOfWork,
     PlacementSequenceControlPlane,
+    RefusalWriteFailsRepository,
     session_ends_as_step_a_exits,
 )
 
@@ -1677,6 +1680,65 @@ async def test_an_unavailable_final_snapshot_refusal_backs_off() -> None:
     await reconciler.tick()
     assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
     assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+@pytest.mark.parametrize(
+    ("code", "refusal"),
+    [
+        (CommandStatus.BUSY, FinalSnapshotRefusal.BUSY),
+        (CommandStatus.UNAVAILABLE, FinalSnapshotRefusal.UNAVAILABLE),
+    ],
+    ids=["busy", "unavailable"],
+)
+async def test_a_refused_retry_whose_refusal_write_fails_is_still_a_refusal(
+    code: CommandStatus,
+    refusal: FinalSnapshotRefusal,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Issue #4103: a held row whose refusal was not written, and recorded for
+    # the short grace, as a refused stop whose write failed leaves it. The
+    # retry's write fails too. The attempt is still the refusal it is, BUSY not
+    # counted and UNAVAILABLE counted, not a failed action that backs off. The
+    # row stays held, and the next refused retry records the refusal.
+    repo = RefusalWriteFailsRepository(DatabaseOutageError("database unreachable"))
+    server = _server(
+        desired=DesiredState.STOPPED,
+        observed=ObservedState.STOPPED,
+        worker=_WORKER,
+        observed_at=_NOW,
+        updated_at=_NOW,
+    )
+    repo.seed(server)
+    unrecorded = UnrecordedStops()
+    unrecorded.record(server.id, at=_NOW)
+    clock = FakeClock(_NOW)
+    cp = _RefusedSnapshots([code, code])
+    reconciler = _reconciler(
+        FakeUnitOfWork(servers=repo), cp, clock, unrecorded_stops=unrecorded
+    )
+
+    _at(_REFUSED_GRACE + 1, clock)
+    with caplog.at_level(logging.WARNING):
+        await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    assert repo.refusal_writes == 1
+    assert not [r for r in caplog.records if "backing off" in r.getMessage()]
+    if code is CommandStatus.BUSY:
+        assert server.id not in reconciler._attempts
+    else:
+        assert reconciler._attempts[server.id].failures == 1
+    stored = repo.by_id[server.id]
+    assert stored.assigned_worker_id == _WORKER
+    assert stored.final_snapshot_refusal is None
+
+    # Past the short grace and the backoff's base of 30 s.
+    _at(_REFUSED_GRACE + 1 + 31, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
+    stored = repo.by_id[server.id]
+    assert stored.assigned_worker_id == _WORKER
+    assert stored.final_snapshot_refusal is refusal
 
 
 async def test_a_refusal_is_superseded_by_a_drop_of_its_worker() -> None:

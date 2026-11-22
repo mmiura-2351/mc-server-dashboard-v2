@@ -8,8 +8,9 @@ attempt.
 
 A COMMIT whose answer is lost with its connection fails the attempt as an
 outage although it applied (issue #4062). The held retry then finds the row
-already at the reported state, or already released, and still publishes the
-frame the lost attempt would have published.
+already at the reported state, or already released, or holding the refusal it
+records (issue #4104), and still publishes the frame the lost attempt would have
+published.
 
 Runs only when ``MCD_TEST_DATABASE_URL`` is set; skipped otherwise (TESTING.md
 Section 5). The real sinks write through a proxy that holds back the COMMIT's
@@ -53,7 +54,10 @@ from mc_server_dashboard_api.servers.application.stop_convergence import (
 from mc_server_dashboard_api.servers.application.unrecorded_stops import (
     UnrecordedStops,
 )
-from mc_server_dashboard_api.servers.domain.value_objects import ObservedState
+from mc_server_dashboard_api.servers.domain.value_objects import (
+    FinalSnapshotRefusal,
+    ObservedState,
+)
 from mcsd.controlplane.v1 import control_plane_pb2 as pb
 from tests.fleet.fakes import FakeClock, FakeDatabasePing
 from tests.fleet.test_grpc_session import (
@@ -496,3 +500,125 @@ async def test_a_retry_leaves_a_row_another_worker_holds(
     assert row.assigned_worker_id.value == holder
     assert await _received(watching) == []
     assert _late_releases(caplog) == []
+
+
+# --- A retry of a late refusal after a lost COMMIT answer (issue #4104) -------
+
+_BUSY_REFUSAL = {"final_snapshot_refusal": "busy"}
+
+
+def _late_sink(world: _World) -> ServersLateSnapshotResultSink:  # noqa: F811
+    return ServersLateSnapshotResultSink(
+        create_session_factory(world.engine),
+        control_plane=FakeControlPlane(),
+        clock=world.clock,
+        stop_convergence=StopConvergenceGuard(),
+        unrecorded_stops=UnrecordedStops(),
+        real_time_events=world.bus,
+    )
+
+
+async def _late_refusal(
+    sink: ServersLateSnapshotResultSink, server_id: str, *, retry: bool
+) -> None:
+    await sink.clear_held_assignment_on_late_snapshot(
+        server_id=server_id,
+        worker_id=_WORKER_ID,
+        code=CommandResultCode.BUSY,
+        message="a leftover container may still run",
+        retry=retry,
+    )
+
+
+@pytest.mark.usefixtures("fast_hold")
+async def test_a_late_refusal_whose_commit_answer_was_lost_is_announced(
+    world: _World,  # noqa: F811
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The first attempt recorded the refusal, and its answer was lost. The held
+    # retry finds the refusal recorded and still announces it, so the live page
+    # shows the hold without a reload.
+    caplog.set_level(logging.INFO, logger=_GRPC_SERVER_LOGGER)
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    watching = world.watch(server)
+    async with _first_commit_answer_lost() as (proxy, engine):
+        state = ControlPlaneState(
+            late_snapshot_sink=ServersLateSnapshotResultSink(
+                create_session_factory(engine),
+                control_plane=FakeControlPlane(),
+                clock=world.clock,
+                stop_convergence=StopConvergenceGuard(),
+                unrecorded_stops=UnrecordedStops(),
+                real_time_events=world.bus,
+            )
+        )
+        h = _Harness(
+            InMemoryWorkerRegistry(clock=FakeClock(_T0), heartbeat_timeout=_TIMEOUT),
+            FakeClock(_T0),
+            control_plane=state,
+            database_ping=FakeDatabasePing(reachable=True),
+        )
+        try:
+            call = await _registered(await h.start())
+            # An abandoned final snapshot of this session, as above.
+            state.register_pending(
+                "snapshot-1",
+                WorkerId(_WORKER_ID),
+                snapshot_server_id=str(server.id.value),
+            )
+            state.discard_pending("snapshot-1")
+            await call.write(
+                pb.WorkerMessage(
+                    correlation_id="snapshot-1",
+                    command_result=pb.CommandResult(
+                        success=False,
+                        error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_BUSY),
+                    ),
+                )
+            )
+            await _wait_until(
+                lambda: _logged(caplog, _HOLD_APPLIED), "the result was not applied"
+            )
+            frames = [event.payload for event in await _received(watching)]
+            await call.done_writing()
+        finally:
+            await h.stop()
+
+    row = await _load(world.engine, server.id)
+    assert row is not None and row.assigned_worker_id is not None
+    assert row.assigned_worker_id.value == uuid.UUID(_WORKER_ID)
+    assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY
+    assert proxy.cuts == 1
+    assert _applied_attempts(caplog) == [2]
+    assert frames == [_BUSY_REFUSAL]
+
+
+async def test_a_first_late_refusal_the_row_already_holds_publishes_nothing(
+    world: _World,  # noqa: F811
+) -> None:
+    # A first attempt is no retry: a late refusal that finds the same refusal
+    # recorded changes nothing and stages no frame.
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    sink = _late_sink(world)
+    await _late_refusal(sink, str(server.id.value), retry=False)
+    watching = world.watch(server)
+
+    await _late_refusal(sink, str(server.id.value), retry=False)
+
+    assert await _received(watching) == []
+
+
+async def test_a_retry_that_records_the_refusal_publishes_one_frame(
+    world: _World,  # noqa: F811
+) -> None:
+    # The refusal a retry repeats did not land: the retry records it, and
+    # stages its one frame, not a second for being a retry.
+    server = await _wedged_stop(world, uuid.UUID(_WORKER_ID), "stopped")
+    watching = world.watch(server)
+
+    await _late_refusal(_late_sink(world), str(server.id.value), retry=True)
+
+    assert [event.payload for event in await _received(watching)] == [_BUSY_REFUSAL]
+    row = await _load(world.engine, server.id)
+    assert row is not None
+    assert row.final_snapshot_refusal is FinalSnapshotRefusal.BUSY

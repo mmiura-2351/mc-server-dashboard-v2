@@ -87,12 +87,15 @@ from tests.audit.fakes import RecordingAuditRecorder
 from tests.client_utils import enter_client
 from tests.servers.contract_table import worker_status
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
     FakeJarProvisioner,
+    FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    RefusalWriteFailsRepository,
 )
 
 _NOW = dt.datetime(2026, 6, 4, 12, 0, tzinfo=dt.timezone.utc)
@@ -468,8 +471,9 @@ def _post_real_stop(
     cp: FakeControlPlane,
     *,
     recorder: RecordingAuditRecorder | None = None,
+    servers: FakeServerRepository | None = None,
 ) -> httpx2.Response:
-    uow = FakeUnitOfWork()
+    uow = FakeUnitOfWork(servers=servers)
     uow.servers.seed(server)
     use_case = StopServer(uow=uow, control_plane=cp, clock=FakeClock(_NOW))
     app = _app(member=True, allow=True)
@@ -549,6 +553,22 @@ def test_a_stop_of_a_held_server_refused_again_is_409_and_audited_denied() -> No
     [event] = recorder.events
     assert event.operation == ops.SERVER_STOP
     assert event.outcome is Outcome.DENIED
+
+
+def test_a_refused_re_stop_whose_refusal_write_fails_is_still_409() -> None:
+    # Issue #4103: the failed write of the refusal is logged, and the refusal
+    # still answers the stop, rather than a 500 for the database error.
+    server = _desired_stopped(uuid.uuid4(), ObservedState.STOPPED, assigned=True)
+    cp = FakeControlPlane(
+        outcomes={"snapshot": CommandOutcome(status=CommandStatus.BUSY)}
+    )
+    repo = RefusalWriteFailsRepository(DatabaseOutageError("database unreachable"))
+
+    resp = _post_real_stop(server, cp, servers=repo)
+
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "final_snapshot_refused"
+    assert repo.refusal_writes == 1
 
 
 def test_a_stop_of_a_held_server_whose_worker_is_gone_is_503_and_names_the_exits() -> (

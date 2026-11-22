@@ -2755,15 +2755,34 @@ class StopServer:
         costs no write. The write's guard (still stopped, still this Worker's)
         matches under the stop-convergence claim: every release holds the claim,
         and no start places a row that is still assigned. So the entity takes the
-        value either way.
+        value whether or not the write changed the row.
+
+        A write that fails is logged, not raised (issue #4103): the refusal it
+        follows decides what the caller does (the stop that set the intent
+        answers, a convergence raises it, and the reconciler classifies it), and
+        the database error would otherwise replace it. The row is held all the
+        same, since it stays assigned, and keeps ``recorded`` until the next
+        refused retry writes the refusal. The entity keeps ``recorded`` too.
         """
 
         if refusal is not recorded:
-            async with self.uow:
-                await self.uow.servers.set_final_snapshot_refusal(
-                    server.id, worker_id, refusal
+            try:
+                async with self.uow:
+                    await self.uow.servers.set_final_snapshot_refusal(
+                        server.id, worker_id, refusal
+                    )
+                    await self.uow.commit()
+            except Exception:
+                _LOG.warning(
+                    "could not record the final-snapshot refusal of server %s: it "
+                    "stays assigned to worker %s, and the next refused retry of "
+                    "the snapshot records the refusal (issue #4103)",
+                    server.id.value,
+                    worker_id.value,
+                    exc_info=True,
                 )
-                await self.uow.commit()
+                server.final_snapshot_refusal = recorded
+                return
         server.final_snapshot_refusal = refusal
 
     async def redispatch_stop(
@@ -3318,7 +3337,9 @@ class StopServer:
         result is dropped above, and a newer one's answer arrives on the same
         Worker stream behind this result, or not at all once that stream ends.
         A retry of a late refusal takes no unassigned row: it has no release to
-        announce, and the row it held was released since.
+        announce, and the row it held was released since. On a row it still
+        holds, it announces the refusal even when it finds it recorded, by its
+        earlier attempt or before (issue #4104).
         """
 
         refusal = _FINAL_SNAPSHOT_REFUSALS_KEEPING_THE_WORKER.get(outcome.status)
@@ -3359,7 +3380,7 @@ class StopServer:
                 )
                 if refusal is not None:
                     await self.uow.servers.set_final_snapshot_refusal(
-                        server_id, worker_id, refusal
+                        server_id, worker_id, refusal, retry=retry
                     )
                     cleared = False
                 else:

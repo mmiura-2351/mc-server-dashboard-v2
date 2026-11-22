@@ -570,8 +570,9 @@ the Worker's sends are not acknowledged. The live frame an applied message
 announces (Section 6) is published at least once too (issue #4062). An attempt
 whose commit lands but whose answer is lost with the connection fails as an
 outage. Its retry then finds the write already made: the row at the reported
-state, or, for a late final-snapshot result (Section 5.1), already released. It
-still publishes the frame the attempt would have, and logs the release. An
+state, or, for a late final-snapshot result (Section 5.1), already released, or
+holding the refusal it records (Section 5; issue #4104). It still publishes the
+frame the attempt would have, and logs the release. An
 attempt can also fail as an outage after it has committed and published: a
 `StatusChange` for a server with a Bedrock port then syncs the server's Bedrock
 tunnel ([`BEDROCK_TUNNEL.md`](BEDROCK_TUNNEL.md) Section 3), and that sync
@@ -868,7 +869,12 @@ Notes:
   selects that shorter grace), then retries a `BUSY` one every tick and backs an
   `UNAVAILABLE` one off (CONFIGURATION.md Section 5.6). Nothing bounds the
   retries. A stop of the held server retries at once and answers
-  `409 final_snapshot_refused` when the Worker refuses again. A retry that
+  `409 final_snapshot_refused` when the Worker refuses again. A write of the
+  refusal that fails changes none of these answers: it is logged, the server
+  stays assigned and so held, and the next refused retry records the refusal
+  (issue #4103). Until then the server reads no refusal, so the release
+  without the snapshot refuses it, and a stop while its Worker is not
+  connected releases it at once. A retry that
   publishes releases the server and clears
   the refusal. One that times out or meets a session end keeps the server and
   the refusal (issue #4111): the snapshot the server is held for is still

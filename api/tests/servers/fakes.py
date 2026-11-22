@@ -1150,16 +1150,18 @@ class FakeServerRepository(ServerRepository):
         self,
         server_id: ServerId,
         worker_id: WorkerId,
-        refusal: FinalSnapshotRefusal | None,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
     ) -> bool:
         # Mirror the real adapter's guard (issue #4054): only a stop still
-        # holding worker_id, and only a change counts.
+        # holding worker_id, and only a change counts, unless a retry (#4104).
         server = self.by_id.get(server_id)
         if (
             server is None
             or server.desired_state is not DesiredState.STOPPED
             or server.assigned_worker_id != worker_id
-            or server.final_snapshot_refusal is refusal
+            or (server.final_snapshot_refusal is refusal and not retry)
         ):
             return False
         server.final_snapshot_refusal = refusal
@@ -1303,6 +1305,31 @@ class ClearCreationFailsRepository(FakeServerRepository):
         if self._errors:
             raise self._errors.pop(0)
         await super().clear_creation_incomplete(server_id)
+
+
+class RefusalWriteFailsRepository(FakeServerRepository):
+    """Fails the write that records a final-snapshot refusal with each of
+    ``errors`` in turn, then makes it (issue #4103), counting every attempt."""
+
+    def __init__(self, *errors: Exception) -> None:
+        super().__init__()
+        self._errors = list(errors)
+        self.refusal_writes = 0
+
+    async def set_final_snapshot_refusal(
+        self,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        refusal: FinalSnapshotRefusal,
+        *,
+        retry: bool = False,
+    ) -> bool:
+        self.refusal_writes += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return await super().set_final_snapshot_refusal(
+            server_id, worker_id, refusal, retry=retry
+        )
 
 
 class FakeBackupRepository(BackupRepository):
