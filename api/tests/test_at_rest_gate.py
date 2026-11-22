@@ -293,12 +293,13 @@ _WRITES_ALLOWED: dict[tuple[str, str], tuple[dict[str, int], str]] = {
     ),
     ("servers/application/manage_server.py", "CreateServer.__call__"): (
         {"write_file": 1},
-        "the create-time seed: a new server owes no final snapshot (a start "
-        "racing the seed is #4045)",
+        "the create-time seed, under the lifecycle lock taken before the row "
+        "commits: no Worker has held the server yet (#4045)",
     ),
     ("servers/application/export_import.py", "ImportServer.__call__"): (
         {"write_file": 1},
-        "seeds the server it has just created, as CreateServer does",
+        "publishes the archive in CreateServer's populate callback, inside the "
+        "same lock hold (#4045)",
     ),
     ("servers/application/lifecycle.py", "StartServer.__call__"): (
         {"write_file": 1},
