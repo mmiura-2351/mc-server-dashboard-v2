@@ -2069,10 +2069,13 @@ class DatabaseOutageError(ConnectionError):
 class OutageUnitOfWork(FakeUnitOfWork):
     """A :class:`FakeUnitOfWork` whose database can go down (issue #4086).
 
-    While ``down`` is set, opening a block raises :class:`DatabaseOutageError`, as
-    a pool that reaches no database does, so nothing in the block runs. The fault
-    is at the entry rather than in ``commit``: this fake applies an add or a
-    delete at once, so a failing commit would not undo it.
+    While ``down`` is set, opening a block raises :class:`DatabaseOutageError`, so
+    nothing in the block runs: a seam for a database that fails before any COMMIT
+    is sent. It does not model the real adapter, which opens a block without
+    touching the database; there the fault lands on the first statement, for a
+    backup's row the INSERT its savepoint sends. The fault is at the entry rather
+    than in ``commit``: this fake applies an add or a delete at once, so a failing
+    commit would not undo it.
     """
 
     down = False
