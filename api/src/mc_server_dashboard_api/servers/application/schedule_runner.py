@@ -53,8 +53,8 @@ Outcome taxonomy (owner-confirmed):
 * **success** — otherwise. Clears any ``_notifying`` state and fires exactly one
   recovery notification when it ends a run of failures.
 
-``next_run_at`` advances to the first occurrence strictly after the advance
-instant on every fired occurrence (success, failure, or skip) — there is no
+``next_run_at`` advances to the first occurrence strictly after the run
+finished on every fired occurrence (success, failure, or skip) — there is no
 tick-level re-run, with one exception. A backup of a server at rest that a stop
 still holds for its final snapshot is refused by :class:`CreateBackup` (409
 ``server_assigned``, issue #3998): an archive taken then would lack that
@@ -94,20 +94,32 @@ retry ~30 minutes later (lost on restart — accepted). The retry records (and, 
 failure, notifies) but never moves ``next_run_at``; it fires at most once, then
 the schedule waits for its next occurrence. Only a failure arms it: an unknown
 outcome may still have run, and a retry could repeat it. The retry is spent once
-its claim (below) has read the row. A claim that raises, canonically on a
-database still down, has attempted nothing: the retry stays armed for the next
-tick, with a WARNING line (issue #4098).
+it has run, or once its claim (below) finds the schedule disabled or no longer a
+backup. A claim that raises, canonically on a database still down, has attempted
+nothing, and nor has an execution whose first server read raises: the retry
+stays armed for the next tick (issue #4098). A claim that keeps raising logs one
+WARNING line on its first tick, and DEBUG on the later ones.
 
 Delivery is at most once per process, and at least once across a restart (issue
 #4108). The run executes before its record and its advance, which commit in one
 transaction. When that transaction raises, canonically on a database that is
 down, the occurrence stays owed in memory with the outcome and times of its run:
 each later tick records it again before its poll, and the schedule runs neither
-the occurrence nor a backup retry while it is owed. One WARNING line marks the
-first failure, and one INFO line the record that commits. A skip, whether stale
-or past a deferral's bound, attempted nothing, so its record is not owed: the
-next tick evaluates the occurrence again. An API restart or crash loses the owed
-record, so the occurrence runs once more on restart, at most once per restart.
+the occurrence nor a backup retry while it is owed. The record that commits
+advances the schedule as if it had committed when the run finished, then arms
+or clears the retry and prunes as the first attempt would have. So an occurrence
+that came due while the record was owed is polled in the same tick, under the
+missed-run rule above: a backup runs one catch-up for all of them, and a
+non-backup occurrence past the late-run grace is recorded as SKIPPED. One
+WARNING line, naming the run's outcome, marks the first failure, then one more
+an hour while the record stays owed, naming how long; the ticks between log at
+DEBUG. One INFO line marks the record that commits. A precondition skip
+:class:`ExecuteScheduleAction` returns is owed like any other outcome, so the
+decision is recorded once, as it was made. A skip the runner decides itself,
+whether stale or past a deferral's bound, attempted nothing, so its record is
+not owed: the next tick evaluates the occurrence again. An API restart or crash
+loses the owed record, so the occurrence runs once more on restart, at most once
+per restart.
 Accepted: a replayed ``backup`` is one more archive, not a harmless duplicate. It
 takes storage, and under a keep-last retention it can push an older backup out.
 A replayed lifecycle/command occurrence is bounded by the same
@@ -422,8 +434,8 @@ class _Ran:
     """An occurrence the runner executed, with what its run record needs.
 
     ``schedule`` is the schedule as polled: its ``next_run_at`` is the
-    occurrence the record advances past. Kept as owed while the record raises
-    (issue #4108).
+    occurrence that ran, which guards the record's advance. Kept as owed while
+    the record raises (issue #4108).
     """
 
     schedule: Schedule
@@ -835,7 +847,8 @@ class RunScheduleTick:
             if not gave_up:
                 # It ran, and a second run would repeat it (a backup as one
                 # more archive): only the record is retried (issue #4108). A
-                # skip past the bound attempted nothing, so it runs again.
+                # precondition skip is owed too, so it is recorded as decided.
+                # A skip past the bound attempted nothing, so it runs again.
                 self._owed[schedule.id] = (ran, self.clock.now())
                 _LOG.warning(
                     "schedule %s: the %s run of its %s could not be recorded; "
