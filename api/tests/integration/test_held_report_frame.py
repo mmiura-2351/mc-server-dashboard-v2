@@ -178,6 +178,8 @@ async def test_a_commit_answered_after_the_deadline_still_reaches_subscribers(
         await call.done_writing()
     finally:
         await h.stop()
+        if h.servicer is not None:
+            await h.servicer.drain_teardowns()
         await engine.dispose()
         listener.close()
         for writer in proxy.writers:
