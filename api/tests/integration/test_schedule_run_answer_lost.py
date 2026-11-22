@@ -42,6 +42,7 @@ from mc_server_dashboard_api.servers.application.schedule_runner import (
 )
 from mc_server_dashboard_api.servers.domain.schedule import (
     ScheduleAction,
+    ScheduleId,
     ScheduleRunOutcome,
 )
 from tests.integration.races import race_database
@@ -110,6 +111,20 @@ async def _run_record_answer_lost() -> AsyncIterator[
             writer.close()
 
 
+async def _keep_the_next_occurrence_clear(
+    engine: AsyncEngine, schedule_id: ScheduleId
+) -> None:
+    """Move the schedule's next occurrence a day out. The first record's advance
+    puts it on the id-jittered interval grid, which can land inside the ticks
+    that follow."""
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE schedule SET next_run_at = :later WHERE id = :id"),
+            {"later": _NOW + dt.timedelta(days=1), "id": schedule_id.value},
+        )
+
+
 async def test_a_run_whose_record_answer_was_lost_is_recorded_and_audited_once(
     engine: AsyncEngine,
 ) -> None:
@@ -122,6 +137,7 @@ async def test_a_run_whose_record_answer_was_lost_is_recorded_and_audited_once(
             execute, SqlAlchemyUnitOfWork(create_session_factory(proxied))
         )
         await runner.tick()  # the record applies, and raises: owed
+        await _keep_the_next_occurrence_clear(engine, schedule_id)
         world.clock.set(_NOW + dt.timedelta(seconds=20))
         await runner.tick()  # the owed record is retried
 
@@ -152,12 +168,7 @@ async def test_a_held_retry_skip_whose_record_answer_was_lost_is_recorded_once(
         _Execute(world.community_id, outcome=ScheduleRunOutcome.FAILURE)
     )
     await runner.tick()  # the occurrence fails, and arms its retry
-    async with engine.begin() as conn:
-        # Keep the next occurrence clear of the ticks below.
-        await conn.execute(
-            text("UPDATE schedule SET next_run_at = :later WHERE id = :id"),
-            {"later": _NOW + dt.timedelta(days=1), "id": schedule_id.value},
-        )
+    await _keep_the_next_occurrence_clear(engine, schedule_id)
     runner.make_execute = lambda: cast(ExecuteScheduleAction, _held)
     retry_at = _NOW + runner.backup_retry_delay
     world.clock.set(retry_at)
