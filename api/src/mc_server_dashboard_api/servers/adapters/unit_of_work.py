@@ -23,6 +23,9 @@ from types import TracebackType
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from mc_server_dashboard_api.core.adapters.database import (
+    is_transient_database_error,
+)
 from mc_server_dashboard_api.fleet.domain.real_time_events import RealTimeEvents
 from mc_server_dashboard_api.servers.adapters.backup_repository import (
     SqlAlchemyBackupRepository,
@@ -134,3 +137,6 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         except BaseException:
             self.servers.discard_status_events_staged_since(mark)
             raise
+
+    def is_transient(self, exc: BaseException) -> bool:
+        return is_transient_database_error(exc)

@@ -8,14 +8,18 @@ gate, name clash), and delete (at-rest gate).
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import asyncpg
 import pytest
+import sqlalchemy.exc
 
 from mc_server_dashboard_api.servers.adapters.file_store import StorageFileStoreAdapter
+from mc_server_dashboard_api.servers.application import manage_server
 from mc_server_dashboard_api.servers.application.lifecycle import StartServer
 from mc_server_dashboard_api.servers.application.manage_server import (
     BedrockJoinability,
@@ -100,13 +104,14 @@ from mc_server_dashboard_api.storage.domain.value_objects import (
 from mc_server_dashboard_api.storage.domain.value_objects import (
     ServerId as StorageServerId,
 )
+from tests.core.fakes import RecordingSleep, server_error
 from tests.servers.fakes import (
+    ClearCreationFailsRepository,
     FakeBackupArchiveStore,
     FakeClock,
     FakeControlPlane,
     FakeFileStore,
     FakeJarProvisioner,
-    FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
     FakeVersionValidator,
@@ -1044,13 +1049,16 @@ class _FailingWriteStore(FakeFileStore):
 _COMMUNITY = CommunityId(uuid.uuid4())
 
 
-def _create(uow: FakeUnitOfWork, store: FakeFileStore) -> Awaitable[Server]:
+def _create(
+    uow: FakeUnitOfWork, store: FakeFileStore, sleep: RecordingSleep | None = None
+) -> Awaitable[Server]:
     return CreateServer(
         uow=uow,
         clock=FakeClock(_NOW),
         version_validator=FakeVersionValidator(),
         file_store=store,
         port_range=_PORTS,
+        sleep=sleep or RecordingSleep(returns=2),
     )(
         community_id=_COMMUNITY,
         name="survival",
@@ -1121,24 +1129,69 @@ async def test_a_finished_create_can_start() -> None:
     assert started.desired_state is DesiredState.RUNNING
 
 
-class _ClearFailsRepository(FakeServerRepository):
-    async def clear_creation_incomplete(self, server_id: ServerId) -> None:
-        raise OSError("connection reset")
+def _pool_timeout() -> Exception:
+    # A pool that hands out no connection within ``pool_timeout`` (#4051): an
+    # outage, which a retry may clear.
+    return sqlalchemy.exc.TimeoutError("QueuePool limit reached, timeout 10.00")
 
 
-async def test_a_creation_whose_end_failed_is_seed_failed_and_stays_unfinished() -> (
-    None
-):
+async def test_a_creation_whose_end_failed_transiently_is_retried_and_ends() -> None:
+    # Issue #4088: every write of the working set is done, so an outage on
+    # the write that ends the creation is retried in a new unit of work,
+    # rather than leaving a whole working set unstartable.
+    servers = ClearCreationFailsRepository(_pool_timeout())
+    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=2)
+
+    server = await _create(uow, FakeFileStore(), sleep)
+
+    assert server.creation_incomplete is False
+    assert uow.servers.by_id[server.id].creation_incomplete is False
+    assert servers.clear_attempts == 2
+    assert sleep.delays == [0.2]
+
+
+async def test_a_creation_whose_end_kept_failing_transiently_is_seed_failed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     # Issue #4065: the working set is whole, but the write that ends the
-    # creation failed, so the row still says it did not finish and a start is
-    # refused. The create answers what it answers for its other failures after
-    # the row commits.
-    uow = FakeUnitOfWork(servers=_ClearFailsRepository())
+    # creation failed on each of its three attempts (#4088), so the row still
+    # says it did not finish and a start is refused. The create answers what it
+    # answers for its other failures after the row commits.
+    errors = [_pool_timeout() for _ in range(3)]
+    servers = ClearCreationFailsRepository(*errors)
+    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=2)
+
+    with caplog.at_level(logging.WARNING, logger=manage_server.__name__):
+        with pytest.raises(WorkingSetSeedFailedError) as exc_info:
+            await _create(uow, FakeFileStore(), sleep)
+
+    assert exc_info.value.__cause__ is errors[-1]
+    assert servers.clear_attempts == 3
+    assert sleep.delays == [0.2, 0.5]
+    [server] = uow.servers.by_id.values()
+    assert server.creation_incomplete is True
+    [record] = [r for r in caplog.records if r.name == manage_server.__name__]
+    assert (record.levelno, getattr(record, "server_id")) == (
+        logging.WARNING,
+        str(server.id.value),
+    )
+
+
+async def test_a_creation_whose_end_failed_otherwise_is_not_retried() -> None:
+    # A failure that is not an outage is no better on a retry: the create
+    # answers it at once, the row still unfinished.
+    error = server_error(
+        asyncpg.UndefinedColumnError('column "creation_incomplete" does not exist')
+    )
+    servers = ClearCreationFailsRepository(error)
+    uow, sleep = FakeUnitOfWork(servers=servers), RecordingSleep(returns=2)
 
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
-        await _create(uow, FakeFileStore())
+        await _create(uow, FakeFileStore(), sleep)
 
-    assert isinstance(exc_info.value.__cause__, OSError)
+    assert exc_info.value.__cause__ is error
+    assert servers.clear_attempts == 1
+    assert sleep.delays == []
     [server] = uow.servers.by_id.values()
     assert server.creation_incomplete is True
 
@@ -1146,18 +1199,21 @@ async def test_a_creation_whose_end_failed_is_seed_failed_and_stays_unfinished()
 class _ClearCommitFailsUnitOfWork(FakeUnitOfWork):
     async def commit(self) -> None:
         await super().commit()
-        if self.commits == 2:
+        if self.commits >= 2:
             raise OSError("connection reset")
 
 
 async def test_a_creation_whose_end_did_not_commit_is_seed_failed() -> None:
-    # The same answer when the end's commit fails. That the row then still
-    # says the creation did not finish needs a real transaction, so it is
+    # The same answer when the end's commit keeps failing. That the row then
+    # still says the creation did not finish needs a real transaction, so it is
     # pinned on PostgreSQL (tests/integration/test_create_start_race.py).
+    uow = _ClearCommitFailsUnitOfWork()
+
     with pytest.raises(WorkingSetSeedFailedError) as exc_info:
-        await _create(_ClearCommitFailsUnitOfWork(), FakeFileStore())
+        await _create(uow, FakeFileStore())
 
     assert isinstance(exc_info.value.__cause__, OSError)
+    assert uow.commits == 4
 
 
 async def test_create_strips_system_jar_keys_from_config() -> None:
