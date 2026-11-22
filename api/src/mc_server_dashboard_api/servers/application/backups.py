@@ -20,12 +20,16 @@ state per the 6.9 table:
 - **anything else** (starting/stopping/restarting/crashed, or a desired/observed
   mismatch) -> :class:`BackupUnsettledError` (409): neither source is well-defined.
 
-Each create commits a :class:`Backup` metadata row (source manual or scheduled,
-the archive ref, the actor) **before** writing the archive (#1707) — a crash
-after the row commit but before the archive write leaves a dangling row
-(detectable via the lazy size backfill and health sweep), never an orphaned
-archive with no row to find it by.  The archive size is backfilled once the
-archive lands (the lazy path legacy rows already use, #661).
+Each create writes the archive **before** it records its :class:`Backup` metadata
+row (source manual or scheduled, the archive ref, its size, the actor), and an
+upload stores its archive the same way (issue #4086). The row is inserted with
+its size in one transaction, so no row is recorded ahead of its archive. A
+failure after the archive write and before the row's COMMIT is sent, a
+cancellation included, deletes the archive again (best effort). Once the COMMIT
+is sent, its outcome is unknown, since a COMMIT can apply and still raise: the
+archive is kept and a WARNING logged. A crash, a delete that fails, or an
+unconfirmed COMMIT that did not apply leaves an archive with no row: no listing
+shows it, and the server's delete prunes it.
 
 Restore requires the server **at rest** (FR-BAK-4): a hot replacement of a live
 working set is unsafe, so a running server is 409. Restore republishes the
@@ -232,64 +236,113 @@ class CreateBackup:
                 # that snapshot, so archiving it now would miss it (issue #3998).
                 raise server.not_quiescent_error(BackupUnsettledError)
 
-            # Commit the metadata row BEFORE writing the archive (#1707): a crash
-            # after the row commit but before the archive write leaves a dangling
-            # row (detectable, self-healing via the lazy size backfill and health
-            # sweep), never an orphaned archive with no row to find it by. The
-            # storage_ref is pre-generated so the row can reference it before the
-            # archive exists; size_bytes starts NULL and is backfilled once the
-            # archive lands (the same lazy path legacy rows already use, #661).
+            # Write the archive BEFORE recording its row (issue #4086), so no row
+            # is recorded ahead of its archive. A failure after the write and
+            # before the row's COMMIT is sent deletes the archive again (best
+            # effort, :func:`_discard_archive`); after it, the archive is kept.
             storage_ref = uuid.uuid4().hex
-            backup = Backup(
-                id=BackupId.new(),
-                server_id=server_id,
-                storage_ref=storage_ref,
-                size_bytes=None,
-                source=source,
-                # Healthy by construction: ``create_from_current`` runs through the
-                # integrity gate (#749), which refuses to archive a corrupt working
-                # set — so reaching here means the archived contents were sound
-                # (#742).
-                health=BackupHealth.HEALTHY,
-                created_by=created_by,
-                created_at=self.clock.now(),
-            )
-            # The lock may have been lost during the snapshot (issue #3927). The row
-            # and the archive written right behind it are one guarded write; the
-            # check stays outside the compensation below, which must not run for
-            # a holder that knows it lost the lock.
+            created_at = self.clock.now()
+            # The lock may have been lost during the snapshot (issue #3927).
             await lock.ensure_held()
-            async with self.uow:
-                await self.uow.backups.add(backup)
-                await self.uow.commit()
             # Both the at-rest path and the running path (after the snapshot just
             # published) archive the authoritative copy (Section 6.9, FR-BAK-2).
-            # If the archive write fails, compensate by deleting the committed
-            # row so repeated failures (e.g. scheduler retries) do not accumulate
-            # dangling rows.
-            try:
-                await self.backup_store.create_from_current(
-                    community_id=community_id,
-                    server_id=server_id,
-                    storage_ref=storage_ref,
-                )
-            except Exception:
-                async with self.uow:
-                    await self.uow.backups.delete(backup.id)
-                    await self.uow.commit()
-                raise
-            # Record the archive size now that it exists (#281). The row was
-            # committed with NULL; update it in place.
-            size_bytes = await self.backup_store.size(
+            await self.backup_store.create_from_current(
                 community_id=community_id,
                 server_id=server_id,
                 storage_ref=storage_ref,
             )
-            backup.size_bytes = size_bytes
-            async with self.uow:
-                await self.uow.backups.update_size(backup.id, size_bytes)
-                await self.uow.commit()
+            commit_sent = False
+            try:
+                backup = Backup(
+                    id=BackupId.new(),
+                    server_id=server_id,
+                    storage_ref=storage_ref,
+                    size_bytes=await self.backup_store.size(
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    ),
+                    source=source,
+                    # Healthy by construction: ``create_from_current`` runs through
+                    # the integrity gate (#749), which refuses to archive a corrupt
+                    # working set — so reaching here means the archived contents
+                    # were sound (#742).
+                    health=BackupHealth.HEALTHY,
+                    created_by=created_by,
+                    created_at=created_at,
+                )
+                # The archive write can take minutes; check again before the row.
+                await lock.ensure_held()
+                async with self.uow:
+                    # The savepoint sends the INSERT, so a refused one raises
+                    # here, before the COMMIT is sent.
+                    async with self.uow.savepoint():
+                        await self.uow.backups.add(backup)
+                    commit_sent = True
+                    await self.uow.commit()
+            except BaseException:
+                if commit_sent:
+                    _keep_unconfirmed_archive(backup)
+                else:
+                    await _discard_archive(
+                        self.backup_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    )
+                raise
             return backup
+
+
+async def _discard_archive(
+    backup_store: BackupArchiveStore,
+    *,
+    community_id: CommunityId,
+    server_id: ServerId,
+    storage_ref: str,
+) -> None:
+    """Delete an archive whose row was not recorded (issue #4086).
+
+    Only for a failure before the row's COMMIT is sent: after it the row may
+    stand, and :func:`_keep_unconfirmed_archive` keeps the archive. Best effort: a
+    delete that fails is logged and the caller's own failure is raised. The
+    archive left behind has no row, so no listing shows it. It runs without a
+    lifecycle-lock check: the ref is new, so nothing else can be using the
+    archive.
+    """
+
+    try:
+        await backup_store.delete(
+            community_id=community_id,
+            server_id=server_id,
+            storage_ref=storage_ref,
+        )
+    except Exception:
+        _LOG.warning(
+            "could not delete the archive of a backup whose row was not recorded",
+            exc_info=True,
+            extra={"server_id": str(server_id.value), "storage_ref": storage_ref},
+        )
+
+
+def _keep_unconfirmed_archive(backup: Backup) -> None:
+    """Keep the archive of a row whose COMMIT was sent but not confirmed.
+
+    A COMMIT can apply and still raise: its answer lost with the connection, a
+    cancellation while awaiting it, or a failure leaving the block after it. The
+    row may stand, and deleting its archive would leave it without one, the row
+    issue #4086 removes. So the archive is kept and logged. If the COMMIT did not
+    apply, the archive has no row, so no listing shows it.
+    """
+
+    _LOG.warning(
+        "kept the archive of a backup whose row commit was not confirmed",
+        extra={
+            "server_id": str(backup.server_id.value),
+            "storage_ref": backup.storage_ref,
+            "backup_id": str(backup.id.value),
+        },
+    )
 
 
 class _NullAuthorDirectory(BackupAuthorDirectory):
@@ -1379,19 +1432,19 @@ class UploadBackup:
             max_decompressed_bytes=self.max_decompressed_bytes,
         )
 
-        # Hold the per-server lifecycle lock across the server check, the row
-        # commit and the archive write, as CreateBackup does (issue #3219). Without
-        # it a DeleteServer / DeleteBackup landing between the commit and the write
-        # removes the row, and the write then lands an archive no delete saw while
-        # this returns a backup that no longer exists. The body is already fully
-        # received, so the lock never waits on the client's network.
+        # Hold the per-server lifecycle lock across the server check, the archive
+        # write and the row commit, as CreateBackup does (issue #3219). Without it
+        # a DeleteServer landing between the check and the write prunes the
+        # server's storage and removes it, and the write then lands an archive no
+        # delete saw. The body is already fully received, so the lock never waits
+        # on the client's network.
         async with self.lifecycle_lock.hold(server_id) as lock:
             async with self.uow:
                 await _load(self.uow, community_id, server_id)
 
-            # Commit the metadata row BEFORE writing the archive (#1707): same
-            # ordering rationale as CreateBackup — a dangling row is detectable and
-            # self-healing, an orphaned archive is not.
+            # Store the archive BEFORE recording its row, as CreateBackup does
+            # (issue #4086). The archive is stored verbatim, so its size is the
+            # body's and needs no read back.
             storage_ref = uuid.uuid4().hex
             backup = Backup(
                 id=BackupId.new(),
@@ -1406,24 +1459,35 @@ class UploadBackup:
                 created_by=created_by,
                 created_at=self.clock.now(),
             )
-            # One guarded write for the row and the archive behind it, checked
-            # outside the compensation below, as in CreateBackup (issue #3927).
+            # Each guarded write is checked right before it, as in CreateBackup
+            # (issue #3927).
             await lock.ensure_held()
-            async with self.uow:
-                await self.uow.backups.add(backup)
-                await self.uow.commit()
-            # If the store write fails, compensate by deleting the committed row.
+            await self.backup_store.store(
+                community_id=community_id,
+                server_id=server_id,
+                stream=_chunked(content),
+                storage_ref=storage_ref,
+            )
+            commit_sent = False
             try:
-                await self.backup_store.store(
-                    community_id=community_id,
-                    server_id=server_id,
-                    stream=_chunked(content),
-                    storage_ref=storage_ref,
-                )
-            except Exception:
+                await lock.ensure_held()
                 async with self.uow:
-                    await self.uow.backups.delete(backup.id)
+                    # As in CreateBackup: a refused INSERT raises before the
+                    # COMMIT is sent.
+                    async with self.uow.savepoint():
+                        await self.uow.backups.add(backup)
+                    commit_sent = True
                     await self.uow.commit()
+            except BaseException:
+                if commit_sent:
+                    _keep_unconfirmed_archive(backup)
+                else:
+                    await _discard_archive(
+                        self.backup_store,
+                        community_id=community_id,
+                        server_id=server_id,
+                        storage_ref=storage_ref,
+                    )
                 raise
             return backup
 
@@ -1491,9 +1555,9 @@ async def _backfill_null_sizes(
     caller's open unit of work; the returned ``rows`` carry any computed size so
     the listing/total reflect it immediately.
 
-    **Only a missing archive is tolerated** (``BackupNotFoundError``, the
-    dangling-row case create is designed to leave behind): that row keeps its NULL
-    size and the remaining rows are still backfilled. **Everything else propagates
+    **Only a missing archive is tolerated** (``BackupNotFoundError``, a row left
+    dangling before creates wrote the archive first, issue #4086): its NULL size
+    stays and the remaining rows are still backfilled. **Everything else propagates
     and fails the read** (issue #2405), where a bare ``except Exception`` used to
     degrade it to a success with null sizes. A null size is indistinguishable from a
     genuinely unrecorded one, so nothing in a degraded response identified it as

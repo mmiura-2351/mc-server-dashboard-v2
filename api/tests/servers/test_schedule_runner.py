@@ -11,6 +11,7 @@ notification emission, and per-schedule tick isolation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import uuid
@@ -81,6 +82,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
 )
 from tests.audit.fakes import RecordingAuditRecorder
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeBackupArchiveStore,
     FakeClock,
     FakeControlPlane,
@@ -90,6 +92,7 @@ from tests.servers.fakes import (
     FakeServerRepository,
     FakeStoreGenerationReader,
     FakeUnitOfWork,
+    OutageUnitOfWork,
 )
 
 _NOW = dt.datetime(2026, 7, 11, 12, 0, 30, tzinfo=dt.timezone.utc)
@@ -184,8 +187,9 @@ def _env(
     backup_retry_delay: dt.timedelta = dt.timedelta(minutes=30),
     warning_grace: dt.timedelta = WARNING_GRACE_FLOOR,
     deferral_bound: dt.timedelta = _DEFERRAL_BOUND,
+    uow: FakeUnitOfWork | None = None,
 ) -> _Env:
-    uow = FakeUnitOfWork()
+    uow = uow or FakeUnitOfWork()
     cp = control_plane or FakeControlPlane()
     the_clock = clock or FakeClock(_NOW)
     store = backup_store or FakeBackupArchiveStore()
@@ -1278,6 +1282,53 @@ class _StorageUnavailableBackupStore(FakeBackupArchiveStore):
         )
 
         raise BackupStorageUnavailableError(str(server_id.value))
+
+
+class _FailsAndTakesTheDatabaseDown(FakeBackupArchiveStore):
+    """The store refuses every archive, and the database goes down with it."""
+
+    def __init__(self, uow: OutageUnitOfWork) -> None:
+        super().__init__()
+        self._uow = uow
+        self.attempts = 0
+
+    async def create_from_current(
+        self, *, community_id: CommunityId, server_id: ServerId, storage_ref: str
+    ) -> None:
+        from mc_server_dashboard_api.servers.domain.errors import (
+            BackupStorageUnavailableError,
+        )
+
+        self.attempts += 1
+        self._uow.down = True
+        raise BackupStorageUnavailableError(str(server_id.value))
+
+
+async def test_backups_failing_in_a_database_outage_leave_no_rows() -> None:
+    # Production, 2026-10-15 (issue #4086): the store refused every archive and
+    # the database went down with it. No run could be recorded, so the occurrence
+    # ran again every tick, and each run left a row with no archive behind.
+    uow = OutageUnitOfWork()
+    store = _FailsAndTakesTheDatabaseDown(uow)
+    env = _env(backup_store=store, uow=uow)
+    server = _stopped_server()
+    schedule = _schedule(
+        server,
+        action=ScheduleAction.BACKUP,
+        only_when_running=False,
+        next_run_at=_NOW - dt.timedelta(seconds=10),
+    )
+    env.uow.servers.seed(server)
+    env.uow.schedules.seed(schedule)
+
+    for tick in range(3):
+        uow.down = False
+        # The tick's own warnings poll meets the same outage.
+        with contextlib.suppress(DatabaseOutageError):
+            await _tick_at(env, _NOW + tick * _TICK)
+
+    assert store.attempts == 3
+    assert env.uow.backups.by_id == {}
 
 
 async def test_backup_storage_timeout_records_distinguishable_detail() -> None:

@@ -577,8 +577,8 @@ class BackupStore(abc.ABC):
 
         The stopped-server path: Storage only ever archives the authoritative copy
         (Section 3.3). When *key* is provided the archive is stored under that key
-        (the caller pre-generated it so it could commit the metadata row first,
-        issue #1707); when ``None`` a fresh key is minted internally.
+        (the caller pre-generates it to record the metadata row once the archive
+        exists, issue #4086); when ``None`` a fresh key is minted internally.
         Raises :class:`~.errors.NotFoundError` if nothing is published, and
         :class:`~.errors.ArchiveTooLargeError`, with no backup written, if the
         archive's decompressed stream would be past the decompressed-size cap
