@@ -1131,21 +1131,26 @@ found".
 **A Community deletion and a concurrent write in that Community wait for each
 other at the `community` row** (issue #4021). The deletion's `DELETE` locks
 that row before any row it cascades to. A write that locks one of those rows
-and then takes another lock holds the `community` row `FOR KEY SHARE` first:
-role creation and update through the permission ceiling, role assignment, grant
-creation, member removal and role unassignment. That is step 1 of the lock
-order in `community/application/permission_ceiling.py`. Whichever of the two
-locks the row first, the other waits for it, so they cannot deadlock, whatever
-order the cascades run in. The schema does not fix that order: a row's
-cascades run in the order of their trigger names, which embed OIDs.
+and can then wait for another holds the `community` row `FOR KEY SHARE` first:
+role creation, role update (a rename too), role assignment, grant creation,
+member removal and role unassignment. A rename counts because its `UPDATE`
+locks the role row and its new name's unique entry can then wait for a
+deletion that deleted a role of that name. That is step 1 of the lock order in
+`community/application/permission_ceiling.py`. Whichever of the two locks the
+row first, the other waits for it, so these writes cannot deadlock with the
+deletion, whatever order the cascades run in. The schema does not fix that
+order: a row's cascades run in the order of their trigger names, which embed
+OIDs. A role deletion takes no hold: a deletion deletes every role before any
+role assignment, so the two cannot wait for each other. A deletion or rename
+waiting for the row does not stop later writes from taking it, so a steady
+overlap of writes can delay it, as their foreign-key checks already could.
 
 - **The deletion first.** The write waits for the deletion and then answers
   404 `not_found`, the answer the route's gate gives a non-member (issue
   #2967). A member addition, a role creation and a grant creation answer this
-  way, as do the other writes listed above. A member addition, or a role
-  creation that confers nothing, locks no row of the Community before its
-  `INSERT`. It meets the deletion at the `INSERT`'s foreign key onto
-  `community` instead, with the same answer.
+  way, as do the other writes listed above. A member addition locks no row of
+  the Community before its `INSERT`. It meets the deletion at the `INSERT`'s
+  foreign key onto `community` instead, with the same answer.
 - **The write first.** The deletion waits for the write to commit, then
   cascades the new row away. A grant names a server of the Community, so the
   deletion that waited for a grant creation is then refused 409

@@ -77,9 +77,9 @@ class CommunityNotFoundError(CommunityError):
     """The targeted community does not exist (read/update/delete on a missing id).
 
     Also raised by a write in a community deleted after the route's gate admitted
-    the caller (issue #2967): a member add or role creation whose INSERT fails
-    its foreign key onto ``community``, or a write that finds the community gone
-    when it holds it against the deletion (issue #4021).
+    the caller (issue #2967): a member add whose INSERT fails its foreign key
+    onto ``community``, or a write that finds the community gone when it holds
+    it against the deletion (issue #4021).
     """
 
 

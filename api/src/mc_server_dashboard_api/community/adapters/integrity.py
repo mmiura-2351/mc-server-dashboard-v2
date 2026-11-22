@@ -72,22 +72,20 @@ deleted after the route's gate admitted the caller as a member and before the
 write commits. They surface as :class:`CommunityNotFoundError`, which the routes
 answer with the gate's own non-member 404: the caller was a member a moment
 earlier and already knew the community existed, so the 404 reveals nothing, and
-it is what the gate answers them from then on. None of the three use cases
-pre-reads the community, so no earlier read answers instead. The rows are staged
-via ``session.add`` and nothing flushes them before the commit, so each
-violation surfaces inside the unit of work's ``commit`` wrap -- these FKs are
-not DEFERRABLE, so the wrap has to be around whichever statement flushes the
-staged row (issue #2612). The membership and role keys are reached by
-``AddMember`` and by a ``CreateRole`` that confers nothing (the ceiling, which
-would hold the community first, is then not consulted). The grant's is not
-reachable through ``CreateGrant``: it holds the community row from before its
-INSERT, so the deletion waits for it, and the grant commits first (issue
-#4021). It is mapped all the same, so that the three writes answer alike: a
-grant INSERT run after the deletion fails this key and its membership key both,
-and reports whichever PostgreSQL checks first, which maps to the same 404
-either way. A write that holds the community before its INSERT meets the
-deletion there instead, and ``hold_community`` (``permission_ceiling``) raises
-the same error when it finds the community gone.
+it is what the gate answers them from then on. The rows are staged via
+``session.add`` and nothing flushes them before the commit, so each violation
+surfaces inside the unit of work's ``commit`` wrap -- these FKs are not
+DEFERRABLE, so the wrap has to be around whichever statement flushes the staged
+row (issue #2612). The membership key is reached by ``AddMember``, which does
+not pre-read the community. The role and grant keys are not reachable through
+``CreateRole`` and ``CreateGrant``: they hold the community row from before
+their INSERT, so a deletion waits for them, and they commit first (issue
+#4021). They are mapped all the same, so that the three writes answer alike: a
+role or grant INSERT run after the deletion fails its key -- a grant's its
+membership key too, and reports whichever PostgreSQL checks first, which maps
+to the same 404 either way. A write that holds the community meets the deletion
+there instead, and ``hold_community`` (``permission_ceiling``) raises the same
+error when it finds the community gone.
 
 **The other foreign keys are deliberately absent, and their absence is not a
 claim that they are unreachable.** The rest of migration 0004 --

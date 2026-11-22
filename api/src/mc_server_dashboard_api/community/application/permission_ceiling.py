@@ -25,9 +25,12 @@ Lock order, the same for every transaction that locks through here:
    check waits for the user row the deletion is deleting;
 1. the community row (``FOR KEY SHARE``, :func:`hold_community`; issue #4021),
    held by every write that locks a row a community deletion cascades to and
-   then takes another lock: :func:`lock_actor_ceiling` takes it first, and a
-   role assignment, a grant creation, a member removal and a role unassignment
-   take it before their first other lock of this context;
+   can then wait for another: a role creation or update, a role assignment, a
+   grant creation, a member removal and a role unassignment take it before
+   their first other lock of this context, and :func:`lock_actor_ceiling`
+   expects it held. A rename is one: its UPDATE locks the role row, and its new
+   name's unique entry can then wait for a deletion that deleted a role of that
+   name;
 2. memberships: the actor's, and the recipient's a role assignment or grant
    creation inserts its row under (``FOR KEY SHARE``, one statement in
    ascending id order, taken by the use case before anything else but steps 0
@@ -62,7 +65,7 @@ Against the deleters:
   community holds a server (issue #3218) only once it has cascaded to the
   rest. The schema does not fix the order of those cascades -- a row's run in
   the order of their trigger names, which embed OIDs -- so a write that locks
-  one of those rows and then takes another lock holds the community row first
+  one of those rows and can then wait for another holds the community row first
   (step 1). Whichever of the two locks it first, the other waits there holding
   nothing the first needs. A role deletion takes no such hold: a deletion
   deletes every role before any assignment, so it never holds an assignment
@@ -70,9 +73,9 @@ Against the deleters:
 
 A write that waited for the deletion, or began after it committed, finds the
 community gone at step 1 and raises :class:`CommunityNotFoundError` (issue
-#2967). So does a member addition or a role creation that confers nothing,
-whose INSERT is its only lock of this context: it meets the deletion at its
-foreign key onto ``community`` (``adapters/integrity.py``).
+#2967). So does a member addition, whose INSERT is its only lock of this
+context: it meets the deletion at its foreign key onto ``community``
+(``adapters/integrity.py``).
 """
 
 from __future__ import annotations
@@ -123,15 +126,14 @@ async def lock_actor_ceiling(
     ``role_to_update`` is locked ``FOR UPDATE``, and ``roles_to_share`` share-
     locked, in the same ordered pass as the actor's roles, for a write that
     depends on those roles' current state; they count toward the ceiling only
-    if the actor holds them. A caller that also inserts under a recipient's
-    membership holds the community and both memberships first (lock order
-    steps 1 and 2); they are then already held here.
+    if the actor holds them.
 
-    Raises :class:`CommunityNotFoundError` when the community is gone (issue
-    #2967); an actor who is merely not a member of a community that exists gets
-    the empty ceiling.
+    The caller holds the community first (lock order step 1), so an actor
+    without a membership is not a member of a community that exists, and gets
+    the empty ceiling. A caller that also inserts under a recipient's membership
+    holds both memberships first too (step 2); the actor's is then already held
+    here.
     """
-    await hold_community(uow, community_id)
     memberships = await uow.memberships.hold_for_users(community_id, [actor_id])
     membership = memberships[0] if memberships else None
     role_ids = (
@@ -185,10 +187,10 @@ async def enforce_permission_ceiling(
 ) -> None:
     """Raise if ``conferred`` contains permissions the actor lacks.
 
-    Locks the ceiling's sources as :func:`lock_actor_ceiling` does, so the write
-    that follows in the same transaction commits only on authority the actor
-    still holds. Raises :class:`PermissionCeilingExceededError` listing the
-    exceeded codes.
+    Locks the ceiling's sources as :func:`lock_actor_ceiling` does, the caller
+    holding the community first, so the write that follows in the same
+    transaction commits only on authority the actor still holds. Raises
+    :class:`PermissionCeilingExceededError` listing the exceeded codes.
     """
     if not conferred:
         return

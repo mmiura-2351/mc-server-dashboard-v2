@@ -3,18 +3,17 @@
 The route's gate admitted the caller as a member a moment earlier, and the
 community's deletion then races the write. A deletion locks the community row
 before anything it cascades to, and every write of this context that locks a
-row of that cascade and then another lock holds the community row first
+row of that cascade and can then wait for another holds the community row first
 (``FOR KEY SHARE``; the lock order in ``permission_ceiling.py``). Whichever
 locks the row first, the other waits for it:
 
 - **The deletion first.** The write waits for the community row and, once the
   deletion has committed, raises :class:`CommunityNotFoundError`, which the
-  routes answer with the gate's own non-member 404 (#2967). A member add and a
-  role creation that confers nothing lock nothing of this context before their
-  INSERT, which meets the deletion at its foreign key onto ``community``
-  instead, with the same answer. Each race pauses the deletion after its DELETE,
-  lets the write run on another connection until it blocks on a lock, then
-  resumes the deletion.
+  routes answer with the gate's own non-member 404 (#2967). A member add locks
+  nothing of this context before its INSERT, which meets the deletion at its
+  foreign key onto ``community`` instead, with the same answer. Each race pauses
+  the deletion after its DELETE, lets the write run on another connection until
+  it blocks on a lock, then resumes the deletion.
 - **The write first.** The deletion waits for the write to commit, then cascades
   its row away -- or, when the community holds a server, as it does for any
   grant, is refused (#3218). Each race pauses the write while it holds its
@@ -23,6 +22,10 @@ locks the row first, the other waits for it:
   resumed only after the deletion has waited past ``deadlock_timeout``: the
   deletion's deadlock check has then run and found nothing, and the write, not
   the deletion, was the victim.
+
+Two races take a third write: a rename onto the name of a role the deletion has
+deleted, while a role deletion holds the deletion back; and a role deletion,
+which takes no hold, stalled mid-cascade with the deletion waiting for it.
 
 Some of those deadlocks need the deletion to cascade to roles or grants before
 memberships. A deletion runs a row's cascades in the order of their trigger
@@ -69,6 +72,7 @@ from mc_server_dashboard_api.community.application.manage_membership import (
 )
 from mc_server_dashboard_api.community.application.manage_role import (
     CreateRole,
+    DeleteRole,
     UpdateRole,
 )
 from mc_server_dashboard_api.community.application.provision_community import (
@@ -281,8 +285,8 @@ async def _add_outsider(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
 
 
 async def _create_empty_role(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
-    # Confers nothing, so the ceiling is not consulted and nothing is locked
-    # before the INSERT.
+    # Confers nothing, so the ceiling is not consulted: the community is the
+    # only row it locks before the INSERT.
     return await CreateRole(uow=uow, clock=SystemClock())(
         community_id=world.community_id,
         actor_id=world.owner,
@@ -332,6 +336,15 @@ async def _update_builders(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
     )
 
 
+async def _rename_builders(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
+    return await UpdateRole(uow=uow, clock=SystemClock())(
+        community_id=world.community_id,
+        role_id=world.builders,
+        actor_id=world.owner,
+        name="Masons",
+    )
+
+
 async def _remove_member(world: _World, uow: SqlAlchemyUnitOfWork) -> object:
     await RemoveMember(uow=uow)(community_id=world.community_id, user_id=world.member)
     return None
@@ -353,6 +366,7 @@ _NOT_FOUND_WRITES = [
     pytest.param(_create_empty_role, id="create-role-conferring-nothing"),
     pytest.param(_create_starter_role, id="create-role-conferring-permissions"),
     pytest.param(_update_builders, id="update-role"),
+    pytest.param(_rename_builders, id="rename-role"),
     pytest.param(_assign_owner_role, id="assign-role"),
     pytest.param(_create_grant, id="create-grant"),
     pytest.param(_remove_member, id="remove-member"),
@@ -601,6 +615,126 @@ async def test_deletion_waiting_for_the_removal_of_a_granted_member_is_refused(
     assert isinstance(deleted, CommunityHasServersError), deleted
     assert await _count(engine, "membership") == 1
     assert await _count(engine, "resource_grant") == 0
+
+
+async def _create_role(world: _World, name: str) -> RoleId:
+    role = await CreateRole(
+        uow=SqlAlchemyUnitOfWork(world.factory), clock=SystemClock()
+    )(
+        community_id=world.community_id,
+        actor_id=world.owner,
+        name=name,
+        permissions=set(),
+    )
+    return role.id
+
+
+async def _run_until_blocked(
+    world: _World, run: Callable[[SqlAlchemyUnitOfWork], Coroutine[Any, Any, None]]
+) -> asyncio.Task[object]:
+    """Start ``run`` on its own connection; return once it is blocked on a lock."""
+
+    pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+    task: asyncio.Task[object] = asyncio.create_task(
+        run(_UnitOfWork(world.factory, pid=pid))
+    )
+    await await_settled(
+        world.engine, task, lambda: pid.result() if pid.done() else None
+    )
+    assert not task.done()
+    return task
+
+
+@pytest.mark.parametrize("stalled", [False, True], ids=["prompt", "stalled"])
+async def test_rename_onto_a_name_the_deletion_freed_waits_for_it(
+    engine: AsyncEngine, stalled: bool
+) -> None:
+    # A rename locks its role row, then waits at the unique name of a role the
+    # deletion deleted but has not committed. A deletion held back by a role
+    # deletion, which takes no hold, then reached the renamed role and waited
+    # for the rename: a deadlock, its victim the rename, or, stalled past
+    # deadlock_timeout, the deletion. Hhh and Zzz come after Builders by name and
+    # by creation alike, so the deletion takes Builders, waits at Hhh, and
+    # reaches Zzz only after it.
+    world = await _world(engine)
+    hhh = await _create_role(world, "Hhh")
+    zzz = await _create_role(world, "Zzz")
+
+    async def delete_community(uow: SqlAlchemyUnitOfWork) -> None:
+        await DeleteCommunity(uow=uow)(community_id=world.community_id)
+
+    async def rename_onto_builders(uow: SqlAlchemyUnitOfWork) -> None:
+        await UpdateRole(uow=uow, clock=SystemClock())(
+            community_id=world.community_id,
+            role_id=zzz,
+            actor_id=world.owner,
+            name="Builders",
+        )
+
+    pause = _Pause()
+    role_deletion = asyncio.create_task(
+        DeleteRole(
+            uow=_UnitOfWork(world.factory, pause=pause, pause_after="roles.delete")
+        )(community_id=world.community_id, role_id=hhh)
+    )
+    await asyncio.wait_for(pause.reached.wait(), SETTLE_TIMEOUT)
+    deletion = await _run_until_blocked(world, delete_community)
+    renaming = await _run_until_blocked(world, rename_onto_builders)
+    if stalled:
+        await asyncio.sleep(await _deadlock_timeout(engine) + 0.5)
+    pause.resume.set()
+    role_deleted, deleted, renamed = await asyncio.gather(
+        role_deletion, deletion, renaming, return_exceptions=True
+    )
+
+    assert role_deleted is None, role_deleted
+    assert deleted is None, deleted
+    assert isinstance(renamed, CommunityNotFoundError), renamed
+    assert await _count(engine, "role") == 0
+
+
+@pytest.mark.parametrize(
+    "cascade_last",
+    [(), ("membership",), ("role",)],
+    ids=["memberships-first", "memberships-last", "roles-last"],
+)
+async def test_deletion_waiting_for_a_role_deletion_mid_cascade_succeeds(
+    engine: AsyncEngine, cascade_last: tuple[str, ...]
+) -> None:
+    # A role deletion takes no hold. It locks the role, then, in the same
+    # statement, the role's assignments, and a deletion deletes every role
+    # before any assignment, whatever order it cascades to its direct children
+    # in. Staged with the role deletion stalled on an assignment a third
+    # transaction holds, and the deletion waiting for the role past
+    # deadlock_timeout.
+    world = await _world(engine)
+    await _cascade_last(engine, *cascade_last)
+
+    async def delete_builders(uow: SqlAlchemyUnitOfWork) -> None:
+        await DeleteRole(uow=uow)(
+            community_id=world.community_id, role_id=world.builders
+        )
+
+    async def delete_community(uow: SqlAlchemyUnitOfWork) -> None:
+        await DeleteCommunity(uow=uow)(community_id=world.community_id)
+
+    async with engine.connect() as holder:
+        await holder.execute(
+            text("SELECT 1 FROM membership_role WHERE role_id = :role FOR SHARE"),
+            {"role": world.builders.value},
+        )
+        role_deletion = await _run_until_blocked(world, delete_builders)
+        deletion = await _run_until_blocked(world, delete_community)
+        await asyncio.sleep(await _deadlock_timeout(engine) + 0.5)
+        await holder.commit()
+    role_deleted, deleted = await asyncio.gather(
+        role_deletion, deletion, return_exceptions=True
+    )
+
+    assert role_deleted is None, role_deleted
+    assert deleted is None, deleted
+    for table in ("membership", "role", "membership_role"):
+        assert await _count(engine, table) == 0
 
 
 @pytest.mark.parametrize("write", _NOT_FOUND_WRITES)

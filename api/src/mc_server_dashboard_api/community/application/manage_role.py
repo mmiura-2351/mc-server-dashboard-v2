@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.community.application.permission_ceiling import (
     check_permission_ceiling,
     enforce_permission_ceiling,
+    hold_community,
     lock_actor_ceiling,
 )
 from mc_server_dashboard_api.community.domain.clock import Clock
@@ -114,6 +115,9 @@ class CreateRole:
             is_preset=False,
         )
         async with self.uow:
+            # The community before the ceiling's locks: the ceiling's lock order
+            # (#4021).
+            await hold_community(self.uow, community_id)
             await enforce_permission_ceiling(
                 self.uow,
                 actor_id=actor_id,
@@ -148,6 +152,11 @@ class UpdateRole:
         permissions: set[Permission] | None = None,
     ) -> Role:
         async with self.uow:
+            # The community first, the ceiling's lock order (#4021), by a rename
+            # too: its UPDATE locks the role row, and the new name can then wait
+            # for a community deletion that deleted a role of that name, whose
+            # cascade would reach the renamed role only after.
+            await hold_community(self.uow, community_id)
             # The ceiling below is evaluated against the set this write replaces,
             # so a permission edit reads the role under a row lock (#3215):
             # against an unlocked read, a permission removed concurrently would
