@@ -874,10 +874,12 @@ export const en = {
   "schedules.dialog.retentionKeepAllHint":
     "This server has no retention policy, so every scheduled backup is kept until it is deleted or a policy is set on the Backups tab.",
   // Keep-last N prunes at once: the count of existing scheduled backups it
-  // deletes, or a generic line when the backups list cannot be read; either
-  // gates Create behind the acknowledgement.
+  // deletes, a counting line while the backups list loads, or a generic line
+  // when it cannot be read; each gates Create behind the acknowledgement.
   "schedules.dialog.retentionPrune":
     "This deletes {count} existing scheduled backup(s) now.",
+  "schedules.dialog.retentionPruneCounting":
+    "Counting the existing scheduled backups this may delete now…",
   "schedules.dialog.retentionPruneUnknown":
     "The existing scheduled backups could not be counted, so this may delete some of them now.",
   "schedules.dialog.retentionPruneAck":

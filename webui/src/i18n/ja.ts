@@ -785,10 +785,12 @@ export const ja: Record<TranslationKey, string> = {
   "schedules.dialog.retentionKeepAllHint":
     "このサーバーには保持ポリシーがないため、定期バックアップは削除するか「バックアップ」タブでポリシーを設定するまで、すべて保持されます。",
   // Keep-last N prunes at once: the count of existing scheduled backups it
-  // deletes, or a generic line when the backups list cannot be read; either
-  // gates Create behind the acknowledgement.
+  // deletes, a counting line while the backups list loads, or a generic line
+  // when it cannot be read; each gates Create behind the acknowledgement.
   "schedules.dialog.retentionPrune":
     "既存の定期バックアップ{count}件がすぐに削除されます。",
+  "schedules.dialog.retentionPruneCounting":
+    "すぐに削除される可能性のある既存の定期バックアップを数えています…",
   "schedules.dialog.retentionPruneUnknown":
     "既存の定期バックアップの件数を取得できませんでした。その一部がすぐに削除される可能性があります。",
   "schedules.dialog.retentionPruneAck":

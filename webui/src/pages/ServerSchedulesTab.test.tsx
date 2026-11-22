@@ -1683,9 +1683,9 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     renderTab(CAN_COUNT, server({ backup_retention: null }));
 
     await openBackupCreate();
-    // Confirmed against the generic line while the list loads.
+    // Confirmed against the counting line while the list loads.
     expect(
-      screen.getByText(t("schedules.dialog.retentionPruneUnknown")),
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
     ).toBeInTheDocument();
     fireEvent.click(pruneAck() as HTMLElement);
     expect(createButton()).toBeEnabled();
@@ -1772,24 +1772,21 @@ describe("ServerSchedulesTab keep-all retention (#4084)", () => {
     );
     const failed = renderTab(CAN_COUNT, server({ backup_retention: null }));
     await openBackupCreate();
-    await waitFor(() =>
-      expect(
-        mockApi.get.mock.calls.some((call) =>
-          (call[0] as string).endsWith("/backups"),
-        ),
-      ).toBe(true),
-    );
-    expect(unknown()).toBeInTheDocument();
+    await waitFor(() => expect(unknown()).toBeInTheDocument());
     expect(createButton()).toBeDisabled();
     failed.unmount();
 
-    // The list has not answered yet: loading never reads as nothing to prune.
+    // The list has not answered yet: loading never reads as nothing to prune,
+    // and says it is counting rather than that it could not count.
     mockApi.get.mockImplementation((path: string) =>
       path.endsWith("/backups") ? new Promise(() => {}) : Promise.resolve([]),
     );
     renderTab(CAN_COUNT, server({ backup_retention: null }));
     await openBackupCreate();
-    expect(unknown()).toBeInTheDocument();
+    expect(
+      screen.getByText(t("schedules.dialog.retentionPruneCounting")),
+    ).toBeInTheDocument();
+    expect(unknown()).not.toBeInTheDocument();
     expect(createButton()).toBeDisabled();
   });
 

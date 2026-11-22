@@ -1285,9 +1285,13 @@ function ScheduleDialog({
           {confirmPrune && (
             <div className="field">
               <p className="schedule-prune-warning">
-                {pruneCount === null
-                  ? t("schedules.dialog.retentionPruneUnknown")
-                  : t("schedules.dialog.retentionPrune", { count: pruneCount })}
+                {pruneCount !== null
+                  ? t("schedules.dialog.retentionPrune", { count: pruneCount })
+                  : t(
+                      backupsQuery.isFetching
+                        ? "schedules.dialog.retentionPruneCounting"
+                        : "schedules.dialog.retentionPruneUnknown",
+                    )}
               </p>
               <label className="checkbox">
                 <input

@@ -1085,8 +1085,9 @@ numbers): the UI for the general scheduler.
   scheduled backups beyond N as soon as it is set, so the step counts them
   from the backups list (`backup:read`). When some would be deleted it says
   how many, and Create waits for an acknowledgement checkbox, asked again
-  when the count or N changes. Without `backup:read`, while the list loads,
-  or when it fails, a generic line replaces the count and the checkbox is
+  when the count or N changes. While the list loads, a counting line
+  replaces the count; without `backup:read`, or when the list fails, a
+  generic line says it could not be counted. Either way the checkbox is
   still required; with nothing to prune there is none.
 - Once the schedule is created, the step reads the server again and leaves a
   policy set since (from another session) in place; otherwise keep-last-N
