@@ -238,6 +238,13 @@ class CommandOutcome:
     # have": the Worker says it on a hydrate's TRANSFER_FAILED only, and an older
     # Worker never does.
     swap_began: bool | None = None
+    # The instant the API read the Worker's answer, before any await, as it
+    # stamps a Worker's report (issues #4117, #4118). The observed state a
+    # lifecycle operation converges from the answer is stamped with it, so a
+    # report read after the answer wins over the convergence and one read before
+    # it loses, whichever is written first. ``None`` for an outcome no Worker
+    # sent.
+    answered_at: dt.datetime | None = None
 
     @property
     def success(self) -> bool:

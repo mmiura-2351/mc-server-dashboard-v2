@@ -398,8 +398,8 @@ class SqlAlchemyServerRepository(ServerRepository):
             values["final_snapshot_refusal"] = None
         # A release owes no hydrate, and a running instance's working set is the
         # one its snapshots will capture, whatever the store holds (issue #3890).
-        # The write is stamped when it lands, so one residue is accepted (r2 review,
-        # question 3): the Worker's event channel outlives a session, and a
+        # A report is stamped as it reaches the API, so one residue is accepted (r2
+        # review, question 3): the Worker's event channel outlives a session, and a
         # ``running`` queued while it was disconnected, for an instance that has
         # ended since, is delivered after the reconnect, ahead of its terminal
         # event. It clears the mark of a placement on that Worker only if the
@@ -410,18 +410,28 @@ class SqlAlchemyServerRepository(ServerRepository):
         # Monotonic guard (issue #216): drop a write stamped no later than the row's
         # current observed_at, so a stale convergence write (stop SERVER_NOT_FOUND,
         # redispatch_start INVALID_STATE) cannot clobber a fresher StatusChange that
-        # already landed. All observed-state writers stamp clock.now(). A never-
-        # observed row has observed_at IS NULL and must still accept its first write.
-        # Strict ``<`` (not ``<=``) is right here: observed_at is timestamptz with
-        # microsecond resolution and every writer uses the same API clock, so equal
-        # timestamps mean a genuine same-instant duplicate that is safe to drop. The
-        # guard and the unassign live in one UPDATE, so a stale write's unassign
-        # decision is dropped atomically with the state write.
+        # already landed. All observed-state writers stamp the API clock: a Worker
+        # report with the instant the API read it (issue #4118), a convergence of
+        # the Worker's answer with the instant the API read that answer (issue
+        # #4117), a kept placement's ``unknown`` with the placement's own stamp
+        # (issue #3890), a disconnect's bulk ``unknown`` with the session's end,
+        # and any other write as it is made. A never-observed row has observed_at
+        # IS NULL and must still accept its first write. Strict ``<`` (not ``<=``)
+        # is right here: observed_at is timestamptz with microsecond resolution and
+        # every writer uses the same API clock, so equal timestamps mean a genuine
+        # same-instant duplicate that is safe to drop. A retry is the exception: it
+        # carries its first attempt's stamp, and that attempt may have committed
+        # with its answer lost (issue #4062), so a row at that very stamp holds the
+        # attempt's own write, which the retry makes again. The guard and the
+        # unassign live in one UPDATE, so a stale write's unassign decision is
+        # dropped atomically with the state write.
         conditions = [
             ServerModel.id == server_id.value,
             or_(
                 ServerModel.observed_at.is_(None),
-                ServerModel.observed_at < observed_at,
+                ServerModel.observed_at <= observed_at
+                if retry
+                else ServerModel.observed_at < observed_at,
             ),
         ]
         # Ownership condition (issue #1708), mirroring

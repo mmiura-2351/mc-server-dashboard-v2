@@ -737,7 +737,9 @@ async def test_resolve_ignores_result_from_non_owning_worker() -> None:
     intruder = WorkerId("33333333-3333-3333-3333-333333333333")
 
     future = state.register_pending("cmd-1", owner)
-    await state.resolve("cmd-1", intruder, pb.CommandResult(success=True))
+    await state.resolve(
+        "cmd-1", intruder, pb.CommandResult(success=True), received_at=_T0
+    )
 
     assert not future.done()
 
@@ -750,13 +752,15 @@ async def test_resolve_accepts_result_from_owning_worker() -> None:
     intruder = WorkerId("33333333-3333-3333-3333-333333333333")
 
     future = state.register_pending("cmd-1", owner)
-    await state.resolve("cmd-1", intruder, pb.CommandResult(success=False))
+    await state.resolve(
+        "cmd-1", intruder, pb.CommandResult(success=False), received_at=_T0
+    )
     assert not future.done()
 
-    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True), received_at=_T0)
 
     assert future.done()
-    assert future.result().success
+    assert future.result()[0].success
 
 
 class _RecordingLateSnapshotSink(LateSnapshotResultSink):
@@ -764,6 +768,8 @@ class _RecordingLateSnapshotSink(LateSnapshotResultSink):
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, CommandResultCode, str | None]] = []
+        # The instant each call says the result was read (issue #4117).
+        self.received: list[dt.datetime] = []
 
     async def clear_held_assignment_on_late_snapshot(
         self,
@@ -772,9 +778,11 @@ class _RecordingLateSnapshotSink(LateSnapshotResultSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         self.calls.append((server_id, worker_id, code, message))
+        self.received.append(received_at)
 
 
 _SERVER = "44444444-4444-4444-4444-444444444444"
@@ -813,6 +821,7 @@ async def test_late_failed_snapshot_forwards_the_worker_message() -> None:
                 code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED, message=detail
             ),
         ),
+        received_at=_T0,
     )
 
     assert sink.calls == [
@@ -831,7 +840,7 @@ async def test_late_failed_snapshot_without_a_message_falls_back_to_the_code() -
 
     state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     state.discard_pending("cmd-1")
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
 
     assert sink.calls == [
         (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
@@ -863,6 +872,7 @@ async def test_late_refused_snapshot_hands_the_sink_its_code(
             success=False,
             error=pb.CommandError(code=wire, message="a leftover may still run"),
         ),
+        received_at=_T0,
     )
 
     assert sink.calls == [(_SERVER, owner.value, code, "a leftover may still run")]
@@ -879,11 +889,11 @@ async def test_late_snapshot_from_non_owning_worker_is_ignored() -> None:
 
     state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     state.discard_pending("cmd-1")
-    await state.resolve("cmd-1", intruder, _failed_transfer_result())
+    await state.resolve("cmd-1", intruder, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
     # The owning worker's later report still clears it.
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == [
         (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
     ]
@@ -899,9 +909,33 @@ async def test_late_successful_snapshot_clears_held_assignment() -> None:
 
     state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     state.discard_pending("cmd-1")
-    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True), received_at=_T0)
 
     assert sink.calls == [(_SERVER, owner.value, CommandResultCode.OK, None)]
+
+
+@pytest.mark.parametrize("abandoned", ["timed-out", "cancelled"])
+async def test_a_late_snapshot_result_reaches_the_sink_with_the_instant_it_was_read(
+    abandoned: str,
+) -> None:
+    # The sink records a refusal, or a release it fails to write, for the
+    # reconciler with the instant the result was read, not handled (issue
+    # #4117). Both ways a final snapshot is abandoned hand it on.
+    sink = _RecordingLateSnapshotSink()
+    state = ControlPlaneState(late_snapshot_sink=sink)
+    owner = WorkerId(_WORKER)
+    future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
+    if abandoned == "timed-out":
+        state.discard_pending("cmd-1")
+    else:
+        future.cancel()
+    read_at = _T0 + dt.timedelta(seconds=1)
+
+    await state.resolve(
+        "cmd-1", owner, pb.CommandResult(success=True), received_at=read_at
+    )
+
+    assert sink.received == [read_at]
 
 
 async def test_unmatched_non_snapshot_result_is_dropped() -> None:
@@ -915,11 +949,13 @@ async def test_unmatched_non_snapshot_result_is_dropped() -> None:
     # A non-snapshot command that timed out: no late-snapshot record is kept.
     state.register_pending("cmd-1", owner)
     state.discard_pending("cmd-1")
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
     # An entirely unknown command_id (never registered) is also just dropped.
-    await state.resolve("cmd-unknown", owner, pb.CommandResult(success=True))
+    await state.resolve(
+        "cmd-unknown", owner, pb.CommandResult(success=True), received_at=_T0
+    )
     assert sink.calls == []
 
 
@@ -931,11 +967,11 @@ async def test_resolved_snapshot_leaves_no_late_record() -> None:
     owner = WorkerId(_WORKER)
 
     future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
-    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True), received_at=_T0)
     assert future.done()
 
     # A duplicate (the record is gone) is dropped, not routed to the sink.
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
 
@@ -953,7 +989,7 @@ async def test_disconnect_drops_in_flight_snapshot_record() -> None:
     state.fail_worker_pending(owner, session, WorkerNotConnectedError(owner.value))
     assert future.done()
 
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
 
@@ -972,7 +1008,7 @@ async def test_disconnect_drops_already_promoted_late_snapshot() -> None:
     state.discard_pending("cmd-1")  # timeout: promoted to _late_snapshots
     state.fail_worker_pending(owner, session, WorkerNotConnectedError(owner.value))
 
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
 
@@ -1026,11 +1062,15 @@ async def test_periodic_snapshot_timeout_does_not_clear_final_snapshot_hold() ->
 
         # Step 3a: the PERIODIC command's late result arrives. It was never tracked
         # (only the final snapshot is), so it must clear NOTHING.
-        await harness.state.resolve(periodic_cmd, worker, _failed_transfer_result())
+        await harness.state.resolve(
+            periodic_cmd, worker, _failed_transfer_result(), received_at=_T0
+        )
         assert sink.calls == []
 
         # Step 3b: the FINAL snapshot's own late result clears the held assignment.
-        await harness.state.resolve(final_cmd, worker, _failed_transfer_result())
+        await harness.state.resolve(
+            final_cmd, worker, _failed_transfer_result(), received_at=_T0
+        )
         assert sink.calls == [
             (
                 _SERVER,
@@ -1074,7 +1114,7 @@ async def test_cancelled_final_snapshot_dispatch_clears_on_late_result() -> None
         await task
 
     # The owning worker's late result clears the held assignment via the sink.
-    await state.resolve(command_id, worker, _failed_transfer_result())
+    await state.resolve(command_id, worker, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == [
         (_SERVER, worker.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
     ]
@@ -1102,7 +1142,7 @@ async def test_cancelled_periodic_snapshot_dispatch_leaves_no_late_record() -> N
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    await state.resolve(command_id, worker, _failed_transfer_result())
+    await state.resolve(command_id, worker, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
 
@@ -1168,7 +1208,7 @@ async def test_fire_and_forget_failure_log_caps_the_error_message(
         error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_INTERNAL, message=message),
     )
     with caplog.at_level(logging.WARNING):
-        await state.resolve(command_id, worker, failed)
+        await state.resolve(command_id, worker, failed, received_at=_T0)
         await task
 
     (record,) = [
@@ -1197,7 +1237,7 @@ async def test_reconnect_sweeps_promoted_late_snapshot_from_prior_session() -> N
     state.open_session(owner, session_b)
 
     # A spurious later result for the old command routes nowhere — the record is gone.
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
 
@@ -1211,6 +1251,7 @@ class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
@@ -1218,6 +1259,7 @@ class _DownLateSnapshotSink(_RecordingLateSnapshotSink):
             worker_id=worker_id,
             code=code,
             message=message,
+            received_at=received_at,
         )
         raise ConnectionRefusedError("connect call failed")
 
@@ -1234,10 +1276,10 @@ async def test_reconnect_sweeps_a_late_snapshot_whose_release_is_held() -> None:
     state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     state.discard_pending("cmd-1")
     with pytest.raises(ConnectionRefusedError):
-        await state.resolve("cmd-1", owner, _failed_transfer_result())
+        await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
 
     state.open_session(owner, 2)
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
 
     assert len(sink.calls) == 1
 
@@ -1260,6 +1302,7 @@ class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         await super().clear_held_assignment_on_late_snapshot(
@@ -1267,6 +1310,7 @@ class _SupersededDuringWriteSink(_RecordingLateSnapshotSink):
             worker_id=worker_id,
             code=code,
             message=message,
+            received_at=received_at,
         )
         self._state.open_session(self._owner, 2)
         if self._error is not None:
@@ -1290,11 +1334,13 @@ async def test_a_release_written_while_a_newer_session_opens_ends_as_written(
     state.discard_pending("cmd-1")
 
     if error is None:
-        await state.resolve("cmd-1", owner, _failed_transfer_result())
+        await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     else:
         with pytest.raises(error):
-            await state.resolve("cmd-1", owner, _failed_transfer_result())
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+            await state.resolve(
+                "cmd-1", owner, _failed_transfer_result(), received_at=_T0
+            )
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
 
     assert len(sink.calls) == 1
 
@@ -1494,7 +1540,7 @@ async def test_resolve_on_cancelled_future_fires_late_snapshot_sink() -> None:
 
     future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     future.cancel()
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
 
     assert sink.calls == [
         (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
@@ -1511,7 +1557,7 @@ async def test_resolve_on_cancelled_future_with_success_result() -> None:
 
     future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     future.cancel()
-    await state.resolve("cmd-1", owner, pb.CommandResult(success=True))
+    await state.resolve("cmd-1", owner, pb.CommandResult(success=True), received_at=_T0)
 
     assert sink.calls == [(_SERVER, owner.value, CommandResultCode.OK, None)]
 
@@ -1536,7 +1582,7 @@ async def test_dispatch_cancel_resolve_before_discard_fires_sink() -> None:
     command_id = (await queue.get()).api_command.command_id
     task.cancel()
     # Resolve BEFORE the cancelled task is awaited (discard_pending has not run).
-    await state.resolve(command_id, worker, _failed_transfer_result())
+    await state.resolve(command_id, worker, _failed_transfer_result(), received_at=_T0)
     with pytest.raises(asyncio.CancelledError):
         await task
 
@@ -1556,7 +1602,7 @@ async def test_resolve_cancelled_periodic_snapshot_does_not_fire_sink() -> None:
     # Periodic snapshot: no snapshot_server_id.
     future = state.register_pending("cmd-1", owner)
     future.cancel()
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
 
     assert sink.calls == []
 
@@ -1571,7 +1617,7 @@ async def test_discard_pending_after_cancelled_resolve_finds_nothing() -> None:
 
     future = state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
     future.cancel()
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == [
         (_SERVER, owner.value, CommandResultCode.TRANSFER_FAILED, "transfer_failed")
     ]
@@ -1600,7 +1646,7 @@ async def test_skipped_stale_final_snapshot_drops_late_record() -> None:
 
     # The late-snapshot record must have been cleaned up — a late result routes
     # nowhere.
-    await state.resolve("cmd-1", worker, _failed_transfer_result())
+    await state.resolve("cmd-1", worker, _failed_transfer_result(), received_at=_T0)
     assert sink.calls == []
 
 
@@ -1634,12 +1680,14 @@ async def test_final_snapshot_outstanding_ends_when_its_result_is_consumed() -> 
     owner = WorkerId(_WORKER)
 
     state.register_pending("cmd-1", owner, snapshot_server_id=_SERVER)
-    await state.resolve("cmd-1", owner, _failed_transfer_result())
+    await state.resolve("cmd-1", owner, _failed_transfer_result(), received_at=_T0)
     assert not state.final_snapshot_outstanding(_SERVER)
 
     state.register_pending("cmd-2", owner, snapshot_server_id=_SERVER)
     state.discard_pending("cmd-2")
-    await state.resolve("cmd-2", owner, _failed_transfer_result())  # late result
+    await state.resolve(
+        "cmd-2", owner, _failed_transfer_result(), received_at=_T0
+    )  # late result
     assert not state.final_snapshot_outstanding(_SERVER)
 
 
@@ -1880,7 +1928,10 @@ async def test_a_final_snapshot_is_never_stamped_and_runs_late() -> None:
 
         # The capture completes after the caller timed out: the hold is released.
         await harness.state.resolve(
-            final_msg.api_command.command_id, worker, pb.CommandResult(success=True)
+            final_msg.api_command.command_id,
+            worker,
+            pb.CommandResult(success=True),
+            received_at=_T0,
         )
         assert sink.calls == [(_SERVER, worker.value, CommandResultCode.OK, None)]
         assert not harness.state.final_snapshot_outstanding(_SERVER)
@@ -1953,7 +2004,9 @@ async def test_a_late_result_never_resolves_a_later_dispatch() -> None:
     )
     await asyncio.sleep(0)
     later = queue.get_nowait()
-    await state.resolve(first.correlation_id, worker, pb.CommandResult(success=True))
+    await state.resolve(
+        first.correlation_id, worker, pb.CommandResult(success=True), received_at=_T0
+    )
     await asyncio.sleep(0)
     assert not second.done()
 
@@ -1964,5 +2017,6 @@ async def test_a_late_result_never_resolves_a_later_dispatch() -> None:
             success=False,
             error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_INVALID_STATE),
         ),
+        received_at=_T0,
     )
     assert (await second).code is CommandResultCode.INVALID_STATE

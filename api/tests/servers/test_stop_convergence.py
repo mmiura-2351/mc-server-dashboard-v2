@@ -436,11 +436,16 @@ class _Worker:
                 success=False,
                 error=pb.CommandError(code=pb.COMMAND_ERROR_CODE_TRANSFER_FAILED),
             ),
+            received_at=_NOW,
         )
 
     async def report_ok(self, command_id: str, *, retry: bool = False) -> None:
         await self.state.resolve(
-            command_id, self.fleet_id, pb.CommandResult(success=True), retry=retry
+            command_id,
+            self.fleet_id,
+            pb.CommandResult(success=True),
+            retry=retry,
+            received_at=_NOW,
         )
 
     def reconnect(self) -> None:
@@ -470,6 +475,7 @@ class _Sink(LateSnapshotResultSink):
         worker_id: str,
         code: CommandResultCode,
         message: str | None,
+        received_at: dt.datetime,
         retry: bool = False,
     ) -> None:
         await _stop_server(
@@ -478,7 +484,9 @@ class _Sink(LateSnapshotResultSink):
             server_id=ServerId(uuid.UUID(server_id)),
             worker_id=WorkerId(uuid.UUID(worker_id)),
             outcome=CommandOutcome(
-                status=CommandStatus(code.value), message=message or ""
+                status=CommandStatus(code.value),
+                message=message or "",
+                answered_at=received_at,
             ),
             retry=retry,
         )

@@ -17,6 +17,7 @@ transport edge.
 from __future__ import annotations
 
 import abc
+import datetime as dt
 import enum
 from dataclasses import dataclass
 
@@ -186,6 +187,12 @@ class CommandResult:
     # it was. ``None`` is "not said": any other failure, or a Worker too old to
     # send the field.
     swap_began: bool | None = None
+    # The instant the API read the Worker's answer off the stream, before any
+    # await, as a report is stamped (issues #4117, #4118). A write that converges
+    # observed state from the answer is stamped with it, so it orders against the
+    # Worker's reports by when the API learned each. ``None`` for a result no
+    # Worker sent: a command the API refused to send.
+    answered_at: dt.datetime | None = None
 
     @property
     def success(self) -> bool:

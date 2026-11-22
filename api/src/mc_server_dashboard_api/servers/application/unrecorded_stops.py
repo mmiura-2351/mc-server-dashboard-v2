@@ -76,11 +76,13 @@ class UnrecordedStops:
     def record(self, server_id: ServerId, *, at: dt.datetime) -> None:
         """Record that a finished stop of ``server_id`` failed to be written.
 
-        ``at`` is when the failed write began (issue #3981), or when the Worker
-        answered a refused final snapshot (issue #3697). Callers record only
-        when nothing is in flight for the server: the Worker answered the stop or
-        reported the process gone, and no final snapshot of it can still be
-        uploading.
+        ``at`` is when the API read the Worker's answer the failed write
+        follows (issue #4117), or a refused final snapshot's answer (issue
+        #3697). A write that follows no answer, such as the release of a
+        disconnected Worker's row, records when it began (issue #3981). Callers
+        record only when nothing is in flight for the server: the Worker
+        answered the stop or reported the process gone, and no final snapshot of
+        it can still be uploading.
         """
 
         self._recorded_at[server_id] = at

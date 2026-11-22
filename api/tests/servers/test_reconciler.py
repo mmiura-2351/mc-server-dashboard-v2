@@ -59,6 +59,7 @@ from mc_server_dashboard_api.servers.domain.control_plane import (
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     CommandDispatchError,
+    FinalSnapshotRefusedError,
     InvalidLifecycleTransitionError,
 )
 from mc_server_dashboard_api.servers.domain.store_generation import (
@@ -4177,10 +4178,12 @@ async def test_a_record_made_since_the_drop_keeps_the_short_grace(
 # --- a finished stop's failed write is stamped as it begins (issue #3981) ---
 #
 # The record of a finished stop whose write failed carries the instant the
-# write began, by which time the Worker had answered, not the instant it
-# raised. A Worker that drops while the write fails is then newer than the
-# record, so its row waits the full grace from the drop: the stop's final
-# snapshot was never sent, and the Worker may be back with the working set.
+# Worker's answer was read (issue #4117), or, for an outcome that carries none
+# as here, the instant the write began, by which time the Worker had answered,
+# not the instant it raised. A Worker that drops while the write fails is then
+# newer than the record, so its row waits the full grace from the drop: the
+# stop's final snapshot was never sent, and the Worker may be back with the
+# working set.
 
 
 class _SlowFailingWrite(FakeServerRepository):
@@ -4603,3 +4606,272 @@ async def test_a_failed_mark_is_logged_and_the_tick_goes_on(
         for record in caplog.records
         if str(_GONE.value) in record.getMessage()
     ] == [logging.WARNING]
+
+
+# --- a record carries the instant its answer was read (issues #4117, #4118) --
+#
+# A refused stop, and a finished stop whose write failed, are recorded for the
+# reconciler with the instant the API read the Worker's answer that settled
+# them, as the observed state converged from that answer is stamped. A Worker
+# report is stamped as it is read, so a report read after the answer supersedes
+# the record, and one read before it does not, however long the answer waited
+# to be handled.
+
+_STOP_READ = _NOW - dt.timedelta(seconds=2)
+_SNAPSHOT_READ = _NOW - dt.timedelta(seconds=1)
+
+
+def _read_at(status: CommandStatus, at: dt.datetime) -> CommandOutcome:
+    return CommandOutcome(status=status, message="answered", answered_at=at)
+
+
+# Each place a record is made, by the one path that reaches it: the row's
+# (desired, observed), the Worker's answers, the write that fails, what the call
+# raises, and the instant the record must carry.
+_RECORDS = {
+    # The stop that set the intent, and the reconciler's re-sent stop, refused.
+    "stop-refused": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.INTERNAL, _STOP_READ)},
+        None,
+        CommandDispatchError,
+        _STOP_READ,
+    ),
+    "redispatch-stop-refused": (
+        DesiredState.STOPPED,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.INTERNAL, _STOP_READ)},
+        None,
+        CommandDispatchError,
+        _STOP_READ,
+    ),
+    # A confirmed stop, or one answered that no instance remains, whose observed
+    # write fails.
+    "stopped-write": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.OK, _STOP_READ)},
+        "record_observed_state",
+        ConnectionRefusedError,
+        _STOP_READ,
+    ),
+    "not-found-write": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {"stop": _read_at(CommandStatus.SERVER_NOT_FOUND, _STOP_READ)},
+        "record_observed_state",
+        ConnectionRefusedError,
+        _STOP_READ,
+    ),
+    # Either release after the final snapshot fails: it follows the snapshot's
+    # answer, not the stop's.
+    "stopped-release": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {
+            "stop": _read_at(CommandStatus.OK, _STOP_READ),
+            "snapshot": _read_at(CommandStatus.OK, _SNAPSHOT_READ),
+        },
+        "clear_assignment_after_final_snapshot",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    "not-found-release": (
+        DesiredState.RUNNING,
+        ObservedState.RUNNING,
+        {
+            "stop": _read_at(CommandStatus.SERVER_NOT_FOUND, _STOP_READ),
+            "snapshot": _read_at(CommandStatus.OK, _SNAPSHOT_READ),
+        },
+        "clear_assignment_after_final_snapshot",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    # The stale-stop arm: its release after the snapshot fails, or the Worker
+    # refuses the snapshot.
+    "stale-release": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"snapshot": _read_at(CommandStatus.OK, _SNAPSHOT_READ)},
+        "clear_stale_assignment",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    "snapshot-refused": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"snapshot": _read_at(CommandStatus.BUSY, _SNAPSHOT_READ)},
+        None,
+        FinalSnapshotRefusedError,
+        _SNAPSHOT_READ,
+    ),
+    # The late result of an abandoned final snapshot: a refusal, or a release
+    # whose write fails.
+    "late-refused": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"late": _read_at(CommandStatus.BUSY, _SNAPSHOT_READ)},
+        None,
+        None,
+        _SNAPSHOT_READ,
+    ),
+    "late-release": (
+        DesiredState.STOPPED,
+        ObservedState.STOPPED,
+        {"late": _read_at(CommandStatus.OK, _SNAPSHOT_READ)},
+        "get_by_id",
+        ConnectionRefusedError,
+        _SNAPSHOT_READ,
+    ),
+}
+
+
+async def _make_record(entry: str, stop: StopServer, server: Server) -> None:
+    c, s = server.community_id, server.id
+    if entry.startswith("late"):
+        late = stop.control_plane
+        assert isinstance(late, _LateResult)
+        await stop.clear_assignment_after_late_snapshot(
+            server_id=s, worker_id=_WORKER, outcome=late.result
+        )
+    elif entry.startswith("stale") or entry == "snapshot-refused":
+        await stop.clear_stale_assignment(
+            community_id=c, server_id=s, worker_connected=True
+        )
+    elif entry.startswith("redispatch"):
+        await stop.redispatch_stop(community_id=c, server_id=s)
+    else:
+        await stop(community_id=c, server_id=s)
+
+
+class _LateResult(FakeControlPlane):
+    """Carries the late result a test hands the late-snapshot release."""
+
+    def __init__(self, outcomes: dict[str, CommandOutcome]) -> None:
+        self.result = outcomes.pop("late", CommandOutcome(status=CommandStatus.OK))
+        super().__init__(outcomes=outcomes)
+
+
+@pytest.mark.parametrize("entry", list(_RECORDS))
+async def test_a_record_carries_the_instant_its_answer_was_read(entry: str) -> None:
+    desired, observed, answers, failing_write, raised, read_at = _RECORDS[entry]
+    repo = _OutageServerRepository()
+    server = _server(
+        desired=desired, observed=observed, worker=_WORKER, observed_at=None
+    )
+    repo.seed(server)
+    repo.down = set() if failing_write is None else {failing_write}
+    refusals = StopDispatchRefusals()
+    unrecorded = UnrecordedStops()
+    stop = StopServer(
+        uow=FakeUnitOfWork(servers=repo),
+        control_plane=_LateResult(dict(answers)),
+        clock=FakeClock(_NOW),
+        stop_refusals=refusals,
+        unrecorded_stops=unrecorded,
+    )
+
+    if raised is None:
+        await _make_record(entry, stop, server)
+    else:
+        with pytest.raises(raised):
+            await _make_record(entry, stop, server)
+
+    recorded = (
+        refusals.refused_at(server.id)
+        if entry.endswith("stop-refused")
+        else unrecorded.recorded_at(server.id)
+    )
+    assert recorded == read_at
+
+
+class _StopAnswerWaits(FakeControlPlane):
+    """Refuses the stop, its answer read at ``answered_at`` and handled at
+    ``handled_at``. Meanwhile a ``running`` report of the server, read at
+    ``reported_at``, is written, as the servicer writes a report queued ahead of
+    the answer or behind it before the stop's caller resumes."""
+
+    def __init__(
+        self,
+        repo: FakeServerRepository,
+        clock: FakeClock,
+        *,
+        answered_at: dt.datetime,
+        reported_at: dt.datetime,
+        handled_at: dt.datetime,
+    ) -> None:
+        super().__init__(
+            outcomes={"stop": _read_at(CommandStatus.INTERNAL, answered_at)}
+        )
+        self._repo = repo
+        self._clock = clock
+        self._reported_at = reported_at
+        self._handled_at = handled_at
+
+    async def stop(
+        self, *, worker_id: WorkerId, server_id: ServerId, force: bool = False
+    ) -> CommandOutcome:
+        outcome = await super().stop(
+            worker_id=worker_id, server_id=server_id, force=force
+        )
+        await self._repo.record_observed_state(
+            server_id,
+            ObservedState.RUNNING,
+            self._reported_at,
+            expected_worker=worker_id,
+        )
+        self._clock.set(self._handled_at)
+        return outcome
+
+
+@pytest.mark.parametrize(
+    ("report", "replayed"),
+    [("before-the-answer", ["stop", "snapshot"]), ("after-the-answer", [])],
+)
+async def test_a_report_read_after_a_refusal_supersedes_it_however_late_it_is_handled(
+    report: str, replayed: list[str]
+) -> None:
+    # The operator's stop commits its intent, and the Worker refuses it. Its
+    # answer waits a while behind a slow write before the stop resumes to
+    # record the refusal, and a report of the server is written meanwhile. One
+    # read after the answer is newer than the refusal: what happened since is
+    # unknown again, so the replay waits the full grace. One read before it is
+    # older, and the replay takes the short grace. The report's write lands
+    # before the refusal is recorded either way.
+    committed = _NOW
+    answered = committed + dt.timedelta(seconds=2)
+    reported = answered + dt.timedelta(seconds=-1 if report.startswith("before") else 1)
+    handled = answered + dt.timedelta(seconds=2)
+    uow = FakeUnitOfWork()
+    long_running = committed - dt.timedelta(seconds=3600)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=long_running,
+        updated_at=long_running,
+    )
+    uow.servers.seed(server)
+    refusals = StopDispatchRefusals()
+    clock = FakeClock(committed)
+    refusing = _StopAnswerWaits(
+        uow.servers,
+        clock,
+        answered_at=answered,
+        reported_at=reported,
+        handled_at=handled,
+    )
+    with pytest.raises(CommandDispatchError):
+        await StopServer(
+            uow=uow, control_plane=refusing, clock=clock, stop_refusals=refusals
+        )(community_id=server.community_id, server_id=server.id)
+    stored = uow.servers.by_id[server.id]
+    assert (stored.updated_at, stored.observed_at) == (committed, reported)
+
+    cp = FakeControlPlane()
+    clock.set(handled + dt.timedelta(seconds=_REFUSED_GRACE + 1))
+    assert clock.now() - reported < dt.timedelta(seconds=_GRACE)
+    await _reconciler(uow, cp, clock, stop_refusals=refusals).tick()
+
+    assert [k for k, _, _ in cp.dispatched] == replayed
