@@ -1095,8 +1095,8 @@ class PruneScheduledBackups:
     their sizes recorded: a legacy row whose archive exists then ranks as the
     sized row it is. A row whose archive the store reports missing stays NULL,
     so it ranks last. Any other store failure stops the prune before it selects
-    or deletes anything, with a WARNING, rather than rank on partial
-    information; the next run retries.
+    or deletes anything, with a WARNING that names the backup, rather than rank
+    on partial information; the next run retries.
 
     Runs under the same per-server :class:`LifecycleLock` that
     :class:`RestoreBackup` / :class:`DeleteBackup` hold, so a backup can never
@@ -1137,21 +1137,27 @@ class PruneScheduledBackups:
                 )
                 return []
             scheduled = [b for b in rows if b.source is BackupSource.SCHEDULED]
-            try:
-                sizes = await _probe_null_sizes(
-                    self.backup_store, community_id, server_id, scheduled
-                )
-            except Exception as exc:
-                _LOG.warning(
-                    "retention prune of server %s stopped before selecting "
-                    "anything: a NULL-size scheduled backup could not be sized "
-                    "(%s: %s), and the ranking needs its size. The next run "
-                    "retries.",
-                    server_id.value,
-                    type(exc).__name__,
-                    exc,
-                )
-                raise
+            sizes: dict[BackupId, int] = {}
+            # One row at a time, so the WARNING names the backup the store
+            # failed on: the error itself may name no key (issue #4158).
+            for backup in scheduled:
+                try:
+                    sizes |= await _probe_null_sizes(
+                        self.backup_store, community_id, server_id, [backup]
+                    )
+                except Exception as exc:
+                    _LOG.warning(
+                        "retention prune of server %s stopped before selecting "
+                        "anything: NULL-size scheduled backup %s (storage_ref "
+                        "%s) could not be sized (%s: %s), and the ranking needs "
+                        "its size. The next run retries.",
+                        server_id.value,
+                        backup.id.value,
+                        backup.storage_ref,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    raise
             await _record_sizes(self.uow, sizes)
             pruned = backups_to_prune(policy, scheduled, self.clock.now())
             for backup in pruned:
