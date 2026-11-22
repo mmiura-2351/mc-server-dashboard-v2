@@ -597,12 +597,12 @@ class StorageSweepSettings(_Section):
     interval, on the object backend only. Each pass, and the startup sweep, is
     followed by the row-less backup archive reclaim (issue #4106), which deletes
     a live server's archives no backup row names once they are older than
-    ``rowless_archive_grace_seconds``. The grace must be longer than any backup
-    takes to write.
+    ``rowless_archive_grace_seconds`` (7 days by default). The grace must be
+    longer than any backup takes to write.
     """
 
     interval_seconds: int = Field(default=86400, gt=0)
-    rowless_archive_grace_seconds: int = Field(default=3600, gt=0)
+    rowless_archive_grace_seconds: int = Field(default=604800, gt=0)
 
 
 class PortsSettings(_Section):

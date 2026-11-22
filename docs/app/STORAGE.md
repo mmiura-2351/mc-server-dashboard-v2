@@ -988,11 +988,15 @@ reads the backup rows. For each server row:
    on with the next server.
 2. Read the server's backup rows. The read follows the listing, so a row
    committed by then is seen. An archive a row names is live and never deleted.
+   A read that fails ends the whole pass with a WARNING, since every later
+   server reads the same database. So does a failed read of the servers.
 3. Spare any archive younger than the grace,
-   `storage_sweep.rowless_archive_grace_seconds` (1 h by default,
-   CONFIGURATION.md Section 5.15). Both writers, a create and an upload, hold
-   the server's lifecycle lock from the archive write to the row commit, and the
-   reclaim takes the same lock, so a writer that holds its lock is never raced.
+   `storage_sweep.rowless_archive_grace_seconds` (7 days by default,
+   CONFIGURATION.md Section 5.15). The age is the archive's own, from its store
+   time, not the time since it lost its row. Both writers, a create and an
+   upload, hold the server's lifecycle lock from the archive write to the row
+   commit, and the reclaim takes the same lock, so a writer that holds its lock
+   is never raced.
    The grace covers a writer that lost its lock (DATABASE.md Section 7) and goes
    on writing, and a store that stamps a multipart object with the time its
    upload began. So it must be longer than any backup takes to write.
@@ -1001,8 +1005,10 @@ reads the backup rows. For each server row:
    was deleted during the pass and is left alone: `DeleteServer` commits under
    the same lock. Otherwise delete each archive the rows still do not name, each
    after a check that the lock is still held. A server whose lock stays busy past
-   the wait budget is skipped until the next pass. A delete that fails ends that
-   server's pass with a WARNING.
+   the wait budget is skipped until the next pass. A delete that fails, or a lock
+   found lost before a delete, ends that server's pass with a WARNING, and the
+   pass goes on with the next server. A re-read that fails ends the whole pass
+   with a WARNING, as in step 2.
 
 Each reclaimed archive is logged at INFO with its server, its ref and its age.
 The pass asks the owner marker first, as every GC does (below), and a refusal
@@ -1140,12 +1146,13 @@ Cases the marker does not cover:
 
 - **A database restored to an earlier point** keeps its installation id, so its
   GCs run. Objects the store gained after the restore point have no row in the
-  restored database, backup archives included. The safety windows (1 h, and the
-  row-less archive reclaim's grace) spare only the newest of them, and
-  the re-read before each delete only catches a row committed meanwhile, so a pass
-  reclaims every such object stored more than an hour before it runs. Restore the
-  store from the same point, or copy out what it gained since, before the restored
-  database's API starts.
+  restored database, backup archives included. The safety windows spare only the
+  newest of them: 1 h for the JAR-pool, plugin-cache and resource-pack GCs, and
+  the row-less archive reclaim's grace (7 days by default) for backup archives.
+  The re-read before each delete only catches a row committed meanwhile, so a
+  pass reclaims every such object stored longer before it runs than its window.
+  Restore the store from the same point, or copy out what it gained since, before
+  the restored database's API starts.
 - **A database cloned from a dump** keeps the installation id too, so two
   databases now carry the same one. An API on the clone (a probe or staging
   stack seeded from a live dump) matches the live store's marker, and its GCs
@@ -2185,7 +2192,10 @@ each listed row is deleted and audited as `backup:delete_dangling`. Only the row
 is deleted: the store is sent no archive delete (issue #4158), so a NotFound
 that was false, from a store that flapped, leaves the archive in the store with
 no row rather than deleting it. The row-less archive reclaim (Section 4.3) then
-deletes that archive after the grace. Only a NotFound answer condemns a row: a HEAD
+deletes that archive at the next API start or sweep pass, unless the archive is
+younger than the grace: the grace counts from when the store wrote the archive,
+not from the repair. DEPLOYMENT.md (Storage-capacity incident runbook) says how
+to keep it. Only a NotFound answer condemns a row: a HEAD
 that fails any other way skips it, and the command then exits 1. `--apply` runs
 only while the owner marker (Section 4.3) names this database's installation,
 since a store that is not this database's answers NotFound for every row. It

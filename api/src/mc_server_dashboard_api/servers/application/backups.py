@@ -1236,7 +1236,8 @@ class DeleteDanglingBackups:
     and a NotFound that was false, from a store that flapped, would take the
     real archive with the row. A false one instead leaves the archive in the
     store with no row: no listing shows it, and the row-less archive reclaim
-    deletes it after its grace (issue #4106).
+    deletes it once it is older than the grace (issue #4106). The grace counts
+    from the archive's write, so an old backup's archive goes at the next pass.
     Each deletion is audited post-commit as ``backup:delete_dangling`` with
     ``actor_id``, ``None`` when run headless, as the sweep audits its verdicts.
 

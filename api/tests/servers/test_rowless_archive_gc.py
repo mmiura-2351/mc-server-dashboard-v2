@@ -32,6 +32,7 @@ from mc_server_dashboard_api.servers.domain.backup_store import StoredArchive
 from mc_server_dashboard_api.servers.domain.entities import Server
 from mc_server_dashboard_api.servers.domain.errors import (
     BackupStorageUnavailableError,
+    LifecycleLockLostError,
     ServerBusyError,
 )
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import (
@@ -47,6 +48,7 @@ from mc_server_dashboard_api.servers.domain.value_objects import (
     ServerType,
 )
 from tests.servers.fakes import (
+    DatabaseOutageError,
     FakeBackupArchiveStore,
     FakeClock,
     FakeLifecycleLock,
@@ -162,6 +164,18 @@ async def test_never_deletes_an_archive_a_row_names() -> None:
     assert env.deleted() == {"leftover"}
 
 
+async def test_a_server_whose_archives_are_all_named_takes_no_lock() -> None:
+    server = _server()
+    lock = FakeLifecycleLock()
+    env = _Env([server], lifecycle_lock=lock)
+    env.archive(server, "named", age=_OLD)
+    env.row(server, "named")
+
+    await env.reclaim()
+
+    assert lock.events == []
+
+
 async def test_deletes_under_the_lifecycle_lock_confirmed_before_the_delete() -> None:
     server = _server()
     lock = FakeLifecycleLock()
@@ -213,6 +227,120 @@ async def test_a_busy_server_is_skipped_and_the_pass_goes_on(
         "busy" in record.getMessage() and str(busy.id.value) in record.getMessage()
         for record in caplog.records
     )
+
+
+class _LostFor(LifecycleLock):
+    """Lost for the servers in ``lost``: their held lock fails its first check,
+    as the real one does once its session is gone (issue #3927). A
+    :class:`FakeLifecycleLock` for the rest."""
+
+    def __init__(self, lost: set[ServerId]) -> None:
+        self.lost = lost
+        self.inner = FakeLifecycleLock()
+
+    @contextlib.asynccontextmanager
+    async def hold(self, server_id: ServerId) -> AsyncIterator[HeldLifecycleLock]:
+        async with self.inner.hold(server_id) as held:
+            yield _LostHeld() if server_id in self.lost else held
+
+
+class _LostHeld(HeldLifecycleLock):
+    async def ensure_held(self) -> None:
+        raise LifecycleLockLostError("lost")
+
+
+async def test_a_lost_lock_skips_that_server_and_the_pass_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    lost, free = _server(), _server()
+    env = _Env([lost, free], lifecycle_lock=_LostFor({lost.id}))
+    env.archive(lost, "lost-leftover", age=_OLD)
+    env.archive(free, "free-leftover", age=_OLD)
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await env.reclaim()
+
+    assert env.deleted() == {"free-leftover"}
+    assert any(
+        record.levelno == logging.WARNING
+        and "lost" in record.getMessage()
+        and str(lost.id.value) in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def _fail_next_call(owner: object, method: str) -> None:
+    """Fail the next call of ``owner.method`` as a database outage would, once:
+    the calls after it run as before."""
+
+    original = getattr(owner, method)
+
+    async def failing(*_args: object, **_kwargs: object) -> object:
+        setattr(owner, method, original)
+        raise DatabaseOutageError("database unreachable")
+
+    setattr(owner, method, failing)
+
+
+def _ended_with_a_warning(caplog: pytest.LogCaptureFixture) -> bool:
+    return any(
+        record.levelno == logging.WARNING
+        and "database" in record.getMessage()
+        and "DatabaseOutageError" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+async def test_a_database_error_reading_the_servers_ends_the_pass_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server = _server()
+    env = _Env([server])
+    env.archive(server, "leftover", age=_OLD)
+    _fail_next_call(env.uow.servers, "list_all")
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await env.reclaim()
+
+    assert env.deleted() == set()
+    assert _ended_with_a_warning(caplog)
+
+
+async def test_a_database_error_reading_a_servers_rows_ends_the_pass_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The fault passes after one read, so a pass that went on with the next
+    # server would reclaim its leftover.
+    first, second = _server(), _server()
+    env = _Env([first, second])
+    env.archive(first, "first-leftover", age=_OLD)
+    env.archive(second, "second-leftover", age=_OLD)
+    _fail_next_call(env.uow.backups, "list_for_server")
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await env.reclaim()
+
+    assert env.deleted() == set()
+    assert _ended_with_a_warning(caplog)
+
+
+async def test_a_database_error_rereading_under_the_lock_ends_the_pass_with_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    first, second = _server(), _server()
+    lock = FakeLifecycleLock()
+    env = _Env([first, second], lifecycle_lock=lock)
+    env.archive(first, "first-leftover", age=_OLD)
+    env.archive(second, "second-leftover", age=_OLD)
+    # Only the re-read under the lock reads the server row back.
+    _fail_next_call(env.uow.servers, "get_by_id")
+
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        await env.reclaim()
+
+    assert env.deleted() == set()
+    assert lock.events == [(first.id, "acquire"), (first.id, "release")]
+    assert _ended_with_a_warning(caplog)
 
 
 class _RowLandsAtAcquire(FakeLifecycleLock):

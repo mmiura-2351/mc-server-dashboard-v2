@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from mc_server_dashboard_api.app import create_app
+from mc_server_dashboard_api.servers.adapters.lifecycle_lock import PgLifecycleLock
 from mc_server_dashboard_api.storage.adapters.fs import FsStorage
 
 
@@ -80,7 +81,9 @@ async def test_reclaims_at_startup_after_the_sweep_and_on_the_sweep_loop(
     [built] = recording.built
     assert loop["reclaim_rowless_archives"] is built
     assert built.kwargs["ownership"] is ownership
-    assert built.kwargs["grace"] == dt.timedelta(hours=1)
+    # The lock is what keeps a delete off a backup still being written.
+    assert isinstance(built.kwargs["lifecycle_lock"], PgLifecycleLock)
+    assert built.kwargs["grace"] == dt.timedelta(days=7)
 
 
 async def test_a_failed_startup_reclaim_is_logged_and_the_app_starts(

@@ -34,7 +34,10 @@ with an ERROR, unless it names this installation (STORAGE.md Section 4.3).
 **Record and failures.** Each reclaimed archive is logged at INFO, as the other
 GCs log what they reclaim. A store that fails to list a server's archives, or to
 delete one, ends that server's pass with a WARNING, and the pass goes on with the
-next server.
+next server. So does a lifecycle lock lost before a delete: the deletes stop
+there, and the next pass retries. A database read that fails, of the servers or
+of a server's rows, ends the whole pass with a WARNING: the database is what
+every later server would read too. The next pass retries.
 """
 
 from __future__ import annotations
@@ -46,7 +49,10 @@ from dataclasses import dataclass
 from mc_server_dashboard_api.servers.domain.backup_store import BackupArchiveStore
 from mc_server_dashboard_api.servers.domain.clock import Clock
 from mc_server_dashboard_api.servers.domain.entities import Server
-from mc_server_dashboard_api.servers.domain.errors import ServerBusyError
+from mc_server_dashboard_api.servers.domain.errors import (
+    LifecycleLockLostError,
+    ServerBusyError,
+)
 from mc_server_dashboard_api.servers.domain.lifecycle_lock import LifecycleLock
 from mc_server_dashboard_api.servers.domain.store_ownership import StoreOwnership
 from mc_server_dashboard_api.servers.domain.unit_of_work import UnitOfWork
@@ -70,12 +76,19 @@ class ReclaimRowlessBackupArchives:
         if refusal is not None:
             _LOG.error("row-less backup archive reclaim refused: %s", refusal)
             return
-        async with self.uow:
-            servers = await self.uow.servers.list_all()
+        try:
+            async with self.uow:
+                servers = await self.uow.servers.list_all()
+        except Exception as exc:  # noqa: BLE001 - logged; the next pass retries
+            _log_rows_unreadable("the servers", exc)
+            return
         for server in servers:
-            await self._reclaim(server)
+            if not await self._reclaim(server):
+                return
 
-    async def _reclaim(self, server: Server) -> None:
+    async def _reclaim(self, server: Server) -> bool:
+        """Reclaim ``server``'s leftovers; return whether the pass goes on."""
+
         try:
             archives = await self.backup_store.list_archives(
                 community_id=server.community_id, server_id=server.id
@@ -89,9 +102,13 @@ class ReclaimRowlessBackupArchives:
                 exc,
                 exc_info=True,
             )
-            return
-        async with self.uow:
-            rows = await self.uow.backups.list_for_server(server.id)
+            return True
+        try:
+            async with self.uow:
+                rows = await self.uow.backups.list_for_server(server.id)
+        except Exception as exc:  # noqa: BLE001 - logged; the next pass retries
+            _log_rows_unreadable(f"the backup rows of server {server.id.value}", exc)
+            return False
         named = {row.storage_ref for row in rows}
         now = self.clock.now()
         leftovers = [
@@ -101,7 +118,7 @@ class ReclaimRowlessBackupArchives:
             and now - archive.modified_at >= self.grace
         ]
         if not leftovers:
-            return
+            return True
         try:
             async with self.lifecycle_lock.hold(server.id) as lock:
                 # A row committed since the read above names its archive now. A
@@ -109,10 +126,16 @@ class ReclaimRowlessBackupArchives:
                 # left, and DeleteServer keeps one of its archives on purpose
                 # (issue #4165). It commits under this lock, so a row read here
                 # is a live server's.
-                async with self.uow:
-                    if await self.uow.servers.get_by_id(server.id) is None:
-                        return
-                    rows = await self.uow.backups.list_for_server(server.id)
+                try:
+                    async with self.uow:
+                        if await self.uow.servers.get_by_id(server.id) is None:
+                            return True
+                        rows = await self.uow.backups.list_for_server(server.id)
+                except Exception as exc:  # noqa: BLE001 - logged; next pass retries
+                    _log_rows_unreadable(
+                        f"the backup rows of server {server.id.value}", exc
+                    )
+                    return False
                 named = {row.storage_ref for row in rows}
                 for archive in leftovers:
                     if archive.storage_ref in named:
@@ -135,7 +158,7 @@ class ReclaimRowlessBackupArchives:
                             exc,
                             exc_info=True,
                         )
-                        return
+                        return True
                     _LOG.info(
                         "row-less backup archive reclaim deleted archive %s of "
                         "server %s (stored %s ago): no backup row names it",
@@ -149,3 +172,22 @@ class ReclaimRowlessBackupArchives:
                 "(another lifecycle operation holds it); the next pass retries",
                 server.id.value,
             )
+        except LifecycleLockLostError:
+            _LOG.warning(
+                "row-less backup archive reclaim skipped the rest of server %s: its "
+                "lifecycle lock was lost; the next pass retries",
+                server.id.value,
+                exc_info=True,
+            )
+        return True
+
+
+def _log_rows_unreadable(what: str, exc: Exception) -> None:
+    _LOG.warning(
+        "row-less backup archive reclaim ended the pass: the database could not "
+        "read %s: %s: %s; the next pass retries",
+        what,
+        type(exc).__name__,
+        exc,
+        exc_info=True,
+    )

@@ -857,7 +857,11 @@ write and its row. Each deletion runs under the server's lifecycle lock, after
 the rows are read again, and a busy server is skipped until the next pass. The
 grace must be longer than any backup, created or uploaded, takes to write: it
 is what spares the archive of a backup that lost its lifecycle lock mid-write
-and has not recorded its row yet. A reclaim that fails at startup is logged and the
+and has not recorded its row yet. An archive's age is the API's clock minus the
+store's last-modified time, so the grace must also exceed how far the API's
+clock runs ahead of the store's. The 7-day default also spares, for a while,
+the archives a database restored to an earlier point no longer has rows for
+(STORAGE.md Section 4.3). A reclaim that fails at startup is logged and the
 API still starts. The archives left under a deleted server are not reclaimed
 (issue #4165).
 
@@ -870,7 +874,7 @@ passes of both follow the interval.
 | Key | Default | Secret | Meaning |
 |---|---|---|---|
 | `storage_sweep.interval_seconds` | `86400` | | Loop resolution: how often the sweep wakes to reclaim orphan staging/snapshot prefixes, abort orphan in-progress multipart uploads and reclaim row-less backup archives, and how often the resource-pack GC wakes to reclaim stored packs no row names. A daily default matches the sibling GC loops and bounds accumulation without a restart. Must be positive. |
-| `storage_sweep.rowless_archive_grace_seconds` | `3600` | | How old a backup archive no row names must be before the row-less archive reclaim deletes it, by the store's last-modified time. Must be longer than any backup takes to write; raise it when a large world's backup or upload can take over an hour. Must be positive. |
+| `storage_sweep.rowless_archive_grace_seconds` | `604800` | | How old a backup archive no row names must be before the row-less archive reclaim deletes it, by the store's last-modified time (7 days by default). The age counts from the archive's write, not from when it lost its row. Must be longer than any backup takes to write, plus how far the API's clock runs ahead of the store's. Must be positive. |
 
 ---
 

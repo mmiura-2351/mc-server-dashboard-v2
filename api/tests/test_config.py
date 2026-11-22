@@ -188,10 +188,10 @@ _SECTION_LOADING_CASES = [
     ),
     pytest.param(
         "storage_sweep",
-        {"interval_seconds": 86400, "rowless_archive_grace_seconds": 3600},
+        {"interval_seconds": 86400, "rowless_archive_grace_seconds": 604800},
         {"interval_seconds": 1800, "rowless_archive_grace_seconds": 7200},
-        {"rowless_archive_grace_seconds": "5400"},
-        {"rowless_archive_grace_seconds": 5400},
+        {"interval_seconds": "3600", "rowless_archive_grace_seconds": "5400"},
+        {"interval_seconds": 3600, "rowless_archive_grace_seconds": 5400},
         id="storage-sweep",
     ),
     pytest.param(
