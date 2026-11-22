@@ -2150,20 +2150,18 @@ class OutageUnitOfWork(FakeUnitOfWork):
 
 
 class CommitAnswerLostUnitOfWork(FakeUnitOfWork):
-    """A :class:`FakeUnitOfWork` whose next commit lands and then raises, once
-    ``lose_next_answer`` is set: a COMMIT whose answer was lost with its
-    connection (issues #4062, #4152). This fake applies a write at once, so the
-    write stands."""
+    """A :class:`FakeUnitOfWork` whose next commit lands and then raises
+    ``lost_answer``, once it is set: a COMMIT whose answer was lost with its
+    connection, or a caller cancelled at its await (issues #4062, #4152). This
+    fake applies a write at once, so the write stands."""
 
-    lose_next_answer = False
+    lost_answer: BaseException | None = None
 
     async def commit(self) -> None:
         await super().commit()
-        if self.lose_next_answer:
-            self.lose_next_answer = False
-            raise DatabaseOutageError(
-                "connection was closed in the middle of operation"
-            )
+        if self.lost_answer is not None:
+            lost, self.lost_answer = self.lost_answer, None
+            raise lost
 
 
 @dataclass

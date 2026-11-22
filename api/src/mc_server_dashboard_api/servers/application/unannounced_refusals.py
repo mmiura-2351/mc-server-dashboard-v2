@@ -14,11 +14,11 @@ frame even when the row already holds the value, so one frame is published. The
 entry is forgotten once a write of the refusal is confirmed, and when the server
 is released, since a release publishes its own frame and clears the refusal.
 
-Only a failed COMMIT is recorded. A write that fails before its COMMIT was sent
-changed nothing, and the next attempt reads the row as it is. A COMMIT that
-failed without landing is recorded all the same, since its caller cannot tell
-the two apart, and costs at most one frame that repeats the value the row
-already held.
+Only a failed COMMIT is recorded, or one whose caller was cancelled at its
+await. A write that fails before its COMMIT was sent changed nothing, and the
+next attempt reads the row as it is. A COMMIT that failed without landing is
+recorded all the same, since its caller cannot tell the two apart, and costs at
+most one frame that repeats the value the row already held.
 
 Held in memory, like ``unrecorded_stops.py``. An API restart loses the entry, and
 the frame is then not published. That is accepted: the hold is the row, so a
@@ -42,7 +42,7 @@ class UnannouncedRefusals:
     _servers: set[ServerId] = field(default_factory=set)
 
     def record(self, server_id: ServerId) -> None:
-        """Record that a COMMIT of ``server_id``'s refusal failed after it was sent."""
+        """Record that a COMMIT of ``server_id``'s refusal went unanswered."""
 
         self._servers.add(server_id)
 

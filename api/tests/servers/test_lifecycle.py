@@ -8520,7 +8520,7 @@ async def _refused_stale_stops(
     stop: StopServer,
     community: uuid.UUID,
     server_id: uuid.UUID,
-    *raised: type[Exception],
+    *raised: type[BaseException],
 ) -> None:
     """Run the stale-stop arm once per entry of ``raised``, which it raises."""
 
@@ -8545,7 +8545,7 @@ async def test_a_refusal_whose_commit_answer_was_lost_is_announced_by_the_next_r
     repo = RefusalWriteFailsRepository()
     repo.seed(_held(community, server_id, worker, refusal=None))
     uow = CommitAnswerLostUnitOfWork(servers=repo)
-    uow.lose_next_answer = True
+    uow.lost_answer = DatabaseOutageError("connection closed mid-operation")
     refusals = UnannouncedRefusals()
     stop = StopServer(
         uow=uow,
@@ -8560,6 +8560,30 @@ async def test_a_refusal_whose_commit_answer_was_lost_is_announced_by_the_next_r
 
     assert repo.refusal_retries == [False, True]
     assert repo.by_id[ServerId(server_id)].final_snapshot_refusal is _REFUSALS[code]
+    assert not refusals.pending(ServerId(server_id))
+
+
+async def test_a_stop_cancelled_at_the_refusal_s_commit_owes_its_frame() -> None:
+    # A caller cancelled at the COMMIT's await may leave it landed with no
+    # answer read, as a lost one does: the next refused retry announces it.
+    community, server_id, worker = _ids()
+    repo = RefusalWriteFailsRepository()
+    repo.seed(_held(community, server_id, worker, refusal=None))
+    uow = CommitAnswerLostUnitOfWork(servers=repo)
+    uow.lost_answer = asyncio.CancelledError()
+    refusals = UnannouncedRefusals()
+    stop = StopServer(
+        uow=uow,
+        control_plane=_ScriptedSnapshots([_refused(CommandStatus.BUSY)] * 2),
+        clock=FakeClock(_NOW),
+        unannounced_refusals=refusals,
+    )
+
+    await _refused_stale_stops(
+        stop, community, server_id, asyncio.CancelledError, FinalSnapshotRefusedError
+    )
+
+    assert repo.refusal_retries == [False, True]
     assert not refusals.pending(ServerId(server_id))
 
 
@@ -8600,7 +8624,7 @@ async def test_a_retry_left_unanswered_keeps_the_announcement_owed(
     repo = RefusalWriteFailsRepository()
     repo.seed(_held(community, server_id, worker, refusal=None))
     uow = CommitAnswerLostUnitOfWork(servers=repo)
-    uow.lose_next_answer = True
+    uow.lost_answer = DatabaseOutageError("connection closed mid-operation")
     refusals = UnannouncedRefusals()
     stop = StopServer(
         uow=uow,

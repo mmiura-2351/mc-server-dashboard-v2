@@ -2843,8 +2843,9 @@ class StopServer:
         same, since it stays assigned, and keeps ``recorded`` until the next
         refused retry writes the refusal. The entity keeps ``recorded`` too.
 
-        A COMMIT that fails may have landed with its answer lost, and then the
-        row holds the refusal with no frame published. That write is recorded
+        A COMMIT that fails, or whose caller is cancelled at its await, may
+        have landed with its answer unread, and then the row holds the refusal
+        with no frame published. That write is recorded
         (``unannounced_refusals``, issue #4152), and the next refused attempt
         writes the refusal as a retry even when it reads it recorded, which
         publishes the frame. An API restart loses the record, and a reload
@@ -2860,7 +2861,8 @@ class StopServer:
                     )
                     try:
                         await self.uow.commit()
-                    except Exception:
+                    except BaseException:
+                        # A cancellation at the await may leave it landed too.
                         self.unannounced_refusals.record(server.id)
                         raise
             except Exception:
