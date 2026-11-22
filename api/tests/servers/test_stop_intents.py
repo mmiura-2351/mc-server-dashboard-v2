@@ -692,13 +692,25 @@ async def test_a_stop_during_a_re_sent_starts_wait_takes_its_final_snapshot() ->
     # the Worker's working set is as it was, and the start puts the mark back.
     # The stop, whose answer comes after that, takes the final snapshot it would
     # have taken without the start. Had its answer come first, it would have
-    # found the mark and taken none.
+    # found the mark and taken none. The stop runs a second later, so its flip
+    # stamps the row anew, and the start knows the row by the stamp the stop's
+    # bump recorded.
     world = _World(desired=DesiredState.RUNNING, assigned=True)
     world.cp.hold_stop_answer = asyncio.Event()
     stops: list[asyncio.Task[Server]] = []
+    later = StopServer(
+        uow=FakeUnitOfWork(servers=world.repo),
+        control_plane=world.cp,
+        clock=FakeClock(_NOW + dt.timedelta(seconds=1)),
+        stop_intents=world.intents,
+    )
 
     async def stop_is_sent() -> None:
-        stops.append(asyncio.create_task(world.stop()))
+        stops.append(
+            asyncio.create_task(
+                later(community_id=world.community, server_id=world.server_id)
+            )
+        )
         await world.cp.stop_sent.wait()
 
     start = replace(
