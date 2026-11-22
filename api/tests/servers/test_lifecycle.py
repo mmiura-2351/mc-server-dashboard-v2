@@ -470,6 +470,12 @@ async def test_start_jar_update_skips_hydrate_when_held_is_fresh_and_warns(
     assert ("hydrate", WorkerId(worker), ServerId(server_id)) not in cp.dispatched
     assert "JAR updated" in caplog.text
     assert "skip-hydrate is active" in caplog.text
+    # The deferral (issue #4046): the start runs whatever ``server.jar`` the
+    # retained set holds, while the row records the new key for the next hydrate.
+    assert ("start", WorkerId(worker), ServerId(server_id)) in cp.dispatched
+    assert cp.start_jar_relpath == "server.jar"
+    stored = uow.servers.by_id[ServerId(server_id)]
+    assert stored.config[JAR_KEY_CONFIG_FIELD] == "e" * 64
 
 
 async def test_place_and_start_persists_both_jar_config_fields() -> None:

@@ -49,7 +49,9 @@ class EnsuredJar:
     """Result of an ensure-on-start: the pool content key and the source fingerprint."""
 
     key: str  # pool content key (SHA-256)
-    source_fingerprint: str | None  # None only on resolve-failure fallback
+    # None only when a fallback (resolve or download failure) reuses a pooled JAR
+    # with no recorded fingerprint: both fallbacks return the recorded one.
+    source_fingerprint: str | None
 
 
 def source_fingerprint(source: JarSource) -> str:

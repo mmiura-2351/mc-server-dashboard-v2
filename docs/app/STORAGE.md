@@ -2303,6 +2303,21 @@ prepends a single tar member to the working set's members; when there is a resol
 a tar carrying just `server.jar` (a `200`, not the `204` of the nothing-to-send
 case) so the Worker can still launch.
 
+A hydrate is the only way a JAR reaches the Worker, so a JAR update waits for
+the next one (issue #4046). `StartServer` records the new key on the row before
+the generation-gated skip ([`CONTROL_PLANE.md`](CONTROL_PLANE.md) Section 5.1)
+decides. A start that reuses a retained working set at `held >= store` runs the
+`server.jar` that set already holds, because hydrating would roll back the newer
+world it keeps (issue #1676). Only the start that records the change logs a
+warning; a later start that skips the hydrate is silent. The recorded JAR
+arrives with the first start that hydrates: once the set is gone (a clean stop's
+final snapshot removes it), on another Worker, or after a store write (a backup
+restore, an at-rest edit) moves the store past the held generation. A publish
+from the running set does not bring one, because the Worker declares the
+generation it published and `held` still equals `store`. No boundary rests on
+this: the server's own code can already rewrite the `server.jar` in its
+bind-mounted working set ([`SECURITY.md`](SECURITY.md) Section 6).
+
 The version catalog lists/resolves vanilla (Mojang
 manifest), Paper (PaperMC API), fabric (meta.fabricmc.net), and forge (the Forge
 Maven + promotions feed). Forge resolves to

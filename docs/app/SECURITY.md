@@ -1105,6 +1105,15 @@ security model, and the following remain true:
   read. The API side is unchanged and still trusts the number a worker reports,
   so a compromised worker, which holds the key, is outside what it covers.
 
+  A JAR update is not one of those store moves, and the signature does not
+  change how it lands (issue #4046). The start records the new JAR on the
+  server row, and only a hydrate delivers it. A start that reuses a retained
+  set whose genuine marker is at `held >= store` keeps that set's JAR (issue
+  #1676) until a later start hydrates: after a clean stop cycle, on another
+  Worker, or after a store write ([`STORAGE.md`](STORAGE.md) Section 8, "JAR
+  posture"). That gives a hostile server nothing it lacks, because it can
+  already rewrite the `server.jar` in its bind-mounted working set.
+
 ---
 
 ## 7. Related documents

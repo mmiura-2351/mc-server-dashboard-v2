@@ -2231,6 +2231,7 @@ class FakeControlPlane(ControlPlane):
         cpu_millis: int,
     ) -> CommandOutcome:
         self.start_launch_server_type = server_type
+        self.start_jar_relpath = jar_relpath
         self.start_memory_limit_bytes = memory_limit_bytes
         self.start_cpu_millis = cpu_millis
         return await self._record("start", worker_id, server_id)
