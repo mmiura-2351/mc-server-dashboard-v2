@@ -647,8 +647,8 @@ class WorkerSessionServicer(WorkerServiceServicer):
         queue: asyncio.Queue[pb.WorkerMessage | None] = asyncio.Queue(
             maxsize=_INBOUND_QUEUE_MAXSIZE
         )
-        # Set at a clean EOF: the session is ending, so a held message is lost
-        # rather than holding up the teardown (issue #3614).
+        # Set at a clean EOF: the session is ending, so a held message gets one
+        # last attempt rather than holding up the teardown (issue #3614).
         stream_ended = asyncio.Event()
         processor = asyncio.ensure_future(
             self._process_inbound(worker_id, session, queue, stream_ended)
@@ -692,14 +692,20 @@ class WorkerSessionServicer(WorkerServiceServicer):
 
         A message the database is out for is held at the head of the queue
         (:meth:`_handle_held`); any other handler failure drops it and counts
-        toward the consecutive-failure cap (issues #776, #807).
+        toward the consecutive-failure cap (issues #776, #807). Once a newer
+        session has replaced this one, nothing more is handled: a message this
+        session still holds or queues would land after the newer session's
+        reports and set a row back to an older state (issue #3614).
         """
 
         consecutive_failures = 0
-        while True:
+        while self._registry.is_current_session(worker_id, session):
             message = await queue.get()
             if message is None:
                 return
+            # The get may have waited for the message.
+            if not self._registry.is_current_session(worker_id, session):
+                break
             # Contain a per-message handler failure so a single bad event is
             # logged and skipped rather than tearing down the whole worker
             # session (issue #776). Stream-level errors from iterating
@@ -734,6 +740,10 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 )
             else:
                 consecutive_failures = 0
+        _LOG.info(
+            "a newer session replaced this one; dropping its queued worker messages",
+            extra={"worker_id": worker_id.value},
+        )
 
     async def _handle_held(
         self,
@@ -747,18 +757,21 @@ class WorkerSessionServicer(WorkerServiceServicer):
         A failure :func:`is_transient_database_error` classifies as an outage is
         retried in place, with a capped backoff and no time budget, so the
         messages behind it wait and keep their order. The hold ends when the
-        message is applied, or when the session ends, which loses it. Any other
-        failure is raised, and so is an outage's failure on a retry the database
-        answered a ping just before: that error is the message's own, and holding
-        it would block the queue for good.
+        message is applied, or when the session ends, which loses it. At a clean
+        EOF the message first gets one last attempt, as each message behind it
+        does. Any other failure is raised, and so is an outage's failure on a
+        retry the database answered a ping both just before and just after: that
+        error is the message's own, and holding it would block the queue for good.
         """
 
         try:
             await self._handle(worker_id, message)
             return
         except Exception as exc:
-            if not is_transient_database_error(exc) or not self._session_lasts(
-                worker_id, session, stream_ended
+            if (
+                not is_transient_database_error(exc)
+                or stream_ended.is_set()
+                or not self._registry.is_current_session(worker_id, session)
             ):
                 raise
             _LOG.warning(
@@ -772,21 +785,37 @@ class WorkerSessionServicer(WorkerServiceServicer):
             while True:
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stream_ended.wait(), timeout=delay)
-                if not self._session_lasts(worker_id, session, stream_ended):
+                delay = min(delay * 2, _HOLD_RETRY_MAX_SECONDS)
+                # At a clean EOF the message gets one last attempt, as each
+                # message behind it does, and any failure of it drops it.
+                last = stream_ended.is_set()
+                answered_before = (
+                    False if last else await self._database_ping.is_reachable()
+                )
+                # Checked after the ping, which can last as long as a connect
+                # timeout.
+                if not self._registry.is_current_session(worker_id, session):
                     _LOG.info(
                         "lost a held worker message: its session ended",
                         extra={"worker_id": worker_id.value, "attempts": attempts},
                     )
                     return
-                delay = min(delay * 2, _HOLD_RETRY_MAX_SECONDS)
-                database_answers = await self._database_ping.is_reachable()
                 attempts += 1
                 try:
                     await self._handle(worker_id, message)
                 except Exception as exc:
+                    if last:
+                        _LOG.info(
+                            "lost a held worker message: its session ended",
+                            extra={"worker_id": worker_id.value, "attempts": attempts},
+                        )
+                        raise
                     if not is_transient_database_error(exc):
                         raise
-                    if database_answers:
+                    # Both pings must answer: one that fails after the retry
+                    # means the database went down again, not that the error
+                    # is the message's own.
+                    if answered_before and await self._database_ping.is_reachable():
                         _LOG.error(
                             "dropping a held worker message: the database "
                             "answers, yet the message still fails as if it were "
@@ -806,15 +835,6 @@ class WorkerSessionServicer(WorkerServiceServicer):
                 extra={"worker_id": worker_id.value, "attempts": attempts},
             )
             raise
-
-    def _session_lasts(
-        self, worker_id: WorkerId, session: SessionToken, stream_ended: asyncio.Event
-    ) -> bool:
-        """Whether the stream is still open and no newer session replaced it."""
-
-        return not stream_ended.is_set() and self._registry.is_current_session(
-            worker_id, session
-        )
 
     async def _rebuild_assignments(
         self, worker_id: WorkerId, session: SessionToken

@@ -365,7 +365,7 @@ class SqlAlchemyServerRepository(ServerRepository):
             values["assigned_worker_id"] = None
         # A release owes no hydrate, and a running instance's working set is the
         # one its snapshots will capture, whatever the store holds (issue #3890).
-        # The write is stamped on receipt, so one residue is accepted (r2 review,
+        # The write is stamped when it lands, so one residue is accepted (r2 review,
         # question 3): the Worker's event channel outlives a session, and a
         # ``running`` queued while it was disconnected, for an instance that has
         # ended since, is delivered after the reconnect, ahead of its terminal

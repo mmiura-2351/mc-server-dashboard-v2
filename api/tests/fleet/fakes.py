@@ -46,14 +46,19 @@ class FakeClock(Clock):
 
 
 class FakeDatabasePing(DatabasePing):
-    """Answers the liveness probe with ``reachable``, counting the probes."""
+    """Answers the probes with ``answers`` in turn, then ``reachable``; counts them."""
 
-    def __init__(self, *, reachable: bool = True) -> None:
+    def __init__(
+        self, *, reachable: bool = True, answers: list[bool] | None = None
+    ) -> None:
         self.reachable = reachable
+        self._answers = list(answers or [])
         self.calls = 0
 
     async def is_reachable(self) -> bool:
         self.calls += 1
+        if self._answers:
+            return self._answers.pop(0)
         return self.reachable
 
 
