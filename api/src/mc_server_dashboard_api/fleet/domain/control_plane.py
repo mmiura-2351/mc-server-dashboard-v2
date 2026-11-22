@@ -256,6 +256,7 @@ class SnapshotCommand:
 
     transfer_url: str
     transfer_token: str
+    final: bool = False
 
 
 @dataclass(frozen=True)

@@ -1125,17 +1125,27 @@ class SnapshotTrigger(_message.Message):
 
     TRANSFER_URL_FIELD_NUMBER: _builtins.int
     TRANSFER_TOKEN_FIELD_NUMBER: _builtins.int
+    FINAL_FIELD_NUMBER: _builtins.int
     transfer_url: _builtins.str
     transfer_token: _builtins.str
+    final: _builtins.bool
+    """final is set only on a stop's final snapshot (issue #4053). With it, a
+    stopped-id snapshot first ends the containers this Worker's own failed starts
+    left running for the server, as a hydrate does, and then packs what their
+    shutdown saves left. Without it nothing is ended: a periodic or on-demand
+    snapshot of a stopped id is refused while such a container may be running.
+    A running-id snapshot ignores it.
+    """
     def __init__(
         self,
         *,
         transfer_url: _builtins.str = ...,
         transfer_token: _builtins.str = ...,
+        final: _builtins.bool = ...,
     ) -> None: ...
     _HasFieldArgType: _TypeAlias = _Never  # noqa: Y015
     def HasField(self, field_name: _HasFieldArgType) -> _builtins.bool: ...
-    _ClearFieldArgType: _TypeAlias = _typing.Literal["transfer_token", b"transfer_token", "transfer_url", b"transfer_url"]  # noqa: Y015
+    _ClearFieldArgType: _TypeAlias = _typing.Literal["final", b"final", "transfer_token", b"transfer_token", "transfer_url", b"transfer_url"]  # noqa: Y015
     def ClearField(self, field_name: _ClearFieldArgType) -> None: ...
     def WhichOneof(self, oneof_group: _Never) -> None: ...
 
