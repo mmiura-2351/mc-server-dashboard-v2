@@ -1455,6 +1455,10 @@ class FakeGroupRepository(GroupRepository):
         # interleaving is pinned in tests/integration/test_group_attach_races.py.
         return None
 
+    async def lock_for_edit(self, group_id: GroupId) -> None:
+        # Nothing to hold, as above; pinned in the same module.
+        return None
+
     async def list_server_ids_for_group(self, group_id: GroupId) -> list[ServerId]:
         return sorted(
             (s for g, s in self.attachments if g == group_id),

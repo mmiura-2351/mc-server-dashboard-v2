@@ -388,7 +388,8 @@ class _FakeSaveSession:
     So the flush these tests target is only reached for a group that is still
     there, and ``get`` must model that. It takes ``populate_existing`` because the
     adapter passes it -- the read has to reach the database rather than the
-    session's identity map for the assertion to mean anything.
+    session's identity map for the assertion to mean anything -- and
+    ``with_for_update`` for the row lock the read takes (issue #2965).
 
     The identity map would not have held the row anyway: it is **weak**, and
     ``get_by_id`` hydrates a framework-free ``PlayerGroup`` and drops the
@@ -403,7 +404,12 @@ class _FakeSaveSession:
         self._row = row if row is not None else _player_group_row()
 
     async def get(
-        self, entity: object, ident: object, *, populate_existing: bool = False
+        self,
+        entity: object,
+        ident: object,
+        *,
+        populate_existing: bool = False,
+        with_for_update: object = None,
     ) -> object | None:
         return self._row
 
@@ -421,7 +427,12 @@ class _MissingRowSaveSession(_FakeSaveSession):
     """A ``_FakeSaveSession`` whose group is gone by the time ``save`` reads it."""
 
     async def get(
-        self, entity: object, ident: object, *, populate_existing: bool = False
+        self,
+        entity: object,
+        ident: object,
+        *,
+        populate_existing: bool = False,
+        with_for_update: object = None,
     ) -> object | None:
         return None
 

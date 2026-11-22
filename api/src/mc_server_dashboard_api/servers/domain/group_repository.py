@@ -72,22 +72,33 @@ class GroupRepository(abc.ABC):
         :class:`GroupNameAlreadyExistsError`
         (``uq_player_group_community_kind_name``, issue #2000).
 
-        The flush of the replacement ``group_player`` rows carries two more. A
-        concurrent group delete too late for the not-found above to catch leaves
-        those INSERTs violating ``fk_group_player_group_id_player_group`` -- the
-        same :class:`GroupNotFoundError`, raised by a constraint rather than by
-        the missing row (issue #2583). An interleaved second edit of the same
-        group violates ``uq_group_player_group_uuid`` instead and raises
-        :class:`GroupPlayerEditConflictError`: under READ COMMITTED the wholesale
-        DELETE cannot see a player the winner committed after it ran, so the
-        loser re-inserts a pair that now exists (issue #2613).
+        **Lock order (issue #2965).** The re-read locks the group's row (FOR NO
+        KEY UPDATE) before any ``group_player`` row is touched -- the order a group
+        delete takes them in: the row (:meth:`lock_against_attach`), then the
+        player rows its cascade removes. A save and a delete of one group therefore
+        never wait on each other in a cycle; the later one waits for the earlier to
+        commit. A delete behind a save deletes once the save has committed; a save
+        behind a delete finds the row gone and raises the not-found above. A second
+        save of the group waits the same way; its DELETE then sees, and replaces,
+        the rows the first one wrote, so the later save's player set wins -- which
+        is why an edit reads the group under :meth:`lock_for_edit` or
+        :meth:`lock_against_attach` before it saves. An attach's FK check does not
+        conflict with the lock.
 
-        A *rename* has a third site, earlier than both: the pending name UPDATE
-        the DELETE autoflushes matches zero rows when the racing delete commits
-        between the re-read and that statement, which the ORM reports as
-        ``StaleDataError`` rather than as a constraint violation. It is the same
-        vanished group, so it raises the same :class:`GroupNotFoundError`
-        (issue #2937). A player-only edit stages no UPDATE and so cannot reach it.
+        That lock closes three later sites that used to answer a racer. A
+        concurrent group delete too late for the not-found above to catch left the
+        replacement rows' INSERTs violating
+        ``fk_group_player_group_id_player_group`` -- the same
+        :class:`GroupNotFoundError`, raised by a constraint rather than by the
+        missing row (issue #2583) -- or, for a rename, left the pending name
+        UPDATE matching zero rows, which the ORM reports as ``StaleDataError``
+        and the adapter raises as the same not-found (issue #2937). An interleaved
+        second edit of the same group violated ``uq_group_player_group_uuid``,
+        raised as :class:`GroupPlayerEditConflictError`: under READ COMMITTED the
+        wholesale DELETE could not see a player the winner committed after it ran,
+        so the loser re-inserted a pair that then existed (issue #2613). Each of
+        those racers now waits on the lock instead; the adapter's translations of
+        all three are still in place.
         """
 
     @abc.abstractmethod
@@ -127,6 +138,22 @@ class GroupRepository(abc.ABC):
         under it (issue #3223): an attach that committed earlier is in the list,
         and a later one waits for the change — then sees it, or finds the group
         deleted. A group that does not exist locks nothing.
+
+        It holds off every edit and delete of the group as well, as
+        :meth:`lock_for_edit` does, so a player edit takes only this one.
+        """
+
+    @abc.abstractmethod
+    async def lock_for_edit(self, group_id: GroupId) -> None:
+        """Hold off every other edit and delete of ``group_id`` until this ends.
+
+        An edit takes this before it reads the group (issue #2965). :meth:`save`
+        writes back the whole group it is given -- its name and its full player
+        set -- so an edit that read the group before another edit committed would
+        write back what it read and undo that edit with no error. Under the lock,
+        an edit behind another reads what that one committed, and an edit behind
+        a delete finds the group gone. Attaches are not held off. A group that
+        does not exist locks nothing.
         """
 
     @abc.abstractmethod
