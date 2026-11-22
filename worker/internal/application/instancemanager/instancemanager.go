@@ -2320,6 +2320,9 @@ func (m *Manager) flushBeforeStopWithDriver(ctx context.Context, serverID, drive
 			"server_id", serverID, trips.attr())
 		return false
 	}
+	// The one line a clean flush writes, so its round trips are logged as well as a
+	// failed one's (issue #4038).
+	m.logger.Info("stop flush: working set settled", "server_id", serverID, trips.attr())
 	return true
 }
 

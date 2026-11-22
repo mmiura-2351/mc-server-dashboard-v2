@@ -260,6 +260,13 @@ func TestStopFlushLogsItsRCONRoundTrips(t *testing.T) {
 	const settleTimedOut = "stop flush: working set did not settle within budget; stopping anyway"
 	for _, tc := range []roundTripCase{
 		{
+			name:  "a clean flush",
+			conns: []*clockedControl{{}},
+			want: map[string]map[string]int64{
+				"stop flush: working set settled": {"save_off_ms": 1200, "save_all_ms": 3400},
+			},
+		},
+		{
 			name:        "a flush whose save never settles",
 			conns:       []*clockedControl{{}},
 			settleAfter: never,
