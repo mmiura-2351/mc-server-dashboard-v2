@@ -649,6 +649,7 @@ async def test_a_backup_retry_of_a_server_a_worker_still_holds_waits_too(
         ScheduleRunOutcome.FAILURE,
         ScheduleRunOutcome.SUCCESS,
     ]
+    assert env.runner._deferred == {}
 
 
 # A hold that outlasts reconciler.grace_seconds is no final snapshot in flight any
