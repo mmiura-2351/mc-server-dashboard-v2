@@ -63,6 +63,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileStorageUnavailableError,
     ServerNotFoundError,
     ServerNotRunningError,
+    SnapshotUploadInFlightError,
     WorkingSetSeedFailedError,
 )
 from mc_server_dashboard_api.servers.domain.value_objects import (
@@ -260,6 +261,21 @@ def test_start_transition_conflict_is_409() -> None:
     resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
     assert resp.status_code == 409
     assert resp.json()["reason"] == "transition_conflict"
+
+
+def test_start_with_its_workers_upload_in_flight_is_409_upload_in_flight() -> None:
+    # The start did not hydrate its Worker while that Worker's upload of the
+    # server was in flight, and kept both for the reconciler (issue #3950); the
+    # web UI reads the reason as a pending start.
+    app = _app(
+        member=True,
+        allow=True,
+        start=_FakeUseCase(error=SnapshotUploadInFlightError("x")),
+    )
+    client = _client(app)
+    resp = client.post(_url(uuid.uuid4(), uuid.uuid4(), "start"))
+    assert resp.status_code == 409
+    assert resp.json()["reason"] == "upload_in_flight"
 
 
 def test_start_no_eligible_worker_is_503() -> None:

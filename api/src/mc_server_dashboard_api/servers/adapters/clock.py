@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 from mc_server_dashboard_api.servers.domain.clock import Clock
 
@@ -12,3 +13,6 @@ class SystemClock(Clock):
 
     def now(self) -> dt.datetime:
         return dt.datetime.now(tz=dt.timezone.utc)
+
+    def monotonic(self) -> float:
+        return time.monotonic()

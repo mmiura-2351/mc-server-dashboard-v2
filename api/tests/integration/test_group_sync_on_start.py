@@ -30,6 +30,7 @@ from mc_server_dashboard_api.community.domain.value_objects import (
 )
 from mc_server_dashboard_api.community.domain.value_objects import CommunityName
 from mc_server_dashboard_api.core.adapters.database import create_session_factory
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.fleet.adapters.real_time_events import (
     InProcessRealTimeEvents,
 )
@@ -189,7 +190,9 @@ class _World:
             control_plane=cp,
             clock=FakeClock(_NOW),
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=StorageGenerationReader(storage=self.storage),
+            store_generation=StorageGenerationReader(
+                storage=self.storage, uploads=SnapshotUploads()
+            ),
             file_store=self.files,
         )(community_id=self.community_id, server_id=self.server_id)
         return cp
@@ -356,7 +359,9 @@ async def test_a_start_that_finds_the_server_live_leaves_the_change_owed(
             control_plane=cp,
             clock=FakeClock(_NOW + dt.timedelta(minutes=1)),
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=StorageGenerationReader(storage=world.storage),
+            store_generation=StorageGenerationReader(
+                storage=world.storage, uploads=SnapshotUploads()
+            ),
             file_store=world.files,
         )(community_id=world.community_id, server_id=world.server_id)
 
@@ -397,7 +402,9 @@ async def test_a_start_kept_on_a_busy_worker_leaves_the_change_owed(
             control_plane=cp,
             clock=FakeClock(_NOW + dt.timedelta(minutes=1)),
             jar_provisioner=FakeJarProvisioner(),
-            store_generation=StorageGenerationReader(storage=world.storage),
+            store_generation=StorageGenerationReader(
+                storage=world.storage, uploads=SnapshotUploads()
+            ),
             file_store=world.files,
         )(community_id=world.community_id, server_id=world.server_id)
 

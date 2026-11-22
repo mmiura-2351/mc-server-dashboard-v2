@@ -20,6 +20,7 @@ from dataclasses import replace
 from typing import assert_never
 
 from mc_server_dashboard_api.fleet.domain.control_plane import (
+    EXPIRY_MARGIN_SECONDS,
     CommandResult,
     CommandResultCode,
     CommandTimedOutError,
@@ -394,15 +395,34 @@ class FleetControlPlaneAdapter(ControlPlane):
         )
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         url = self._working_set_url(community_id, server_id)
         return await self._dispatch(
             worker_id,
             server_id,
             HydrateCommand(transfer_url=url, transfer_token=self._token()),
-            timeout_override=self._hydrate_timeout_seconds,
+            timeout_override=(
+                self._hydrate_timeout_seconds
+                if timeout_seconds is None
+                else timeout_seconds
+            ),
         )
+
+    def hydrate_timeout_seconds(self) -> float:
+        # A start spends this budget on its wait and its hydrate together (issue
+        # #3950), so an adapter that dispatches a start's hydrate needs one.
+        if self._hydrate_timeout_seconds is None:
+            raise RuntimeError("this control plane was built without a hydrate budget")
+        return self._hydrate_timeout_seconds
+
+    def command_expiry_margin_seconds(self) -> float:
+        return EXPIRY_MARGIN_SECONDS
 
     async def snapshot(
         self,

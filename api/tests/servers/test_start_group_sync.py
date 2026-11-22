@@ -107,6 +107,16 @@ class _VersionedFileStore(FakeFileStore, StoreGenerationReader):
     ) -> int:
         return self.generation
 
+    async def uploads_settled(
+        self,
+        *,
+        community_id: CommunityId,
+        server_id: ServerId,
+        worker_id: WorkerId,
+        timeout: float,
+    ) -> bool:
+        return True
+
 
 def _server(*, worker: WorkerId | None = None) -> Server:
     return Server(
@@ -404,7 +414,12 @@ class _WorkerAlreadyRunningIt(FakeControlPlane):
         self._live = True
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         outcome = await super().hydrate(
             worker_id=worker_id, community_id=community_id, server_id=server_id
@@ -545,7 +560,12 @@ class _LaunchInFlightThenLive(_WorkerAlreadyRunningIt):
         self._launching = True
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         if not self._launching:
             return await super().hydrate(
@@ -656,7 +676,12 @@ class _FailsThenInFlightThenLive(_LaunchInFlightThenLive):
         self._transfer_fails = True
 
     async def hydrate(
-        self, *, worker_id: WorkerId, community_id: CommunityId, server_id: ServerId
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        timeout_seconds: float | None = None,
     ) -> CommandOutcome:
         if not self._transfer_fails:
             return await super().hydrate(

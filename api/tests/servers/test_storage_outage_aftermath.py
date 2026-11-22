@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 from starlette.types import Message
 
+from mc_server_dashboard_api.dataplane.api.uploads import SnapshotUploads
 from mc_server_dashboard_api.http_streaming import ClosingStreamingResponse, started
 from mc_server_dashboard_api.servers.adapters.file_store import (
     StorageFileStoreAdapter,
@@ -149,7 +150,9 @@ class _Rig:
         return await self.files.read_file(**self.scope, rel_path=rel_path)
 
     async def generation(self) -> int:
-        reader = StorageGenerationReader(storage=self.storage)
+        reader = StorageGenerationReader(
+            storage=self.storage, uploads=SnapshotUploads()
+        )
         return await reader.current_generation(**self.scope)
 
 
@@ -246,7 +249,9 @@ def _start(rig: _Rig, control_plane: FakeControlPlane) -> StartServer:
         control_plane=control_plane,
         clock=FakeClock(_NOW),
         jar_provisioner=FakeJarProvisioner(),
-        store_generation=StorageGenerationReader(storage=rig.storage),
+        store_generation=StorageGenerationReader(
+            storage=rig.storage, uploads=SnapshotUploads()
+        ),
         file_store=rig.files,
     )
 

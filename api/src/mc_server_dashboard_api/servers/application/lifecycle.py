@@ -178,6 +178,7 @@ from mc_server_dashboard_api.servers.domain.errors import (
     ServerFileNotFoundError,
     ServerNotFoundError,
     ServerNotRunningError,
+    SnapshotUploadInFlightError,
 )
 from mc_server_dashboard_api.servers.domain.file_store import FileStore
 from mc_server_dashboard_api.servers.domain.groups import GroupKind, PendingGroupSync
@@ -507,15 +508,17 @@ class StartServer:
             server.config = config
             server.updated_at = self.clock.now()
             # Any failure across the CAS+commit window — a raising update_lifecycle or
-            # commit, the lost-race abort, or this request task being cancelled at an
-            # await (a client disconnect cancels the HTTP task), including the wait
-            # for the start-intent lock — must release the placement reservation
-            # (the slot _place tentatively took, #778), or it leaks permanently: a
-            # never-committed server id never appears in the authoritative tally, so
-            # no reconnect rebuild ever reclaims it. Releasing on an ambiguous commit
-            # failure is safe: if the commit actually landed, the committed count
-            # undercounts by one until the reconnect rebuild, exactly the recovery
-            # _compensate's docstring already relies on.
+            # commit, the lost-race abort, or this task being cancelled at an await,
+            # including the wait for the start-intent lock — must release the
+            # placement reservation (the slot _place tentatively took, #778), or it
+            # leaks permanently: a never-committed server id never appears in the
+            # authoritative tally, so no reconnect rebuild ever reclaims it. A client
+            # disconnect does not cancel this task: on the shipped uvicorn (h11) and
+            # Starlette ``BaseHTTPMiddleware`` stack, a disconnect reaches only a
+            # handler that reads the request body (issue #3950). Releasing on an
+            # ambiguous commit failure is safe: if the commit actually landed, the
+            # committed count undercounts by one until the reconnect rebuild, exactly
+            # the recovery _compensate's docstring already relies on.
             try:
                 # The flip assumes the at-rest row this start read under the lock,
                 # and the JAR provisioning above can be slow (issue #3927).
@@ -559,9 +562,9 @@ class StartServer:
                     # await in between (a sync registry call) — not after the ``async
                     # with`` block: the UoW ``__aexit__`` awaits rollback()/close(),
                     # suspension points outside this try/except where a
-                    # client-disconnect CancelledError (or a post-commit teardown
-                    # error) would leave the committed reservation neither confirmed
-                    # nor released, leaking it permanently (#840).
+                    # CancelledError (or a post-commit teardown error) would leave
+                    # the committed reservation neither confirmed nor released,
+                    # leaking it permanently (#840).
                     self.control_plane.increment_assignment(
                         worker_id=worker_id, server_id=server_id
                     )
@@ -640,6 +643,16 @@ class StartServer:
         except LifecycleTransitionConflictError:
             # The intent is no longer this start's (see ``_launch``): the write that
             # moved it owns the row and its load, so there is nothing to revert.
+            raise
+        except SnapshotUploadInFlightError:
+            # The wait for this Worker's upload ran out before the hydrate was sent
+            # (issue #3950). Keep the Worker, as for a hydrate refused BUSY below,
+            # so the reconciler retries the start on it. On the #2499 replay the
+            # start was sent already, which keeps the Worker as it is.
+            if not dispatch.attempted:
+                await self._record_unknown(
+                    server, worker_id, owe_again=owed_group_files
+                )
             raise
         except Exception as exc:
             # A timeout/lost-response AFTER the start was sent (dispatch.attempted)
@@ -758,7 +771,7 @@ class StartServer:
 
         - Before the start command was dispatched (placement, jar provisioning, a
           failed hydrate) -> safe: ``_unassign`` so a later tick re-places. No start
-          ever reached a Worker, so re-placing elsewhere cannot double-start. Three
+          ever reached a Worker, so re-placing elsewhere cannot double-start. Four
           exceptions keep the assignment. The re-read just before the send raising
           (a database error, issue #3741): the hydrate succeeded, so the
           assignment is kept for a re-send to the same Worker (see ``_launch``).
@@ -768,7 +781,12 @@ class StartServer:
           ``redispatch_start`` does, and returns. And a hydrate refused ``BUSY``,
           ``UNAVAILABLE`` or ``EXPIRED`` (issue #3890): the Worker may run an
           instance, so re-placing elsewhere MAY double-start. That one records
-          observed=unknown and raises, and the next tick retries this Worker.
+          observed=unknown and raises, and the next tick retries this Worker. And
+          a wait for the Worker's uploads that used the hydrate budget (issue
+          #3950): no hydrate was sent, and the server stays on this Worker so
+          that the retry's hydrate serves what the upload publishes. That one
+          records observed=unknown and raises as well, and the next tick retries
+          this Worker.
         - After the start was dispatched (a failed outcome, or a timeout/lost-response
           ``WorkerUnavailableError`` — the command MAY have been applied) -> KEEP the
           assignment. Subsequent ticks then take the ``redispatch_start`` path to the
@@ -854,9 +872,9 @@ class StartServer:
                     # await in between (a sync registry call) — not after the ``async
                     # with`` block: the UoW ``__aexit__`` awaits rollback()/close(),
                     # suspension points outside this try/except where a
-                    # client-disconnect CancelledError (or a post-commit teardown
-                    # error) would leave the committed reservation neither confirmed
-                    # nor released, leaking it permanently (#840).
+                    # CancelledError (or a post-commit teardown error) would leave
+                    # the committed reservation neither confirmed nor released,
+                    # leaking it permanently (#840).
                     self.control_plane.increment_assignment(
                         worker_id=worker_id, server_id=server_id
                     )
@@ -889,6 +907,11 @@ class StartServer:
                     stop_intent_count=stop_intent_count,
                     original=exc,
                 )
+            raise
+        except SnapshotUploadInFlightError:
+            # Kept on this Worker for the next tick, as ``__call__`` keeps it
+            # (issue #3950). This path always hydrates, so nothing was sent yet.
+            await self._record_unknown(server, worker_id, owe_again=owed_group_files)
             raise
         if not outcome.success:
             if not dispatch.attempted and outcome.status is CommandStatus.INVALID_STATE:
@@ -1107,7 +1130,8 @@ class StartServer:
         meanwhile, the row now names another Worker, or the count moved, this raises
         :class:`LifecycleTransitionConflictError` without sending the start. Every
         caller lets it propagate as is: the write that withdrew the intent owns the
-        decrement and the release, so nothing is compensated.
+        decrement and the release, so nothing is compensated. The same re-read runs
+        after the wait for the Worker's uploads (issue #3950), before the hydrate.
 
         ``skip_hydrate`` SKIPS the hydrate and goes straight to start (issue #696).
         Both ``__call__`` and ``redispatch_start`` perform a generation-gated check
@@ -1135,6 +1159,58 @@ class StartServer:
         """
 
         if not skip_hydrate:
+            # Wait first for this Worker's snapshot uploads of the server that are
+            # still in flight (issue #3950). The Worker's command can end at its
+            # deadline, or the Worker restart, while the API holds the whole body
+            # and goes on committing it. Hydrated before that commit, the Worker
+            # would run on the older generation, and the commit would then publish
+            # a world that run does not contain; after it, the hydrate serves it.
+            # Only this Worker's uploads: the commit-time fence refuses another
+            # Worker's while this one is assigned. Every caller runs this outside
+            # the lifecycle lock and its unit of work, and the wait holds nothing
+            # an upload needs. A skipped hydrate does not wait: the Worker runs
+            # on the tree such an upload packed, or a newer one. An upload that
+            # registers only after the wait is refused by the ``awaiting_hydrate``
+            # mark on a start that placed the server, but not on a
+            # ``redispatch_start``, which does not mark the row: CONTROL_PLANE.md
+            # Section 5 says what keeps that case out today (issue #4024).
+            #
+            # The wait and the hydrate share one deadline, the hydrate budget from
+            # the moment the wait begins, measured on the monotonic clock, so the
+            # hydrate gets what the wait left and the start's hydrate phase takes
+            # no longer than it did. A hydrate that then runs out of time fails as
+            # any hydrate timeout does. A wait that leaves no more than the
+            # command expiry margin raises before anything is sent, since a
+            # command handed that little is dropped unsent, and the Worker is not
+            # hydrated over the upload: ``__call__`` and ``place_and_start`` keep
+            # the server on this Worker, as for a hydrate refused BUSY, and
+            # ``redispatch_start`` changes nothing, so the reconciler retries the
+            # start here without placing it again.
+            budget = self.control_plane.hydrate_timeout_seconds()
+            began = self.clock.monotonic()
+            settled = await self.store_generation.uploads_settled(
+                community_id=community_id,
+                server_id=server_id,
+                worker_id=worker_id,
+                timeout=budget,
+            )
+            # Re-read the intent after the wait, whether it ended or ran out. The
+            # wait can last the whole budget, and a start that hangs is what an
+            # operator stops: a stop that committed meanwhile, or a row moved to
+            # another Worker, means this start is no longer anybody's. Answer the
+            # conflict and send nothing, as the re-read before the start does
+            # (below, which this mirrors): no hydrate goes to a Worker that may no
+            # longer hold the server, and nothing is recorded or owed again for a
+            # start the stop withdrew. Like that re-read it takes no lifecycle
+            # lock: a stop takes none, so the lock would order nothing against
+            # the write that withdraws the intent, and the row and the
+            # stop-intent count are what tell.
+            async with self.uow:
+                current = await self.uow.servers.get_by_id(server_id)
+            if current is None or not self._still_owns(
+                current, worker_id, stop_intent_count
+            ):
+                raise LifecycleTransitionConflictError(str(server_id.value))
             # Read the authoritative generation BEFORE the transfer (issue #2477): the
             # data plane serves the store's generation at PULL time, and the counter is
             # monotonic (commit_snapshot, a restore #873, an at-rest edit #889 and the
@@ -1144,13 +1220,31 @@ class StartServer:
             # later start would then skip a hydrate it needs. A failed read costs only
             # the refresh (the entry stays as it was, so the next start hydrates), so
             # it must not fail the launch.
-            hydrated_generation = await self._generation_before_hydrate(
-                community_id, server_id
-            )
+            hydrated_generation: int | None = None
+            if settled:
+                hydrated_generation = await self._generation_before_hydrate(
+                    community_id, server_id
+                )
+            remaining = budget - (self.clock.monotonic() - began)
+            if (
+                not settled
+                or remaining <= self.control_plane.command_expiry_margin_seconds()
+            ):
+                _LOG.warning(
+                    "start of server %s did not hydrate worker %s: waiting for the "
+                    "worker's snapshot uploads of the server left too little of the "
+                    "%ss hydrate budget to send the hydrate; the server stays on "
+                    "that worker, and the start is retried there",
+                    server_id.value,
+                    worker_id.value,
+                    budget,
+                )
+                raise SnapshotUploadInFlightError(str(server_id.value))
             hydrate = await self.control_plane.hydrate(
                 worker_id=worker_id,
                 community_id=community_id,
                 server_id=server_id,
+                timeout_seconds=remaining,
             )
             if not hydrate.success:
                 return hydrate
@@ -2003,8 +2097,9 @@ class StopServer:
           intact) → the late publish succeeds, then the stale-stop arm clears and the
           next start hydrates the captured generation; the race never opens.
 
-        On CANCELLATION (a client disconnect cancels the HTTP-request task at the
-        snapshot await) the clear is likewise SKIPPED — the dispatched snapshot keeps
+        On CANCELLATION of the task at the snapshot await (by whatever cancels it: a
+        client disconnect does not, on the shipped server stack, issue #3950) the
+        clear is likewise SKIPPED — the dispatched snapshot keeps
         uploading worker-side (abandoning the pending future signals nothing to the
         worker, and the proto has no command-cancel), so holding the assignment is
         CORRECT for the same reason as the timeout case. The ``CancelledError``

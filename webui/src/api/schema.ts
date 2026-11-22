@@ -2363,6 +2363,13 @@ export interface paths {
          *     this check before the placement was marked still commits, since the
          *     commit-time fence stays keyed on the Worker id.
          *
+         *     A publish that names its Worker counts as in flight from the moment it
+         *     arrives until it has committed or been refused (issue #3950). A start that
+         *     hydrates that Worker waits for it first, so the hydrate serves what it
+         *     publishes: a Worker's command can end before the commit of its upload does,
+         *     and a Worker hydrated in between would run on the older generation while the
+         *     commit published a world that run does not contain.
+         *
          *     The content-integrity gate uses the single region rule set (issue #927): a
          *     non-4096-aligned tail is the normal on-disk shape of a 26.x world, not a tear, on
          *     every snapshot source. The earlier source-keyed strict/live split (issue #923)
