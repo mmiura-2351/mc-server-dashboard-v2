@@ -61,7 +61,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(held, "level.dat"), []byte("x"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(held, 7); err != nil {
+	if err := stampGeneration(held, 7); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,7 +81,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 	if err := os.MkdirAll(markerOnly, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(markerOnly, 3); err != nil {
+	if err := stampGeneration(markerOnly, 3); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,7 +90,7 @@ func TestScanHeldServersReportsNonEmptyDirsWithGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
+	got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: heldNoMarkerID, Generation: 0},
@@ -145,7 +145,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 	// Both callers share hasWorkingSet, so both are asserted — non-fatally, so a
 	// regression names every caller it broke in one run.
 	want := session.HeldServer{ServerID: leftoverPlusWorldID, Generation: 0}
-	if got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); len(got) != 1 || got[0] != want {
+	if got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
 	m := New(nil, scratch, regionfsck.Checker{}, nil)
@@ -158,7 +158,7 @@ func TestScanHeldServersSkipsGenerationMarkerTempLeftover(t *testing.T) {
 // TestScanHeldServersMissingScratchRoot verifies an absent scratch root yields an
 // empty list (a fresh Worker holds nothing), not a panic or error.
 func TestScanHeldServersMissingScratchRoot(t *testing.T) {
-	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"), regionfsck.Checker{}, true, nil)
+	got := ScanHeldServers(filepath.Join(t.TempDir(), "does-not-exist"), &GenerationKey{}, regionfsck.Checker{}, true, nil)
 	if len(got) != 0 {
 		t.Fatalf("held = %v, want empty", got)
 	}
@@ -192,7 +192,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
+	if err := stampGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
 		t.Fatal(err)
 	}
 
@@ -204,12 +204,12 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sound, "r.0.0.mca"), healthyRegion(), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, soundServerID), 4); err != nil {
+	if err := stampGeneration(filepath.Join(scratch, soundServerID), 4); err != nil {
 		t.Fatal(err)
 	}
 	soundMarker := readMarkerBytes(t, filepath.Join(scratch, soundServerID))
 
-	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
+	got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: soundServerID, Generation: 4},
@@ -234,7 +234,7 @@ func TestScanHeldServersTornRegionForcesHydrate(t *testing.T) {
 			"scan every Register sends reads the marker, so a torn verdict that is not written "+
 			"there is advertised at the recorded generation and boots the torn world (issue #3178)", gen)
 	}
-	m := New(nil, scratch, regionfsck.Checker{}, nil)
+	m := New(nil, scratch, regionfsck.Checker{}, nil).WithGenerationKey(testGenerationKey)
 	closeWithTest(t, m)
 	inSession := m.HeldServers()
 	sort.Slice(inSession, func(i, j int) bool { return inSession[i].ServerID < inSession[j].ServerID })
@@ -262,15 +262,15 @@ func TestScanHeldServersFailedTornMarkerRewriteIsBestEffort(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
+	if err := stampGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
 		t.Fatal(err)
 	}
 	orig := rewriteTornMarker
-	rewriteTornMarker = func(string, uint64) error { return errors.New("injected: disk full") }
+	rewriteTornMarker = func(*GenerationKey, string, string, uint64) error { return errors.New("injected: disk full") }
 	t.Cleanup(func() { rewriteTornMarker = orig })
 	h := &capturingSlogHandler{}
 
-	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, slog.New(h))
+	got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, slog.New(h))
 
 	want := []session.HeldServer{{ServerID: tornServerID, Generation: 0}}
 	if len(got) != 1 || got[0] != want[0] {
@@ -311,7 +311,7 @@ func TestScanHeldServersTornSetWithoutAMarkerGainsNone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
+	got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, nil)
 
 	want := session.HeldServer{ServerID: tornServerID, Generation: 0}
 	if len(got) != 1 || got[0] != want {
@@ -369,7 +369,7 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 	if err := os.WriteFile(filepath.Join(torn, "r.0.0.mca"), healthyRegion()[:3*fsckSector-10], 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
+	if err := stampGeneration(filepath.Join(scratch, tornServerID), 9); err != nil {
 		t.Fatal(err)
 	}
 	sound := filepath.Join(scratch, soundServerID, "region")
@@ -379,11 +379,11 @@ func TestScanHeldServersAdvertisesTheRecordedGenerationWhenQuiescenceIsUnproven(
 	if err := os.WriteFile(filepath.Join(sound, "r.0.0.mca"), healthyRegion(), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, soundServerID), 4); err != nil {
+	if err := stampGeneration(filepath.Join(scratch, soundServerID), 4); err != nil {
 		t.Fatal(err)
 	}
 
-	got := ScanHeldServers(scratch, regionfsck.Checker{}, false, nil)
+	got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, false, nil)
 	sort.Slice(got, func(i, j int) bool { return got[i].ServerID < got[j].ServerID })
 	want := []session.HeldServer{
 		{ServerID: soundServerID, Generation: 4},
@@ -427,12 +427,12 @@ func TestScanHeldServersLiveFormatScratchAdvertisesHeldGeneration(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(live, "r.0.0.mca"), unalignedLiveRegion(), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(filepath.Join(scratch, liveServerID), 11); err != nil {
+	if err := stampGeneration(filepath.Join(scratch, liveServerID), 11); err != nil {
 		t.Fatal(err)
 	}
 	before := readMarkerBytes(t, filepath.Join(scratch, liveServerID))
 
-	got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
+	got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, nil)
 	want := []session.HeldServer{{ServerID: liveServerID, Generation: 11}}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("held = %v, want %v", got, want)
@@ -583,7 +583,7 @@ func TestHeldSetScansReportOnlyServerIDDirectories(t *testing.T) {
 	}
 
 	want := session.HeldServer{ServerID: serverID, Generation: 0}
-	if got := ScanHeldServers(scratch, regionfsck.Checker{}, true, nil); len(got) != 1 || got[0] != want {
+	if got := ScanHeldServers(scratch, testGenerationKey, regionfsck.Checker{}, true, nil); len(got) != 1 || got[0] != want {
 		t.Errorf("ScanHeldServers = %v, want [%v]", got, want)
 	}
 	h := &capturingSlogHandler{}
@@ -631,11 +631,11 @@ func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(srv, "level.dat"), []byte("x"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(srv, 3); err != nil {
+	if err := stampGeneration(srv, 3); err != nil {
 		t.Fatal(err)
 	}
 
-	m := New(nil, scratch, regionfsck.Checker{}, nil)
+	m := New(nil, scratch, regionfsck.Checker{}, nil).WithGenerationKey(testGenerationKey)
 	closeWithTest(t, m)
 
 	got := m.HeldServers()
@@ -647,7 +647,7 @@ func TestManagerHeldServersReadsCurrentGenerations(t *testing.T) {
 	}
 
 	// Advance the generation and verify HeldServers reflects the new value.
-	if err := writeGeneration(srv, 10); err != nil {
+	if err := stampGeneration(srv, 10); err != nil {
 		t.Fatal(err)
 	}
 	got = m.HeldServers()

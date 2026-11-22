@@ -552,7 +552,7 @@ func TestReclaimDeletedServerCommandEndsALeftoverOfAnUnheldScratch(t *testing.T)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, generationFile), testGenerationKey.seal(markerServerID(dir), 0), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	g.recordLeftover(s1)
@@ -585,7 +585,7 @@ func seedMarkerOnly(t *testing.T, m *Manager, serverID string) string {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("0"), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, generationFile), testGenerationKey.seal(markerServerID(dir), 0), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	return dir

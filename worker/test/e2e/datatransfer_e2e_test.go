@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,10 @@ func TestSnapshotThenHydrateRoundTrip(t *testing.T) {
 	// Act 2: hydrate the just-published set back into a fresh dir.
 	dest := t.TempDir()
 	hydrateURL := scopeURL(base, community, server, "working-set")
-	if _, err := client.Hydrate(ctx, hydrateURL, credential, dest); err != nil {
+	// The marker's content is the caller's (the Worker signs it, issue #3349); this
+	// test asserts the working set's files only.
+	marker := func(gen uint64) []byte { return []byte(strconv.FormatUint(gen, 10)) }
+	if _, err := client.Hydrate(ctx, hydrateURL, credential, dest, marker); err != nil {
 		t.Fatalf("Hydrate against real API: %v", err)
 	}
 
@@ -117,7 +121,7 @@ func TestHydrateRejectsWrongCredential(t *testing.T) {
 	defer cancel()
 
 	hydrateURL := scopeURL(base, community, server, "working-set")
-	_, err := client.Hydrate(ctx, hydrateURL, "wrong-credential", t.TempDir())
+	_, err := client.Hydrate(ctx, hydrateURL, "wrong-credential", t.TempDir(), func(uint64) []byte { return nil })
 	if err == nil {
 		t.Fatal("expected an error hydrating with a wrong credential (401)")
 	}

@@ -26,6 +26,11 @@ import (
 const generationMarkerFile = scratchformat.GenerationMarkerFile
 
 // tarOf builds an in-memory tar of {name: content}.
+// plainMarker renders a generation as the bare number. The Worker's own rendering
+// signs it (instancemanager, issue #3349); the adapter writes whatever it is given, and
+// these tests read the value back.
+func plainMarker(gen uint64) []byte { return []byte(strconv.FormatUint(gen, 10)) }
+
 func tarOf(files map[string]string) []byte {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -58,7 +63,7 @@ func TestHydrateUnpacksWorkingSet(t *testing.T) {
 
 	dest := t.TempDir()
 	c := New(srv.Client())
-	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest)
+	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker)
 	if err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
@@ -108,7 +113,7 @@ func TestHydrateReplacesStaleWorkingSet(t *testing.T) {
 	}
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -156,7 +161,7 @@ func TestHydrateDoesNotFollowPreexistingSymlink(t *testing.T) {
 	}
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -192,7 +197,7 @@ func TestHydrateLeavesNoTempSiblingsInScratch(t *testing.T) {
 	scratch := t.TempDir()
 	dest := filepath.Join(scratch, "server")
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -215,7 +220,7 @@ func TestHydrateNoContentLeavesDestEmpty(t *testing.T) {
 
 	dest := t.TempDir()
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 	entries, _ := os.ReadDir(dest)
@@ -235,7 +240,7 @@ func TestHydrateRejectsPathEscape(t *testing.T) {
 	parent := t.TempDir()
 	dest := filepath.Join(parent, "working")
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err == nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err == nil {
 		t.Fatal("expected an error for the path-escape member")
 	}
 	if _, err := os.Stat(filepath.Join(parent, "escape.txt")); !os.IsNotExist(err) {
@@ -277,7 +282,7 @@ func TestHydrateRejectsAbsoluteMember(t *testing.T) {
 			defer srv.Close()
 
 			dest := filepath.Join(t.TempDir(), "working")
-			_, err := New(srv.Client()).Hydrate(context.Background(), srv.URL, "tok", dest)
+			_, err := New(srv.Client()).Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker)
 			if err == nil || !strings.Contains(err.Error(), "refusing absolute member") {
 				t.Fatalf("Hydrate = %v, want the absolute member refused", err)
 			}
@@ -615,7 +620,7 @@ func TestHydrateRejectsSymlinkMember(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", t.TempDir()); err == nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", t.TempDir(), plainMarker); err == nil {
 		t.Fatal("expected an error for the symlink member")
 	}
 }
@@ -1092,7 +1097,7 @@ func TestTransferErrorNamesTheDataPlaneURL(t *testing.T) {
 		transfer func(t *testing.T, c *Client, transferURL string) error
 	}{
 		{"hydrate", func(t *testing.T, c *Client, transferURL string) error {
-			_, err := c.Hydrate(context.Background(), transferURL, "tok", filepath.Join(t.TempDir(), "dest"))
+			_, err := c.Hydrate(context.Background(), transferURL, "tok", filepath.Join(t.TempDir(), "dest"), plainMarker)
 			return err
 		}},
 		{"snapshot", func(t *testing.T, c *Client, transferURL string) error {
@@ -1569,7 +1574,7 @@ func TestHydrateRestoresOldCopyWhenSwapRenameFails(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"level.dat": "new-world"})
-	err := unpackAndSwap(bytes.NewReader(body), dest, 0, slog.Default())
+	err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(0), slog.Default())
 	if err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
@@ -1618,7 +1623,7 @@ func TestHydrateDisplacesOldWorkingSetInsteadOfDeleting(t *testing.T) {
 	}
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -1665,7 +1670,7 @@ func TestHydrateSwapChangesDestDirIdentity(t *testing.T) {
 	}
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -1708,12 +1713,12 @@ func TestHydrateKeepsOldestDisplacedTree(t *testing.T) {
 	c := New(srv.Client())
 	// First hydrate displaces working set "v1".
 	seed("v1")
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("first Hydrate: %v", err)
 	}
 	// Second hydrate displaces working set "v2", which must replace the v1 displaced tree.
 	seed("v2")
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("second Hydrate: %v", err)
 	}
 
@@ -1806,7 +1811,7 @@ func TestSwapAsidesOldCopyToDisplacedNotTrash(t *testing.T) {
 	defer func() { swapRename = orig }()
 
 	body := tarOf(map[string]string{"server.properties": "fresh"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 0, slog.Default()); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(0), slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1842,7 +1847,7 @@ func TestReHydrateDoesNotDeleteDisplacedWhenDestAbsent(t *testing.T) {
 	}
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -1881,7 +1886,7 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"level.dat": "new-world"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 0, slog.Default()); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(0), slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -1902,7 +1907,8 @@ func TestHydrateNeverDeletesOnlyCopyOnSwapFailure(t *testing.T) {
 // (issue #917 bug 1): if it is written after the swap, a crash between swap-in and
 // marker write leaves a destDir with no marker — the API reads gen 0 and re-dispatches
 // hydrate, and that spurious retry discards this working set whenever a .displaced-<id>
-// is retained (issue #2278).
+// is retained (issue #2278). What it holds is the caller's rendering of the served
+// generation, which signs it (issue #3349).
 func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 	const servedGen uint64 = 42
 	body := tarOf(map[string]string{"server.properties": "new"})
@@ -1930,17 +1936,18 @@ func TestGenerationMarkerPresentAtSwapTime(t *testing.T) {
 	}
 	defer func() { swapRename = orig }()
 
+	marker := func(gen uint64) []byte { return []byte("signed " + strconv.FormatUint(gen, 10)) }
 	c := New(srv.Client())
-	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest)
+	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, marker)
 	if err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 	if gen != servedGen {
 		t.Fatalf("generation = %d, want %d", gen, servedGen)
 	}
-	if markerAtSwap != strconv.FormatUint(servedGen, 10) {
+	if want := string(marker(servedGen)); markerAtSwap != want {
 		t.Fatalf("marker at swap-in time = %q, want %q (issue #917: marker must be written before swap)",
-			markerAtSwap, strconv.FormatUint(servedGen, 10))
+			markerAtSwap, want)
 	}
 }
 
@@ -1984,7 +1991,7 @@ func TestHydrateSkipsRootGenerationMarkerMembers(t *testing.T) {
 
 	dest := filepath.Join(t.TempDir(), "server")
 	c := New(srv.Client())
-	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest)
+	gen, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker)
 	if err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
@@ -2038,7 +2045,7 @@ func TestPriorDisplacedSurvivesSwapFailure(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -2114,7 +2121,7 @@ func TestSwapParksSupersededSetUnderSweepableName(t *testing.T) {
 	defer func() { swapRename = orig }()
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err != nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.Default()); err != nil {
 		t.Fatalf("unpackAndSwap: %v", err)
 	}
 
@@ -2152,7 +2159,7 @@ func TestSupersededSetDroppedOnSuccessfulSwap(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err != nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.Default()); err != nil {
 		t.Fatalf("unpackAndSwap: %v", err)
 	}
 
@@ -2255,7 +2262,7 @@ func TestSupersededSetKeptWhenSweepEmptiesSlotBeforeDrop(t *testing.T) {
 
 			h := &capturingHandler{}
 			body := tarOf(map[string]string{"server.properties": "new"})
-			if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.New(h)); err != nil {
+			if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.New(h)); err != nil {
 				t.Fatalf("unpackAndSwap: %v", err)
 			}
 			if !swept {
@@ -2330,7 +2337,7 @@ func TestSupersededSetRestoredWhenSwapFails(t *testing.T) {
 	}
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err == nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.Default()); err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the swap rename fails")
 	}
 
@@ -2381,7 +2388,7 @@ func TestCrashBetweenAsideAndSwapConvergesToOldest(t *testing.T) {
 	mkTree(filepath.Join(scratch, ".hydrate-server-456"), "half-unpacked")
 
 	c := New(srv.Client())
-	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest); err != nil {
+	if _, err := c.Hydrate(context.Background(), srv.URL, "tok", dest, plainMarker); err != nil {
 		t.Fatalf("Hydrate: %v", err)
 	}
 
@@ -2482,7 +2489,7 @@ func TestJunkDisplacedSlotDoesNotShadowLiveSet(t *testing.T) {
 			tc.junk(t, displaced)
 
 			body := tarOf(map[string]string{"server.properties": "new"})
-			if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default()); err != nil {
+			if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.Default()); err != nil {
 				t.Fatalf("unpackAndSwap: %v", err)
 			}
 
@@ -2537,7 +2544,7 @@ func TestUnreadableDisplacedSlotFailsHydrateWithoutDiscarding(t *testing.T) {
 	defer func() { readDir = orig }()
 
 	body := tarOf(map[string]string{"server.properties": "new"})
-	err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.Default())
+	err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.Default())
 	if err == nil {
 		t.Fatal("expected unpackAndSwap to fail when the displaced slot cannot be read")
 	}
@@ -2588,7 +2595,7 @@ func TestDiscardWarnsWithBothPaths(t *testing.T) {
 
 	h := &capturingHandler{}
 	body := tarOf(map[string]string{"server.properties": "new"})
-	if err := unpackAndSwap(bytes.NewReader(body), dest, 99, slog.New(h)); err != nil {
+	if err := unpackAndSwap(bytes.NewReader(body), dest, plainMarker(99), slog.New(h)); err != nil {
 		t.Fatalf("unpackAndSwap: %v", err)
 	}
 

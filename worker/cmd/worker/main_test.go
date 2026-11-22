@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -359,6 +358,10 @@ const s1 = "5d3c2b1a-0f9e-4d8c-8b7a-6f5e4d3c2b1a"
 func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 	scratch := t.TempDir()
 	seedTornWorkingSet(t, filepath.Join(scratch, s1), 9)
+	seeded, err := os.ReadFile(filepath.Join(scratch, s1, ".mcsd_generation"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	cp := newRegistrationRecorder()
 	// A docker socket that does not exist: the sweep's container list fails, which
 	// buildInstanceManager logs and does not treat as fatal, so boot continues unquiesced.
@@ -377,9 +380,9 @@ func TestBootDoesNotJudgeHeldWorldsWhenTheOrphanSweepFails(t *testing.T) {
 		t.Errorf("Register #1 held_servers = %v, want %v: a boot whose orphan sweep failed must "+
 			"advertise the recorded generation unjudged (issue #3171)", first, want)
 	}
-	if got, err := os.ReadFile(filepath.Join(scratch, s1, ".mcsd_generation")); err != nil || string(got) != "9" {
-		t.Errorf("s1 marker = %q (err %v) after an unquiesced boot, want \"9\" untouched: a boot "+
-			"that cannot prove no orphan is writing must not persist a torn verdict (issue #3171)", got, err)
+	if got, err := os.ReadFile(filepath.Join(scratch, s1, ".mcsd_generation")); err != nil || string(got) != string(seeded) {
+		t.Errorf("s1 marker = %q (err %v) after an unquiesced boot, want %q untouched: a boot "+
+			"that cannot prove no orphan is writing must not persist a torn verdict (issue #3171)", got, err, seeded)
 	}
 	out := logged()
 	if strings.Contains(out, "has a corrupt region") {
@@ -458,8 +461,9 @@ func TestBootJudgesATornHeldWorldWhenTheOrphanSweepSucceeds(t *testing.T) {
 func TestHydratedTornHeldSetIsAdvertisedAtItsServedGenerationWithoutAReboot(t *testing.T) {
 	scratch := t.TempDir()
 	seedTornWorkingSet(t, filepath.Join(scratch, s1), 9)
-	boot := instancemanager.ScanHeldServers(scratch, regionfsck.Checker{}, true, nil)
-	manager := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil).WithTransfer(soundTreeTransfer{gen: 9})
+	key := instancemanager.LoadGenerationKey(scratch, nil)
+	boot := instancemanager.ScanHeldServers(scratch, key, regionfsck.Checker{}, true, nil)
+	manager := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil).WithGenerationKey(key).WithTransfer(soundTreeTransfer{gen: 9})
 	t.Cleanup(manager.Close)
 
 	cp := newRegistrationRecorder()
@@ -572,7 +576,7 @@ type soundTreeTransfer struct {
 	gen uint64
 }
 
-func (s soundTreeTransfer) Hydrate(_ context.Context, _, _, workingDir string) (uint64, error) {
+func (s soundTreeTransfer) Hydrate(_ context.Context, _, _, workingDir string, _ func(uint64) []byte) (uint64, error) {
 	if err := os.RemoveAll(workingDir); err != nil {
 		return 0, err
 	}
@@ -850,10 +854,10 @@ func cancelOnFirstDial(t *testing.T, cancel context.CancelFunc) string {
 // it references starts past the end of the file (regionfsck's sector_out_of_bounds). This
 // is the shape a crash mid-chunk-save leaves, and the one the fsck exists to catch.
 //
-// The image and the marker name are spelled out here rather than shared with the
-// instancemanager fixtures, which are behind an internal package's test files; the two
-// boot tests are paired so the shape cannot rot silently — the sweep-succeeded leg fails
-// the moment this stops reading as torn.
+// The image is spelled out here rather than shared with the instancemanager fixtures,
+// which are behind an internal package's test files; the two boot tests are paired so
+// the shape cannot rot silently — the sweep-succeeded leg fails the moment this stops
+// reading as torn.
 func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 	t.Helper()
 	region := make([]byte, 2*4096)
@@ -865,11 +869,29 @@ func seedTornWorkingSet(t *testing.T, dir string, gen int) {
 	if err := os.WriteFile(filepath.Join(dir, "region", "r.0.0.mca"), region, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	// scratchformat.GenerationMarkerFile; a rename there fails these tests loudly,
-	// because a set with no marker is advertised at generation 0 either way.
-	if err := os.WriteFile(filepath.Join(dir, ".mcsd_generation"), []byte(strconv.Itoa(gen)), 0o640); err != nil {
-		t.Fatal(err)
+	// The marker is the Worker's own, signed under the key at the scratch root that boot
+	// loads too (issue #3349), so it is written the way the Worker writes it: by a hydrate
+	// through a manager given that key, whose data plane leaves the tree as it is.
+	scratch, id := filepath.Dir(dir), filepath.Base(dir)
+	m := instancemanager.New(nil, scratch, regionfsck.Checker{}, nil).
+		WithGenerationKey(instancemanager.LoadGenerationKey(scratch, nil)).
+		WithTransfer(stampOnlyTransfer{gen: uint64(gen)})
+	defer m.Close()
+	if res := m.Handle(context.Background(), session.Command{CommandID: "seed", ServerID: id, Kind: "HydrateTrigger"}); !res.Success {
+		t.Fatalf("stamping %s's marker: %+v", id, res)
 	}
+}
+
+// stampOnlyTransfer is a data plane whose hydrate leaves the working set as it is and
+// reports gen, so the marker the manager writes after it is the hydrate's only effect.
+// The embedded Transfer is nil, so any other data-plane call panics the test.
+type stampOnlyTransfer struct {
+	instancemanager.Transfer
+	gen uint64
+}
+
+func (s stampOnlyTransfer) Hydrate(context.Context, string, string, string, func(uint64) []byte) (uint64, error) {
+	return s.gen, nil
 }
 
 // captureStderr redirects os.Stderr to a pipe for the rest of the test and returns the

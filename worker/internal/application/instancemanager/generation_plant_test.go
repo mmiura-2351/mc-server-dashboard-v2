@@ -96,20 +96,13 @@ func markerPlants() []markerPlant {
 			}
 			return ""
 		}},
-		// Zero-padded to 33 bytes, one past the 32-byte cap: it parses as 42 when read
+		// Zero-padded to 129 bytes, one past the 128-byte cap: it parses as 42 when read
 		// whole, so only the size bound refuses it. The length is spelled out so that
 		// raising the cap fails here.
 		{"well-formed but over the size cap", func(t *testing.T, path string) string {
 			t.Helper()
-			padded := strings.Repeat("0", 31) + outsideGeneration
+			padded := strings.Repeat("0", 127) + outsideGeneration
 			if err := os.WriteFile(path, []byte(padded), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return ""
-		}},
-		{"not a number", func(t *testing.T, path string) string {
-			t.Helper()
-			if err := os.WriteFile(path, []byte("not-a-number"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			return ""
@@ -200,7 +193,7 @@ func TestReadGenerationMarkerRefusesAPlantedMarker(t *testing.T) {
 
 			var gen uint64
 			var err error
-			within(t, "the marker read", func() { gen, err = readGenerationMarker(dir) })
+			within(t, "the marker read", func() { gen, err = readMarker(dir) })
 
 			if gen != 0 || err == nil {
 				t.Fatalf("readGenerationMarker = %d, %v; want 0 and a refusal", gen, err)
@@ -217,20 +210,23 @@ func TestReadGenerationMarkerReportsAnAbsentMarkerAsZeroWithoutAnError(t *testin
 		"marker absent":      t.TempDir(),
 		"working dir absent": filepath.Join(t.TempDir(), "absent"),
 	} {
-		if gen, err := readGenerationMarker(dir); gen != 0 || err != nil {
+		if gen, err := readMarker(dir); gen != 0 || err != nil {
 			t.Errorf("%s: readGenerationMarker = %d, %v; want 0, nil", name, gen, err)
 		}
 	}
 }
 
-// The largest generation there is, with the trailing newline an operator's echo
-// adds, fits the cap.
+// The largest generation there is, signed, fits the cap.
 func TestReadGenerationMarkerAcceptsTheLargestGeneration(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, generationFile), []byte("18446744073709551615\n"), 0o600); err != nil {
+	dir := filepath.Join(t.TempDir(), s1)
+	if err := os.Mkdir(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if gen, err := readGenerationMarker(dir); gen != 1<<64-1 || err != nil {
+	marker := testGenerationKey.seal(s1, 1<<64-1)
+	if err := os.WriteFile(filepath.Join(dir, generationFile), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gen, err := readMarker(dir); gen != 1<<64-1 || err != nil {
 		t.Fatalf("readGenerationMarker = %d, %v; want the maximum generation", gen, err)
 	}
 }
@@ -261,11 +257,11 @@ func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
 			m := newManager(t, &fakeDriver{}, nil)
 			h := &capturingSlogHandler{}
 			m.WithLogger(slog.New(h))
-			if err := writeGeneration(seed(t, m.scratchDir, aHealthy), 5); err != nil {
+			if err := stampGeneration(seed(t, m.scratchDir, aHealthy), 5); err != nil {
 				t.Fatal(err)
 			}
 			outside := plant.plant(t, filepath.Join(seed(t, m.scratchDir, bPlanted), generationFile))
-			if err := writeGeneration(seed(t, m.scratchDir, cHealthy), 9); err != nil {
+			if err := stampGeneration(seed(t, m.scratchDir, cHealthy), 9); err != nil {
 				t.Fatal(err)
 			}
 			want := []session.HeldServer{
@@ -276,10 +272,10 @@ func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
 
 			for name, scan := range map[string]func() []session.HeldServer{
 				"the quiesced boot scan": func() []session.HeldServer {
-					return ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, slog.New(h))
+					return ScanHeldServers(m.scratchDir, testGenerationKey, regionfsck.Checker{}, true, slog.New(h))
 				},
 				"the unquiesced boot scan": func() []session.HeldServer {
-					return ScanHeldServers(m.scratchDir, regionfsck.Checker{}, false, slog.New(h))
+					return ScanHeldServers(m.scratchDir, testGenerationKey, regionfsck.Checker{}, false, slog.New(h))
 				},
 				"the per-Register scan": m.HeldServers,
 			} {
@@ -313,8 +309,7 @@ func TestHeldServerScansSurviveAPlantedMarkerInOneServer(t *testing.T) {
 // replaying the launch with a hydrate.
 func TestStartRefusedWhenTheMarkerIsNotARegularFile(t *testing.T) {
 	for _, plant := range markerPlants() {
-		if plant.name == "not a number" || plant.name == "well-formed but over the size cap" ||
-			plant.name == "sparse and huge" {
+		if plant.name == "well-formed but over the size cap" || plant.name == "sparse and huge" {
 			// Regular files: the guard's predicate is the marker's presence, not its
 			// content, exactly as before.
 			continue
@@ -379,7 +374,7 @@ func TestRunningSnapshotDeclaresNoBaseForAPlantedMarkerAndRestampsIt(t *testing.
 			if info, err := os.Lstat(marker); err != nil || !info.Mode().IsRegular() {
 				t.Fatalf("the marker after the stamp: %v, %v; want a regular file", info, err)
 			}
-			if gen, err := readGenerationMarker(dir); gen != 12 || err != nil {
+			if gen, err := readMarker(dir); gen != 12 || err != nil {
 				t.Fatalf("readGenerationMarker after the stamp = %d, %v; want 12", gen, err)
 			}
 			assertUntouched(t, outside)
@@ -402,7 +397,7 @@ func TestWriteGenerationFailsOnADirectoryAtTheMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		err := writeGeneration(dir, 7)
+		err := stampGeneration(dir, 7)
 		if err == nil {
 			t.Fatal("writeGeneration over a directory = nil, want an error")
 		}
@@ -410,7 +405,7 @@ func TestWriteGenerationFailsOnADirectoryAtTheMarker(t *testing.T) {
 			t.Errorf("writeGeneration error %q does not name the marker", err)
 		}
 	}
-	if gen, err := readGenerationMarker(dir); gen != 0 || err == nil {
+	if gen, err := readMarker(dir); gen != 0 || err == nil {
 		t.Fatalf("readGenerationMarker = %d, %v; want 0 and a refusal", gen, err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -438,7 +433,7 @@ func TestWriteGenerationReplacesAPlantWithoutWritingThroughIt(t *testing.T) {
 			outside := plant.plant(t, marker)
 
 			var err error
-			within(t, "the marker write", func() { err = writeGeneration(dir, 7) })
+			within(t, "the marker write", func() { err = stampGeneration(dir, 7) })
 
 			if err != nil {
 				t.Fatalf("writeGeneration: %v", err)
@@ -446,7 +441,7 @@ func TestWriteGenerationReplacesAPlantWithoutWritingThroughIt(t *testing.T) {
 			if info, statErr := os.Lstat(marker); statErr != nil || !info.Mode().IsRegular() {
 				t.Fatalf("the marker: %v, %v; want a regular file", info, statErr)
 			}
-			if gen, readErr := readGenerationMarker(dir); gen != 7 || readErr != nil {
+			if gen, readErr := readMarker(dir); gen != 7 || readErr != nil {
 				t.Fatalf("readGenerationMarker = %d, %v; want 7", gen, readErr)
 			}
 			assertUntouched(t, outside)
@@ -468,7 +463,7 @@ func TestWriteGenerationDoesNotCreateItsTempThroughAPlantedLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeGeneration(dir, 7); err == nil {
+	if err := stampGeneration(dir, 7); err == nil {
 		t.Fatal("writeGeneration = nil, want an error: every temp name it could use is taken")
 	}
 
@@ -494,7 +489,7 @@ func TestGenerationTempSweepRemovesAPlantedLinkNotItsTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeGeneration(dir, 7); err != nil {
+	if err := stampGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
 
@@ -507,12 +502,11 @@ func TestGenerationTempSweepRemovesAPlantedLinkNotItsTarget(t *testing.T) {
 	assertUntouched(t, outside)
 }
 
-// What the hardening above does NOT establish (issue #3336, SECURITY.md Section 6):
-// a regular file holding a well-formed number is indistinguishable from a marker
-// the Worker wrote, so a server that rewrites its own marker is believed. This pins
-// the two places the value goes, so that the trust-model statement cannot drift
-// from the code silently.
-func TestAForgedWellFormedMarkerIsBelieved(t *testing.T) {
+// A regular file holding a well-formed number is what a server writes when it
+// rewrites its own marker (issue #3336). It carries no MAC under the Worker's key, so
+// it reads as generation 0 in both places the value goes (issue #3349): the held
+// generation and the snapshot's declared base.
+func TestAForgedWellFormedMarkerIsNotBelieved(t *testing.T) {
 	// A UUID: the held-set scan advertises only directories named by a server id (issue #3395).
 	const serverID = "d0000000-0000-4000-8000-000000000004"
 	tr := &fakeTransfer{gen: 12}
@@ -533,13 +527,13 @@ func TestAForgedWellFormedMarkerIsBelieved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if held := m.HeldServers(); len(held) != 1 || held[0].Generation != 999 {
-		t.Fatalf("HeldServers = %+v, want the forged generation 999 advertised", held)
+	if held := m.HeldServers(); len(held) != 1 || held[0].Generation != 0 {
+		t.Fatalf("HeldServers = %+v, want the forged marker read as generation 0", held)
 	}
 	if res := m.Handle(context.Background(), snapshot); !res.Success {
 		t.Fatalf("SnapshotTrigger = %+v, want success", res)
 	}
-	if got := tr.snapshotBaseGenerations; len(got) != 1 || got[0] != 999 {
-		t.Fatalf("declared base generations = %v, want the forged [999]", got)
+	if got := tr.snapshotBaseGenerations; len(got) != 1 || got[0] != 0 {
+		t.Fatalf("declared base generations = %v, want [0] for the forged marker", got)
 	}
 }

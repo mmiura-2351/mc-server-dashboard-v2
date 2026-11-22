@@ -459,8 +459,9 @@ class FleetControlPlaneAdapter(ControlPlane):
         # a hydrate or earn the short held-start grace: it was at most the store
         # generation when recorded, the publish before the deletion minted a greater
         # one, and the store's counter never goes back, so ``held >= store`` — the
-        # only test either reader applies — stays false for it. The one exception is
-        # a forged registration value (issue #3349); there the Worker's launch guard
+        # only test either reader applies — stays false for it. A registration value
+        # cannot exceed the store either, since the Worker advertises only a marker
+        # it signed (issue #3349); should one ever do so, the Worker's launch guard
         # refuses the hydrate-less start over the missing scratch and the API replays
         # it with a hydrate.
         if outcome.held_generation is not None:

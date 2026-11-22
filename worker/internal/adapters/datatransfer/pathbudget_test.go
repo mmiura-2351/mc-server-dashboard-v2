@@ -137,7 +137,7 @@ func TestASnapshotMemberAtThePathLimitRestoresUnderALongerRoot(t *testing.T) {
 	defer func() { _ = spool.Close() }()
 
 	destDir := filepath.Join(longDir(t, 3000), "server")
-	if err := unpackAndSwap(spool, destDir, 7, slog.Default()); err != nil {
+	if err := unpackAndSwap(spool, destDir, plainMarker(7), slog.Default()); err != nil {
 		t.Fatalf("a member that packed must hydrate under a longer root: %v", err)
 	}
 	if got := readAt(t, destDir, rel); got != "deep" {

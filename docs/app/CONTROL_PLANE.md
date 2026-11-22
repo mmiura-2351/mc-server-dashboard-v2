@@ -234,7 +234,9 @@ hint, host resources) — the input to the API's greedy placement
 set the Worker already holds in its persistent local scratch (the non-empty
 per-server scratch dirs found at startup), tagged with the **generation** that
 set is at — the authoritative store generation it was last hydrated from or
-snapshotted to, persisted in the scratch. The API records this so it can skip the
+snapshotted to, persisted in the scratch. The Worker signs that record and
+advertises a set whose record does not verify at generation 0
+([`STORAGE.md`](STORAGE.md) Section 8). The API records this so it can skip the
 destructive hydrate on a same-worker restart **only when the held generation is
 fresh enough** — hydrating a live, newer set would unpack the last authoritative
 snapshot over it and roll the world back, while a *stale* held set (e.g. an

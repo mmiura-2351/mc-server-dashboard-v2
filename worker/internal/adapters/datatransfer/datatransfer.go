@@ -23,6 +23,7 @@ package datatransfer
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -104,14 +105,15 @@ func (c *Client) WithLogger(l *slog.Logger) *Client {
 // contents wholesale: the tar is unpacked into a fresh temp sibling that is then
 // atomically swapped into destDir, so a retained stale working set is replaced
 // (not merged) and any symlink a previous run planted in destDir is never
-// traversed (issue #772). The generation marker is written into the temp tree
+// traversed (issue #772). The generation marker — marker(gen), the caller's signed
+// rendering of the served generation (issue #3349) — is written into the temp tree
 // before the swap-in rename so it is atomic with the new destDir (issue #917);
 // the caller's recordGeneration call is still needed for the 204 path and is
 // idempotent on the 200 path. A 204 response
 // means "no published working set"; destDir is left empty and Hydrate returns nil
 // (the Worker launches against an empty dir). Any archive member that would
 // escape destDir is rejected and aborts the transfer.
-func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint64, error) {
+func (c *Client) Hydrate(ctx context.Context, url, token, destDir string, marker func(gen uint64) []byte) (uint64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, fmt.Errorf("datatransfer: build hydrate request: %w", err)
@@ -149,7 +151,7 @@ func (c *Client) Hydrate(ctx context.Context, url, token, destDir string) (uint6
 	}
 
 	gen := parseGeneration(resp.Header)
-	if err := unpackAndSwap(resp.Body, destDir, gen, c.logger); err != nil {
+	if err := unpackAndSwap(resp.Body, destDir, marker(gen), c.logger); err != nil {
 		return 0, fmt.Errorf("datatransfer: unpack: %w", err)
 	}
 	// The store generation the API served, recorded by the caller alongside the
@@ -304,8 +306,8 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // rather than over the retained scratch — gives REPLACE semantics (files deleted
 // upstream do not survive) and means a symlink a previous run planted in destDir
 // is never traversed (the destination tree has no pre-existing entries). The
-// generation marker is written into the temp tree BEFORE the swap-in rename
-// (issue #917) so it is atomic with the new destDir (issue #763).
+// generation marker, whose content is marker, is written into the temp tree BEFORE
+// the swap-in rename (issue #917) so it is atomic with the new destDir (issue #763).
 //
 // The temp dir is a dot-prefixed sibling in destDir's parent (the scratch root).
 // ScanHeldServers (scratchscan.go) skips the .displaced-<id> sibling and never
@@ -385,7 +387,7 @@ func (c *Client) Snapshot(ctx context.Context, url, token, srcDir string, baseGe
 // marker — the API reads gen 0 and re-dispatches hydrate, and that spurious retry
 // discards this working set whenever a .displaced-<id> is retained (issue #2278).
 // Writing it pre-swap closes that window.
-func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) error {
+func unpackAndSwap(r io.Reader, destDir string, marker []byte, log *slog.Logger) error {
 	parent := filepath.Dir(destDir)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return err
@@ -425,8 +427,7 @@ func unpackAndSwap(r io.Reader, destDir string, gen uint64, log *slog.Logger) er
 	// gen 0 and re-dispatches hydrate, and that spurious retry discards this working
 	// set whenever a .displaced-<id> is retained (issue #2278). writeFile fsyncs the
 	// contents; fsyncTree below makes the dir entry durable.
-	if err := writeFile(tmpFd, scratchformat.GenerationMarkerFile,
-		strings.NewReader(strconv.FormatUint(gen, 10)), 0o640); err != nil {
+	if err := writeFile(tmpFd, scratchformat.GenerationMarkerFile, bytes.NewReader(marker), 0o640); err != nil {
 		return err
 	}
 

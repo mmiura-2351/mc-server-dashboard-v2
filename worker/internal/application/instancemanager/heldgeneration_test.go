@@ -97,7 +97,7 @@ func TestRunningSnapshotDeclaresNothingWhenTheStampWasSkipped(t *testing.T) {
 		t.Fatalf("start = %+v, want success", res)
 	}
 	dir := seedScratch(t, m, s1)
-	if err := writeGeneration(dir, 5); err != nil {
+	if err := stampGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}
 	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }

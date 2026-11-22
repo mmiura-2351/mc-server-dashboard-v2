@@ -101,7 +101,7 @@ func TestSnapshotMakesTheTreeDurableBeforeTheMarker(t *testing.T) {
 					t.Fatalf("start = %+v, want success", res)
 				}
 			}
-			if err := writeGeneration(dir, 5); err != nil {
+			if err := stampGeneration(dir, 5); err != nil {
 				t.Fatal(err)
 			}
 			var markerAtSync []uint64
@@ -156,7 +156,7 @@ func TestRunningSnapshotSyncsOnTheRequestContextNotTheDeadline(t *testing.T) {
 	if res := m.Handle(context.Background(), startCmd()); !res.Success {
 		t.Fatalf("start = %+v, want success", res)
 	}
-	if err := writeGeneration(dir, 5); err != nil {
+	if err := stampGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}
 	var endDeadline context.CancelFunc

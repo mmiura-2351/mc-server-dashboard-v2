@@ -81,7 +81,7 @@ func replaceWorkingDirLikeHydrate(t *testing.T, dir string, gen uint64) {
 	if err := os.WriteFile(filepath.Join(tmp, "level.dat"), []byte("hydrated"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeGeneration(tmp, gen); err != nil {
+	if err := writeGeneration(testGenerationKey, tmp, id, gen); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(dir, filepath.Join(parent, ".displaced-"+id)); err != nil {
@@ -111,7 +111,7 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T)
 		t.Fatalf("start = %+v, want success", res)
 	}
 	dir := seedScratch(t, m, s1)
-	if err := writeGeneration(dir, 5); err != nil {
+	if err := stampGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}
 	tr.duringUpload = func(workingDir string) { replaceWorkingDirLikeHydrate(t, workingDir, 7) }
@@ -139,7 +139,7 @@ func TestRunningSnapshotSkipsGenerationStampWhenWorkingDirReplaced(t *testing.T)
 func TestWriteGenerationGuardedRefusesAndRemovesItsTemp(t *testing.T) {
 	dir := t.TempDir()
 
-	err := writeGenerationGuarded(dir, 9, func() bool { return false })
+	err := writeGenerationGuarded(testGenerationKey, dir, filepath.Base(dir), 9, func() bool { return false })
 
 	if !errors.Is(err, errWorkingDirReplaced) {
 		t.Fatalf("writeGenerationGuarded = %v, want errWorkingDirReplaced", err)
@@ -183,7 +183,7 @@ func TestWriteGenerationGuardedReportsAStampTheReplacementOvertook(t *testing.T)
 		return false
 	}
 
-	err := writeGenerationGuarded(dir, 12, guard)
+	err := writeGenerationGuarded(testGenerationKey, dir, filepath.Base(dir), 12, guard)
 
 	if !errors.Is(err, errWorkingDirReplaced) {
 		t.Fatalf("writeGenerationGuarded = %v, want errWorkingDirReplaced", err)
@@ -204,7 +204,7 @@ func TestWriteGenerationGuardedReportsAStampTheReplacementOvertook(t *testing.T)
 func TestWriteGenerationGuardedWritesWhenTheGuardHolds(t *testing.T) {
 	dir := t.TempDir()
 
-	if err := writeGenerationGuarded(dir, 9, func() bool { return true }); err != nil {
+	if err := writeGenerationGuarded(testGenerationKey, dir, filepath.Base(dir), 9, func() bool { return true }); err != nil {
 		t.Fatal(err)
 	}
 
@@ -270,7 +270,7 @@ func TestRunningSnapshotSkipsStampWhenWorkingDirReplacedAfterTheCheck(t *testing
 		t.Fatalf("start = %+v, want success", res)
 	}
 	dir := seedScratch(t, m, s1)
-	if err := writeGeneration(dir, 5); err != nil {
+	if err := stampGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}
 
@@ -375,7 +375,7 @@ func TestRunningSnapshotStampsWhenWorkingDirUnchanged(t *testing.T) {
 	dir := seedScratch(t, m, s1)
 	tr.duringUpload = func(workingDir string) {
 		// A concurrent 204 hydrate records its generation into the SAME directory.
-		if err := writeGeneration(workingDir, 0); err != nil {
+		if err := stampGeneration(workingDir, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -405,7 +405,7 @@ func TestRunningSnapshotSkipsStampWhenIdentityUnavailable(t *testing.T) {
 		t.Fatalf("start = %+v, want success", res)
 	}
 	dir := seedScratch(t, m, s1)
-	if err := writeGeneration(dir, 5); err != nil {
+	if err := stampGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}
 	restore := openWorkingDirRef
@@ -508,7 +508,7 @@ func TestSnapshotDeclaresHeldGenerationAsBase(t *testing.T) {
 		t.Fatalf("start = %+v, want success", res)
 	}
 	dir := seedScratch(t, m, s1)
-	if err := writeGeneration(dir, 5); err != nil {
+	if err := stampGeneration(dir, 5); err != nil {
 		t.Fatal(err)
 	}
 
@@ -552,7 +552,7 @@ func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	m := newManager(t, &fakeDriver{}, nil).WithTransfer(tr)
 	dir := seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	if err := writeGeneration(dir, 7); err != nil {
+	if err := stampGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
 
@@ -569,7 +569,7 @@ func TestGenerationMarkerRemovedAfterFinalSnapshot(t *testing.T) {
 	if _, err := os.Stat(generationMarkerPath(m, s1)); !os.IsNotExist(err) {
 		t.Fatalf("generation marker survived the post-stop final snapshot GC: stat err = %v", err)
 	}
-	if held := ScanHeldServers(m.scratchDir, regionfsck.Checker{}, true, nil); len(held) != 0 {
+	if held := ScanHeldServers(m.scratchDir, testGenerationKey, regionfsck.Checker{}, true, nil); len(held) != 0 {
 		t.Fatalf("held = %v after final snapshot, want none", held)
 	}
 }
@@ -589,7 +589,7 @@ func TestWriteGenerationSweepsStaleTempSiblings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeGeneration(dir, 9); err != nil {
+	if err := stampGeneration(dir, 9); err != nil {
 		t.Fatal(err)
 	}
 
@@ -615,7 +615,7 @@ func TestWriteGenerationKeepsTempFormDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeGeneration(dir, 4); err != nil {
+	if err := stampGeneration(dir, 4); err != nil {
 		t.Fatal(err)
 	}
 
@@ -703,7 +703,7 @@ func TestGenerationMarkerRetainedOnRestart(t *testing.T) {
 	m := newManager(t, d, nil)
 	dir := seedScratch(t, m, s1)
 	_ = m.Handle(context.Background(), startCmd())
-	if err := writeGeneration(dir, 7); err != nil {
+	if err := stampGeneration(dir, 7); err != nil {
 		t.Fatal(err)
 	}
 
