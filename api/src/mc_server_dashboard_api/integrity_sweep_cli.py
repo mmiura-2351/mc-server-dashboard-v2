@@ -144,9 +144,9 @@ async def run(settings: Settings, *, server_id: ServerId | None) -> SweepSummary
             audit=LoggingAuditRecorder(
                 SqlAlchemyAuditWriter(session_factory, clock=AuditSystemClock())
             ),
-            # The same per-server advisory lock the API's backup creation holds
-            # (issue #3220): keyed on the server id in PostgreSQL, so it serializes
-            # this process against the API's.
+            # The same per-server advisory lock the API's backup delete holds
+            # across its two removals (issue #3220): keyed on the server id in
+            # PostgreSQL, so it serializes this process against the API's.
             lifecycle_lock=PgLifecycleLock(engine=lock_engine),
         )
         return await sweep(server_id=server_id)
