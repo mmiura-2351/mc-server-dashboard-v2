@@ -1551,6 +1551,172 @@ async def test_timed_out_final_snapshot_drops_the_unrecorded_stop() -> None:
     assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
 
 
+# --- a final snapshot the Worker refused is retried, holding the row (#3697) --
+
+
+class _RefusedSnapshots(FakeControlPlane):
+    """Answers each final snapshot with the next scripted status, then OK."""
+
+    def __init__(self, statuses: list[CommandStatus]) -> None:
+        super().__init__()
+        self._statuses = statuses
+
+    async def snapshot(
+        self,
+        *,
+        worker_id: WorkerId,
+        community_id: CommunityId,
+        server_id: ServerId,
+        final: bool = False,
+    ) -> CommandOutcome:
+        self.dispatched.append(("snapshot", worker_id, server_id))
+        status = self._statuses.pop(0) if self._statuses else CommandStatus.OK
+        return CommandOutcome(status=status)
+
+
+async def _held_by_a_refused_stop(
+    code: CommandStatus,
+) -> tuple[FakeUnitOfWork, Server, UnrecordedStops, FakeClock]:
+    """A stop at ``_NOW`` whose final snapshot the Worker refused ``code``."""
+
+    uow = FakeUnitOfWork()
+    long_running = _NOW - dt.timedelta(seconds=3600)
+    server = _server(
+        desired=DesiredState.RUNNING,
+        observed=ObservedState.RUNNING,
+        worker=_WORKER,
+        observed_at=long_running,
+        updated_at=long_running,
+    )
+    uow.servers.seed(server)
+    unrecorded = UnrecordedStops()
+    clock = FakeClock(_NOW)
+    await StopServer(
+        uow=uow,
+        control_plane=_RefusedSnapshots([code]),
+        clock=clock,
+        unrecorded_stops=unrecorded,
+    )(community_id=server.community_id, server_id=server.id)
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+    return uow, server, unrecorded, clock
+
+
+def _at(seconds: int, clock: FakeClock) -> None:
+    clock.set(_NOW + dt.timedelta(seconds=seconds))
+    # Every tick below is within the full grace of the stop, so only the
+    # recorded refusal can let the reconciler act.
+    assert seconds < _GRACE
+
+
+@pytest.mark.parametrize(
+    "code", [CommandStatus.BUSY, CommandStatus.UNAVAILABLE], ids=lambda c: c.value
+)
+async def test_a_refused_final_snapshot_is_retried_on_the_short_grace(
+    code: CommandStatus,
+) -> None:
+    uow, server, unrecorded, clock = await _held_by_a_refused_stop(code)
+    cp = FakeControlPlane()
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+
+    _at(_REFUSED_GRACE - 1, clock)
+    await reconciler.tick()
+    assert cp.dispatched == []
+
+    _at(_REFUSED_GRACE + 1, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id is None
+    assert stored.final_snapshot_refusal is None
+
+
+async def test_a_busy_final_snapshot_refusal_is_retried_on_the_next_tick() -> None:
+    # BUSY clears once the other command or the orphan settles, so it earns no
+    # backoff, and each refused retry records the refusal again.
+    uow, server, unrecorded, clock = await _held_by_a_refused_stop(CommandStatus.BUSY)
+    cp = _RefusedSnapshots([CommandStatus.BUSY, CommandStatus.BUSY])
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+
+    for seconds in (_REFUSED_GRACE + 1, 2 * _REFUSED_GRACE + 2):
+        _at(seconds, clock)
+        await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
+    assert server.id not in reconciler._attempts
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    _at(3 * _REFUSED_GRACE + 3, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"] * 3
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_an_unavailable_final_snapshot_refusal_backs_off() -> None:
+    # Each attempt may spend a graceful stop on a leftover the Worker cannot
+    # end, so UNAVAILABLE counts toward the backoff (base 30 s). The retry after
+    # it still takes the short grace: the refused retry recorded the refusal.
+    uow, server, unrecorded, clock = await _held_by_a_refused_stop(
+        CommandStatus.UNAVAILABLE
+    )
+    cp = _RefusedSnapshots([CommandStatus.UNAVAILABLE])
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+
+    _at(_REFUSED_GRACE + 1, clock)
+    await reconciler.tick()
+    assert reconciler._attempts[server.id].failures == 1
+
+    _at(_REFUSED_GRACE + 2, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot"]
+
+    _at(_REFUSED_GRACE + 1 + 31, clock)
+    await reconciler.tick()
+    assert [k for k, _, _ in cp.dispatched] == ["snapshot", "snapshot"]
+    assert uow.servers.by_id[server.id].assigned_worker_id is None
+
+
+async def test_a_refusal_is_superseded_by_a_drop_of_its_worker() -> None:
+    # A Worker that drops after it refused may be back with the working set. So
+    # the row waits a full grace from the drop, and the release without the
+    # snapshot that follows is the disconnected-Worker leg (PM ruling 2(a) on
+    # #3697).
+    uow, server, unrecorded, clock = await _held_by_a_refused_stop(
+        CommandStatus.UNAVAILABLE
+    )
+    dropped_at = _NOW + dt.timedelta(seconds=1)
+    cp = FakeControlPlane(
+        connected={_WORKER: False}, offline_since={_WORKER: dropped_at}
+    )
+    reconciler = _reconciler(uow, cp, clock, unrecorded_stops=unrecorded)
+
+    _at(_REFUSED_GRACE + 2, clock)
+    await reconciler.tick()
+    assert uow.servers.by_id[server.id].assigned_worker_id == _WORKER
+
+    clock.set(dropped_at + dt.timedelta(seconds=_GRACE + 1))
+    await reconciler.tick()
+    assert cp.dispatched == []
+    stored = uow.servers.by_id[server.id]
+    assert stored.assigned_worker_id is None
+    assert stored.final_snapshot_refusal is None
+
+
+async def test_a_busy_stop_dispatch_refusal_still_backs_off() -> None:
+    # Only a refused final snapshot skips the backoff on BUSY. A replayed stop
+    # the Worker refuses BUSY is the converger's cadence and keeps it (#2478).
+    uow = FakeUnitOfWork()
+    server = _server(
+        desired=DesiredState.STOPPED, observed=ObservedState.RUNNING, worker=_WORKER
+    )
+    uow.servers.seed(server)
+    cp = FakeControlPlane(outcomes={"stop": CommandOutcome(status=CommandStatus.BUSY)})
+    reconciler = _reconciler(uow, cp, FakeClock(_NOW))
+
+    await reconciler.tick()
+
+    assert [k for k, _, _ in cp.dispatched] == ["stop"]
+    assert reconciler._attempts[server.id].failures == 1
+
+
 async def test_server_placed_after_registration_gets_the_short_held_grace() -> None:
     # Issue #2477: the held inventory must reflect what the Worker holds NOW, not
     # only what it advertised at registration. Register the Worker with an EMPTY

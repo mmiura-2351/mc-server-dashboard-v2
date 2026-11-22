@@ -24,7 +24,15 @@ Two floors make up that grace on the stop side, and this record satisfies both:
 So the reconciler can take the short ``refused_stop_grace_seconds`` for either
 stop-side action (``redispatch_stop`` or ``clear_stale_assignment``), as it does for
 a refused stop (``stop_dispatch_refusals.py``, issue #2478). The owed action itself
-is unchanged. Like a refusal that was not ``EXPIRED``, the record only counts while
+is unchanged.
+
+A final snapshot the Worker refuses ``BUSY`` or ``UNAVAILABLE`` is recorded here
+too, once it is answered (issue #3697). The row stays held, so this is not a stop
+whose write failed, but the two floors hold the same way: the Worker answered,
+and the retry the short grace allows only re-drives the snapshot, so the row is
+released only once a snapshot settles. Each refused retry records it again.
+
+Like a refusal that was not ``EXPIRED``, the record only counts while
 it is the most recent thing known about the row: a newer intent commit or Worker
 report supersedes it. The refusal record's ``EXPIRED`` exception (issue #3682) does
 not apply here.
@@ -68,7 +76,8 @@ class UnrecordedStops:
     def record(self, server_id: ServerId, *, at: dt.datetime) -> None:
         """Record that a finished stop of ``server_id`` failed to be written.
 
-        ``at`` is when the failed write began (issue #3981). Callers record only
+        ``at`` is when the failed write began (issue #3981), or when the Worker
+        answered a refused final snapshot (issue #3697). Callers record only
         when nothing is in flight for the server: the Worker answered the stop or
         reported the process gone, and no final snapshot of it can still be
         uploading.
