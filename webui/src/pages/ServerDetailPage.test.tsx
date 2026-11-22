@@ -1663,6 +1663,71 @@ describe("ServerDetailPage settings", () => {
     });
   });
 
+  // A stop holds its Worker until the final snapshot settles, and the API
+  // refuses a save that rewrites server.properties until the release (409
+  // server_assigned, #3998): Save is held, with the reason (#4003).
+  describe("a stopped server its Worker still holds", () => {
+    const held = {
+      observed_state: "stopped",
+      desired_state: "stopped",
+      assigned_worker_id: "worker-a",
+    };
+
+    function saveButton() {
+      return screen.getByRole("button", {
+        name: t("serverDetail.settings.save"),
+      });
+    }
+
+    it("holds Save with the reason", async () => {
+      routeGet({ srv: held });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      expect(saveButton()).toBeDisabled();
+      expect(saveButton()).toHaveAccessibleDescription(
+        t("common.serverAssigned"),
+      );
+    });
+
+    // A running server is assigned too, but waiting for a release is not its
+    // remedy: Save stays offered, as a safe-keys-only edit passes (#115).
+    it("keeps Save offered while the server runs", async () => {
+      routeGet({ srv: { assigned_worker_id: "worker-a" } });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      expect(saveButton()).toBeEnabled();
+      expect(
+        screen.queryByText(t("common.serverAssigned")),
+      ).not.toBeInTheDocument();
+    });
+
+    it("frees Save on the release frame", async () => {
+      routeGet({ srv: held });
+      renderPage();
+
+      await screen.findByText("survival");
+      openSettings();
+      expect(saveButton()).toBeDisabled();
+
+      act(() => {
+        MockWebSocket.last().open();
+        MockWebSocket.last().message(
+          serverFrame("status", { assigned_worker_id: null }),
+        );
+      });
+
+      // The frame alone frees it: every REST read still answers worker-a.
+      await waitFor(() => expect(saveButton()).toBeEnabled());
+      expect(
+        screen.queryByText(t("common.serverAssigned")),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("adds and removes config rows", async () => {
     routeGet({ srv: { observed_state: "stopped", config: {} } });
     mockApi.patch.mockResolvedValue(server());
@@ -2728,7 +2793,8 @@ describe("ServerDetailPage delete (typed confirm)", () => {
   });
 
   // The cache can still show the server released when the API finds it
-  // assigned; the refusal then says the same as the held button (#3852).
+  // assigned (#3852); the refusal toasts the one neutral release message
+  // every surface shows (#4003).
   it("toasts the release reason when the delete answers 409 server_assigned", async () => {
     routeGet({
       srv: {
@@ -2757,9 +2823,7 @@ describe("ServerDetailPage delete (typed confirm)", () => {
     );
 
     expect(
-      (
-        await screen.findByText(t("serverDetail.danger.deleteAwaitsRelease"))
-      ).closest(".toast"),
+      (await screen.findByText(t("common.serverAssigned"))).closest(".toast"),
     ).not.toBeNull();
     expect(navigateMock).not.toHaveBeenCalledWith(`/communities/${CID}`);
   });

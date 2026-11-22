@@ -20,8 +20,9 @@ describe("serverSettingsErrorPresentation", () => {
     ["config_null_value", "serverDetail.error.configNullValue"],
     ["config_invalid_shape", "serverDetail.error.configInvalidShape"],
     ["config_lone_surrogate", "serverDetail.error.configLoneSurrogate"],
-    // A delete the Worker still holds (#3852): the held Delete button's reason.
-    ["server_assigned", "serverDetail.danger.deleteAwaitsRelease"],
+    // A save, delete or export the stop's Worker still holds the server for
+    // (#3998): one neutral message, not the delete's own words (#4003).
+    ["server_assigned", "common.serverAssigned"],
     // A rename to a name with a control character (#3957). A save sends the
     // name only when it changed (#3988).
     ["invalid_server_name", "serverDetail.error.invalidServerName"],

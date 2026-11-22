@@ -43,6 +43,7 @@ import { serverSettingsErrorPresentation } from "./serverSettingsErrorPresentati
 import {
   actionApplies,
   atRest,
+  atRestWriteRefusal,
   converging,
   crashNotRestarted,
   normalizeState,
@@ -1520,6 +1521,16 @@ function Settings({
   // with the reason, while the live cache shows a Worker assigned.
   const deleteHeld = server.assigned_worker_id !== null;
   const deleteHeldId = useId();
+  // A save that rewrites server.properties is refused the same way while a
+  // stopped server's Worker is still assigned (#3998): hold Save, with the
+  // reason. Not while it runs: a safe-keys-only edit passes then (#115).
+  const saveHeld =
+    atRestWriteRefusal(
+      normalizeState(server.observed_state),
+      server.desired_state,
+      server.assigned_worker_id !== null,
+    ) === "server_assigned";
+  const saveHeldId = useId();
   const canExport = can("file:read", { serverId: server.id });
 
   const onError = (error: unknown) => {
@@ -1758,6 +1769,11 @@ function Settings({
         </label>
         <ConfigEditor rows={rows} disabled={!canUpdate} onChange={setRows} />
         <p className="field-hint">{t("serverDetail.settings.atRestHint")}</p>
+        {saveHeld && (
+          <p className="field-hint" id={saveHeldId}>
+            {t("common.serverAssigned")}
+          </p>
+        )}
         <button
           type="button"
           className="btn primary"
@@ -1766,8 +1782,10 @@ function Settings({
             !memoryLimitOk ||
             !cpuAllocationOk ||
             !slugOk ||
-            save.isPending
+            save.isPending ||
+            saveHeld
           }
+          aria-describedby={saveHeld ? saveHeldId : undefined}
           onClick={() => save.mutate()}
         >
           {t("serverDetail.settings.save")}

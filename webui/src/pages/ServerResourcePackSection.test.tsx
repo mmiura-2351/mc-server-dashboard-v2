@@ -517,6 +517,49 @@ describe("ServerResourcePackSection — unsettled mutation errors", () => {
   );
 });
 
+describe("ServerResourcePackSection — a server the stop still holds", () => {
+  // The cache showed the server released when the API found it assigned
+  // (#3998): the toast names the release, not stopping the server (#4003).
+  it.each([
+    ["assign", null],
+    ["unassign", ASSIGNMENT],
+  ] as const)(
+    "toasts the release reason for %s on a 409 server_assigned",
+    async (action, assignment) => {
+      routeGet({ assignment });
+      const refused = new ApiError(409, { reason: "server_assigned" });
+      if (action === "assign") {
+        mockApi.post.mockRejectedValue(refused);
+      } else {
+        mockApi.delete.mockRejectedValue(refused);
+      }
+      await openSettings();
+
+      if (action === "assign") {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: t("serverDetail.resourcePack.assign"),
+          }),
+        );
+        const select = await screen.findByRole("combobox");
+        fireEvent.change(select, { target: { value: PACK.id } });
+        fireEvent.click(dialogSubmit());
+      } else {
+        fireEvent.click(
+          await screen.findByRole("button", {
+            name: t("serverDetail.resourcePack.remove"),
+          }),
+        );
+        fireEvent.click(removeConfirm());
+      }
+
+      expect(
+        (await screen.findByText(t("common.serverAssigned"))).closest(".toast"),
+      ).not.toBeNull();
+    },
+  );
+});
+
 describe("ServerResourcePackSection — version < 1.17 option wiring", () => {
   it("hides option controls in the assign dialog", async () => {
     routeGet({ srv: { mc_version: "1.16.4" }, assignment: null });

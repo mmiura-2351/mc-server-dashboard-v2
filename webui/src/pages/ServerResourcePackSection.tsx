@@ -40,6 +40,8 @@ function resourcePackErrorMessage(
       return "serverDetail.error.unsettled";
     if (error.reason === "server_not_stopped")
       return "serverDetail.error.notStopped";
+    // A change the stop's Worker still holds the server for (#3998, #4003).
+    if (error.reason === "server_assigned") return "common.serverAssigned";
   }
   return fallback;
 }

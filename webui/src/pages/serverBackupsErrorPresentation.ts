@@ -28,6 +28,11 @@ export function backupErrorPresentation(
       return "backups.error.unsettled";
     case "server_not_stopped":
       return "backups.error.serverMustBeStopped";
+    case "server_assigned":
+      // A create or restore the stop's Worker still holds the server for
+      // (#3998): the server reads stopped, and waiting for the release is the
+      // remedy (#4003).
+      return "common.serverAssigned";
     case "server_busy":
     case "worker_busy":
       // Two layers, one remedy (issue #2436). `server_busy` is API-side
