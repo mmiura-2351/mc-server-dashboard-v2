@@ -757,6 +757,12 @@ class StartServer:
             # redispatch_start to this Worker, and record what is known.
             await self._record_unknown(server, worker_id, owe_again=owed_group_files)
             raise failure
+        # A failed transfer's ``swap_began`` is not read here, unlike in
+        # ``redispatch_start`` (issue #4041). The row's mark is this placement's
+        # own, and the release below clears it. A row the release skips, because a
+        # stop or drain withdrew the intent, keeps that mark: this Worker never
+        # hydrated under the placement, and clearing it would let the final
+        # snapshot publish a stale or absent scratch over the store (#3890).
         await self._compensate(
             community_id,
             server_id,
@@ -960,6 +966,9 @@ class StartServer:
             # HYDRATE outcome (not dispatched) never reached the start, so unassign,
             # unless its answer leaves an instance of this server on the Worker
             # possible (issue #3890): then keep the Worker, as ``__call__`` does.
+            # As there, a failed transfer's ``swap_began`` is not read (issue
+            # #4041): the mark is this placement's own, and clearing it would let
+            # a final snapshot publish a stale or absent scratch (#3890).
             if not dispatch.attempted:
                 if outcome.status in _HYDRATE_REFUSALS_KEEPING_THE_WORKER:
                     await self._record_unknown(

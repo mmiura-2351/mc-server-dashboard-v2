@@ -132,6 +132,28 @@ func TestHydrateFailureSaysWhetherItsSwapBegan(t *testing.T) {
 			if got := errors.Is(err, scratchformat.ErrBeforeSwap); got != tc.beforeSwap {
 				t.Fatalf("errors.Is(%q, ErrBeforeSwap) = %v, want %v", err, got, tc.beforeSwap)
 			}
+			if tc.beforeSwap {
+				assertWorkingDirAsItWas(t, dest, tc.live)
+			}
 		})
+	}
+}
+
+// assertWorkingDirAsItWas checks what "before the swap" promises: the working dir
+// still holds exactly the live set, or is still absent.
+func assertWorkingDirAsItWas(t *testing.T, dest string, live bool) {
+	t.Helper()
+	if !live {
+		if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+			t.Fatalf("working dir %s exists after a failure before the swap (Lstat: %v), want it absent", dest, err)
+		}
+		return
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "server.properties" {
+		t.Fatalf("working dir entries = %v (%v), want only the live server.properties", entries, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dest, "server.properties")); err != nil || string(got) != "live" {
+		t.Fatalf("working dir server.properties = %q (%v), want %q", got, err, "live")
 	}
 }
